@@ -29,7 +29,19 @@ const MAX_EDGE_CANDIDATES: usize = 8;
 
 pub enum Query { File(String), Symbol(String), Imports(String), Calls(String), Modules(String) }
 
-pub fn query_cli(args: &[String]) -> Result<Answer, String> {
+impl Query {
+    pub fn file_scope(&self) -> Option<(&'static str, &str)> {
+        match self {
+            Self::File(path) => Some(("file", path)),
+            Self::Imports(path) => Some(("imports", path)),
+            Self::Calls(path) => Some(("calls", path)),
+            Self::Modules(path) => Some(("modules", path)),
+            Self::Symbol(_) => None,
+        }
+    }
+}
+
+pub fn parse_cli(args: &[String]) -> Result<(PathBuf, Query), String> {
     let (root, rest) = if args.first().is_some_and(|arg| arg == "--root") {
         let path = args.get(1).ok_or("missing --root path")?;
         (PathBuf::from(path), &args[2..])
@@ -42,6 +54,11 @@ pub fn query_cli(args: &[String]) -> Result<Answer, String> {
         [kind, value] if kind == "modules" => Query::Modules(value.clone()),
         _ => return Err("usage: doxa codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH".into()),
     };
+    Ok((root, request))
+}
+
+pub fn query_cli(args: &[String]) -> Result<Answer, String> {
+    let (root, request) = parse_cli(args)?;
     query(&root, request)
 }
 
@@ -169,7 +186,7 @@ fn source_language(path: &str) -> Option<&'static str> {
     }
 }
 
-fn worktree_root(path: &Path) -> Result<PathBuf, String> {
+pub fn worktree_root(path: &Path) -> Result<PathBuf, String> {
     let requested = fs::canonicalize(path).map_err(|e| format!("worktree path: {e}"))?;
     let output = Command::new("git").arg("-C").arg(&requested)
         .args(["rev-parse", "--show-toplevel"]).output()

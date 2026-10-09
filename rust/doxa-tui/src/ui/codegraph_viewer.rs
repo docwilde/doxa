@@ -1,7 +1,9 @@
 //! Read-only presentation of the bounded, fresh codegraph syntax queries.
 use super::{App, ChipInfo};
 use doxa_codegraph::{Answer, Query};
+use doxa_lore::CodegraphSnapshot;
 use std::sync::mpsc::{self, TryRecvError};
+use std::time::Duration;
 
 fn request(args: &str) -> Result<Query, &'static str> {
     let (kind, value) = args.trim().split_once(char::is_whitespace)
@@ -95,6 +97,32 @@ fn answer_lines(answer: &Answer) -> Vec<String> {
     lines
 }
 
+fn stored_lines(snapshot: &CodegraphSnapshot) -> Vec<String> {
+    match snapshot {
+        CodegraphSnapshot::Missing => vec![
+            "No reviewed LORE snapshot for this file and query".into(),
+            "Run a fresh /codegraph query; storage requires an explicit LORE review".into(),
+        ],
+        CodegraphSnapshot::Current(row) => {
+            let mut lines = vec![
+                format!("Reviewed LORE code graph · revision {}", row.revision),
+                format!("{} {} · {}", row.query, display(&row.path), display(&row.project_key)),
+                format!("Worktree: {}", display(&row.worktree_root)),
+                format!("Requested source SHA-256: {}", row.source_sha256),
+                format!("Graph SHA-256: {}", row.graph_sha256),
+                "Freshness: requested source verified at read time; other source candidates may have changed".into(),
+                "Binding: unknown · syntax data only".into(),
+                String::new(),
+            ];
+            match serde_json::to_string_pretty(&row.graph) {
+                Ok(graph) => lines.extend(graph.lines().map(display)),
+                Err(_) => lines.push("Stored graph could not be displayed".into()),
+            }
+            lines
+        }
+    }
+}
+
 pub(super) fn wrapped_lines(lines: &[String], width: usize) -> Vec<String> {
     lines.iter().flat_map(|line| crate::memory_menu::wrap_review(line, width.max(1))).collect()
 }
@@ -110,10 +138,16 @@ impl App {
     }
 
     pub(super) fn open_codegraph(&mut self, args: &str) {
+        let (stored, args) = args.trim().strip_prefix("stored ")
+            .map_or((false, args), |rest| (true, rest));
         let request = match request(args) {
             Ok(value) => value,
             Err(error) => { self.notice = error.into(); return; }
         };
+        if stored && request.file_scope().is_none() {
+            self.notice = "Stored code graph requires file|imports|calls|modules PATH".into();
+            return;
+        }
         if self.codegraph_pending.is_some() {
             self.notice = "Wait for the current code graph query to finish".into();
             return;
@@ -128,7 +162,8 @@ impl App {
         };
         let owner = (id.clone(), cwd.to_string_lossy().into_owned());
         self.chip_info = Some(ChipInfo { kind: "codegraph", label: String::new(),
-            lines: vec!["Scanning current Git worktree…".into()], scroll: 0, owner: Some(owner) });
+            lines: vec![if stored { "Reading reviewed LORE snapshot…".into() }
+                else { "Scanning current Git worktree…".into() }], scroll: 0, owner: Some(owner) });
         if self.active_chooser_rect().is_none() {
             self.chip_info = None;
             self.notice = "Enlarge active pane to open code graph".into();
@@ -136,7 +171,23 @@ impl App {
         }
         let (sender, receiver) = mpsc::channel();
         let root = cwd.clone();
-        std::thread::spawn(move || { let _ = sender.send(doxa_codegraph::query(&root, request)); });
+        std::thread::spawn(move || {
+            let result = if stored {
+                (|| {
+                    let root = doxa_codegraph::worktree_root(&root)?;
+                    let cwd = root.to_str().ok_or("worktree path is not UTF-8")?;
+                    let (kind, path) = request.file_scope().expect("validated file scope");
+                    let mut lore = doxa_lore::LoreClient::open(Duration::from_secs(3))
+                        .map_err(|error| error.to_string())?;
+                    lore.codegraph_snapshot(cwd, kind, path)
+                        .map(|snapshot| stored_lines(&snapshot))
+                        .map_err(|error| error.to_string())
+                })()
+            } else {
+                doxa_codegraph::query(&root, request).map(|answer| answer_lines(&answer))
+            };
+            let _ = sender.send(result);
+        });
         self.codegraph_pending = Some((id, cwd, receiver));
         self.input.clear();
         self.input_cursor = 0;
@@ -162,7 +213,7 @@ impl App {
         }
         let info = self.chip_info.as_mut().expect("matched code graph modal");
         info.lines = match result {
-            Ok(answer) => answer_lines(&answer),
+            Ok(lines) => lines,
             Err(error) => vec!["Code graph query failed; no partial answer".into(), display(&error)],
         };
         info.scroll = 0;
@@ -200,6 +251,33 @@ mod tests {
         assert!(lines.contains(modules.module_edges[1].conditional_candidate_sha256.as_deref().unwrap()));
         assert!(request("module lib.rs").is_err());
         assert!(request("file ../lib.rs\nattack").is_err());
+    }
+
+    #[test]
+    fn stored_view_preserves_unknown_binding_and_candidate_details() {
+        let row = doxa_lore::StoredCodegraph {
+            project_key: "fixture".into(), worktree_root: "/fixture".into(),
+            query: "modules".into(), path: "lib.rs".into(), revision: 3,
+            source_sha256: "a".repeat(64), graph_sha256: "b".repeat(64),
+            graph: serde_json::json!({"module_edges":[{"resolution":"unknown",
+                "reason":"conditional_compilation_unverified",
+                "conditional_candidate":"child.rs","target":null}]}),
+        };
+        let lines = stored_lines(&CodegraphSnapshot::Current(row)).join("\n");
+        assert!(lines.contains("revision 3"));
+        assert!(lines.contains("requested source verified at read time"));
+        assert!(lines.contains("Binding: unknown"));
+        assert!(lines.contains("conditional_candidate"));
+        assert!(lines.contains("conditional_compilation_unverified"));
+        assert!(stored_lines(&CodegraphSnapshot::Missing).join(" ").contains("No reviewed"));
+    }
+
+    #[test]
+    fn stored_command_rejects_symbol_without_starting_worker() {
+        let mut app = App::default();
+        app.open_codegraph("stored symbol Child");
+        assert!(app.codegraph_pending.is_none());
+        assert!(app.notice.contains("requires file|imports|calls|modules"));
     }
 
     #[test]

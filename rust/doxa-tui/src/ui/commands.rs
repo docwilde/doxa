@@ -117,7 +117,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
     CommandHelp { kind: LocalCommand::Split, name: "/split", form: "/split", summary: "Stacked pane split", support: "local" },
     CommandHelp { kind: LocalCommand::Vsplit, name: "/vsplit", form: "/vsplit", summary: "Side-by-side pane split", support: "local" },
     CommandHelp { kind: LocalCommand::Diff, name: "/diff", form: "/diff", summary: "Worktree diff", support: "local · active worktree" },
-    CommandHelp { kind: LocalCommand::Codegraph, name: "/codegraph", form: "/codegraph file|symbol|imports|calls|modules VALUE", summary: "Read-only Rust syntax viewer", support: "local · active worktree · bounded, fresh syntax query" },
+    CommandHelp { kind: LocalCommand::Codegraph, name: "/codegraph", form: "/codegraph [stored] file|symbol|imports|calls|modules VALUE", summary: "Read-only Rust syntax viewer", support: "local · stored accepts file-scoped queries only · reviewed LORE snapshot" },
     CommandHelp { kind: LocalCommand::Pane, name: "/pane", form: "/pane [number]", summary: "Switch pane", support: "local · numbered pane groups" },
     CommandHelp { kind: LocalCommand::Movepane, name: "/movepane", form: "/movepane [number]", summary: "Move active tab", support: "local · source retains its final tab" },
     CommandHelp { kind: LocalCommand::Sidebar, name: "/sidebar", form: "/sidebar [on|off|wider|narrower|width N]", summary: "Session rail", support: "local" },

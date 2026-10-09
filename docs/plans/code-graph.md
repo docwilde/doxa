@@ -1,16 +1,17 @@
 # Code graph: native syntax-query slice
 
-Status: **read-only syntax queries and explicit LORE file-map overlay
-implemented**. DOXA can query current Rust source for definitions, imports,
+Status: **read-only syntax queries, explicit file-map export, and reviewed LORE
+snapshot reads implemented**. DOXA can query current Rust source for definitions, imports,
 conservative call-site candidates, and bounded top-level module-file layout,
 including literal paths and unverified conditional candidates.
-It does not build a resolved dependency graph or persist a code graph in LORE.
+LORE 0.62.20 owns durable source-hashed snapshots; DOXA does not write them.
 
 ## Contents
 
 - [Shipped surface](#shipped-surface)
 - [Freshness and coverage](#freshness-and-coverage)
 - [Explicit snapshot export](#explicit-snapshot-export)
+- [Reviewed snapshot read](#reviewed-snapshot-read)
 - [Architecture boundary](#architecture-boundary)
 - [Still open](#still-open)
 
@@ -47,6 +48,12 @@ runs outside the input loop; the viewer shows source hashes, scan coverage,
 omitted counts, and explicit `ambiguous`, `unresolved`, or `unknown` labels.
 The answer is a snapshot of bytes read during that query, not a live binding
 or a persisted graph.
+
+`/codegraph stored file|imports|calls|modules PATH` reads a previously
+reviewed LORE snapshot for the active session's exact worktree. It runs outside
+the input/render loop and displays revision, hashes, freshness limit, and the
+original graph JSON, including ambiguous candidates. A missing snapshot is
+shown explicitly; stale or malformed data fails closed.
 
 The parser is [Syn's Rust source parser](https://docs.rs/syn/latest/syn/fn.parse_file.html).
 It records top-level definitions, inline modules, trait methods, and methods
@@ -102,29 +109,51 @@ freshness is explicitly unverified and it cannot prove a binding to the
 current source. A missing capability, malformed response, project mismatch,
 unparseable source, or oversized export fails closed.
 
+## Reviewed snapshot read
+
+`doxa codegraph --stored [--root WORKTREE] file|imports|calls|modules PATH`
+returns a validated LORE `current` snapshot or `{"status":"missing"}`. DOXA
+pins `lore-core` 0.62.20 and calls only `codegraph_snapshot_read_v1`; it checks
+the exact project, canonical worktree, query, path, revision, source hash,
+graph digest, and `unknown` binding claim. LORE checks Git worktree identity
+and rehashes the requested file on each read. A source edit or checkout
+replacement rejects the read. A stored call or module candidate from another
+file may have changed since review; its hash remains evidence for the original
+producer bytes, not current freshness or semantic binding.
+
+To persist an export, an owner must inspect it and invoke LORE's explicit
+`codegraph_snapshot_store_v1` command with human-review authority and an
+expected revision. DOXA's CLI and TUI expose no store operation. The export's
+producer `query_sha256` is not used as a store integrity claim: LORE computes
+`graph_sha256` over the stored graph JSON.
+
+The owner command is `lore-rs codegraph store --cwd ABSOLUTE_WORKTREE --input
+EXPORT.json --expected-sha256 FILE_SHA256 --expected-revision N`. It requires
+an interactive terminal, confirms the reviewed file digest, and asks for
+`STORE`. Use `N=0` for a new snapshot; use the current revision for replacement.
+
 ## Architecture boundary
 
 The older proposal described Python `ast`, `doxa/operators.py`, and tables in a
 LORE SQLite store. DOXA now uses native Rust hosts and a pinned external
 `lore-core` crate. Its agent tool catalog is explicitly validated in
 `rust/doxa-lore/src/lib.rs`; DOXA cannot silently add a LORE operator or table.
-The pinned LORE release offers a read-only `filemap` operator, but no codegraph
-snapshot storage or retrieval operator. This slice lives in
+The pinned LORE release offers the read-only `filemap` and reviewed codegraph
+snapshot operators. This slice lives in
 `rust/doxa-codegraph`, `rust/doxa-lore`, and the installed `doxa` launcher. It
 is read-only and creates no second memory authority.
 
 ## Still open
 
-- Define a LORE-owned graph snapshot schema, read operator, and reviewed write
-  gate. Persist only through that gate, with source-hash validation, revision
-  and worktree lifecycle rules. The current file map has curated `purpose` but
-  no revision or source hash; the export does not persist it.
+- Decide whether reviewed snapshots need an operator index, retention policy,
+  and explicit invalidation across worktree lifecycle. The current read is
+  exact worktree/query/path and verifies only the requested source.
 - Resolve imports and actual Rust call bindings with crate, trait, type, and
   conditional-compilation context. Module edges remain top-level and structural;
   `cfg_attr` and conditional reachability are unresolved. Call candidates stop
   at spelling matches.
-- Add a reviewed agent tool and optional persistent TUI tree/chip after the
-  shared LORE operator exists. The current TUI viewer is a direct syntax query.
+- Decide whether a reviewed agent tool or persistent TUI tree is useful. The
+  current viewer offers explicit fresh and stored queries only.
 - Decide whether other languages justify a parser dependency and coverage bar.
   Python support from the old plan has **not** shipped.
 - Benchmark scan latency on large repositories before using this query in an

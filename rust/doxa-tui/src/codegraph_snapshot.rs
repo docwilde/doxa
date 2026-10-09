@@ -1,5 +1,5 @@
 //! Explicit, read-only export of one fresh syntax answer plus LORE's curated
-//! file-map candidates. LORE does not yet own a durable codegraph protocol.
+//! file-map candidates. Owner-reviewed persistence stays in LORE's CLI.
 use doxa_codegraph::Answer;
 use doxa_lore::FileMap;
 use serde_json::{json, Value};

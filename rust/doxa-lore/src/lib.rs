@@ -62,6 +62,84 @@ pub struct FileMap {
     pub entries: Vec<FileMapEntry>,
 }
 
+/// LORE's local, owner-reviewed syntax snapshot. `Current` verifies only the
+/// requested source at read time; other-file candidates and bindings remain
+/// unverified producer data.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CodegraphSnapshot {
+    Missing,
+    Current(StoredCodegraph),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredCodegraph {
+    pub project_key: String,
+    pub worktree_root: String,
+    pub query: String,
+    pub path: String,
+    pub revision: u64,
+    pub source_sha256: String,
+    pub graph_sha256: String,
+    pub graph: Value,
+}
+
+impl CodegraphSnapshot {
+    fn parse(value: Value, cwd: &str, query: &str, path: &str) -> Result<Self, LoreError> {
+        if serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > 128 * 1024) {
+            return Err(LoreError::InvalidFrame);
+        }
+        let object = value.as_object().ok_or(LoreError::InvalidFrame)?;
+        match object.get("status").and_then(Value::as_str) {
+            Some("missing") if object.len() == 1 => Ok(Self::Missing),
+            Some("current") if object.len() == 12 => {
+                let project_key = object.get("project_key").and_then(Value::as_str)
+                    .filter(|key| *key == lore_core::config::project_slug(Path::new(cwd)))
+                    .ok_or(LoreError::InvalidFrame)?.to_owned();
+                let worktree_root = object.get("worktree_root").and_then(Value::as_str)
+                    .filter(|root| *root == cwd).ok_or(LoreError::InvalidFrame)?.to_owned();
+                if object.get("schema_version") != Some(&json!(1))
+                    || object.get("query") != Some(&json!(query))
+                    || object.get("path") != Some(&json!(path))
+                    || object.get("binding") != Some(&json!("unknown"))
+                    || object.get("freshness") != Some(&json!("requested_source_verified_only")) {
+                    return Err(LoreError::InvalidFrame);
+                }
+                let revision = object.get("revision").and_then(Value::as_u64)
+                    .filter(|revision| *revision > 0).ok_or(LoreError::InvalidFrame)?;
+                let source_sha256 = object.get("source_sha256").and_then(Value::as_str)
+                    .filter(|digest| valid_digest(digest)).ok_or(LoreError::InvalidFrame)?.to_owned();
+                let graph_sha256 = object.get("graph_sha256").and_then(Value::as_str)
+                    .filter(|digest| valid_digest(digest)).ok_or(LoreError::InvalidFrame)?.to_owned();
+                let graph = object.get("graph").filter(|graph| graph.is_object()
+                    && graph["scope"] == cwd && graph["query"] == query && graph["value"] == path
+                    && graph["status"] == "ok" && graph["requested_source_sha256"] == source_sha256
+                    && graph["requested_source_read_unix_ms"].as_u64().is_some()
+                    && graph["coverage"].is_object() && graph["rows"].is_array()
+                    && graph["edges"].is_array() && graph["module_edges"].is_array())
+                    .ok_or(LoreError::InvalidFrame)?.clone();
+                let bytes = serde_json::to_vec(&graph).map_err(|_| LoreError::InvalidFrame)?;
+                if format!("{:x}", Sha256::digest(&bytes)) != graph_sha256 {
+                    return Err(LoreError::InvalidFrame);
+                }
+                Ok(Self::Current(StoredCodegraph { project_key, worktree_root, query: query.into(),
+                    path: path.into(), revision, source_sha256, graph_sha256, graph }))
+            }
+            _ => Err(LoreError::InvalidFrame),
+        }
+    }
+
+    pub fn to_value(&self) -> Value {
+        match self {
+            Self::Missing => json!({"status":"missing"}),
+            Self::Current(row) => json!({"status":"current","schema_version":1,
+                "project_key":row.project_key,"worktree_root":row.worktree_root,
+                "query":row.query,"path":row.path,"revision":row.revision,
+                "source_sha256":row.source_sha256,"graph_sha256":row.graph_sha256,
+                "binding":"unknown","freshness":"requested_source_verified_only","graph":row.graph}),
+        }
+    }
+}
+
 impl FileMap {
     fn parse(value: Value, cwd: &str) -> Result<Self, LoreError> {
         if serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > 32 * 1024) {
@@ -403,6 +481,10 @@ impl LoreClient {
 
     pub fn can_read_file_map(&self) -> bool { self.capabilities.contains("filemap") }
 
+    pub fn can_read_codegraph_snapshot(&self) -> bool {
+        self.capabilities.contains("codegraph_snapshot_read_v1")
+    }
+
     pub fn can_act_on_beliefs(&self) -> bool {
         self.capabilities.contains("belief_review_v1")
             && self.capabilities.contains("belief_action_v1")
@@ -560,6 +642,23 @@ impl LoreClient {
             return Err(LoreError::InvalidFrame);
         }
         FileMap::parse(self.request_value("filemap", json!({"cwd":cwd}))?, cwd)
+    }
+
+    /// The only codegraph storage operation exposed by DOXA is read-only.
+    /// LORE rehashes the requested source and checks its worktree identity;
+    /// this client validates the returned scope and graph digest as well.
+    pub fn codegraph_snapshot(&mut self, cwd: &str, query: &str, path: &str)
+        -> Result<CodegraphSnapshot, LoreError> {
+        if !Path::new(cwd).is_absolute() || cwd.len() > 4096 || cwd.chars().any(char::is_control)
+            || !matches!(query, "file" | "imports" | "calls" | "modules")
+            || path.is_empty() || path.len() > 4096 || !path.ends_with(".rs")
+            || path.chars().any(char::is_control)
+            || !Path::new(path).components().all(|part|
+                matches!(part, std::path::Component::Normal(_))) {
+            return Err(LoreError::InvalidFrame);
+        }
+        CodegraphSnapshot::parse(self.request_value("codegraph_snapshot_read_v1",
+            json!({"cwd":cwd,"query":query,"path":path}))?, cwd, query, path)
     }
 
     /// Read curated memory sizes using LORE's own project mapping and entry
@@ -1408,5 +1507,45 @@ mod file_map_tests {
         let mut wrong = valid;
         wrong["entries"][1]["sha256"] = json!("invented");
         assert!(FileMap::parse(wrong, cwd).is_err());
+    }
+}
+
+#[cfg(test)]
+mod codegraph_snapshot_tests {
+    use super::*;
+
+    fn response(cwd: &str) -> Value {
+        let graph = json!({"scope":cwd,"query":"modules","value":"lib.rs","status":"ok",
+            "requested_source_sha256":"a".repeat(64),"requested_source_read_unix_ms":1,
+            "coverage":{},"rows":[],"edges":[],"module_edges":[
+                {"source":"lib.rs","module":"child","resolution":"unknown",
+                 "reason":"conditional","target":null,"conditional_candidate":"child.rs"}]});
+        let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&graph).unwrap()));
+        json!({"status":"current","schema_version":1,
+            "project_key":lore_core::config::project_slug(Path::new(cwd)),
+            "worktree_root":cwd,"query":"modules","path":"lib.rs","revision":2,
+            "source_sha256":"a".repeat(64),"graph_sha256":digest,
+            "freshness":"requested_source_verified_only","binding":"unknown","graph":graph})
+    }
+
+    #[test]
+    fn stored_snapshot_requires_exact_scope_source_digest_and_unknown_binding() {
+        let cwd = "/owned/codegraph-fixture";
+        let valid = response(cwd);
+        let parsed = CodegraphSnapshot::parse(valid.clone(), cwd, "modules", "lib.rs").unwrap();
+        assert!(matches!(parsed, CodegraphSnapshot::Current(_)));
+        assert_eq!(parsed.to_value(), valid);
+        assert_eq!(CodegraphSnapshot::parse(json!({"status":"missing"}), cwd,
+            "modules", "lib.rs").unwrap(), CodegraphSnapshot::Missing);
+        for pointer in ["/project_key", "/worktree_root", "/query", "/path",
+            "/source_sha256", "/graph_sha256", "/freshness", "/binding",
+            "/graph/requested_source_sha256", "/graph/module_edges/0/reason"] {
+            let mut wrong = valid.clone();
+            *wrong.pointer_mut(pointer).unwrap() = json!("wrong");
+            assert!(CodegraphSnapshot::parse(wrong, cwd, "modules", "lib.rs").is_err(),
+                "accepted changed {pointer}");
+        }
+        assert!(CodegraphSnapshot::parse(json!({"status":"missing","graph":{}}), cwd,
+            "modules", "lib.rs").is_err());
     }
 }

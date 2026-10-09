@@ -1,6 +1,53 @@
 //! In-process canonical backend fixtures, entirely under owned roots.
-use doxa_lore::LoreClient;
+use doxa_lore::{CodegraphSnapshot, LoreClient};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
+
+#[test]
+fn reviewed_codegraph_read_is_scoped_and_rejects_stale_source() {
+    let owned = tempfile::tempdir().unwrap();
+    let source = owned.path().join("worktree");
+    std::fs::create_dir(&source).unwrap();
+    assert!(std::process::Command::new("git").args(["init", "-q"])
+        .arg(&source).status().unwrap().success());
+    let file = source.join("lib.rs");
+    std::fs::write(&file, "mod child;\n").unwrap();
+    let cwd = source.to_str().unwrap();
+    let hash = format!("{:x}", Sha256::digest(std::fs::read(&file).unwrap()));
+    let graph = serde_json::json!({"scope":cwd,"query":"modules","value":"lib.rs",
+        "status":"ok","requested_source_sha256":hash,
+        "requested_source_read_unix_ms":1,"coverage":{},"rows":[],"edges":[],
+        "module_edges":[{"source":"lib.rs","module":"child","resolution":"unknown",
+            "reason":"ambiguous_layout","target":null}]});
+    let config = lore_core::config::Config::for_root(owned.path().join("store"));
+    let mut client = LoreClient::open_config(config.clone(), Duration::from_secs(2)).unwrap();
+    assert!(client.can_read_codegraph_snapshot());
+    assert_eq!(client.codegraph_snapshot(cwd, "modules", "lib.rs").unwrap(),
+        CodegraphSnapshot::Missing);
+    assert!(!config.root.join("codegraph-v1").exists());
+    let req = serde_json::json!({"cwd":cwd,"query":"modules","path":"lib.rs",
+        "expected_revision":0,"snapshot":{"schema_version":1,
+            "storage":"export_only_not_persisted","graph_binding":"unknown",
+            "curated_purpose":{"project_key":lore_core::config::project_slug(&source)},
+            "graph":graph}});
+    let authority = lore_core::gate::Authority::HumanReview {
+        agent: "fixture".into(), engine: "human".into(),
+    };
+    lore_core::codegraph_snapshot::store(&config, &req, &authority).unwrap();
+    let before = std::fs::read_dir(config.root.join("codegraph-v1")).unwrap()
+        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap()).collect::<Vec<_>>();
+    let stored = client.codegraph_snapshot(cwd, "modules", "lib.rs").unwrap();
+    let CodegraphSnapshot::Current(stored) = stored else { panic!("expected current snapshot") };
+    assert_eq!(stored.source_sha256, hash);
+    assert_eq!(stored.graph["module_edges"][0]["resolution"], "unknown");
+    assert_eq!(stored.graph["module_edges"][0]["reason"], "ambiguous_layout");
+    let after = std::fs::read_dir(config.root.join("codegraph-v1")).unwrap()
+        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap()).collect::<Vec<_>>();
+    assert_eq!(before, after, "read unexpectedly rewrote the store");
+    std::fs::write(&file, "mod changed;\n").unwrap();
+    assert!(client.codegraph_snapshot(cwd, "modules", "lib.rs").is_err());
+    assert!(client.codegraph_snapshot(cwd, "symbol", "lib.rs").is_err());
+}
 
 #[test]
 fn native_source_session_pending_summary_respects_project_and_session() {
@@ -9,11 +56,7 @@ fn native_source_session_pending_summary_respects_project_and_session() {
     let source = owned.path().join("source");
     let other = owned.path().join("other");
     let mut client = LoreClient::open_config(config.clone(), Duration::from_secs(2)).unwrap();
-    if !client.can_pending_for_sessions() {
-        // This committed pin is intentionally still 0.62.17. The test becomes
-        // active when release integration advances the LORE dependency.
-        return;
-    }
+    assert!(client.can_pending_for_sessions());
     let source_slug = lore_core::config::project_slug(&source);
     let target_slug = lore_core::config::project_slug(&other);
     let authority = lore_core::gate::Authority::HumanReview {

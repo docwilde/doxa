@@ -3121,7 +3121,7 @@ for line in sys.stdin:
         app.open_help();
         let info = app.chip_info.as_ref().unwrap();
         assert_eq!(info.kind, "help");
-        for form in ["/collection [action] [name]", "/codegraph file|symbol|imports|calls|modules VALUE", "/usage", "/context", "/compact",
+        for form in ["/collection [action] [name]", "/codegraph [stored] file|symbol|imports|calls|modules VALUE", "/usage", "/context", "/compact",
             "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|dependency-review [RUN] SLOT|mesh [RUN]|start OPTIONS|resume RUN]", "/help"] {
             assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
         }
