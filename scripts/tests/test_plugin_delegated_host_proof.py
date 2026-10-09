@@ -6,9 +6,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -177,6 +180,67 @@ class DelegatedShapeTests(unittest.TestCase):
         alias.symlink_to(source)
         with self.assertRaises(OSError):
             proof.file_sha256(alias)
+
+    def test_bounded_runner_kills_output_flood_before_unbounded_capture(self) -> None:
+        start = time.monotonic()
+        with self.assertRaisesRegex(proof.ProofError, "output limit"):
+            proof.run_bounded([sys.executable, "-c", "import os,time; os.write(1,b'x'*1000000); time.sleep(30)"],
+                              cwd=Path(self.temp.name), environment=os.environ.copy(),
+                              limit=1024, timeout=3)
+        self.assertLess(time.monotonic() - start, 3)
+
+    def test_bounded_runner_deadline_kills_child_process_group(self) -> None:
+        marker = Path(self.temp.name) / "child-survived"
+        child = f"import time,pathlib; time.sleep(0.7); pathlib.Path({str(marker)!r}).write_text('bad')"
+        parent = f"import subprocess,time,sys; subprocess.Popen([sys.executable,'-c',{child!r}]); print('started',flush=True); time.sleep(30)"
+        start = time.monotonic()
+        with self.assertRaisesRegex(proof.ProofError, "deadline"):
+            proof.run_bounded([sys.executable, "-c", parent], cwd=Path(self.temp.name),
+                              environment=os.environ.copy(), limit=1024, timeout=0.25)
+        self.assertLess(time.monotonic() - start, 2)
+        time.sleep(0.8)
+        self.assertFalse(marker.exists(), "child escaped proof process-group cleanup")
+
+    def test_opened_test_executable_runs_exact_inode_after_path_swap(self) -> None:
+        path = Path(self.temp.name) / "test-executable"
+        shutil.copy2("/usr/bin/true", path)
+        path.chmod(0o700)
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC), "rb") as opened:
+            expected = proof.descriptor_sha256(opened.fileno(), str(path))
+            path.rename(path.with_name("reviewed-original"))
+            shutil.copy2("/usr/bin/false", path)
+            status, output = proof.run_bounded([str(path)], cwd=Path(self.temp.name),
+                                               environment=os.environ.copy(), limit=1024,
+                                               timeout=3, executable=f"/proc/self/fd/{opened.fileno()}",
+                                               pass_fds=(opened.fileno(),))
+            self.assertEqual((status, output), (0, b""))
+            self.assertNotEqual(expected, proof.file_sha256(path))
+
+    def test_cargo_artifact_parser_requires_one_in_target_lib_test(self) -> None:
+        target = Path(self.temp.name) / "target"
+        target.mkdir()
+        executable = target / "doxa_tui-test"
+        executable.write_bytes(b"fixture")
+        row = {"reason": "compiler-artifact", "target": {"name": "doxa_tui", "kind": ["lib"]},
+               "profile": {"test": True}, "executable": str(executable)}
+        encoded = (json.dumps(row) + "\n").encode()
+        self.assertEqual(proof.test_artifact(encoded, target), executable)
+        for bad in (b"", encoded + encoded,
+                    (json.dumps({**row, "executable": str(Path(self.temp.name) / "outside")}) + "\n").encode()):
+            with self.assertRaises((proof.ProofError, FileNotFoundError)):
+                proof.test_artifact(bad, target)
+
+    def test_build_identity_changes_with_config_and_build_environment(self) -> None:
+        root = Path(self.temp.name) / "source"
+        (root / ".cargo").mkdir(parents=True)
+        config = root / ".cargo/config.toml"
+        config.write_text("[build]\njobs = 2\n")
+        environment = {**os.environ, "CARGO_TARGET_DIR": str(Path(self.temp.name) / "target")}
+        first = proof.build_identity(root, environment)
+        config.write_text("[build]\njobs = 3\n")
+        self.assertNotEqual(proof.build_identity(root, environment), first)
+        config.write_text("[build]\njobs = 2\n")
+        self.assertNotEqual(proof.build_identity(root, {**environment, "RUSTFLAGS": "-C opt-level=1"}), first)
 
     def test_receipt_is_private_exclusive_and_explicitly_non_authorizing(self) -> None:
         scratch = Path(self.temp.name)

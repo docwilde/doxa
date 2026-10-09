@@ -12,11 +12,14 @@ import os
 from pathlib import Path
 import platform
 import re
+import selectors
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 BWRAP = Path("/usr/bin/bwrap")
@@ -34,6 +37,9 @@ BWRAP_FLAGS = (
 NAMESPACES = ("net", "mnt", "user", "pid")
 PROOF_CASES = frozenset({"approved-wasm", "boundary", "pids", "memory", "cpu", "setsid-cancel", "timeout"})
 PROOF_LOG_LIMIT = 128 * 1024
+BUILD_LOG_LIMIT = 8 * 1024 * 1024
+BUILD_TIMEOUT_SECONDS = 900
+PROOF_TIMEOUT_SECONDS = 45
 IPV4_ROUTE_POLICY = 'NR == 1 { if (NF != 11 || $1 != "Iface") exit 1; next } { if (NF != 11 || $1 != "lo") exit 1 } END { if (NR == 0) exit 1 }'
 IPV6_ROUTE_POLICY = 'NF { if (NF != 10 || $10 != "lo") exit 1 }'
 
@@ -270,16 +276,121 @@ def staged_worker(source: Path, scratch: Path):
 
 
 def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC), "rb") as stream:
-        before = os.fstat(stream.fileno())
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-        after = os.fstat(stream.fileno())
+        return descriptor_sha256(stream.fileno(), str(path))
+
+
+def descriptor_sha256(fd: int, label: str) -> str:
+    digest = hashlib.sha256()
+    before = os.fstat(fd)
+    require(stat.S_ISREG(before.st_mode) and before.st_size <= 1024 * 1024 * 1024,
+            f"{label}: executable is not a regular file below 1 GiB")
+    offset = 0
+    while chunk := os.pread(fd, 1024 * 1024, offset):
+        digest.update(chunk)
+        offset += len(chunk)
+        require(offset <= 1024 * 1024 * 1024, f"{label}: executable exceeded 1 GiB")
+    after = os.fstat(fd)
     require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
             == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
-            f"{path}: executable changed during hashing")
+            f"{label}: executable changed during hashing")
     return digest.hexdigest()
+
+
+def run_bounded(args: list[str], *, cwd: Path, environment: dict[str, str],
+                limit: int, timeout: float, executable: str | None = None,
+                pass_fds: tuple[int, ...] = ()) -> tuple[int, bytes]:
+    """Bound output as it arrives; kill the new process group on failure."""
+    process = subprocess.Popen(args, cwd=cwd, env=environment, executable=executable,
+                               pass_fds=pass_fds, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, start_new_session=True, bufsize=0)
+    assert process.stdout is not None
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                require(remaining > 0, "proof subprocess exceeded its deadline")
+                if not selector.select(min(remaining, 0.25)):
+                    continue
+                chunk = os.read(process.stdout.fileno(), min(8192, limit + 1 - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                require(len(output) <= limit, "proof subprocess exceeded its output limit")
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, "proof subprocess exceeded its deadline")
+        return process.wait(timeout=remaining), bytes(output)
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired as exc:
+            raise ProofError("proof subprocess could not be reaped after group kill") from exc
+        raise
+    finally:
+        process.stdout.close()
+
+
+def build_identity(root: Path, environment: dict[str, str]) -> dict[str, object]:
+    toolchain: dict[str, object] = {}
+    for binary in ("cargo", "rustc"):
+        path = shutil.which(binary, path=environment.get("PATH"))
+        require(path is not None, f"{binary} is unavailable")
+        resolved = Path(path).resolve(strict=True)
+        status, output = run_bounded([binary, "-vV"], cwd=root, environment=environment,
+                                     limit=8192, timeout=10)
+        require(status == 0, f"{binary} version probe failed")
+        toolchain[binary] = {"path": str(resolved), "sha256": file_sha256(resolved),
+                             "version": output.decode("utf-8")}
+    build_keys = sorted(key for key in environment if key in {
+        "CARGO_HOME", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTFLAGS", "RUSTDOCFLAGS", "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+        "RUSTC_BOOTSTRAP", "RUSTUP_TOOLCHAIN", "CC", "CXX", "CFLAGS", "CXXFLAGS",
+        "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR",
+    } or key.startswith(("CARGO_BUILD_", "CARGO_PROFILE_", "CARGO_TARGET_")))
+    pairs = [(key, environment[key]) for key in build_keys]
+    env_sha256 = hashlib.sha256(json.dumps(pairs, separators=(",", ":")).encode()).hexdigest()
+    cargo_home = Path(environment.get("CARGO_HOME", str(Path.home() / ".cargo")))
+    require(cargo_home.is_absolute(), "CARGO_HOME must be absolute for proof identity")
+    config_roots = [*root.parents, root, cargo_home]
+    config_files: dict[str, str] = {}
+    for directory in config_roots:
+        for name in ("config", "config.toml"):
+            candidate = directory / ".cargo" / name if directory != cargo_home else directory / name
+            if candidate.exists() or candidate.is_symlink():
+                config_files[str(candidate)] = file_sha256(candidate)
+    return {"toolchain": toolchain, "build_environment_sha256": env_sha256,
+            "build_environment_keys": build_keys, "cargo_config_sha256": config_files}
+
+
+def test_artifact(output: bytes, target: Path) -> Path:
+    candidates = []
+    for line in output.splitlines():
+        try:
+            message = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            continue  # Cargo diagnostics are not compiler-artifact messages.
+        if not isinstance(message, dict):
+            continue
+        target_info = message.get("target")
+        profile = message.get("profile")
+        if (message.get("reason") == "compiler-artifact"
+                and isinstance(target_info, dict) and target_info.get("name") == "doxa_tui"
+                and target_info.get("kind") == ["lib"]
+                and isinstance(profile, dict) and profile.get("test") is True
+                and isinstance(message.get("executable"), str)):
+            candidates.append(Path(message["executable"]))
+    require(len(candidates) == 1, "Cargo did not identify exactly one DOXA library test executable")
+    artifact = candidates[0]
+    require(artifact.is_absolute() and artifact.resolve(strict=True).is_relative_to(target.resolve(strict=True))
+            and not artifact.is_symlink(), "test executable escaped the reviewed target directory")
+    return artifact
 
 
 def source_identity(root: Path) -> dict[str, str]:
@@ -323,6 +434,21 @@ def require_no_plugin_cgroups(parent: Path) -> None:
     require(len(entries) <= 4096, "delegated parent has too many children to audit")
     require(not any(entry.name.startswith("doxa-plugin-") for entry in entries),
             "private plugin worker cgroup remains in delegated parent")
+
+
+def stop_plugin_cgroups(parent: Path) -> None:
+    """Emergency cleanup if the proof test is killed before Rust Drop runs."""
+    groups = [entry for entry in parent.iterdir() if entry.name.startswith("doxa-plugin-")]
+    require(len(groups) <= 64, "too many plugin cgroups for bounded emergency cleanup")
+    for group in groups:
+        require(group.is_dir() and not group.is_symlink(), "plugin cleanup saw a non-directory")
+        (group / "cgroup.kill").write_text("1")
+        deadline = time.monotonic() + 3
+        while "populated 0" not in bounded_read(group / "cgroup.events").splitlines():
+            require(time.monotonic() < deadline, "plugin cgroup remained populated after emergency kill")
+            time.sleep(0.01)
+        group.rmdir()
+    require_no_plugin_cgroups(parent)
 
 
 def proof_cases(output: bytes) -> dict[str, dict[str, str]]:
@@ -429,40 +555,70 @@ def main() -> int:
     cgroup = cgroup_identity(parent)
     require_no_plugin_cgroups(parent)
     bwrap_sha256 = file_sha256(BWRAP)
-    build = ["cargo", "build", "--locked", "-p", "doxa-tui", "--bin", "doxa-plugin-worker"]
-    if subprocess.run(build, cwd=root, check=False).returncode != 0:
-        return 1
-    worker = target / "debug" / "doxa-plugin-worker"
-    command = ["cargo", "test", "--locked", "-p", "doxa-tui", "--lib",
-               "delegated_cgroup_containment_acceptance", "--", "--ignored", "--nocapture"]
     environment = os.environ.copy()
     environment["RUST_TEST_THREADS"] = "1"
     environment["CARGO_TERM_COLOR"] = "never"
     environment["DOXA_PLUGIN_ACCEPTANCE_PARENT"] = str(parent)
     environment["DOXA_PLUGIN_ACCEPTANCE_PARENT_ID"] = (
         f"{cgroup['parent_device']}:{cgroup['parent_inode']}")
+    build_identity_before = build_identity(root, environment)
+    build_command = ["cargo", "build", "--locked", "-p", "doxa-tui", "--bin", "doxa-plugin-worker"]
+    build_status, build_output = run_bounded(build_command, cwd=root, environment=environment,
+                                             limit=BUILD_LOG_LIMIT, timeout=BUILD_TIMEOUT_SECONDS)
+    sys.stdout.buffer.write(build_output)
+    sys.stdout.flush()
+    if build_status != 0:
+        return 1
+    worker = target / "debug" / "doxa-plugin-worker"
+    compile_command = ["cargo", "test", "--locked", "-p", "doxa-tui", "--lib",
+                       "--no-run", "--message-format=json"]
+    compile_status, compile_output = run_bounded(
+        compile_command, cwd=root, environment=environment,
+        limit=BUILD_LOG_LIMIT, timeout=BUILD_TIMEOUT_SECONDS)
+    require(compile_status == 0, "Cargo failed to build the proof test executable")
+    artifact = test_artifact(compile_output, target)
     with staged_worker(worker, scratch) as private_worker:
         environment["DOXA_PLUGIN_ACCEPTANCE_WORKER"] = str(private_worker)
         worker_sha256 = file_sha256(private_worker)
-        with tempfile.TemporaryFile(dir=scratch) as capture:
-            result = subprocess.run(command, cwd=root, env=environment,
-                                    stdout=capture, stderr=subprocess.STDOUT, check=False)
-            capture.seek(0)
-            output = capture.read(PROOF_LOG_LIMIT + 1)
-        require(len(output) <= PROOF_LOG_LIMIT, "plugin proof output exceeded 128 KiB")
+        with os.fdopen(os.open(artifact, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC), "rb") as test_file:
+            meta = os.fstat(test_file.fileno())
+            require(stat.S_ISREG(meta.st_mode) and meta.st_uid == os.geteuid()
+                    and meta.st_mode & 0o022 == 0 and meta.st_mode & 0o111,
+                    "proof test executable is not owner-controlled and executable")
+            test_sha256 = descriptor_sha256(test_file.fileno(), str(artifact))
+            test_fd = test_file.fileno()
+            command = [str(artifact), "delegated_cgroup_containment_acceptance",
+                       "--ignored", "--nocapture", "--test-threads=1"]
+            try:
+                test_status, output = run_bounded(
+                    command, cwd=root, environment=environment, limit=PROOF_LOG_LIMIT,
+                    timeout=PROOF_TIMEOUT_SECONDS, executable=f"/proc/self/fd/{test_fd}",
+                    pass_fds=(test_fd,))
+            except BaseException:
+                stop_plugin_cgroups(parent)
+                raise
         sys.stdout.buffer.write(output)
         sys.stdout.flush()
-        if result.returncode != 0:
-            return result.returncode
-        cases = proof_cases(output)
+        if test_status != 0:
+            stop_plugin_cgroups(parent)
+            return test_status
+        try:
+            cases = proof_cases(output)
+        except BaseException:
+            stop_plugin_cgroups(parent)
+            raise
     require_no_plugin_cgroups(parent)
     require(cgroup_identity(parent) == cgroup, "delegated cgroup identity changed during proof")
     require(file_sha256(BWRAP) == bwrap_sha256, "Bubblewrap binary changed during proof")
     require(source_identity(root) == source, "proof source checkout changed during proof")
+    require(file_sha256(artifact) == test_sha256, "proof test executable changed during proof")
+    require(build_identity(root, environment) == build_identity_before,
+            "proof toolchain or build configuration changed during proof")
     write_receipt(receipt, {
         "format_version": 1, "purpose": "review-only; does not authorize TUI execution",
         "tui_execution_authorized": False, "recorded_at": datetime.now(timezone.utc).isoformat(),
         "source": source, "worker_sha256": worker_sha256, "bwrap_sha256": bwrap_sha256,
+        "test_executable_sha256": test_sha256, "build": build_identity_before,
         "host": {"kernel": platform.release(), "bwrap_version": version,
                  "uid": os.geteuid(), "cpus": len(os.sched_getaffinity(0)), "cgroup": cgroup},
         "proof_log_sha256": hashlib.sha256(output).hexdigest(),

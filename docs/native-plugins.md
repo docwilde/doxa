@@ -190,7 +190,11 @@ DOXA_PLUGIN_CGROUP_ACCEPTANCE=1 DOXA_PLUGIN_DISPOSABLE_HOST=1 \
 `--run` requires both explicit environment switches, an absolute real-disk
 `CARGO_TARGET_DIR`, and a new receipt name inside the private `TMPDIR`. It
 refuses a dirty source checkout or an existing receipt. It repeats the preflight, builds the actual
-`doxa-plugin-worker`, then runs the ignored Rust fixture. It creates only per-worker child cgroups in
+`doxa-plugin-worker`, builds and hashes the exact Rust test executable, then
+runs that opened executable by descriptor. Build output is limited to 8 MiB
+with a 15-minute deadline; the seven-case proof output is limited to 128 KiB
+with a 45-second deadline. Deadline or output-limit failure kills the proof
+process group and attempts bounded cleanup of worker cgroups. It creates only per-worker child cgroups in
 the delegated parent; it does not configure systemd, enable controllers or
 change host networking. Missing prerequisites or proof observations fail the
 run, rather than skipping it. The fixture uses the same descriptor-mounted
@@ -210,8 +214,10 @@ timeout cleanup.
 The proof validates all seven case lines and their cleanup markers, checks that
 no plugin worker cgroup remains, and writes a private JSON receipt only after
 the Rust test passes. The receipt binds the clean Git commit and tree, SHA-256
-of the staged worker and Bubblewrap binary, delegated cgroup parent and
-supervisor device/inode, host details, seven observed cases and SHA-256 of the
+of the staged worker, Bubblewrap binary and exact Rust test executable,
+toolchain versions and executable hashes, a digest of build-affecting environment
+settings, Cargo config hashes, delegated cgroup parent and supervisor
+device/inode, host details, seven observed cases and SHA-256 of the
 bounded test log. The terminal prints the receipt SHA-256; retain that line and
 the test log separately so reviewers can detect later receipt or log changes.
 This is operator evidence, not a signature or an activation token. No TUI code
