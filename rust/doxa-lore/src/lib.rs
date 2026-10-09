@@ -64,7 +64,7 @@ pub struct FileMap {
 
 /// LORE's local, owner-reviewed syntax snapshot. The requested source is
 /// verified by LORE; DOXA rechecks included references and, when present, the
-/// complete enumerated Rust scan-input inventory. Bindings remain unknown.
+/// complete enumerated Rust and Python scan-input inventories. Bindings remain unknown.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CodegraphSnapshot {
     Missing,
@@ -83,6 +83,7 @@ pub struct StoredCodegraph {
     pub graph: Value,
     pub referenced_sources: ReferenceFreshness,
     pub scan_inputs: ScanInputFreshness,
+    pub python_scan_inputs: ScanInputFreshness,
 }
 
 /// Read-time verification of the producer's complete Git-listed Rust input
@@ -149,6 +150,48 @@ impl ScanInputFreshness {
             },
             Err(_) => Self { status: "unknown", checked_files: 0,
                 reason: "scan_inputs_uncheckable" },
+        }
+    }
+
+    fn check_python(cwd: &str, graph: &Value) -> Self {
+        let Some(expected) = graph.get("python_scan_input_sha256").and_then(Value::as_str) else {
+            return Self { status: "unknown", checked_files: 0,
+                reason: "python_scan_input_digest_absent" };
+        };
+        if !valid_digest(expected) {
+            return Self { status: "unknown", checked_files: 0,
+                reason: "invalid_python_scan_input_digest" };
+        }
+        let coverage = &graph["coverage"];
+        let (Some(total_skipped), Some(total_unparseable), Some(skipped), Some(unparseable),
+            Some(expected_files)) = (
+            coverage["skipped"]["count"].as_u64(),
+            coverage["unparseable"]["count"].as_u64(),
+            coverage["python_skipped_files"].as_u64(),
+            coverage["python_unparseable_files"].as_u64(),
+            coverage["parsed_python_files"].as_u64(),
+        ) else {
+            return Self { status: "unknown", checked_files: 0,
+                reason: "python_scan_coverage_uncheckable" };
+        };
+        if skipped > total_skipped || unparseable > total_unparseable {
+            return Self { status: "unknown", checked_files: 0,
+                reason: "python_scan_coverage_uncheckable" };
+        }
+        if skipped != 0 || unparseable != 0 {
+            return Self { status: "unknown", checked_files: 0,
+                reason: "python_scan_incomplete" };
+        }
+        match doxa_codegraph::current_python_scan_input_sha256(Path::new(cwd)) {
+            Ok((actual, checked_files)) => Self {
+                status: if actual == expected && checked_files as u64 == expected_files {
+                    "verified" } else { "stale" },
+                checked_files,
+                reason: if actual == expected && checked_files as u64 == expected_files {
+                    "matched" } else { "python_scan_inputs_changed" },
+            },
+            Err(_) => Self { status: "unknown", checked_files: 0,
+                reason: "python_scan_inputs_uncheckable" },
         }
     }
 }
@@ -257,7 +300,8 @@ impl ReferenceFreshness {
             Some(edges) => for edge in edges {
                 check.record(edge.get("source"), edge.get("source_sha256"));
                 for (path_key, hash_key) in [("target", "target_sha256"),
-                    ("conditional_candidate", "conditional_candidate_sha256")] {
+                    ("conditional_candidate", "conditional_candidate_sha256"),
+                    ("structural_candidate", "structural_candidate_sha256")] {
                     if edge.get(path_key).is_some_and(|value| !value.is_null()) {
                         check.record(edge.get(path_key), edge.get(hash_key));
                     } else if edge.get(hash_key).is_some_and(|value| !value.is_null()) {
@@ -311,9 +355,10 @@ impl CodegraphSnapshot {
                 }
                 let referenced_sources = ReferenceFreshness::check(cwd, &graph);
                 let scan_inputs = ScanInputFreshness::check(cwd, &graph);
+                let python_scan_inputs = ScanInputFreshness::check_python(cwd, &graph);
                 Ok(Self::Current(StoredCodegraph { project_key, worktree_root, query: query.into(),
                     path: path.into(), revision, source_sha256, graph_sha256, graph,
-                    referenced_sources, scan_inputs }))
+                    referenced_sources, scan_inputs, python_scan_inputs }))
             }
             _ => Err(LoreError::InvalidFrame),
         }
@@ -333,7 +378,10 @@ impl CodegraphSnapshot {
                         json!({"path":issue.path,"reason":issue.reason})).collect::<Vec<_>>()},
                 "scan_inputs":{"status":row.scan_inputs.status,
                     "checked_files":row.scan_inputs.checked_files,
-                    "reason":row.scan_inputs.reason}}),
+                    "reason":row.scan_inputs.reason},
+                "python_scan_inputs":{"status":row.python_scan_inputs.status,
+                    "checked_files":row.python_scan_inputs.checked_files,
+                    "reason":row.python_scan_inputs.reason}}),
         }
     }
 }
@@ -1736,11 +1784,14 @@ mod codegraph_snapshot_tests {
         assert_eq!(rendered["referenced_sources"]["status"], "unknown");
         assert_eq!(rendered["scan_inputs"]["status"], "unknown");
         assert_eq!(rendered["scan_inputs"]["reason"], "scan_input_digest_absent");
+        assert_eq!(rendered["python_scan_inputs"]["status"], "unknown");
+        assert_eq!(rendered["python_scan_inputs"]["reason"], "python_scan_input_digest_absent");
         assert_eq!(rendered["referenced_sources"]["issues"][0]["reason"],
             "missing_reference_hash");
         let mut original = rendered.clone();
         original.as_object_mut().unwrap().remove("referenced_sources");
         original.as_object_mut().unwrap().remove("scan_inputs");
+        original.as_object_mut().unwrap().remove("python_scan_inputs");
         assert_eq!(original, valid);
         assert_eq!(CodegraphSnapshot::parse(json!({"status":"missing"}), cwd,
             "modules", "lib.rs").unwrap(), CodegraphSnapshot::Missing);
@@ -1811,6 +1862,47 @@ mod codegraph_snapshot_tests {
         assert_eq!(uncheckable.scan_inputs.reason, "scan_inputs_uncheckable");
     }
 
+    #[test]
+    fn reviewed_python_scan_inputs_detect_edit_add_remove_and_uncheckable_files() {
+        let owned = tempfile::tempdir().unwrap();
+        let cwd = owned.path().to_str().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"])
+            .arg(owned.path()).status().unwrap().success());
+        std::fs::write(owned.path().join("service.py"), "def first(): pass\n").unwrap();
+        let graph = serde_json::to_value(doxa_codegraph::query(owned.path(),
+            doxa_codegraph::Query::File("service.py".into())).unwrap()).unwrap();
+        let mut stored = response(cwd);
+        stored["query"] = json!("file");
+        stored["path"] = json!("service.py");
+        stored["source_sha256"] = graph["requested_source_sha256"].clone();
+        stored["graph"] = graph.clone();
+        stored["graph_sha256"] = json!(format!("{:x}", Sha256::digest(
+            serde_json::to_vec(&graph).unwrap())));
+        let CodegraphSnapshot::Current(parsed) = CodegraphSnapshot::parse(stored, cwd,
+            "file", "service.py").unwrap() else { panic!("missing") };
+        assert_eq!(parsed.python_scan_inputs.status, "verified");
+        let checked = || ScanInputFreshness::check_python(cwd, &graph);
+        assert_eq!((checked().status, checked().checked_files), ("verified", 1));
+        std::fs::write(owned.path().join("service.py"), "def second(): pass\n").unwrap();
+        assert_eq!(checked().status, "stale");
+        std::fs::write(owned.path().join("service.py"), "def first(): pass\n").unwrap();
+        std::fs::write(owned.path().join("added.py"), "pass\n").unwrap();
+        assert_eq!(checked().status, "stale");
+        std::fs::remove_file(owned.path().join("added.py")).unwrap();
+        assert_eq!(checked().status, "verified");
+        std::fs::remove_file(owned.path().join("service.py")).unwrap();
+        assert_eq!(checked().status, "stale");
+        std::fs::write(owned.path().join("service.py"), "def first(): pass\n").unwrap();
+        std::os::unix::fs::symlink(owned.path().join("service.py"),
+            owned.path().join("linked.py")).unwrap();
+        assert_eq!(checked().status, "unknown");
+        let mut incomplete = graph.clone();
+        incomplete["coverage"]["python_skipped_files"] = json!(1);
+        incomplete["coverage"]["skipped"]["count"] = json!(1);
+        assert_eq!(ScanInputFreshness::check_python(cwd, &incomplete).reason,
+            "python_scan_incomplete");
+    }
+
 
     #[test]
     fn referenced_call_candidates_require_safe_paths_and_matching_hashes() {
@@ -1868,5 +1960,22 @@ mod codegraph_snapshot_tests {
             std::fs::write(owned.path().join("service.py"),
                 "from package import helper\nhelper()\n").unwrap();
         }
+    }
+
+    #[test]
+    fn python_structural_candidate_is_rechecked_by_lore() {
+        let owned = tempfile::tempdir().unwrap();
+        let cwd = owned.path().to_str().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"])
+            .arg(owned.path()).status().unwrap().success());
+        std::fs::write(owned.path().join("service.py"), "import helper\n").unwrap();
+        std::fs::write(owned.path().join("helper.py"), "pass\n").unwrap();
+        let graph = serde_json::to_value(doxa_codegraph::query(owned.path(),
+            doxa_codegraph::Query::Modules("service.py".into())).unwrap()).unwrap();
+        assert_eq!(graph["module_edges"][0]["structural_candidate"], "helper.py");
+        assert!(graph["module_edges"][0]["target"].is_null());
+        assert_eq!(ReferenceFreshness::check(cwd, &graph).checked_files, 2);
+        std::fs::write(owned.path().join("helper.py"), "changed = True\n").unwrap();
+        assert_eq!(ReferenceFreshness::check(cwd, &graph).status, "stale");
     }
 }
