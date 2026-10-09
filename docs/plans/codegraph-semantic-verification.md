@@ -40,6 +40,23 @@ returning unrelated inspect and cgroup records. A production caller must
 establish that the reviewed Docker client/socket and attached LSP stream refer
 to the same attested container before this path can be enabled.
 
+An additional **private, disabled** Linux transport seam opens the configured
+Unix socket with a two-second deadline, checks that it is a private socket
+owned by the current user, records its inode and `SO_PEERCRED` PID, and sends a
+bounded [Engine attach request](https://docs.docker.com/reference/api/engine/version/v1.51/#tag/Container/operation/ContainerAttach)
+for the exact 64-digit container ID. It accepts only an HTTP upgrade with a
+multiplexed stream and checks the frame selector and size. Fake Unix daemons
+exercise the request path, response rejection, and frame bounds. This is a
+transport measurement, **not** a binding claim: a same-user fake daemon can
+answer it, and the existing Docker CLI child still supplies the LSP pipes.
+The probe intentionally rejects a `200` response or a `raw-stream` content
+type; API version and response compatibility need review on the chosen live
+Engine before this transport can be used.
+The next implementation must launch, inspect, and carry every LSP byte over
+one reviewed Engine endpoint, bind the attach request to the inspected CID,
+and preserve cleanup and resource checks across that exchange. Until then,
+the CLI never opens this seam and keeps `binding: unknown`.
+
 The library-only LSP driver exercises a bounded initialize, quiescence,
 definition, and shutdown exchange against a fixture server. It caps messages
 and output, enforces a 20-second maximum deadline, and kills the process group
