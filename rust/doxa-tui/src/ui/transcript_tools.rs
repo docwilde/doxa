@@ -54,7 +54,7 @@ pub(super) fn mermaid_cache_key(source_hash: &str, renderer_identity: &str, widt
     digest.update(b"\0");
     digest.update(renderer_identity.as_bytes());
     digest.update(width.to_be_bytes());
-    format!("{digest:x}")
+    format!("{:x}", digest.finalize())
 }
 
 fn fence_marker(line: &str) -> Option<(u8, usize, &str)> {

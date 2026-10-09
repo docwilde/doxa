@@ -237,7 +237,7 @@ fn renderer_identity(renderer: &str, root: &str) -> Option<String> {
             hash.update(value.to_be_bytes());
         }
     }
-    Some(format!("{hash:x}"))
+    Some(format!("{:x}", hash.finalize()))
 }
 
 fn private_temp_root() -> Option<PathBuf> {
