@@ -104,8 +104,6 @@ fn scene(name: &str) -> App {
                                {"label":"Revise", "description":"Keep reviewing"}]}]
             }));
             if name == "pane-triage" {
-                app.input = "/collection view panes".into();
-                key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
                 app.notice = format!("Rust {} · pane rail · fixture", env!("CARGO_PKG_VERSION"));
             } else {
                 app.notice = format!("Rust {} · hidden tab #3 needs input · fixture", env!("CARGO_PKG_VERSION"));
@@ -445,6 +443,7 @@ fn main() {
         }).unwrap();
     } else {
         if name == "image-preview" { std::env::set_var("DOXA_IMAGE_MODE", "halfblock"); }
+        if name == "pane-triage" { std::env::set_var("DOXA_RAIL_ENTRIES", "panes"); }
         let app=scene(&name);
         if name == "image-preview" { app.configure_terminal_images("halfblock"); }
         terminal.draw(|frame| app.draw(frame)).unwrap();
