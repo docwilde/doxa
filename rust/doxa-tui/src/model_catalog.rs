@@ -89,7 +89,11 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(2);
             let mut stream = loop {
                 match listener.accept() {
-                    Ok((stream, _)) => break stream,
+                    Ok((stream, _)) => {
+                        // Accepted sockets inherit nonblocking mode on macOS.
+                        stream.set_nonblocking(false).unwrap();
+                        break stream;
+                    }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
                         thread::sleep(Duration::from_millis(5)),
                     Err(error) => panic!("catalog fixture accept failed: {error}"),
