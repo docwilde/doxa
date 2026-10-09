@@ -76,11 +76,11 @@ project ID to each private session tree, set a hard block limit, and verify
 that writes through every bind source hit that limit. For XFS, that means a
 `prjquota` mount and project setup/limit with `xfs_quota`; owner-only rootless
 Docker cannot silently provision this. Hard quotas remain an open stage.
-The [read-only hard-quota preflight](hard-quota-preflight.md) checks an
-owner-private **fixture** for mount and project-inheritance prerequisites. It
-always refuses to certify enforcement; an administrator-set hard limit and a
-real rootless-container `EDQUOT` test across checkout, home and cache remain
-necessary before a hard-quota profile can ship.
+The [hard-quota fixture guide](hard-quota-preflight.md) covers the read-only
+project-inheritance preflight and a bounded, opt-in rootless container write
+probe for an administrator-prepared fixture. A successful fixture `EDQUOT`
+receipt is never production admission; per-session quota provisioning,
+restart/remount verification and a reviewed runtime admission path remain open.
 See [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/),
 [Docker's storage option requirements](https://docs.docker.com/reference/cli/docker/container/run/),
 and [XFS project quotas](https://man7.org/linux/man-pages/man8/xfs_quota.8.html).
@@ -138,8 +138,9 @@ an orphan provider writer when the supervisor crashes.
 
 Implementation limits: this is a Linux rootless Docker boundary, not a VM.
 The restricted-egress gateway has an exact hostname/443 `CONNECT` allowlist and
-checks TLS SNI in a network-none fixture, but is not wired into a production
-profile. Provider streaming, login, refresh and bypass tests in a rootless
+checks TLS SNI before dialing the pinned DNS answer. It rejects ECH, TLS early
+data and extra handshake bytes in a network-none fixture, but is not wired into
+a production profile. Provider streaming, login, refresh and bypass tests in a rootless
 container remain the gate. There is no hard disk quota or CLI credential secrecy.
 macOS Docker Desktop, remote Engines and nested privileged Docker are refused.
 

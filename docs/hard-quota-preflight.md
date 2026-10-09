@@ -57,6 +57,38 @@ from inside the container through each path, and verify aggregate writes
 receive `EDQUOT` at the configured project limit while unrelated host space
 remains free. Verify the same result after stop/restart and source remounts.
 Do not use a live provider, DOXA store, or host quota changes for this probe.
+
+An opt-in probe now performs the bounded container write portion. After the
+administrator has set a **small enforced** project quota on an otherwise empty
+owner-private fixture under a real-disk `TMPDIR`, use a pinned reviewed image
+with Python 3 and an explicit task-local rootless Engine socket:
+
+```sh
+export TMPDIR=/path/on/real/disk
+python3 scripts/probe_docker_hard_quota.py "$fixture" \
+  --docker-host "unix:///run/user/$(id -u)/doxa-test-docker.sock" \
+  --image "sha256:PINNED_CONTENT_ID" \
+  --max-write-mib 128 --acknowledge-fixture-writes
+```
+
+The probe checks the read-only prerequisites again, refuses nonempty bind
+sources, uses an empty Docker CLI config, and starts a credential-free,
+network-none container with only the three fixture binds. It writes and
+`fsync`s at most 128 MiB per bind, deleting each probe file before the next.
+Only positive bounded writes ending in `EDQUOT` on **all three** binds produce a
+fixture proof. `ENOSPC`, no error before the cap, an unexpected receipt, a
+non-rootless Engine, and low host free space all refuse the proof. It removes
+only its random test container. The JSON still sets
+`admissible_as_hard_quota` to `false`: it is evidence for this fixture at this
+moment, not runtime admission or proof across restart/remount. No quota is
+configured or changed by the probe. The host's ordinary Docker context and
+credential helpers are not used.
+
+For the focused refusal-path tests:
+
+```sh
+TMPDIR=/path/on/real/disk python3 -m unittest discover -s scripts -p 'test_docker_*quota*.py'
+```
 Only after that evidence and a reviewed runtime admission path may DOXA label
 any profile as hard-quota enforced. Docker writable-layer limits alone do not
 bound these bind mounts.

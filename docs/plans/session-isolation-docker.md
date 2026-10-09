@@ -8,9 +8,10 @@ settings and commands. A bounded allocated-block scan now gates launches,
 resumes, migrations and new turns against a saved soft ceiling and host
 free-space floor. The chip reports usage as monitoring, not a hard quota.
 Hard quotas still require administrator-managed filesystem project quotas and
-verified enforcement across bind mounts. A [read-only operator preflight](../hard-quota-preflight.md)
-checks fixture mount and project-inheritance prerequisites but never certifies
-an enforced limit. New Docker sessions request a private
+verified enforcement across bind mounts. The [operator fixture guide](../hard-quota-preflight.md)
+includes a read-only project-inheritance preflight and an opt-in bounded
+rootless-container `EDQUOT` probe. Neither authorizes production hard-quota
+admission. New Docker sessions request a private
 cgroup namespace, and the worker checks actual cgroup v2 memory, swap, CPU and
 PID ceilings before admission and each CLI provider turn. Beta.16 adds an opt-in
 rootless restricted-egress transport smoke; it does not verify production cgroup
@@ -193,10 +194,11 @@ A **gateway core** now lives in `doxa-isolation::egress`. The host
 binds `egress.sock` beside the private session broker and accepts HTTP/1.1
 `CONNECT` for exact owner-listed DNS hostnames on port 443. It resolves each
 name on the host, rejects any private/reserved answer (including mixed public
-and private answers), connects to the checked IP, and requires a bounded TLS
-ClientHello with SNI matching the `CONNECT` hostname before forwarding worker
-bytes. Missing, duplicate, mismatched and known encrypted ClientHello names are
-refused. TLS remains end-to-end. The worker's `egress-proxy PORT` command can bridge loopback
+and private answers), and requires a bounded TLS ClientHello with SNI matching
+the `CONNECT` hostname before dialing the checked IP or forwarding worker
+bytes. Missing, duplicate, mismatched and known encrypted ClientHello names,
+early data and extra handshake bytes are refused. TLS remains end-to-end. The
+worker's `egress-proxy PORT` command can bridge loopback
 HTTP proxy traffic to that Unix socket in a `network=none` fixture. A fixture
 can explicitly set `HTTP_PROXY` and `HTTPS_PROXY` to its loopback port. The
 gateway socket is session-private; losing it produces a proxy error, and
