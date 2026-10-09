@@ -13,9 +13,15 @@ const COMMAND_TTL: Duration = Duration::from_secs(60);
 const MAX_SESSIONS: usize = 64;
 const MAX_COMMANDS: usize = 8;
 const MAX_RETAINED_COMMANDS: usize = 512;
-// Never evict a fenced request during one Hub boot. Exhaustion refuses new
-// Android writes/fences rather than silently losing the delivery barrier.
+// A request ID embeds the issuing boot nonce. At capacity, an issuance epoch
+// can end and only proven-safe records can be dropped: strict Android POSTs
+// reject every ID from the old epoch, even after its record is gone.
 const MAX_ANDROID_RECORDS: usize = 8192;
+// Rotate on inventory reads before the hard cap, leaving room for writes and
+// fences minted from that inventory while an older epoch drains.
+const ANDROID_ROTATE_AT: usize = MAX_ANDROID_RECORDS * 3 / 4;
+// Avoid churning the boot nonce when almost the entire ledger is unresolved.
+const MIN_ANDROID_RECLAIM: usize = MAX_ANDROID_RECORDS / 4;
 const MAX_EVENTS: usize = 512;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_EVENT_BYTES: usize = 32 * 1024 * 1024;
@@ -49,7 +55,12 @@ struct AndroidRecord {
     digest:Option<[u8;32]>, command_id:Option<String>, state:AndroidState, fenced:bool,
 }
 #[derive(Clone,Copy,PartialEq,Eq)]
-enum AndroidState { Absent, Queued, Cancelled, Delivered, ExpiredUndelivered, Accepted, Refused, OldBoot }
+enum AndroidState { Absent, Queued, Cancelled, Delivered, ExpiredUndelivered, Accepted, Refused }
+impl AndroidState {
+    fn reclaimable(self)->bool {
+        matches!(self,Self::Absent|Self::Cancelled|Self::ExpiredUndelivered|Self::Accepted|Self::Refused)
+    }
+}
 pub struct Hub { hosts:HashMap<(String,String),Host>, commands:HashMap<String,Command>,
     requests:HashMap<(String,String),String>,
     boot:String, android_records:HashMap<(String,String),AndroidRecord>,
@@ -64,6 +75,18 @@ impl Hub {
     pub fn new()->Self{Self{hosts:HashMap::new(),commands:HashMap::new(),requests:HashMap::new(),
         boot:Uuid::new_v4().simple().to_string(),android_records:HashMap::new(),events:HashMap::new(),event_order:VecDeque::new(),event_bytes:0,
         subscriptions:HashMap::new(),pending_push:VecDeque::new(),android:HashMap::new(),pending_android:VecDeque::new(),last_push:HashMap::new()}}
+    fn rotate_android_issuance_if_needed(&mut self){
+        if self.android_records.len()<ANDROID_ROTATE_AT ||
+            self.android_records.values().filter(|record|record.state.reclaimable()).count()<MIN_ANDROID_RECLAIM {
+            return;
+        }
+        let prior=self.boot.clone();
+        loop {
+            self.boot=Uuid::new_v4().simple().to_string();
+            if self.boot!=prior {break;}
+        }
+        self.android_records.retain(|_,record|!record.state.reclaimable());
+    }
     fn reap(&mut self){
         let now=Instant::now();
         let old_hosts=self.hosts.len();
@@ -202,6 +225,11 @@ impl Hub {
         if !same_secret(&host.lease,lease){return Err("host lease refused");}
         Ok(host)
     }
+    pub fn inventory(&mut self,owner:&str)->Value{
+        self.reap();
+        self.rotate_android_issuance_if_needed();
+        self.list(owner)
+    }
     pub fn list(&mut self,owner:&str)->Value{
         self.reap();
         json!({"owner":owner,"hub_boot":self.boot,"sessions":self.hosts.iter().filter(|((login,_),_)|login==owner).flat_map(|((_,host_id),host)|{
@@ -300,9 +328,18 @@ impl Hub {
                 return Err("Android fence scope differs");
             }
         } else {
-            if self.android_records.len()>=MAX_ANDROID_RECORDS{return Err("Android request ledger full");}
+            // An unknown ID from an older epoch can never pass strict POST
+            // admission. Its delivery status is unknown, so do not assert a
+            // safe fence or let repeated old-boot probes fill the ledger.
+            if boot!=self.boot {return Ok(json!({"status":"unknown_old_boot","safe_to_clear":false}));}
+            // The full ledger admits no new request IDs until an inventory
+            // read changes the nonce. Absence is therefore safe without a
+            // stored tombstone: this ID cannot be accepted later this epoch.
+            if self.android_records.len()>=MAX_ANDROID_RECORDS {
+                return Ok(json!({"status":"absent_fenced","safe_to_clear":true}));
+            }
             self.android_records.insert(key.clone(),AndroidRecord{host:host.into(),session:session.into(),op:op.into(),incarnation:incarnation.into(),
-                digest:None,command_id:None,state:if boot==self.boot{AndroidState::Absent}else{AndroidState::OldBoot},fenced:true});
+                digest:None,command_id:None,state:AndroidState::Absent,fenced:true});
         }
         let record=self.android_records.get_mut(&key).expect("inserted");
         record.fenced=true;
@@ -320,7 +357,6 @@ impl Hub {
             AndroidState::Delivered=>("delivered_unsettled",false,None),
             AndroidState::Accepted=>("terminal",true,Some("accepted")),
             AndroidState::Refused=>("terminal",true,Some("refused")),
-            AndroidState::OldBoot=>("unknown_old_boot",false,None),
             AndroidState::Queued=>unreachable!(),
         };
         let mut response=json!({"status":status,"safe_to_clear":safe});
@@ -659,5 +695,93 @@ impl Hub {
         let mut wrong_boot=payload;wrong_boot["hub_boot"]=json!(Uuid::new_v4().simple().to_string());
         assert!(hub.enqueue_android("user","host","session","prompt",wrong_boot).is_err());
         assert!(hub.fence_android("user",&id,"host~session","answer","v1").is_err());
+    }
+    #[test]fn full_ledger_rotates_issuance_and_rejects_reclaimed_late_posts(){
+        let mut hub=Hub::new();let lease=android_host(&mut hub,false);
+        let old_boot=hub.boot.clone();
+        let delivered=android_id(&hub);
+        let delivered_command=hub.enqueue_android("user","host","session","prompt",android_payload(&hub,&delivered)).unwrap();
+        let delivered_command=delivered_command["command_id"].as_str().unwrap().to_owned();
+        hub.take("user","host",&lease).unwrap();
+        let queued=android_id(&hub);
+        hub.enqueue_android("user","host","session","prompt",android_payload(&hub,&queued)).unwrap();
+        let reclaimed=android_id(&hub);
+        assert_eq!(hub.fence_android("user",&reclaimed,"host~session","prompt","v1").unwrap()["safe_to_clear"],true);
+        for _ in 0..MAX_ANDROID_RECORDS-3 {
+            let id=android_id(&hub);
+            hub.fence_android("user",&id,"host~session","prompt","v1").unwrap();
+        }
+        assert_eq!(hub.android_records.len(),MAX_ANDROID_RECORDS);
+        assert_eq!(hub.list("user")["hub_boot"],old_boot);
+        assert_eq!(hub.boot,old_boot);
+        assert_eq!(hub.inventory("user")["hub_boot"],hub.boot);
+        assert_ne!(hub.boot,old_boot);
+        assert_eq!(hub.android_records.len(),2);
+        assert!(hub.android_records.contains_key(&("user".into(),delivered.clone())));
+        assert!(hub.android_records.contains_key(&("user".into(),queued.clone())));
+        assert_eq!(hub.fence_android("user",&reclaimed,"host~session","prompt","v1").unwrap(),
+            json!({"status":"unknown_old_boot","safe_to_clear":false}));
+        assert_eq!(hub.android_records.len(),2);
+        let mut late=json!({"text":"late","request_id":reclaimed,"hub_boot":old_boot,"incarnation":"v1"});
+        assert!(hub.enqueue_android("user","host","session","prompt",late.clone()).is_err());
+        late["hub_boot"]=json!(hub.boot);
+        assert!(hub.enqueue_android("user","host","session","prompt",late).is_err());
+        assert!(hub.enqueue("user","host","session","prompt",json!({"request_id":reclaimed,"text":"legacy"})).is_err());
+        assert_eq!(hub.fence_android("user",&delivered,"host~session","prompt","v1").unwrap(),
+            json!({"status":"delivered_unsettled","safe_to_clear":false}));
+        assert_eq!(hub.fence_android("user",&queued,"host~session","prompt","v1").unwrap(),
+            json!({"status":"queued_cancelled","safe_to_clear":true}));
+        hub.complete("user","host",&lease,&delivered_command,json!({"ok":true})).unwrap();
+        assert_eq!(hub.fence_android("user",&delivered,"host~session","prompt","v1").unwrap()["command_status"],"accepted");
+        let fresh=android_id(&hub);
+        assert_eq!(hub.enqueue_android("user","host","session","prompt",android_payload(&hub,&fresh)).unwrap()["status"],"queued");
+    }
+    #[test]fn inventory_reclaims_terminal_records_before_the_hard_cap(){
+        let mut hub=Hub::new();let lease=android_host(&mut hub,false);
+        let boot=hub.boot.clone();
+        let accepted=android_id(&hub);
+        let accepted_payload=android_payload(&hub,&accepted);
+        let command=hub.enqueue_android("user","host","session","prompt",accepted_payload.clone()).unwrap();
+        let command_id=command["command_id"].as_str().unwrap().to_owned();
+        hub.take("user","host",&lease).unwrap();
+        hub.complete("user","host",&lease,&command_id,json!({"ok":true})).unwrap();
+        for _ in 1..ANDROID_ROTATE_AT {
+            let id=android_id(&hub);
+            hub.fence_android("user",&id,"host~session","prompt","v1").unwrap();
+        }
+        assert_eq!(hub.android_records.len(),ANDROID_ROTATE_AT);
+        hub.list("user");
+        assert_eq!(hub.boot,boot);
+        hub.inventory("user");
+        assert_ne!(hub.boot,boot);
+        assert!(hub.android_records.is_empty());
+        assert_eq!(hub.fence_android("user",&accepted,"host~session","prompt","v1").unwrap(),
+            json!({"status":"unknown_old_boot","safe_to_clear":false}));
+        assert!(hub.enqueue_android("user","host","session","prompt",accepted_payload).is_err());
+    }
+    #[test]fn unresolved_ledger_stays_full_and_old_boot_probes_are_not_stored(){
+        let mut hub=Hub::new();android_host(&mut hub,false);
+        let boot=hub.boot.clone();
+        for _ in 0..MAX_ANDROID_RECORDS {
+            let id=android_id(&hub);
+            hub.android_records.insert(("user".into(),id),AndroidRecord{
+                host:"host".into(),session:"session".into(),op:"prompt".into(),incarnation:"v1".into(),
+                digest:None,command_id:None,state:AndroidState::Delivered,fenced:true,
+            });
+        }
+        assert_eq!(hub.android_records.len(),MAX_ANDROID_RECORDS);
+        assert_eq!(hub.inventory("user")["hub_boot"],boot);
+        assert_eq!(hub.boot,boot);
+        let absent=android_id(&hub);
+        assert_eq!(hub.fence_android("user",&absent,"host~session","prompt","v1").unwrap(),
+            json!({"status":"absent_fenced","safe_to_clear":true}));
+        assert!(hub.enqueue_android("user","host","session","prompt",android_payload(&hub,&absent)).is_err());
+        assert_eq!(hub.android_records.len(),MAX_ANDROID_RECORDS);
+        let unknown=format!("{}-{}",Uuid::new_v4().simple(),Uuid::new_v4());
+        for _ in 0..100 {
+            assert_eq!(hub.fence_android("user",&unknown,"host~session","prompt","v1").unwrap(),
+                json!({"status":"unknown_old_boot","safe_to_clear":false}));
+        }
+        assert_eq!(hub.android_records.len(),MAX_ANDROID_RECORDS);
     }
 }

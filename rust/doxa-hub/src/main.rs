@@ -177,7 +177,7 @@ async fn handle_inner(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:b
         (Method::GET,["remote.js"])=>return response(StatusCode::OK,"text/javascript; charset=utf-8",include_str!("../../doxa-remote/assets/remote.js")),
         (Method::GET,["remote.css"])=>return response(StatusCode::OK,"text/css; charset=utf-8",include_str!("../../doxa-remote/assets/remote.css")),
         (Method::GET,["remote-sw.js"])=>return response(StatusCode::OK,"text/javascript; charset=utf-8",include_str!("../../doxa-remote/assets/remote-sw.js")),
-        (Method::GET,["api","sessions"])=>Ok(state.list(&owner)),
+        (Method::GET,["api","sessions"])=>Ok(state.inventory(&owner)),
         (Method::GET,["api","push","config"])=>Ok(match push.as_ref(){
             Some(push)=>json!({"enabled":true,"public_key":push.public_key()}),
             None=>json!({"enabled":false}),
