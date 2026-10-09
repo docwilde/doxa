@@ -9,8 +9,9 @@ use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -25,6 +26,8 @@ mod semantic_broker;
 const MAX_FILES: usize = 20_000;
 const MAX_PATH_BYTES: usize = 4_096;
 const MAX_LIST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_GIT_STDERR_BYTES: usize = 16 * 1024;
+const MAX_GIT_TIME: Duration = Duration::from_secs(10);
 const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PYTHON_NODES: usize = 200_000;
@@ -224,24 +227,24 @@ fn source_language(path: &str) -> Option<&'static str> {
 
 pub fn worktree_root(path: &Path) -> Result<PathBuf, String> {
     let requested = fs::canonicalize(path).map_err(|e| format!("worktree path: {e}"))?;
-    let output = Command::new("git").arg("-C").arg(&requested)
-        .args(["rev-parse", "--show-toplevel"]).output()
-        .map_err(|e| format!("git unavailable: {e}"))?;
-    if !output.status.success() { return Err("path is not inside a Git worktree".into()); }
-    let root = String::from_utf8(output.stdout).map_err(|_| "non-UTF-8 Git root")?;
+    let output = bounded_git_output(Path::new("git"), &requested,
+        &["rev-parse", "--show-toplevel"], MAX_PATH_BYTES, MAX_GIT_TIME)
+        .map_err(|e| format!("Git root lookup: {e}"))?;
+    let root = String::from_utf8(output).map_err(|_| "non-UTF-8 Git root")?;
     let root = root.strip_suffix('\n').ok_or("invalid Git root reply")?;
     fs::canonicalize(root).map_err(|e| format!("Git root: {e}"))
 }
 
 fn listed_files(root: &Path) -> Result<BTreeSet<String>, String> {
-    let output = Command::new("git").arg("-C").arg(root)
-        .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
-        .output().map_err(|e| format!("Git enumeration: {e}"))?;
-    if !output.status.success() || output.stdout.len() > MAX_LIST_BYTES {
-        return Err("Git worktree enumeration failed or exceeded its byte limit; no partial answer".into());
-    }
+    let output = bounded_git_output(Path::new("git"), root,
+        &["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        MAX_LIST_BYTES, MAX_GIT_TIME)
+        .map_err(|e| format!("Git worktree enumeration {e}; no partial answer"))?;
     let mut paths = BTreeSet::new();
-    for bytes in output.stdout.split(|byte| *byte == 0).filter(|bytes| !bytes.is_empty()) {
+    if output.last().is_some_and(|byte| *byte != 0) {
+        return Err("Git worktree enumeration ended with an incomplete path; no partial answer".into());
+    }
+    for bytes in output.split(|byte| *byte == 0).filter(|bytes| !bytes.is_empty()) {
         if bytes.len() > MAX_PATH_BYTES { return Err("file path exceeds limit; no partial answer".into()); }
         let path = String::from_utf8(bytes.to_vec()).map_err(|_| "non-UTF-8 file path; no partial answer")?;
         if Path::new(&path).is_absolute() || Path::new(&path).components().any(|part| matches!(part, std::path::Component::ParentDir)) {
@@ -251,6 +254,96 @@ fn listed_files(root: &Path) -> Result<BTreeSet<String>, String> {
         if paths.len() > MAX_FILES { return Err("file count exceeds limit; no partial answer".into()); }
     }
     Ok(paths)
+}
+
+// `Command::output` buffers arbitrarily much data and waits without a deadline.
+// Git enumeration is part of every complete-inventory claim, including stored
+// snapshot readback, so failure here must end without returning a partial set.
+fn bounded_git_output(program: &Path, root: &Path, args: &[&str], max_stdout: usize,
+    timeout: Duration) -> Result<Vec<u8>, String> {
+    let mut command = Command::new(program);
+    command.arg("-C").arg(root).args(args)
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+        });
+    }
+    let mut child = command.spawn().map_err(|e| format!("could not start: {e}"))?;
+    let mut leader_reaped = false;
+    let result = (|| {
+        let mut stdout = child.stdout.take().ok_or("missing stdout")?;
+        let mut stderr = child.stderr.take().ok_or("missing stderr")?;
+        for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+                return Err("could not make Git pipe nonblocking".into());
+            }
+        }
+        let deadline = Instant::now() + timeout;
+        let mut output = Vec::new();
+        let mut error_bytes = 0usize;
+        let mut stdout_open = true;
+        let mut stderr_open = true;
+        while stdout_open || stderr_open {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { return Err("exceeded deadline".into()); }
+            let mut fds = [
+                libc::pollfd { fd: if stdout_open { stdout.as_raw_fd() } else { -1 },
+                    events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: if stderr_open { stderr.as_raw_fd() } else { -1 },
+                    events: libc::POLLIN, revents: 0 },
+            ];
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t,
+                remaining.as_millis().min(50) as i32) };
+            if ready < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted { continue; }
+                return Err("pipe poll failed".into());
+            }
+            for index in 0..2 {
+                if fds[index].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 { continue; }
+                let mut buf = [0u8; 8192];
+                let read = if index == 0 { stdout.read(&mut buf) } else { stderr.read(&mut buf) };
+                match read {
+                    Ok(0) => { if index == 0 { stdout_open = false; } else { stderr_open = false; } }
+                    Ok(n) if index == 0 => {
+                        if n > max_stdout.saturating_sub(output.len()) {
+                            return Err("exceeded output byte limit".into());
+                        }
+                        output.extend_from_slice(&buf[..n]);
+                    }
+                    Ok(n) => {
+                        error_bytes = error_bytes.saturating_add(n);
+                        if error_bytes > MAX_GIT_STDERR_BYTES {
+                            return Err("exceeded stderr byte limit".into());
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => return Err("pipe read failed".into()),
+                }
+            }
+        }
+        // Closed pipes do not imply the child exited: it may have closed its
+        // descriptors and continued running. Keep the same wall-clock bound.
+        loop {
+            if let Some(status) = child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
+                leader_reaped = true;
+                if !status.success() { return Err("failed".into()); }
+                return Ok(output);
+            }
+            if Instant::now() >= deadline { return Err("exceeded deadline".into()); }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })();
+    if result.is_err() && !leader_reaped {
+        // The unreaped leader keeps its process-group ID reserved; kill all
+        // descendants that inherited Git's pipes before waiting for it.
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    result
 }
 
 fn require_stable_listing(root: &Path, initial: &BTreeSet<String>) -> Result<(), String> {
@@ -1279,7 +1372,7 @@ fn query_with_rehash_hooks(root: &Path, request: Query,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{symlink, PermissionsExt};
     use tempfile::TempDir;
 
     fn worktree() -> TempDir {
@@ -1287,6 +1380,55 @@ mod tests {
         let status = Command::new("git").arg("init").arg("-q").arg(root.path()).status().unwrap();
         assert!(status.success());
         root
+    }
+
+    fn fake_git(root: &Path, body: &str) -> PathBuf {
+        let script = root.join("fake-git");
+        fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        script
+    }
+
+    #[test]
+    fn git_inventory_command_bounds_output_and_time_before_accepting_it() {
+        let root = tempfile::tempdir().unwrap();
+        let good = fake_git(root.path(), "printf 'a.rs\\000b.py\\000'");
+        let output = bounded_git_output(&good, root.path(), &["ls-files"], 10,
+            Duration::from_secs(1)).unwrap();
+        assert_eq!(output, b"a.rs\0b.py\0");
+
+        let flood = fake_git(root.path(), "exec yes excess");
+        let started = Instant::now();
+        let error = bounded_git_output(&flood, root.path(), &["ls-files"], 1024,
+            Duration::from_secs(1)).unwrap_err();
+        assert!(error.contains("output byte limit"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let stderr_flood = fake_git(root.path(), "exec yes excess >&2");
+        let error = bounded_git_output(&stderr_flood, root.path(), &["ls-files"], 1024,
+            Duration::from_secs(1)).unwrap_err();
+        assert!(error.contains("stderr byte limit"), "{error}");
+
+        // Closing both pipes cannot make a successful verification if the
+        // process keeps running without ever completing the enumeration.
+        let closed_pipes = fake_git(root.path(), "exec 1>&- 2>&-; exec sleep 30");
+        let started = Instant::now();
+        let error = bounded_git_output(&closed_pipes, root.path(), &["ls-files"], 1024,
+            Duration::from_millis(150)).unwrap_err();
+        assert!(error.contains("deadline"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        // A child can exit while its descendant keeps the output pipe open.
+        // A completed inventory still needs EOF before it can be accepted.
+        let inherited_pipe = fake_git(root.path(), "sleep 30 & exit 0");
+        let error = bounded_git_output(&inherited_pipe, root.path(), &["ls-files"], 1024,
+            Duration::from_millis(150)).unwrap_err();
+        assert!(error.contains("deadline"), "{error}");
+
+        let failed = fake_git(root.path(), "printf 'a.rs\\000'; exit 7");
+        let error = bounded_git_output(&failed, root.path(), &["ls-files"], 1024,
+            Duration::from_secs(1)).unwrap_err();
+        assert!(error.contains("failed"), "{error}");
     }
 
     #[test]
