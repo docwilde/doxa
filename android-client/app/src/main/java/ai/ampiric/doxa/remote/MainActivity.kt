@@ -257,17 +257,20 @@ private class RemoteController(private val prefs: SharedPreferences, private val
     }
 
     private suspend fun snapshot(client: HubApi, session: Session, mine: Int,
-                                 recoveryBoot: String? = null): Boolean? {
-        if (recoveryBoot != null) require(client.inventoryContains(session, recoveryBoot)) {
-            "Saved session incarnation or hub boot changed; writes remain blocked"
+                                 safeFence: WriteFenceResult? = null): Boolean? {
+        val beforeBoot = if (safeFence != null) client.recoveryInventoryBoot(session) else null
+        if (safeFence != null) require(beforeBoot != null) {
+            "Saved session incarnation is no longer in the hub inventory; writes remain blocked"
         }
         val history = client.transcript(session.id, session.encrypted)
-        if (recoveryBoot != null) require(client.inventoryContains(session, recoveryBoot)) {
-            "Saved session incarnation or hub boot changed; writes remain blocked"
-        }
+        val afterBoot = if (safeFence != null) client.recoveryInventoryBoot(session) else null
         if (mine != generation || api !== client) return null
         require(AndroidReview.matchesIncarnation(history, session.incarnation)) {
             "Transcript belongs to a different session incarnation; writes remain blocked"
+        }
+        if (safeFence != null) require(AndroidReview.safeSnapshot(
+                safeFence, beforeBoot, afterBoot, history, session.incarnation)) {
+            "Hub boot or session changed during recovery snapshot; writes remain blocked"
         }
         val turns = history.getJSONArray("turns")
         val inputs = history.getJSONArray("pending_inputs")
@@ -301,7 +304,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         if (mine != generation || api !== client) return null
         recoveryFenceStatus = fence.status
         if (fence.safeToClear) {
-            val complete = snapshot(client, session, mine, AndroidWriteId.bootOf(marker.requestId))
+            val complete = snapshot(client, session, mine, fence)
                 ?: return null
             if (mine != generation || api !== client) return null
             require(writeRecovery.recordFence(marker, fence)) { "Saved write marker changed; writes remain blocked" }

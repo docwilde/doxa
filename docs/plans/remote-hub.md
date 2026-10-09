@@ -176,12 +176,13 @@ write check. The timestamp remains available for ordering and diagnostics.
 Before review, the client fences that ID at the hub; a queued command is cancelled, while an
 already delivered command remains blocked until a terminal host result. Only a
 safe fence followed by an authoritative snapshot of the original incarnation
-with a matching host incarnation receipt, matching inventory before and after
-the read, complete pending inputs, and explicit user acknowledgment permits new
+with a matching host incarnation receipt, a stable current inventory boot before
+and after the read, complete pending inputs, and explicit user acknowledgment permits new
 writes. Answers carry the exact reviewed pending input; the host rejects a
 same-ID changed question or options before acting.
-A process restart or unreadable marker remains blocked because the earlier
-delivery outcome cannot be proven from the volatile hub state.
+A retired boot may be reviewed after a safe fence from the same hub process. A
+hub restart before the fence, or an unreadable marker, remains blocked because
+the earlier delivery outcome cannot be proven from the volatile hub state.
 An inventory read may issue a new boot nonce once the bounded Hub ledger is
 three-quarters full and at least one-quarter can be safely reclaimed. It
 discards only terminal or proven-undelivered records. Strict POST and fence

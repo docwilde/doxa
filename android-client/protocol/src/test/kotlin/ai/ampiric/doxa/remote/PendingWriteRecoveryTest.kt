@@ -197,6 +197,31 @@ class PendingWriteRecoveryTest {
         assertTrue(guard.canAcknowledge(scope))
     }
 
+    @Test fun retiredBootSafeFenceCanReviewButRestartUnsafeFenceCannot() {
+        val currentBoot = "fedcba9876543210fedcba9876543210"
+        assertNotEquals(currentBoot, marker.requestId.substring(0, 32))
+        val history = JSONObject().put("incarnation", scope.incarnation)
+        val retired = PendingWriteGuard(Store(marker.encode()))
+        assertTrue(AndroidReview.safeSnapshot(safeFence, currentBoot, currentBoot,
+            history, scope.incarnation))
+        assertTrue(retired.recordFence(marker, safeFence))
+        retired.observeSnapshot(scope, true)
+        assertTrue(retired.canAcknowledge(scope))
+
+        val restarted = PendingWriteGuard(Store(marker.encode()))
+        val unsafe = WriteFenceResult.decode(JSONObject()
+            .put("status", "unknown_old_boot").put("safe_to_clear", false))
+        assertFalse(AndroidReview.safeSnapshot(unsafe, currentBoot, currentBoot,
+            history, scope.incarnation))
+        assertFalse(restarted.recordFence(marker, unsafe))
+        restarted.observeSnapshot(scope, true)
+        assertFalse(restarted.canAcknowledge(scope))
+        assertFalse(AndroidReview.safeSnapshot(safeFence, currentBoot,
+            "0123456789abcdef0123456789abcdef", history, scope.incarnation))
+        assertFalse(AndroidReview.safeSnapshot(safeFence, currentBoot, currentBoot,
+            history, "different-incarnation"))
+    }
+
     @Test fun staleControllerCannotClearOrReplaceNewerMarker() {
         val store = Store()
         val old = PendingWriteGuard(store)

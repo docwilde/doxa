@@ -132,13 +132,14 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
         parseInventory(get("api/sessions"))
     }
 
-    suspend fun inventoryContains(session: Session, expectedBoot: String): Boolean = withContext(Dispatchers.IO) {
-        require(AndroidWriteId.validBoot(expectedBoot)) { "Invalid recovery boot nonce" }
+    /** Returns the current boot only when the exact session incarnation is still listed. */
+    suspend fun recoveryInventoryBoot(session: Session): String? = withContext(Dispatchers.IO) {
         val inventory = get("api/sessions")
         val sessions = parseInventory(inventory)
-        inventory.optString("hub_boot") == expectedBoot && sessions.any {
+        val exactSessionListed = sessions.any {
             it.id == session.id && it.incarnation == session.incarnation && it.encrypted == session.encrypted
         }
+        if (exactSessionListed) inventory.getString("hub_boot") else null
     }
 
     fun prepare(target: String, operation: String, payload: JSONObject, encrypted: Boolean,

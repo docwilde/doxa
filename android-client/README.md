@@ -52,10 +52,12 @@ arrive after a successful fence or cross a hub restart. A queued request is
 cancelled; an already delivered request stays blocked until the host reports a
 terminal result. Only then does the app load a fresh authoritative snapshot of
 the saved hub and session incarnation, checks the host's transcript incarnation
-receipt against inventory on both sides of the read, includes complete pending inputs, and
-offer explicit acknowledgment. New prompts and answers remain blocked across
-hub or session changes. If that exact scope is unavailable, or the hub rebooted
-while the request was uncertain, the readable marker stays blocked.
+receipt against inventory on both sides of the read, includes complete pending
+inputs, and offers explicit acknowledgment. A safe fence for a retired boot in
+the same hub process also permits review when the current inventory boot stays
+stable across the read. New prompts and answers remain blocked across hub or
+session changes. If that exact scope is unavailable, or the hub restarted before
+it could fence the request, the readable marker stays blocked.
 An unreadable marker stays blocked because its request ID and scope cannot be
 fenced or verified. The app offers no in-app bypass; clearing app storage is a
 last resort after independent outcome review and also removes local settings

@@ -10,10 +10,6 @@ object AndroidWriteId {
 
     fun validBoot(value: String): Boolean = boot.matches(value)
     fun valid(value: String): Boolean = id.matches(value)
-    fun bootOf(value: String): String {
-        require(valid(value)) { "Invalid Android write ID" }
-        return value.substring(0, 32)
-    }
     fun new(boot: String): String {
         require(validBoot(boot)) { "Invalid hub boot nonce" }
         return "$boot-${UUID.randomUUID()}"
@@ -24,6 +20,12 @@ object AndroidWriteId {
 object AndroidReview {
     fun matchesIncarnation(history: JSONObject, incarnation: String): Boolean =
         incarnation.isNotBlank() && history.opt("incarnation") == incarnation
+
+    /** A safe fence is the delivery proof; inventory boot only has to stay stable across the read. */
+    fun safeSnapshot(fence: WriteFenceResult, beforeBoot: String?, afterBoot: String?,
+                     history: JSONObject, incarnation: String): Boolean =
+        fence.safeToClear && beforeBoot != null && AndroidWriteId.validBoot(beforeBoot) &&
+            beforeBoot == afterBoot && matchesIncarnation(history, incarnation)
 
     fun matchesAnswer(history: JSONObject, payload: JSONObject, incarnation: String): Boolean {
         if (!matchesIncarnation(history, incarnation) || history.opt("pending_inputs_complete") != true)
