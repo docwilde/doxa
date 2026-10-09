@@ -2057,13 +2057,8 @@ impl App {
     pub(super) fn draw_rail(&self, frame: &mut Frame, area: Rect) {
         let rows = self.rail_rows();
         let ranks = self.rail_groups().into_iter().map(|(key, _, rank)| (key, rank)).collect::<Vec<_>>();
-        let badge = |key: &RailGroupKey| match ranks.iter().find(|(candidate, _)| candidate == key).map(|(_, rank)| *rank).unwrap_or(0) {
-            4 => "!",        // stopped for a human
-            3 => "ctx",      // provider-reported context use >= 50%
-            2 => "lore",     // source-session proposals await review
-            1 => "new",      // completed but unseen
-            _ => "",
-        };
+        let badge = |key: &RailGroupKey| super::triage::urgency_label(
+            ranks.iter().find(|(candidate, _)| candidate == key).map(|(_, rank)| *rank).unwrap_or(0));
         let start = self.rail_view_start(area, &rows);
         let visible = usize::from(area.height.saturating_sub(2));
         let selected = self.rail_order().get(self.rail_selected).copied();
@@ -2090,7 +2085,7 @@ impl App {
                     lines.push(Line::styled(
                         format!("{}{}", prefix, clipped_title(project,
                             usize::from(area.width).saturating_sub(prefix.len() + 2)).0),
-                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                        Style::default().fg(self.rail_project_colour(project).unwrap_or(theme::ACCENT)).add_modifier(Modifier::BOLD),
                     ));
                 },
                 RailRow::PastHeading => lines.push(Line::styled(
@@ -2121,7 +2116,9 @@ impl App {
                     };
                     let queued = self.session_activity.get(&session.id).map(|activity| activity.1).unwrap_or(0)
                         + self.pending_prompts.iter().filter(|(id, _)| id == &session.id).count();
-                    let badge = if queued > 0 { format!(" [q{queued}]") } else { String::new() };
+                    let pane = self.pane_signal(&session.id).map(|signal| signal.badge()).unwrap_or_default();
+                    let queue = if queued > 0 { format!(" [q{queued}]") } else { String::new() };
+                    let badge = format!("{pane}{queue}");
                     let title_width = usize::from(area.width.saturating_sub(5))
                         .saturating_sub(badge.width());
                     let title = clipped_title(&session.title, title_width).0;

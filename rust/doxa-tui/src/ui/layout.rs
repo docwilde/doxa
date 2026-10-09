@@ -53,14 +53,7 @@ impl App {
         for index in 0..self.sessions.len() {
             if seen.insert(index) && self.rail_session_visible(index)
                 && !self.offline_ids.contains(&self.sessions[index].id) {
-                let session = &self.sessions[index];
-                let project = session.collection.trim();
-                let fallback = if project.is_empty() { "Other sessions" } else { project };
-                let label = match self.repo_cache.get(&session.id).and_then(|(status, _)| status.as_ref()) {
-                    Some(doxa_worktrees::RepoStatus::Repository { repo, .. }) => repo.as_str(),
-                    Some(doxa_worktrees::RepoStatus::Directory { name }) => name.as_str(),
-                    None => fallback,
-                };
+                let label = self.rail_project_label(index);
                 projects.entry(label.to_owned()).or_default().push(index);
             }
         }

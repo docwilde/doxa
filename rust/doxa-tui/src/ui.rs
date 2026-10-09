@@ -19,6 +19,7 @@ mod render;
 mod session_controls;
 mod isolation_controls;
 mod session_navigation;
+mod triage;
 mod terminal_loop;
 use render::context_detail_lines;
 #[cfg(test)]
@@ -1485,11 +1486,13 @@ pub struct App {
         Receiver<Result<Vec<crate::memory_menu::Fact>, &'static str>>,
     )>,
     repo_cache: HashMap<String, (Option<doxa_worktrees::RepoStatus>, Instant)>,
+    project_roots: HashMap<String, PathBuf>,
+    project_colours: Option<HashMap<PathBuf, String>>,
     repo_pending: Option<(
         String,
         PathBuf,
         u64,
-        Receiver<Option<doxa_worktrees::RepoStatus>>,
+        Receiver<(Option<doxa_worktrees::RepoStatus>, Option<PathBuf>)>,
     )>,
     repo_epoch: HashMap<String, u64>,
     chip_offsets: Vec<usize>,
@@ -1771,6 +1774,8 @@ impl Default for App {
             fleet_dependency_review: None,
             fleet_controller: None,
             repo_cache: HashMap::new(),
+            project_roots: HashMap::new(),
+            project_colours: triage::configured_colours(),
             repo_pending: None,
             repo_epoch: HashMap::new(),
             chip_offsets: vec![0; panes::MAX_PANES],

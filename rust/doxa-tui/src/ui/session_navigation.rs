@@ -977,14 +977,16 @@ impl App {
         let mut changed = false;
         if let Some((id, cwd, epoch, receiver)) = self.repo_pending.take() {
             match receiver.try_recv() {
-                Ok(status) => {
+                Ok((status, root)) => {
                     if self.session_cwds.get(&id) == Some(&cwd)
                         && self.repo_epoch.get(&id).copied().unwrap_or_default() == epoch
                     {
-                        changed = self
+                        changed = self.project_roots.get(&id) != root.as_ref() || self
                             .repo_cache
                             .get(&id)
                             .is_none_or(|(old, _)| *old != status);
+                        if let Some(root) = root { self.project_roots.insert(id.clone(), root); }
+                        else { self.project_roots.remove(&id); }
                         self.repo_cache.insert(id, (status, Instant::now()));
                     }
                 }
@@ -996,6 +998,7 @@ impl App {
                             .repo_cache
                             .get(&id)
                             .is_some_and(|(old, _)| old.is_some());
+                        self.project_roots.remove(&id);
                         self.repo_cache.insert(id, (None, Instant::now()));
                     }
                 }
@@ -1005,18 +1008,23 @@ impl App {
         if self.repo_pending.is_some() {
             return changed;
         }
-        for group in std::iter::once(self.active_group)
+        let active_ids = std::iter::once(self.active_group)
             .chain((0..self.groups.len()).filter(|group| *group != self.active_group))
-        {
-            let Some(id) = self.groups[group].active_id().map(str::to_owned) else {
-                continue;
-            };
+            .filter_map(|group| self.groups[group].active_id().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let mut candidates = active_ids.clone();
+        candidates.extend(self.sessions.iter().map(|session| session.id.clone())
+            .filter(|id| !active_ids.contains(id)));
+        for id in candidates {
             if self.offline_ids.contains(&id) {
                 continue;
             }
             let Some(cwd) = self.session_cwds.get(&id).cloned() else {
                 continue;
             };
+            // Active tabs refresh their branch status. Hidden tabs need one
+            // background probe for project identity; unknown is cached too.
+            if !active_ids.contains(&id) && self.repo_cache.contains_key(&id) { continue; }
             if self
                 .repo_cache
                 .get(&id)
@@ -1028,7 +1036,7 @@ impl App {
             let (tx, rx) = mpsc::sync_channel(1);
             self.repo_pending = Some((id, cwd.clone(), epoch, rx));
             std::thread::spawn(move || {
-                let _ = tx.send(doxa_worktrees::repo_status(&cwd));
+                let _ = tx.send((doxa_worktrees::repo_status(&cwd), doxa_worktrees::project_root(&cwd)));
             });
             break;
         }

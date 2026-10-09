@@ -2,7 +2,8 @@
 
 Status: **The Python 1.x implementation shipped Parts 0, 1 and 1b.** The
 Rust rail added derived collection names and settled, opt-in group ordering in
-beta.12. Beta.15 adds a verified local-session pending signal from LORE 0.62.19.
+beta.12. Beta.15 adds a verified local-session pending signal from LORE 0.62.19,
+plus a bounded project-hue and pane-tab aggregation pass.
 
 Native Rust behavior: `/collection new` derives a name from configured
 customer, project and active session title when no name is supplied.
@@ -20,8 +21,22 @@ snapshot with exact proposal IDs per session and explicit completeness flags.
 DOXA refreshes local sessions asynchronously at a bounded interval. Legacy,
 unreadable, overflowing or unresolved claims, stale results, and unavailable
 LORE all remain unknown; remote sessions are excluded. The signal ranks a
-verified pending proposal, but does not approve or resolve it. Pane-tab
-aggregation and Python-era colour remain open in Rust.
+verified pending proposal, but does not approve or resolve it.
+
+Native project headings receive a stable palette hue after the background
+repository probe resolves the exact canonical Git common root (or a plain
+directory root). `[project_colours]` in `~/.doxa/config.toml` can override an
+exact root with `blue`, `teal`, `amber`, `violet`, `coral`, or `green`. An
+unknown root, conflicting roots behind the same display label, invalid owner
+config, or an invalid override keeps the ordinary heading style rather than claiming a project
+identity. The name remains visible independently of colour.
+
+When a pane contains multiple tabs, its active session row displays the tab
+count and strongest existing urgency rank across all live tabs. If a hidden
+tab supplies that rank, the badge gives its tab number and clipped title. Unknown context
+stays unranked. Session-row navigation and click targets remain intact; a
+full one-row-per-pane rail, editable project labels, and manual collection
+hues remain open.
 
 The remainder of this document is the historical Python design and uses
 Python module/test names. Its shipped labels do not describe the Rust rail.

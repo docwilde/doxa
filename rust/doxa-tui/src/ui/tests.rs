@@ -1932,7 +1932,7 @@ for line in sys.stdin:
         let old_epoch = app.repo_epoch.get("b").copied().unwrap_or_default();
         app.repo_pending = Some(("b".into(), PathBuf::from("/tmp/new"), old_epoch, rx));
         app.invalidate_repo("b");
-        tx.send(Some(RepoStatus::Directory { name: "stale".into() })).unwrap();
+        tx.send((Some(RepoStatus::Directory { name: "stale".into() }), Some(PathBuf::from("/tmp/new")))).unwrap();
         app.poll_repo();
         assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "directory"));
     }
@@ -4143,6 +4143,68 @@ for line in sys.stdin:
         assert_ne!(app.collections[0].name, app.collections[1].name);
         app.local_collection("new Chosen name");
         assert_eq!(app.collections[2].name, "Chosen name");
+    }
+
+    #[test]
+    fn pane_badge_aggregates_hidden_tabs_without_inventing_context() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 24));
+        app.rail_visible = true; app.rail_width = 30;
+        for (id, title) in [("a", "Active"), ("b", "Beta")] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:title.into(),
+                collection:"project".into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.groups[0].tabs = vec!["a".into(), "b".into()];
+        app.groups[0].active = 0;
+        assert_eq!(app.pane_signal("a").unwrap().badge(), " [2 tabs]");
+        app.session_telemetry.entry("b".into()).or_default().context_percent = Some(51.0);
+        assert_eq!(app.pane_signal("a").unwrap().badge(), " [2 ctx#2:Beta]");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"b",
+            "event":{"type":"needs_input", "data":{"id":"question", "kind":"ask_user",
+                "title":"Choose", "questions":[{"question":"Choose", "options":[]}]}}}));
+        let signal = app.pane_signal("a").unwrap();
+        assert_eq!(signal.rank, 4);
+        assert_eq!(signal.hidden_source.as_ref().map(|(tab, title)| (*tab, title.as_str())), Some((2, "Beta")));
+        assert!(painted_at(&app, 100, 24).contains("[2 !#2:Beta]"));
+    }
+
+    #[test]
+    fn project_hue_requires_one_known_root_even_when_labels_match() {
+        let mut app = App::default();
+        app.project_colours = Some(HashMap::new());
+        for id in ["a", "b"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:"same".into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        assert_eq!(app.rail_project_colour("same"), None);
+        let root = PathBuf::from("/verified/project");
+        app.project_roots.insert("a".into(), root.clone());
+        assert_eq!(app.rail_project_colour("same"), None);
+        app.project_roots.insert("b".into(), PathBuf::from("/verified/other"));
+        assert_eq!(app.rail_project_colour("same"), None);
+        app.project_roots.insert("b".into(), root.clone());
+        app.project_colours.as_mut().unwrap().insert(root, "blue".into());
+        assert_eq!(app.rail_project_colour("same"), Some(Color::Rgb(0x8A, 0xBF, 0xF2)));
+        let colours = app.project_colours.take();
+        assert_eq!(app.rail_project_colour("same"), None);
+        app.project_colours = colours;
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|frame| app.draw_rail(frame, Rect::new(0, 0, 40, 8))).unwrap();
+        assert_eq!(terminal.backend().buffer()[(2, 1)].fg, Color::Rgb(0x8A, 0xBF, 0xF2));
+    }
+
+    #[test]
+    fn hidden_tab_gets_one_background_project_probe() {
+        let mut app = App::default();
+        for id in ["active", "hidden"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:"project".into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.groups[0].tabs = vec!["active".into(), "hidden".into()];
+        app.repo_cache.insert("active".into(), (None, Instant::now()));
+        app.session_cwds.insert("hidden".into(), PathBuf::from("/nonexistent/doxa-triage-hidden"));
+        app.poll_repo();
+        assert_eq!(app.repo_pending.as_ref().map(|(id, _, _, _)| id.as_str()), Some("hidden"));
     }
 
     #[test]
