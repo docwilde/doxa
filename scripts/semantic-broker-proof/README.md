@@ -93,4 +93,6 @@ That retained run predates the scan-digest packet field. Its sender-continuity
 result remains historical evidence for the earlier packet format. The updated
 format passed a separate [six-case offline guest run](evidence/stream-source-basis-2026-10-09/RUN.md)
 against source commit `d5b2347f`, with input hashes and the full serial log
-retained there. The synthetic sender still proves no Engine or analyzer origin.
+retained there. After requiring the originating complete Rust `calls` answer,
+the [corrected source passed the same six cases](evidence/stream-complete-answer-2026-10-09/RUN.md)
+at `ef4aa64f`. The synthetic sender still proves no Engine or analyzer origin.
