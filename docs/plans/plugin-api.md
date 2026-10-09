@@ -134,12 +134,18 @@ host home or repository mount. The parent kills the entire cgroup on every
 outcome, including a descendant that changes process groups. Bubblewrap
 fixtures show host files, mounts, a host TCP listener and inherited test
 environment are unavailable; resource fixtures show memory and CPU exhaustion
-stopped by kernel limits. This host has no user-delegated cgroup subtree, so
-the aggregate limits and cgroup cleanup **cannot be exercised here**; admission
-refuses to spawn in that condition.
+stopped by kernel limits. Without a user-delegated cgroup subtree, admission
+refuses to spawn. Aggregate limits and cgroup cleanup still need a recorded
+run on a disposable delegated host.
 An [ignored delegated-host acceptance fixture](../native-plugins.md#delegated-host-acceptance-fixture)
 now measures the actual aggregate limits, namespace boundary and cgroup
-cleanup in one bounded run. It has not yet run on a delegated host.
+cleanup in one bounded run. The opt-in `scripts/plugin-delegated-host-proof.py`
+checks the disposable host's delegated cgroup shape, writable cgroup v2 mount,
+fixed tools, Bubblewrap features and namespace support, private real-disk
+scratch, and available CPUs before running the fixture. Its boundary case
+compares worker network, mount, user and PID namespace identities with the
+host and rejects any non-loopback network interface or route. It has not yet
+run the cgroup-writing cases on a disposable delegated host.
 
 The sandbox opens the trusted worker executable with `O_NOFOLLOW` and
 binds that descriptor into the private mount; replacing its pathname after
