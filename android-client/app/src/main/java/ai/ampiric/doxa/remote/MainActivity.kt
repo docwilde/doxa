@@ -3,10 +3,13 @@ package ai.ampiric.doxa.remote
 import android.Manifest
 import android.content.pm.PackageManager
 import android.content.SharedPreferences
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -428,6 +431,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.DKGRAY),
+            navigationBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.DKGRAY),
+        )
         val prefs = getSharedPreferences("doxa-remote", MODE_PRIVATE)
         alerts = LocalAlerts(this, prefs)
         push = BackgroundPush(this, prefs, scope) { message -> scope.launch { state.statusMessage(message) } }
@@ -465,7 +472,7 @@ private fun RemoteScreen(state: RemoteController, alerts: LocalAlerts, push: Bac
                          onChooseKey: () -> Unit, onEnableAlerts: () -> Unit, onEnablePush: () -> Unit) {
     val session = state.selected
     val question = state.pending.firstOrNull()
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    Column(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
         Text("DOXA Remote", style = MaterialTheme.typography.headlineSmall)
         Text(state.status, style = MaterialTheme.typography.bodySmall)
         Spacer(Modifier.height(8.dp))
