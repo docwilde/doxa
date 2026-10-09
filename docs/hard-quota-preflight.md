@@ -102,8 +102,24 @@ and an ext4 `prjquota` fixture with a 32 MiB project hard limit, all three
 binds returned `EDQUOT` and the aggregate limit persisted after restarting
 the same container. The receipt still reports `admissible_as_hard_quota=false`.
 An otherwise equivalent XFS fixture returned `ENOSPC` at the limit and was
-correctly refused. Neither run restarted the Engine, remounted a source, or
-tested the production broker and provider path.
+correctly refused. That first run did not restart the Engine, remount a source,
+or test the broker path.
+
+A second fresh disposable guest tested the production-shaped four binds:
+checkout, home and cache writable; broker read-only. On ext4 with project ID
+1002 and a 32 MiB hard limit, the inspected rootless `network=none` container
+kept its identity while the Engine restarted (PID 3736 to 5893) and the
+filesystem was unmounted and remounted (mount ID 382 to 366). Checkout and
+home each retained 8,388,608 bytes. Cache received `EDQUOT` (errno 122) after
+16,711,680 bytes before the restart and immediately on append afterward.
+The broker socket replied on both sides of the transition; attempted worker
+creation in its read-only bind returned `EROFS` (errno 30). A separate XFS
+four-bind control with project ID 1001 returned `ENOSPC` (errno 28) after
+33,554,432 bytes, not `EDQUOT`. The disposable container and markers were
+removed. These are exact-fixture observations, not a production session or
+admission token. The current Rust kernel quota reader supports XFS only, while
+the observed strict `EDQUOT` behavior occurred on ext4; neither tested
+filesystem satisfies both current proof gates.
 
 The Rust hardened-admission seam reads a bounded receipt and checks the saved
 session profile and exact tree. Its read-only Linux XFS verifier can inspect
@@ -119,14 +135,14 @@ mount identity. Its bounded direct-entry audit allows only owner-private
 `hook.sock` and `egress.sock` Unix sockets on that mount; any other entry or
 replacement during inspection refuses the snapshot. The verifier also reads
 the effective project hard block limit with accounting and enforcement enabled.
-It requires an explicit
-exact limit; the fixture's maximum write size is **not** that limit.
+It requires an explicit exact limit; the fixture's maximum write size is
+**not** that limit.
 Unsupported filesystems, unavailable `quotactl_fd`, and any mismatch refuse
 verification. The descendant walk covers the three data bind sources; it does
 not establish an immutable tree or authenticate the live broker peer and
 protocol. This is a point-in-time snapshot, not an EDQUOT/restart proof. The
-receipt is not an
-owner-controlled policy, and the admission seam still refuses even a
+receipt is not an owner-controlled policy, and the admission seam still
+refuses even a
 hand-edited `admissible_as_hard_quota=true`. Selecting `docker-hardened` remains
 unavailable.
 

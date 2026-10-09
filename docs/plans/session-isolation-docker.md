@@ -232,10 +232,13 @@ a kernel-stable peer handle (for example `SO_PEERPIDFD` where supported),
 reject host/sibling/changed-container peers, and rerun the protocol tests
 after worker, daemon and Engine restart. If the kernel or Engine cannot
 provide that origin evidence, startup must refuse hardened mode.
-The
-opt-in disposable quota fixture can compare aggregate writes through all three
-binds and recheck EDQUOT after restarting the same container; it does not
-restart the Engine, remount the source or produce a production admission token.
+The opt-in disposable quota fixture can compare aggregate writes through all
+three data binds and recheck EDQUOT after restarting the same container. A
+separate disposable four-bind guest proof retained EDQUOT on ext4 after an
+Engine restart and source remount, with a working read-only broker socket;
+an XFS control returned ENOSPC instead. The Rust quota reader currently
+supports XFS only, so these observations do not produce a production
+admission token.
 `docker-hardened` is explicitly refused at
 profile parsing, with no fallback. A credential-free rootless smoke can test
 Python `HTTPS_PROXY` streaming, denied second-host access and failed direct
