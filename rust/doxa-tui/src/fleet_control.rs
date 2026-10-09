@@ -1088,10 +1088,18 @@ fn queue_auto_test(value:&mut Value,worker:usize)->io::Result<()> {
 fn finish_auto_test(value:&mut Value,task:AutoTestTask)->bool {
     let row=&value["slots"][task.worker];
     if row["auto_test"]["state"]!="running" || row["auto_test"]["turn_serial"].as_u64()!=Some(task.turn_serial) {
-        let _=task.handle.join();
-        return false;
+        let uncertain=match task.handle.join(){
+            Ok(Err(error))=>doxa_isolation::test_runner::cleanup_unconfirmed(&error),
+            Err(_)=>true,
+            Ok(Ok(_))=>false,
+        };
+        if uncertain{value["auto_test_cleanup_failed"]=json!(true);}
+        return uncertain;
     }
-    let result=task.handle.join().unwrap_or_else(|_|Err(io::Error::other("automatic test runner panicked")));
+    let result=match task.handle.join(){
+        Ok(result)=>result,
+        Err(_)=>{value["auto_test_cleanup_failed"]=json!(true);Err(io::Error::other("automatic test runner panicked"))},
+    };
     value["slots"][task.worker]["auto_test"]=match result {
         Ok(receipt)=>json!({"state":if receipt["passed"]==true{"passed"}else{"failed"},
             "turn_serial":task.turn_serial,"result":receipt}),
@@ -1327,6 +1335,11 @@ mod tests {
         let stale=AutoTestTask{worker:1,turn_serial:1,cancel:Arc::new(AtomicBool::new(false)),handle:std::thread::spawn(||Ok(json!({"passed":true})))};
         assert!(!finish_auto_test(&mut value,stale));
         assert_eq!(value["slots"][1]["auto_test"]["state"],"running");
+        let stale_cleanup=AutoTestTask{worker:1,turn_serial:1,cancel:Arc::new(AtomicBool::new(false)),
+            handle:std::thread::spawn(||Err(io::Error::other(doxa_isolation::test_runner::CleanupUnconfirmed("fixture Docker rm failed".into()))))};
+        assert!(finish_auto_test(&mut value,stale_cleanup),"stale failure still changes fleet teardown state");
+        assert_eq!(value["auto_test_cleanup_failed"],true);
+        assert_eq!(value["slots"][1]["auto_test"]["state"],"running","newer turn marker must survive the stale result");
         assert!(interrupt_uncertain_auto_tests(&mut value));
         assert_eq!(value["slots"][1]["auto_test"]["state"],"interrupted");
         assert!(!interrupt_uncertain_auto_tests(&mut value));
@@ -1335,6 +1348,12 @@ mod tests {
         assert!(finish_auto_test(&mut value,failed));
         assert_eq!(value["slots"][1]["auto_test"]["state"],"failed");
         assert_eq!(value["slots"][1]["auto_test"]["result"]["test_id"],"t");
+        value["auto_test_cleanup_failed"]=json!(false);
+        value["slots"][1]["auto_test"]=json!({"state":"running","turn_serial":3});
+        let panic_task=AutoTestTask{worker:1,turn_serial:3,cancel:Arc::new(AtomicBool::new(false)),
+            handle:std::thread::spawn(||->io::Result<Value>{panic!("fixture runner panic")})};
+        assert!(finish_auto_test(&mut value,panic_task));
+        assert_eq!(value["auto_test_cleanup_failed"],true,"panic cannot confirm Docker cleanup");
         // These markers expose results; only the separately reviewed human
         // dependency-release path can change scheduling authority.
         assert!(value.get("dependency_releases").is_none());

@@ -18,7 +18,7 @@ pub struct Capture { pub sha256: String, pub files: usize, pub bytes: u64 }
 pub struct RunResult { pub exit_code: i32, pub duration_ms: u64, pub output_sha256: String, pub output_bytes: u64, pub passed: bool }
 
 #[derive(Debug)]
-struct CleanupUnconfirmed(String);
+pub struct CleanupUnconfirmed(pub String);
 impl std::fmt::Display for CleanupUnconfirmed {
     fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{write!(f,"fleet test Docker cleanup unconfirmed: {}",self.0)}
 }
