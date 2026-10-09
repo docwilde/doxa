@@ -86,7 +86,7 @@ fn scene(name: &str) -> App {
                 worktree: Some("feat".into()),
             });
         }
-        "triage" | "pane-triage" => {
+        "triage" | "pane-triage" | "project-label" => {
             app.rail_visible = true;
             app.groups[0].tabs = vec!["demo-codex-01".into(), "demo-claude-02".into(), "demo-deepseek-03".into()];
             for id in ["demo-codex-01", "demo-claude-02", "demo-deepseek-03"] {
@@ -103,7 +103,10 @@ fn scene(name: &str) -> App {
                     "options":[{"label":"Approve", "description":"Continue the fixture"},
                                {"label":"Revise", "description":"Keep reviewing"}]}]
             }));
-            if name == "pane-triage" {
+            if name == "project-label" {
+                app.set_project_label_fixture("/demo/project".into(), "Client Work".into());
+                app.notice = format!("Rust {} · explicit project label · fixture", env!("CARGO_PKG_VERSION"));
+            } else if name == "pane-triage" {
                 app.notice = format!("Rust {} · pane rail · fixture", env!("CARGO_PKG_VERSION"));
             } else {
                 app.notice = format!("Rust {} · hidden tab #3 needs input · fixture", env!("CARGO_PKG_VERSION"));
@@ -426,7 +429,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "triage" | "pane-triage" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
+        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();

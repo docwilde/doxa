@@ -46,7 +46,7 @@ members within a group. `/collection view sessions` restores session rows.
 Manual collections now accept a named hue with `/collection hue <name>
 <blue|teal|amber|violet|coral|green|none>`; their names remain editable with
 `/collection rename <old> -> <new>`. Invalid saved hue names remain stored but
-render without a hue. The beta.18 candidate adds explicit editing of an
+render without a hue. Beta.18 adds explicit editing of an
 automatic project's heading with `/collection project-label <label>` and
 `/collection project-label --clear`. The edit is keyed to the selected pane's
 freshly verified canonical project root, including all of its tabs, and

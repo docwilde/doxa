@@ -1009,6 +1009,14 @@ impl App {
         self.project_roots.insert(id.to_owned(), root);
     }
 
+    /// Show an explicit owner label in a gallery fixture without writing the
+    /// real owner config. Live edits use `/collection project-label`.
+    pub fn set_project_label_fixture(&mut self, root: PathBuf, label: String) {
+        self.project_labels.get_or_insert_with(Default::default).insert(root, label);
+        self.rail_sort_signature.clear();
+        self.rail_sort_order.clear();
+    }
+
     /// Deterministic gallery state for the read-only memory menu. Live menus
     /// always use the LORE sidecar through `open_memory_menu`.
 
