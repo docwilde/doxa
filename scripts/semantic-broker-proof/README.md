@@ -54,3 +54,37 @@ namespace and reviewed binary/configuration, and bind every later Engine and
 LSP byte to the same controlled broker. A root-owned process could delegate
 signing or response authority; this packet test does not attest its code or
 policy. No production caller uses the verifier.
+
+## Stream sender and transcript continuity
+
+`run-stream.sh` builds a separate offline QEMU initramfs with a synthetic
+three-packet LSP stream. The client sends one fresh challenge naming the
+query digest and source/target hashes. It requires a root sender on **every**
+packet, one sender PID and container ID, ordered chunks, the exact byte hash,
+and EOF. The root-owned socket cannot be replaced by the UID-1000 client.
+
+| Guest server behavior | Client result |
+| --- | --- |
+| Root sender for the whole stream | Accept transport observation; `binding: unknown` |
+| Root listener handed to UID 1000 | Reject reply sender |
+| Root opening, then UID-1000 FD handoff | Reject midstream sender |
+| Root opening, then another root PID | Reject sender change |
+| Container ID changes in byte packet | Reject ID change |
+| Extra packet after the close receipt | Reject trailing data |
+
+Build and strip the static Rust test binary as described above, then run
+`run-stream.sh STATIC_CODEGRAPH_TEST KERNEL_IMAGE OUTPUT_DIR`. The script
+hashes the source, fixture binary, test binary, kernel, and initramfs, saves
+the full serial log, and requires all six cases to finish successfully. It
+uses KVM, 512 MiB RAM, and no network device or guest disk. Its server
+fabricates the LSP bytes and container ID; no Docker or analyzer is present.
+The passing root case is therefore an **untrusted stream observation**, not
+an attested semantic binding or a rootless-container proof. The CLI does not
+call this seam.
+
+The 2026-10-09 run's [full serial log](evidence/stream-2026-10-09/guest-serial.log.gz)
+and [input hashes](evidence/stream-2026-10-09/SHA256SUMS) are retained with
+the fixture. The uncompressed serial log's SHA-256 is
+`44c76b762e875213196741b274fdff8da22c53ea8febd1ef7ff7a0abbbdd2ba8`.
+The kernel digest matches the prior disposable anchor guest receipt; the
+kernel bytes came from the Ubuntu package recorded there.

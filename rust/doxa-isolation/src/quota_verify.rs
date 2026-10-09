@@ -4,6 +4,7 @@
 //! Docker bind behavior, EDQUOT, and restart/remount still need independent
 //! verification before a hardened profile may be enabled.
 use crate::{error, Manifest, Profile};
+use serde::{Deserialize, Serialize};
 use std::{ffi::{CStr, CString}, fs::File, io, os::fd::{AsRawFd, BorrowedFd, FromRawFd},
     os::unix::{ffi::OsStrExt, fs::MetadataExt}, path::{Component, Path}};
 
@@ -18,6 +19,17 @@ pub struct QuotaExpectation { pub project_id: u32, pub hard_limit_bytes: u64 }
 pub struct QuotaSnapshot { pub project_id: u32, pub hard_limit_bytes: u64,
     pub mount_id: u64, pub filesystem_device: u64, pub descendants_checked: usize,
     pub broker_entries_checked: usize }
+
+/// Administrator-recorded identities for the root and all four bind sources.
+/// A privileged reader must not accept these values from the requesting peer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaBinding { pub device: u64, pub inode: u64, pub mount_id: u64 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaBindings { pub root: QuotaBinding, pub checkout: QuotaBinding,
+    pub home: QuotaBinding, pub cache: QuotaBinding, pub broker: QuotaBinding }
 
 #[derive(Clone, Copy, Debug)]
 struct ProjectState { id: u32, inherits: bool, mount_id: u64 }
@@ -38,6 +50,13 @@ pub fn inspect_session_hard_quota(manifest: &Manifest, expected: QuotaExpectatio
     inspect_with(manifest, expected, &KernelQuotaReader)
 }
 
+/// Privileged, read-only variant for an administrator-pinned tree. This does
+/// not grant hardened admission or keep the tree immutable after inspection.
+pub fn inspect_pinned_session_hard_quota(manifest: &Manifest, expected: QuotaExpectation,
+    owner_uid: u32, bindings: &QuotaBindings) -> io::Result<QuotaSnapshot> {
+    inspect_with_owner(manifest, expected, &KernelQuotaReader, owner_uid, Some(bindings))
+}
+
 /// Fixture-only read-only probe. The caller supplies a pinned session-root
 /// descriptor and expected owner UID. This API does not authenticate those
 /// inputs: it provides a snapshot, never an admission token.
@@ -53,8 +72,20 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
     inspect_with_root(manifest, expected, unsafe { libc::geteuid() }, root, reader)
 }
 
+fn inspect_with_owner(manifest: &Manifest, expected: QuotaExpectation, reader: &impl QuotaReader,
+    owner_uid: u32, bindings: Option<&QuotaBindings>) -> io::Result<QuotaSnapshot> {
+    let root_path = manifest.checkout.parent().ok_or_else(|| error("session root missing"))?;
+    let root = open_absolute_directory(root_path)?;
+    inspect_with_root_pinned(manifest, expected, owner_uid, root, reader, bindings)
+}
+
 fn inspect_with_root(manifest: &Manifest, expected: QuotaExpectation, owner_uid: u32,
     root: File, reader: &impl QuotaReader) -> io::Result<QuotaSnapshot> {
+    inspect_with_root_pinned(manifest, expected, owner_uid, root, reader, None)
+}
+
+fn inspect_with_root_pinned(manifest: &Manifest, expected: QuotaExpectation, owner_uid: u32,
+    root: File, reader: &impl QuotaReader, bindings: Option<&QuotaBindings>) -> io::Result<QuotaSnapshot> {
     if manifest.profile != Profile::DockerOffline || manifest.state != "ready" {
         return Err(error("hard-quota inspection requires a ready network-none Docker session"));
     }
@@ -83,6 +114,7 @@ fn inspect_with_root(manifest: &Manifest, expected: QuotaExpectation, owner_uid:
     if root_state.id != expected.project_id || !root_state.inherits || root_state.mount_id == 0 {
         return Err(error("session root has wrong project ID, inheritance, or mount identity"));
     }
+    if let Some(pinned) = bindings { verify_binding(&root, pinned.root, root_state.mount_id)?; }
     let mut descendants = 0;
     for (name, path) in [("checkout", &manifest.checkout), ("home", &manifest.private_home), ("cache", &manifest.cache)] {
         let directory = open_child(&root, name)?;
@@ -94,6 +126,11 @@ fn inspect_with_root(manifest: &Manifest, expected: QuotaExpectation, owner_uid:
         let state = reader.project(&directory).map_err(|_| error("session bind project metadata unavailable"))?;
         if state.id != expected.project_id || !state.inherits || state.mount_id != root_state.mount_id {
             return Err(error("session bind source has wrong project ID, inheritance, or mount"));
+        }
+        if let Some(pinned) = bindings {
+            let expected = match name { "checkout" => pinned.checkout, "home" => pinned.home,
+                "cache" => pinned.cache, _ => unreachable!() };
+            verify_binding(&directory, expected, root_state.mount_id)?;
         }
         audit_descendants(&directory, reader, expected.project_id, root_state.mount_id,
             root_meta.dev(), &mut descendants, 0)?;
@@ -120,6 +157,7 @@ fn inspect_with_root(manifest: &Manifest, expected: QuotaExpectation, owner_uid:
         || broker_state.mount_id != root_state.mount_id {
         return Err(error("session broker has wrong project ID, inheritance, or mount"));
     }
+    if let Some(pinned) = bindings { verify_binding(&broker, pinned.broker, root_state.mount_id)?; }
     let broker_entries = audit_broker_entries(&broker, root_state.mount_id, root_meta.dev(), owner_uid)?;
     let visible_broker = open_absolute_directory(&manifest.broker)?;
     let visible_meta = visible_broker.metadata()?;
@@ -146,9 +184,33 @@ fn inspect_with_root(manifest: &Manifest, expected: QuotaExpectation, owner_uid:
     if (root_meta.dev(), root_meta.ino()) != (visible_meta.dev(), visible_meta.ino()) {
         return Err(error("session root changed during quota inspection"));
     }
+    if let Some(pinned) = bindings {
+        verify_binding(&visible, pinned.root, root_state.mount_id)?;
+        for (path, identity) in [(&manifest.checkout, pinned.checkout),
+            (&manifest.private_home, pinned.home), (&manifest.cache, pinned.cache),
+            (&manifest.broker, pinned.broker)] {
+            verify_binding(&open_absolute_directory(path)?, identity, root_state.mount_id)?;
+        }
+    }
     Ok(QuotaSnapshot { project_id: expected.project_id, hard_limit_bytes: limit.hard_limit_bytes,
         mount_id: root_state.mount_id, filesystem_device: root_meta.dev(),
         descendants_checked: descendants, broker_entries_checked: broker_entries })
+}
+
+fn verify_binding(directory: &File, expected: QuotaBinding, common_mount_id: u64) -> io::Result<()> {
+    let meta = directory.metadata()?;
+    if expected.device == 0 || expected.inode == 0 || expected.mount_id == 0
+        || expected.mount_id != common_mount_id || meta.dev() != expected.device
+        || meta.ino() != expected.inode {
+        return Err(error("quota binding differs from administrator policy"));
+    }
+    #[cfg(target_os = "linux")]
+    if entry_mount_id(directory)? != expected.mount_id {
+        return Err(error("quota binding mount differs from administrator policy"));
+    }
+    #[cfg(not(target_os = "linux"))]
+    return Err(error("quota binding verification requires Linux"));
+    Ok(())
 }
 
 // Only the two host-created Unix sockets may appear in the read-only worker
@@ -552,6 +614,45 @@ mod tests {
         assert_eq!(snapshot.hard_limit_bytes, expected.hard_limit_bytes);
         assert_eq!(snapshot.descendants_checked, 0);
         assert_eq!(snapshot.broker_entries_checked, 0);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn privileged_policy_pins_all_five_descriptors_and_rejects_substitution() {
+        let (_temp, manifest, mut reader, expected) = fixture();
+        let paths = [manifest.checkout.parent().unwrap(), manifest.checkout.as_path(),
+            manifest.private_home.as_path(), manifest.cache.as_path(), manifest.broker.as_path()];
+        let mount_id = entry_mount_id(&File::open(paths[0]).unwrap()).unwrap();
+        for state in reader.states.values_mut() { state.mount_id = mount_id; }
+        let binding = |path: &Path| {
+            let meta = fs::metadata(path).unwrap();
+            QuotaBinding { device: meta.dev(), inode: meta.ino(), mount_id }
+        };
+        let pinned = QuotaBindings { root: binding(paths[0]), checkout: binding(paths[1]),
+            home: binding(paths[2]), cache: binding(paths[3]), broker: binding(paths[4]) };
+        let owner = unsafe { libc::geteuid() };
+        assert!(inspect_with_owner(&manifest, expected, &reader, owner, Some(&pinned)).is_ok());
+        assert!(inspect_with_owner(&manifest, expected, &reader, owner + 1, Some(&pinned))
+            .unwrap_err().to_string().contains("owner-owned"));
+        let mut wrong = pinned; wrong.root.inode += 1;
+        assert!(inspect_with_owner(&manifest, expected, &reader, owner, Some(&wrong))
+            .unwrap_err().to_string().contains("administrator policy"));
+        for (label, altered) in [
+            ("checkout inode", QuotaBindings { checkout: QuotaBinding {
+                inode: pinned.checkout.inode.wrapping_add(1), ..pinned.checkout }, ..pinned }),
+            ("home mount", QuotaBindings { home: QuotaBinding { mount_id: mount_id + 1, ..pinned.home }, ..pinned }),
+            ("cache device", QuotaBindings { cache: QuotaBinding { device: pinned.cache.device + 1, ..pinned.cache }, ..pinned }),
+            ("broker inode", QuotaBindings { broker: QuotaBinding { inode: pinned.broker.inode + 1, ..pinned.broker }, ..pinned }),
+        ] {
+            assert!(inspect_with_owner(&manifest, expected, &reader, owner, Some(&altered)).is_err(), "{label}");
+        }
+        let old_cache = manifest.cache.with_file_name("old-cache");
+        fs::rename(&manifest.cache, &old_cache).unwrap();
+        fs::create_dir(&manifest.cache).unwrap();
+        fs::set_permissions(&manifest.cache, fs::Permissions::from_mode(0o700)).unwrap();
+        reader.states.insert(fs::metadata(&manifest.cache).unwrap().ino(),
+            ProjectState { id: expected.project_id, inherits: true, mount_id });
+        assert!(inspect_with_owner(&manifest, expected, &reader, owner, Some(&pinned))
+            .unwrap_err().to_string().contains("administrator policy"));
     }
     #[test]
     fn supplied_root_fd_substitution_and_wrong_policy_refuse() {

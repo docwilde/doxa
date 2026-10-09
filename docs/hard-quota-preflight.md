@@ -139,10 +139,85 @@ It requires an explicit exact limit; the fixture's maximum write size is
 Unsupported filesystems, unavailable `quotactl_fd`, and any mismatch refuse
 verification. A rootless owner can receive `EPERM` or `EACCES` from the
 project-limit query: XFS/ext4 `Q_XGETQUOTA` requires `CAP_SYS_ADMIN` for this
-project ID. The verifier reports that denial and refuses. Production needs a
-narrow privileged **read-only** helper bound to the exact session directory
-descriptor and owner-controlled quota policy; it must not pass quota-changing
-privileges or Docker access to the worker. No such helper exists yet.
+project ID. The verifier reports that denial and refuses. An opt-in
+`doxa-quota-helper` now supplies this read-only query. It requires an
+administrator-installed, root-owned mode `0600` JSON policy and one systemd
+socket-activation descriptor. Its policy fixes a session root, project ID,
+exact hard limit, filesystem device, mount ID and inode for the root and all
+four bind sources. It opens and rechecks those descriptors, authenticates the
+peer through `SO_PEERCRED`, and requires a dedicated caller UID distinct from
+the session tree owner. The peer supplies no request body, path, project ID or
+expected limit. The result always says `admissible_as_hard_quota=false`. The
+helper does not configure quotas, call Docker, or enable `docker-hardened`.
+
+The service is inert unless an administrator explicitly installs a policy and
+socket unit. The policy path and socket path must be absolute; every policy
+ancestor must be root-owned and not group/other writable. The policy itself
+must be a regular single-link root-owned file with exact mode `0600` and at
+most 8 KiB. An illustrative policy shape is:
+
+```json
+{
+  "version": 1,
+  "session_id": "SESSION_ID",
+  "root": "/private/isolation/SESSION_ID",
+  "socket_path": "/run/doxa/quota/SESSION_ID.sock",
+  "caller_uid": 2001,
+  "owner_uid": 2002,
+  "project_id": 1002,
+  "hard_limit_bytes": 33554432,
+  "bindings": {
+    "root": {"device": 1, "inode": 2, "mount_id": 3},
+    "checkout": {"device": 1, "inode": 4, "mount_id": 3},
+    "home": {"device": 1, "inode": 5, "mount_id": 3},
+    "cache": {"device": 1, "inode": 6, "mount_id": 3},
+    "broker": {"device": 1, "inode": 7, "mount_id": 3}
+  }
+}
+```
+
+Those numbers are placeholders; an administrator must capture the live exact
+identities and provision quota accounting, enforcement and the hard limit
+separately. The activation socket must be root-owned, bound to the policy
+path, and accessible only to the dedicated caller. DOXA's current host
+controller and rootless worker commonly share a host UID, so this deliberately
+refuses their existing arrangement; a separated service identity and reviewed
+runtime integration are still needed. Root privilege or `CAP_SYS_ADMIN` for
+the project quota syscall must stay with the helper. No live host service is
+installed by the repository.
+
+The socket activation descriptor lives in Linux sockfs, so its `fstat`
+device/inode does not equal the filesystem socket pathname's device/inode.
+The helper proves their live connection by sending a one-use kernel-random
+nonce to the configured pathname and reading it from that exact listener FD.
+It retains up to 16 callers already queued by socket activation and serves
+them after the challenge. The challenge has a one-second deadline; the
+pathname inode is pinned and rechecked before each reply. A changed path
+stops the helper.
+
+The [disposable helper guest runner](../scripts/quota-helper-guest/run.sh)
+builds a static helper and purpose-built initramfs, then uses QEMU with a
+private ext4 `prjquota` image. Set `TMPDIR` to real disk and pass a matching
+kernel and an existing evidence directory. It never installs a host unit or
+changes host quotas:
+
+```sh
+TMPDIR=/path/on/real/disk scripts/quota-helper-guest/run.sh \
+  /absolute/vmlinuz-VERSION /absolute/evidence-parent
+```
+
+On a disposable Linux 7.0.0-38 guest, project 1002 with a 32 MiB enforced
+limit and four private bind sources returned the exact privileged snapshot
+to caller UID 2001 for tree owner UID 2002. Twenty-one fixture cases passed:
+wrong and prequeued callers, caller-supplied FD data, wrong project/limit/bind
+identity, same-inode different mount, wrong activation FD, root-owned socket
+path replacement before and after activation, unsafe policy ownership/mode
+and symlink, and replaced bind source. A failed path challenge closed its
+queued caller without a positive response. Every reply kept
+`admissible_as_hard_quota=false`. This tests systemd-shaped socket activation
+inside QEMU; an actual installed systemd service and a DOXA runtime caller
+remain unverified.
+
 The descendant walk covers the three data bind sources; it does not establish
 an immutable tree. The broker audit may report zero sockets, and its socket
 names and inode snapshots do not bind an entry to the live host listener or

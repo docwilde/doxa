@@ -5,13 +5,16 @@
 //! unprivileged worker. These observations do not authenticate a live
 //! producer or return a semantic binding. Nothing in the CLI calls this.
 
-use super::semantic_producer::ProducerPlan;
+use super::semantic_evidence::inspect_definition_reply;
+use super::semantic_producer::{plan_rust_analyzer, read_lsp_frame, ProducerPlan};
 use super::semantic_runtime::bounded_unix_connect;
-use super::{CallCandidate, CallEdge};
+use super::{file_bytes, CallCandidate, CallEdge};
+use serde::de::{MapAccess, Visitor};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
@@ -19,7 +22,10 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const PROTOCOL: &str = "doxa-semantic-socket-observation-v1";
+const STREAM_PROTOCOL: &str = "doxa-semantic-stream-observation-v1";
 const MAX_WIRE_BYTES: usize = 4096;
+const MAX_STREAM_BYTES: usize = 32 * 1024;
+const MAX_STREAM_CHUNKS: usize = 32;
 const DEADLINE: Duration = Duration::from_secs(2);
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -133,6 +139,38 @@ fn match_reply(reply: &Value, nonce: &str, digest: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The packet protocol has only scalar top-level fields. Reject duplicate
+/// JSON names before Value parsing can silently retain the last occurrence.
+fn unique_packet_object(bytes: &[u8]) -> Result<Value, String> {
+    struct Unique(Value);
+    impl<'de> Deserialize<'de> for Unique {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct UniqueVisitor;
+            impl<'de> Visitor<'de> for UniqueVisitor {
+                type Value = Unique;
+                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    formatter.write_str("a broker packet object with unique fields")
+                }
+                fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                    let mut fields = serde_json::Map::new();
+                    while let Some((key, value)) = map.next_entry::<String, Value>()? {
+                        if fields.insert(key, value).is_some() {
+                            return Err(serde::de::Error::custom("duplicate broker packet field"));
+                        }
+                    }
+                    Ok(Unique(Value::Object(fields)))
+                }
+            }
+            deserializer.deserialize_map(UniqueVisitor)
+        }
+    }
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    let parsed = Unique::deserialize(&mut decoder)
+        .map_err(|_| "invalid or duplicate broker packet JSON".to_owned())?;
+    decoder.end().map_err(|_| "trailing broker packet JSON".to_owned())?;
+    Ok(parsed.0)
+}
+
 fn untrusted_status() -> Value {
     json!({"status":"unknown","binding":"unknown",
         "socket_observation":"uid_zero_echo_untrusted",
@@ -202,7 +240,7 @@ fn packet_ready(fd: libc::c_int, events: libc::c_short, deadline: Instant) -> Re
 }
 
 #[allow(dead_code)]
-fn receive_root_packet(fd: libc::c_int, deadline: Instant) -> Result<Value, String> {
+fn receive_root_packet_with_sender(fd: libc::c_int, deadline: Instant) -> Result<(Value, libc::ucred), String> {
     let mut body = [0u8; MAX_WIRE_BYTES + 1];
     // Control storage is word-aligned for cmsghdr and large enough for one
     // ucred; any extra ancillary message or truncation fails closed below.
@@ -239,9 +277,190 @@ fn receive_root_packet(fd: libc::c_int, deadline: Instant) -> Result<Value, Stri
         if credential.pid <= 0 || credential.uid != 0 || credential.gid != 0 {
             return Err("broker packet sender is not UID/GID zero in caller namespace".into());
         }
-        return serde_json::from_slice(&body[..count as usize])
-            .map_err(|_| "invalid broker packet reply JSON".into());
+        let value = unique_packet_object(&body[..count as usize])?;
+        return Ok((value, credential));
     }
+}
+
+#[allow(dead_code)]
+fn receive_root_packet(fd: libc::c_int, deadline: Instant) -> Result<Value, String> {
+    receive_root_packet_with_sender(fd, deadline).map(|(value, _)| value)
+}
+
+#[allow(dead_code)]
+struct StreamAssembler<'a> {
+    nonce: &'a str,
+    query: &'a str,
+    source: &'a str,
+    target: &'a str,
+    sender_pid: Option<libc::pid_t>,
+    cid: Option<String>,
+    bytes: Vec<u8>,
+    chunks: usize,
+    stage: u8,
+}
+
+#[allow(dead_code)]
+impl<'a> StreamAssembler<'a> {
+    fn new(nonce: &'a str, query: &'a str, source: &'a str, target: &'a str) -> Self {
+        Self { nonce, query, source, target, sender_pid: None, cid: None,
+            bytes: Vec::new(), chunks: 0, stage: 0 }
+    }
+
+    fn accept(&mut self, packet: &Value, sender_pid: libc::pid_t) -> Result<bool, String> {
+        if sender_pid <= 0 { return Err("invalid broker stream sender PID".into()); }
+        if self.sender_pid.is_some_and(|pid| pid != sender_pid) {
+            return Err("broker stream sender changed".into());
+        }
+        self.sender_pid.get_or_insert(sender_pid);
+        let object = packet.as_object().ok_or("broker stream packet is not an object")?;
+        if packet.get("protocol").and_then(Value::as_str) != Some(STREAM_PROTOCOL)
+            || packet.get("nonce").and_then(Value::as_str) != Some(self.nonce)
+            || packet.get("query_sha256").and_then(Value::as_str) != Some(self.query) {
+            return Err("broker stream packet does not match challenge".into());
+        }
+        let cid = packet.get("cid").and_then(Value::as_str).ok_or("missing broker stream CID")?;
+        if cid.len() != 64 || !cid.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) {
+            return Err("invalid broker stream CID".into());
+        }
+        if self.cid.as_deref().is_some_and(|expected| expected != cid) {
+            return Err("broker stream CID changed".into());
+        }
+        let phase = packet.get("phase").and_then(Value::as_str).ok_or("missing broker stream phase")?;
+        match (self.stage, phase) {
+            (0, "opened") => {
+                if object.len() != 9 || packet.get("source_sha256").and_then(Value::as_str) != Some(self.source)
+                    || packet.get("target_sha256").and_then(Value::as_str) != Some(self.target)
+                    || packet.get("status").and_then(Value::as_str) != Some("observation_only")
+                    || !packet.get("image_id").and_then(Value::as_str).is_some_and(valid_image_id) {
+                    return Err("broker stream opening is incomplete or claims authority".into());
+                }
+                self.cid = Some(cid.to_owned());
+                self.stage = 1;
+                Ok(false)
+            }
+            (1, "chunk") => {
+                if object.len() != 7 || packet.get("sequence").and_then(Value::as_u64) != Some(self.chunks as u64)
+                    || self.chunks >= MAX_STREAM_CHUNKS {
+                    return Err("broker stream sequence or chunk limit invalid".into());
+                }
+                let hex = packet.get("data_hex").and_then(Value::as_str).ok_or("missing broker stream bytes")?;
+                if hex.is_empty() || hex.len() > 2048 || hex.len() % 2 != 0
+                    || self.bytes.len() + hex.len() / 2 > MAX_STREAM_BYTES {
+                    return Err("broker stream bytes exceed bound".into());
+                }
+                for pair in hex.as_bytes().chunks_exact(2) {
+                    let pair = std::str::from_utf8(pair).map_err(|_| "invalid broker stream hex")?;
+                    self.bytes.push(u8::from_str_radix(pair, 16).map_err(|_| "invalid broker stream hex")?);
+                }
+                self.chunks += 1;
+                Ok(false)
+            }
+            (1, "closed") => {
+                if object.len() != 8 || self.chunks == 0
+                    || packet.get("chunks").and_then(Value::as_u64) != Some(self.chunks as u64)
+                    || packet.get("stream_sha256").and_then(Value::as_str) != Some(sha256_hex(&self.bytes).as_str())
+                    || packet.get("status").and_then(Value::as_str) != Some("observation_only") {
+                    return Err("broker stream closure is incomplete or mismatched".into());
+                }
+                self.stage = 2;
+                Ok(true)
+            }
+            _ => Err("broker stream phase is out of order".into()),
+        }
+    }
+
+    fn lsp_reply(&self) -> Result<Value, String> {
+        if self.stage != 2 { return Err("broker stream was not closed".into()); }
+        let mut cursor = Cursor::new(&self.bytes);
+        let reply = read_lsp_frame(&mut cursor)?;
+        if cursor.position() != self.bytes.len() as u64 {
+            return Err("broker stream contained trailing LSP bytes".into());
+        }
+        Ok(reply)
+    }
+}
+
+fn valid_image_id(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+}
+
+/// The broker must close its seqpacket connection after the terminal packet.
+/// Waiting for EOF rules out a queued second transcript and keeps a half-open
+/// broker from making a completed observation look successful.
+#[allow(dead_code)]
+fn require_stream_eof(fd: libc::c_int, deadline: Instant) -> Result<(), String> {
+    packet_ready(fd, libc::POLLIN, deadline)?;
+    let mut byte = [0u8; 1];
+    let count = unsafe { libc::recv(fd, byte.as_mut_ptr().cast(), byte.len(), libc::MSG_DONTWAIT) };
+    if count == 0 { Ok(()) } else { Err("broker stream has extra data or did not close".into()) }
+}
+
+/// This disabled exchange ties one query digest and two source hashes to a
+/// bounded packet stream from the same observed UID-zero sender PID. It does
+/// not prove that sender's code, the Engine, or the actual analyzer byte path.
+#[allow(dead_code)]
+fn observe_stream_packets(path: &Path, nonce: &str, digest: &str,
+    source: &str, target: &str) -> Result<Value, String> {
+    if unsafe { libc::geteuid() } == 0 { return Err("broker client must run unprivileged".into()); }
+    let inode = root_owned_socket(path)?;
+    let deadline = Instant::now() + DEADLINE;
+    let socket = bounded_packet_connect(path, deadline)?;
+    uid_zero_peer_fd(socket.as_raw_fd())?;
+    if root_owned_socket(path)? != inode { return Err("broker socket changed during connect".into()); }
+    let request = json!({"protocol":STREAM_PROTOCOL,"operation":"observe_stream",
+        "nonce":nonce,"query_sha256":digest,"source_sha256":source,"target_sha256":target});
+    let body = serde_json::to_vec(&request).map_err(|_| "cannot encode broker stream challenge")?;
+    if body.len() > MAX_WIRE_BYTES { return Err("broker stream challenge exceeds bound".into()); }
+    packet_ready(socket.as_raw_fd(), libc::POLLOUT, deadline)?;
+    let sent = unsafe { libc::send(socket.as_raw_fd(), body.as_ptr().cast(), body.len(),
+        libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT) };
+    if sent != body.len() as isize { return Err("broker stream challenge send failed".into()); }
+    let mut assembler = StreamAssembler::new(nonce, digest, source, target);
+    for _ in 0..(MAX_STREAM_CHUNKS + 2) {
+        let (packet, sender) = receive_root_packet_with_sender(socket.as_raw_fd(), deadline)?;
+        if assembler.accept(&packet, sender.pid)? {
+            require_stream_eof(socket.as_raw_fd(), deadline)?;
+            if root_owned_socket(path)? != inode { return Err("broker socket changed during stream".into()); }
+            return assembler.lsp_reply();
+        }
+    }
+    Err("broker stream packet count exceeded".into())
+}
+
+/// Library-only semantic stream observation. Every accepted response still
+/// has an unknown binding: the broker's attested launch/inspect/attach chain
+/// is absent. The CLI has no call to this function.
+#[allow(dead_code)]
+pub(crate) fn observe_stream_definition(path: &Path, plan: &ProducerPlan,
+    edge: &CallEdge, candidate: &CallCandidate) -> Result<Value, String> {
+    let expected = plan_rust_analyzer(&plan.root, &plan.image, &plan.docker_host, true)?;
+    if plan.root != expected.root || plan.args != expected.args
+        || plan.initialize != expected.initialize || plan.attestation != expected.attestation {
+        return Err("semantic producer plan changed before stream challenge".into());
+    }
+    let (_, source, _) = file_bytes(&plan.root, &edge.file)?;
+    let (_, target, _) = file_bytes(&plan.root, &candidate.file)?;
+    if source != edge.sha256 || target != candidate.sha256 {
+        return Err("semantic source changed before stream challenge".into());
+    }
+    let nonce = challenge_nonce()?;
+    let digest = query_digest(plan, edge, candidate)?;
+    let response = observe_stream_packets(path, &nonce, &digest, &source, &target)?;
+    let request = json!({"jsonrpc":"2.0","id":7,"method":"textDocument/definition",
+        "params":{"textDocument":{"uri":format!("file://{}/{}",plan.root.display(),edge.file)},
+            "position":{"line":edge.line.checked_sub(1).ok_or("invalid source line")?,
+                "character":edge.column}}});
+    let evidence = inspect_definition_reply(&plan.root, edge, candidate, &request, &response)?;
+    for (relative, expected) in [(&edge.file, &source), (&candidate.file, &target)] {
+        if file_bytes(&plan.root, relative)?.1 != *expected {
+            return Err("semantic source changed after stream observation".into());
+        }
+    }
+    Ok(json!({"status":"protocol_match_untrusted","binding":"unknown",
+        "socket_observation":"one_sender_stream_untrusted",
+        "reason":"analyzer_engine_and_broker_binary_unproven","evidence":evidence}))
 }
 
 /// Guest-only check of a reply *sender* on one packet. Still returns unknown:
@@ -440,6 +659,131 @@ mod tests {
         let error = receive_root_packet(client.as_raw_fd(), start + Duration::from_millis(30)).unwrap_err();
         assert!(error.contains("deadline"), "{error}");
         assert!(start.elapsed() < Duration::from_millis(250));
+    }
+
+    fn stream_fixture() -> (String, String, String, String, Value, Value, Value) {
+        let nonce = "a".repeat(64);
+        let query = "b".repeat(64);
+        let source = "c".repeat(64);
+        let target = "d".repeat(64);
+        let cid = "e".repeat(64);
+        let frame = b"Content-Length: 2\r\n\r\n{}";
+        let opened = json!({"protocol":STREAM_PROTOCOL,"nonce":nonce,"query_sha256":query,
+            "cid":cid,"phase":"opened","source_sha256":source,
+            "target_sha256":target,"image_id":format!("sha256:{}", "f".repeat(64)),
+            "status":"observation_only"});
+        let chunk = json!({"protocol":STREAM_PROTOCOL,"nonce":nonce,"query_sha256":query,
+            "cid":cid,"phase":"chunk","sequence":0,
+            "data_hex":frame.iter().map(|byte| format!("{byte:02x}")).collect::<String>()});
+        let closed = json!({"protocol":STREAM_PROTOCOL,"nonce":nonce,"query_sha256":query,
+            "cid":cid,"phase":"closed","chunks":1,"stream_sha256":sha256_hex(frame),
+            "status":"observation_only"});
+        (nonce, query, source, target, opened, chunk, closed)
+    }
+
+    #[test]
+    fn stream_observation_requires_one_ordered_sender_and_exact_lsp_frame() {
+        let (nonce, query, source, target, opened, chunk, closed) = stream_fixture();
+        let mut stream = StreamAssembler::new(&nonce, &query, &source, &target);
+        assert!(!stream.accept(&opened, 101).unwrap());
+        assert!(!stream.accept(&chunk, 101).unwrap());
+        assert!(stream.accept(&closed, 101).unwrap());
+        assert_eq!(stream.lsp_reply().unwrap(), json!({}));
+        assert!(stream.accept(&closed, 101).unwrap_err().contains("out of order"));
+    }
+
+    #[test]
+    fn stream_packet_json_rejects_duplicate_and_trailing_fields() {
+        assert!(unique_packet_object(br#"{"phase":"opened","phase":"closed"}"#)
+            .unwrap_err().contains("duplicate"));
+        assert!(unique_packet_object(br#"{"phase":"opened"}{}"#)
+            .unwrap_err().contains("trailing"));
+        assert!(unique_packet_object(br#"["opened"]"#).is_err());
+    }
+
+    #[test]
+    fn stream_observation_rejects_packet_splice_replay_and_claimed_authority() {
+        let (nonce, query, source, target, opened, chunk, closed) = stream_fixture();
+        let fresh = || StreamAssembler::new(&nonce, &query, &source, &target);
+        for (field, wrong) in [("nonce", json!("old")), ("query_sha256", json!("old")),
+            ("source_sha256", json!("old")), ("target_sha256", json!("old")),
+            ("status", json!("attested")), ("image_id", json!("latest"))] {
+            let mut changed = opened.clone(); changed[field] = wrong;
+            assert!(fresh().accept(&changed, 101).is_err(), "{field}");
+        }
+        let mut claimed = opened.clone(); claimed["binding"] = json!("verified");
+        assert!(fresh().accept(&claimed, 101).is_err());
+        let mut stream = fresh();
+        assert!(stream.accept(&chunk, 101).is_err());
+        stream.accept(&opened, 101).unwrap();
+        assert!(stream.accept(&chunk, 102).unwrap_err().contains("sender changed"));
+        for (field, wrong) in [("cid", json!("f".repeat(64))),
+            ("sequence", json!(1)), ("data_hex", json!("zz")),
+            ("nonce", json!("old"))] {
+            let mut changed = chunk.clone(); changed[field] = wrong;
+            assert!(fresh().accept(&opened, 101).is_ok());
+            let mut stream = fresh(); stream.accept(&opened, 101).unwrap();
+            assert!(stream.accept(&changed, 101).is_err(), "{field}");
+        }
+        let mut stream = fresh(); stream.accept(&opened, 101).unwrap();
+        stream.accept(&chunk, 101).unwrap();
+        for (field, wrong) in [("chunks", json!(2)), ("stream_sha256", json!("0".repeat(64))),
+            ("cid", json!("f".repeat(64))), ("status", json!("verified"))] {
+            let mut changed = closed.clone(); changed[field] = wrong;
+            assert!(stream.accept(&changed, 101).is_err(), "{field}");
+        }
+        let mut trailing = chunk.clone(); trailing["data_hex"] = json!("00");
+        let mut stream = fresh(); stream.accept(&opened, 101).unwrap();
+        stream.accept(&chunk, 101).unwrap(); stream.accept(&trailing, 101).unwrap_err();
+    }
+
+    #[test]
+    fn stream_definition_rederives_plan_and_rehashes_source_before_connect() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(Command::new("git").arg("init").arg("-q").arg(root.path()).status().unwrap().success());
+        fs::write(root.path().join("a.rs"), "fn caller() { target(); }\nfn target() {}\n").unwrap();
+        assert!(Command::new("git").arg("add").arg("a.rs").current_dir(root.path()).status().unwrap().success());
+        let answer = query(root.path(), Query::Calls("a.rs".into())).unwrap();
+        let edge = answer.edges.iter().find(|row| row.target == "target").unwrap();
+        let candidate = edge.candidates.first().unwrap();
+        let mut plan = plan_rust_analyzer(root.path(), IMAGE,
+            "unix:///run/user/1000/docker.sock", true).unwrap();
+        let same_uid_socket = root.path().join("fake.sock");
+        plan.args.push("--privileged".into());
+        let error = observe_stream_definition(&same_uid_socket, &plan, edge, candidate).unwrap_err();
+        assert!(error.contains("plan changed"), "{error}");
+        plan.args.pop();
+        fs::write(root.path().join("a.rs"), "fn caller() { target(); }\nfn target() {}\n// changed\n").unwrap();
+        let error = observe_stream_definition(&same_uid_socket, &plan, edge, candidate).unwrap_err();
+        assert!(error.contains("source changed"), "{error}");
+    }
+
+    /// Guest only: root owns this endpoint and sends a complete stream in
+    /// the passing case. All cases remain transport observations, not proof
+    /// that a rootless Engine or rust-analyzer produced the bytes.
+    #[test]
+    #[ignore]
+    fn disposable_guest_stream_sender_continuity() {
+        let mode = std::env::var("DOXA_STREAM_MODE").unwrap();
+        let path = Path::new("/run/doxa-semantic/stream.sock");
+        let result = observe_stream_packets(path, &"a".repeat(64), &"b".repeat(64),
+            &"c".repeat(64), &"d".repeat(64));
+        if mode == "root" {
+            assert_eq!(result.unwrap(), json!({}));
+            println!("DOXA_STREAM_RECEIPT mode=root ordered_root_sender=observed binding=unknown");
+        } else {
+            let error = result.unwrap_err();
+            let expected = match mode.as_str() {
+                "handoff" | "mid_handoff" => "sender is not UID/GID zero",
+                "root_switch" => "sender changed",
+                "cid_swap" => "CID changed",
+                "extra" => "extra data",
+                _ => panic!("unknown stream fixture mode"),
+            };
+            assert!(error.contains(expected), "{mode}: {error}");
+            println!("DOXA_STREAM_RECEIPT mode={mode} rejected={error}");
+        }
+        assert!(fs::remove_file(path).is_err(), "guest client replaced the root socket");
     }
 
     /// Run only in the offline guest with a root-owned, separately started

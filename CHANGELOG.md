@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.34 — 2026-10-09
+
+**Trust boundary probes**
+
+- Add a requestless, administrator-pinned quota inspector. A disposable ext4 guest exercised four binds, caller and policy substitutions; its response still denies hardened admission.
+- Probe per-message `SCM_PIDFD` to distinguish a socket writer from its connector and reject mixed senders. Exact Docker origin and post-send cgroup membership remain unproved.
+- Bind disabled semantic streams to query and source hashes and one sender across packets. Six offline adversarial cases passed; synthetic analyzer bytes keep binding `unknown`.
+
 ## 2.0.0-beta.33 — 2026-10-09
 
 **Isolation evidence**
