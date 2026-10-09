@@ -603,6 +603,7 @@ fn run_loop_with_remote(
         }
         changed |= app.poll_plugin_commands();
         changed |= app.poll_native_package_review();
+        changed |= app.poll_native_package_run();
         changed |= app.poll_mermaid_preflight();
         if !app.remote_mode {
             let status = app.native_status.poll(Instant::now());
@@ -729,6 +730,8 @@ fn run_loop_with_remote(
             terminal.draw(|frame| app.draw(frame))?;
         }
     }
+    // exec-based restart and handoff bypass Rust destructors for App.
+    app.cancel_native_package_run();
     drop(remote_connector);
     if let Some(router)=command_router.as_ref(){
         if let Ok(mut destination)=router.remote.lock(){*destination=None;}

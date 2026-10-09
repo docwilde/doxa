@@ -1137,6 +1137,7 @@ impl App {
             self.notice = "Wait for session launch/attach/clear before closing a pane".into();
             return;
         }
+        self.cancel_native_package_run();
         let group = &mut self.groups[self.active_group];
         if group.active >= group.tabs.len() {
             self.notice = "No active tab to detach".into();

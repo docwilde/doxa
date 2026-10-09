@@ -5,17 +5,19 @@ use crate::native_plugins::packages::Review;
 use std::path::Path;
 use std::sync::mpsc::{self, TryRecvError};
 
-const USAGE: &str = "Usage: /native-plugin preflight NAME";
+const USAGE: &str = "Usage: /native-plugin preflight NAME | run NAME (TUI host admission disabled)";
 
-fn request(args: &str) -> Result<&str, &'static str> {
+enum Request<'a> { Preflight(&'a str), Run(&'a str) }
+
+fn request(args: &str) -> Result<Request<'_>, &'static str> {
     let parts = args.split_whitespace().collect::<Vec<_>>();
-    let ["preflight", name] = parts.as_slice() else { return Err(USAGE); };
+    let [verb @ ("preflight" | "run"), name] = parts.as_slice() else { return Err(USAGE); };
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > 48 || !bytes[0].is_ascii_lowercase()
         || !bytes.iter().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-') {
         return Err("Package name must be 1–48 lowercase ASCII letters, digits or hyphens, starting with a letter");
     }
-    Ok(name)
+    Ok(if *verb == "run" { Request::Run(name) } else { Request::Preflight(name) })
 }
 
 fn review_lines(review: &Review) -> Vec<String> {
@@ -34,15 +36,18 @@ fn review_lines(review: &Review) -> Vec<String> {
 
 impl App {
     pub(super) fn open_native_package_review(&mut self, args: &str) {
-        let name = match request(args) {
-            Ok(name) => name,
+        let request = match request(args) {
+            Ok(request) => request,
             Err(error) => { self.notice = error.into(); return; }
         };
         let home = match crate::operations::doxa_home() {
             Ok(home) => home,
             Err(error) => { self.notice = format!("Native package review: {error}"); return; }
         };
-        self.open_native_package_review_at(&home, name);
+        match request {
+            Request::Preflight(name) => self.open_native_package_review_at(&home, name),
+            Request::Run(name) => self.open_native_package_run_at(&home, name),
+        }
     }
 
     fn open_native_package_review_at(&mut self, home: &Path, name: &str) {
@@ -170,7 +175,7 @@ mod tests {
 
     #[test]
     fn invalid_forms_are_consumed_locally_without_a_worker() {
-        for draft in ["/native-plugin", "/native-plugin run demo", "/native-plugin preflight ../demo",
+        for draft in ["/native-plugin", "/native-plugin run ../demo", "/native-plugin preflight ../demo",
             "/native-plugin preflight demo extra", "/native-plugin unknown demo"] {
             let mut app = App::default();
             app.input = draft.into();
@@ -179,6 +184,23 @@ mod tests {
             assert!(app.native_package_pending.is_none());
             assert!(app.pending_prompts.is_empty() && app.local_shell_jobs.is_empty());
         }
+    }
+
+    #[test]
+    fn explicit_run_form_reaches_only_closed_tui_admission() {
+        assert!(matches!(request("run demo"), Ok(Request::Run("demo"))));
+        let home = fixture(true, &[]);
+        let mut app = App::default();
+        app.handle(crossterm::event::Event::Resize(100, 30));
+        app.open_native_package_run_at(home.path(), "demo");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !app.poll_native_package_run() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.native_package_run.is_none());
+        assert!(app.chip_info.as_ref().unwrap().lines.iter()
+            .any(|line| line.contains("installed host has no trusted delegation acceptance")));
+        assert!(app.local_shell_jobs.is_empty() && app.pending_prompts.is_empty());
     }
 
     #[test]

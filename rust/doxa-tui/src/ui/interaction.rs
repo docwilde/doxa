@@ -197,6 +197,7 @@ impl App {
             }
         }
         self.sync_chooser_state();
+        changed |= self.reconcile_native_package_run();
         self.tick_chip_hover(Instant::now());
         changed |= self.tick_belief_preview(Instant::now());
         if matches!(self.focus, Focus::Chip(_) | Focus::Rail)

@@ -48,6 +48,36 @@ pub fn run_grantless_package(home: &Path, name: &str, cancel: &std::sync::atomic
     }
 }
 
+/// TUI lifecycle seam: preserve the *same* review identity across installed
+/// host admission and the sandbox's final recheck. Only call behind an
+/// independently authenticated installed-host policy.
+#[cfg(target_os = "linux")]
+pub(crate) fn run_reviewed_grantless_package(
+    home: &Path, review: &packages::Review, cancel: &std::sync::atomic::AtomicBool,
+) -> io::Result<i32> {
+    if !review.owner_approved || !review.requested_grants.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "exact zero-grant approval required"));
+    }
+    let worker = std::env::current_exe()?.with_file_name("doxa-plugin-worker");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "plugin run cancelled"));
+    }
+    let result = runner_sandbox::supervise_reviewed(home, review, &worker, cancel, deadline)?;
+    match result {
+        runner_sandbox::IsolatedOutcome::Return(value) => Ok(value),
+        other => Err(io::Error::other(format!("isolated plugin result: {}", outcome_class(other)))),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn run_reviewed_grantless_package(
+    _home: &Path, _review: &packages::Review, _cancel: &std::sync::atomic::AtomicBool,
+) -> io::Result<i32> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "isolated plugin runner requires Linux"))
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn run_grantless_package(_home: &Path, _name: &str, _cancel: &std::sync::atomic::AtomicBool)
     -> io::Result<i32>
