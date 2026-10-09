@@ -38,7 +38,8 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
     if manifest.profile != Profile::DockerOffline || manifest.state != "ready" {
         return Err(error("hard-quota inspection requires a ready network-none Docker session"));
     }
-    if expected.project_id == 0 || expected.hard_limit_bytes == 0
+    if expected.project_id == 0 || expected.project_id > i32::MAX as u32
+        || expected.hard_limit_bytes == 0
         || expected.hard_limit_bytes % 512 != 0
         || expected.hard_limit_bytes > MAX_HARD_BYTES {
         return Err(error("hard-quota expectation has no finite project ID and hard block limit"));
@@ -304,6 +305,7 @@ mod tests {
     fn malformed_policy_and_escaped_paths_refuse() {
         let (_temp, mut manifest, reader, expected) = fixture();
         assert!(inspect_with(&manifest, QuotaExpectation { project_id: 0, ..expected }, &reader).is_err());
+        assert!(inspect_with(&manifest, QuotaExpectation { project_id: u32::MAX, ..expected }, &reader).is_err());
         assert!(inspect_with(&manifest, QuotaExpectation { hard_limit_bytes: 0, ..expected }, &reader).is_err());
         assert!(inspect_with(&manifest, QuotaExpectation { hard_limit_bytes: 513, ..expected }, &reader).is_err());
         manifest.private_home = PathBuf::from("/outside/home");
