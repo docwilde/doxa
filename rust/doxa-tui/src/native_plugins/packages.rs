@@ -341,17 +341,21 @@ mod tests {
         assert_eq!(checked.review().module_sha256, reviewed.module_sha256);
 
         let module = dir.path().join("native-plugin-packages/demo/module.wasm");
+        let retired_module = File::open(&module).unwrap();
         std::fs::remove_file(&module).unwrap();
-        write(&module, MODULE); // identical content, different opened inode
+        write(&module, MODULE); // keep the old inode live so identical bytes get a new identity
         assert!(preflight(dir.path(), "demo").unwrap().owner_approved);
         assert!(recheck_approved(dir.path(), &reviewed).unwrap_err()
             .to_string().contains("identity changed"));
+        drop(retired_module);
 
         let fresh = preflight(dir.path(), "demo").unwrap();
         let manifest = dir.path().join("native-plugin-packages/demo/manifest.toml");
+        let retired_manifest = File::open(&manifest).unwrap();
         std::fs::remove_file(&manifest).unwrap();
         write(&manifest, MANIFEST);
         assert!(recheck_approved(dir.path(), &fresh).is_err());
+        drop(retired_manifest);
 
         let latest = preflight(dir.path(), "demo").unwrap();
         write(&config, "");
