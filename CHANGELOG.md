@@ -5,6 +5,23 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.20 — 2026-10-09
+
+**Code graph**
+
+- Add **`scan_input_sha256`** for complete Git-listed Rust scans; reviewed snapshots rehash the full Rust input set and report changed, missing or uncheckable inputs.
+- Stage **`semantic_evidence`** and a bounded rust-analyzer producer plan. No analyzer runs or verified Rust binding is exposed yet.
+
+**Docker isolation**
+
+- Add **`probe_docker_hard_quota.py`** for a private rootless EDQUOT fixture and keep **`docker-hardened`** closed until per-session kernel quota and restart proof exist.
+- Validate TLS SNI before an egress gateway opens upstream TCP; add denied-host and direct-bypass fixtures.
+
+**Native plugins**
+
+- Stage **`doxa-plugin-worker`** with an independent frame decoder and an FD-bound Linux sandbox launch with private namespaces and cgroup limits.
+- Bound child input and status receipts. Executable plugins remain unwired pending delegated-cgroup containment proof.
+
 ## 2.0.0-beta.19 — 2026-10-09
 
 **Native plugins**

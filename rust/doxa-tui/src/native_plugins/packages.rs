@@ -71,7 +71,7 @@ impl Review {
     pub fn report(&self) -> String {
         let grants = if self.requested_grants.is_empty() { "none".to_owned() }
             else { self.requested_grants.join(", ") };
-        format!("Package: {} {}\nFormat: wasm-core-v1 (fully validated WebAssembly 1.0, no imports or start)\nManifest SHA-256: {}\nModule SHA-256: {}\nRequested grants: {}\nOwner approval: {}\nOpened inodes (device:inode): manifest {}:{}, module {}:{}\nExecution: unavailable (no plugin runner)\n",
+        format!("Package: {} {}\nFormat: wasm-core-v1 (fully validated WebAssembly 1.0, no imports or start)\nManifest SHA-256: {}\nModule SHA-256: {}\nRequested grants: {}\nOwner approval: {}\nOpened inodes (device:inode): manifest {}:{}, module {}:{}\nExecution: unavailable (no approved runner command)\n",
             self.name, self.version, self.manifest_sha256, self.module_sha256,
             grants, if self.owner_approved { "exact identity and grants match" } else { "review required" },
             self.manifest_inode.0, self.manifest_inode.1, self.module_inode.0, self.module_inode.1)

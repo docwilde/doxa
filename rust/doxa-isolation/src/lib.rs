@@ -14,6 +14,7 @@ use std::{
 };
 pub mod broker;
 pub mod egress;
+pub mod hardened;
 pub mod workspace;
 pub mod test_runner;
 pub mod migration;
@@ -35,6 +36,7 @@ impl Profile {
     pub fn parse(value: &str) -> io::Result<Self> {
         match value { "native" => Ok(Self::Native), "docker-open" => Ok(Self::DockerOpen),
             "docker-offline" => Ok(Self::DockerOffline),
+            "docker-hardened" => Err(error("docker-hardened is unavailable: per-session kernel hard-quota, restart and provider-egress proofs are required")),
             _ => Err(error("isolation must be native, docker-open or docker-offline")) }
     }
     pub fn key(self) -> &'static str { match self { Self::Native => "native", Self::DockerOpen => "docker-open", Self::DockerOffline => "docker-offline" } }

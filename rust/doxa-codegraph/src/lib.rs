@@ -15,6 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+pub mod semantic_evidence;
+pub mod semantic_producer;
+
 const MAX_FILES: usize = 20_000;
 const MAX_PATH_BYTES: usize = 4_096;
 const MAX_LIST_BYTES: usize = 4 * 1024 * 1024;
@@ -72,6 +75,10 @@ pub struct Answer {
     /// empty file with no rows or module declarations.
     pub requested_source_sha256: Option<String>,
     pub requested_source_read_unix_ms: Option<u128>,
+    /// Digest of every listed Rust path and parsed source digest. Absent when
+    /// any Rust input was skipped or failed to parse. This is a scan-input
+    /// inventory, not proof of compiler bindings or an atomic filesystem view.
+    pub scan_input_sha256: Option<String>,
     pub status: String,
     pub coverage: Coverage,
     pub rows: Vec<Row>,
@@ -267,6 +274,41 @@ fn file_bytes(root: &Path, relative: &str) -> Result<(String, String, u128), Str
 /// component. This uses the same 1 MiB, descriptor-anchored read as queries.
 pub fn source_sha256(root: &Path, relative: &str) -> Result<String, String> {
     file_bytes(root, relative).map(|(_, sha, _)| sha)
+}
+
+fn scan_digest<'a>(entries: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"doxa-rust-scan-input-v1\0");
+    for (path, digest) in entries {
+        hasher.update((path.len() as u64).to_be_bytes());
+        hasher.update(path.as_bytes());
+        hasher.update(digest.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Re-enumerate and hash all nonignored Git-listed Rust inputs. Any
+/// uncheckable file or scan-budget breach fails closed. Callers compare this
+/// with an answer's scan-input digest to detect edits, additions, and removals.
+pub fn current_scan_input_sha256(root: &Path) -> Result<(String, usize), String> {
+    let root = worktree_root(root)?;
+    let paths = listed_files(&root)?;
+    let mut entries = Vec::new();
+    let mut total = 0u64;
+    for path in paths.iter().filter(|path| source_language(path) == Some("rust")) {
+        let (content, sha, _) = file_bytes(&root, path)?;
+        total = total.saturating_add(content.len() as u64);
+        if total > MAX_TOTAL_SOURCE_BYTES {
+            return Err("Rust source scan exceeded 64 MiB; no partial verification".into());
+        }
+        entries.push((path.as_str(), sha));
+    }
+    let after = listed_files(&root)?;
+    if paths != after {
+        return Err("Git worktree listing changed during scan verification".into());
+    }
+    let count = entries.len();
+    Ok((scan_digest(entries.iter().map(|(path, sha)| (*path, sha.as_str()))), count))
 }
 
 #[derive(Clone)]
@@ -647,6 +689,7 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
     let mut answer = Answer { scope: root.to_string_lossy().into_owned(), query: kind, value: value.clone(),
         observed_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
         requested_source_sha256: None, requested_source_read_unix_ms: None,
+        scan_input_sha256: None,
         status: "ok".into(), coverage: Coverage::default(), rows: Vec::new(), omitted_rows: 0,
         edges: Vec::new(), omitted_edges: 0,
         module_edges: Vec::new(), omitted_module_edges: 0, skipped_nested_modules: 0,
@@ -719,6 +762,14 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
             None => { answer.coverage.other_files += 1; if path == &value { answer.status = "unsupported:unknown".into(); } }
         }
     }
+    if answer.coverage.skipped.count == 0 && answer.coverage.unparseable.count == 0 {
+        answer.scan_input_sha256 = Some(scan_digest(source_facts.iter().map(|(path, fact)| {
+            let SourceFact::Parsed { sha256, .. } = fact else {
+                unreachable!("complete scan has only parsed Rust sources")
+            };
+            (path.as_str(), sha256.as_str())
+        })));
+    }
     if let Some((declarations, nested, sha, read_unix_ms)) = requested_modules {
         answer.skipped_nested_modules = nested;
         (answer.module_edges, answer.omitted_module_edges) = module_edges(
@@ -762,6 +813,39 @@ mod tests {
         let status = Command::new("git").arg("init").arg("-q").arg(root.path()).status().unwrap();
         assert!(status.success());
         root
+    }
+
+    #[test]
+    fn complete_scan_digest_detects_edits_additions_and_removals() {
+        let root = worktree();
+        fs::write(root.path().join("lib.rs"), "fn first() {}\n").unwrap();
+        let answer = query(root.path(), Query::File("lib.rs".into())).unwrap();
+        let expected = answer.scan_input_sha256.unwrap();
+        assert_eq!(current_scan_input_sha256(root.path()).unwrap(), (expected.clone(), 1));
+
+        fs::write(root.path().join("lib.rs"), "fn second() {}\n").unwrap();
+        assert_ne!(current_scan_input_sha256(root.path()).unwrap().0, expected);
+        fs::write(root.path().join("lib.rs"), "fn first() {}\n").unwrap();
+        fs::write(root.path().join("added.rs"), "fn added() {}\n").unwrap();
+        assert_ne!(current_scan_input_sha256(root.path()).unwrap().0, expected);
+        fs::remove_file(root.path().join("added.rs")).unwrap();
+        assert_eq!(current_scan_input_sha256(root.path()).unwrap().0, expected);
+        fs::remove_file(root.path().join("lib.rs")).unwrap();
+        assert_ne!(current_scan_input_sha256(root.path()).unwrap().0, expected);
+    }
+
+    #[test]
+    fn incomplete_or_uncheckable_scan_never_gets_a_digest() {
+        let root = worktree();
+        fs::write(root.path().join("lib.rs"), "fn first() {}\n").unwrap();
+        fs::write(root.path().join("broken.rs"), "fn broken( {\n").unwrap();
+        assert!(query(root.path(), Query::File("lib.rs".into())).unwrap()
+            .scan_input_sha256.is_none());
+        fs::remove_file(root.path().join("broken.rs")).unwrap();
+        symlink(root.path().join("lib.rs"), root.path().join("link.rs")).unwrap();
+        assert!(query(root.path(), Query::File("lib.rs".into())).unwrap()
+            .scan_input_sha256.is_none());
+        assert!(current_scan_input_sha256(root.path()).is_err());
     }
 
     #[test]

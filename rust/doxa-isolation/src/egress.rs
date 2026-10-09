@@ -182,7 +182,11 @@ fn client_hello_sni(mut hello: &[u8]) -> io::Result<String> {
         let kind = take_u16(&mut hello)?;
         let size = take_u16(&mut hello)?;
         let mut body = take(&mut hello, size)?;
+        // ECH hides the inner name. Early data can carry encrypted application
+        // bytes before the peer has authenticated; neither can be audited by
+        // this SNI-only gateway. Resumption without early data remains valid.
         if kind == 0xfe0d { return Err(error("encrypted TLS ClientHello is unsupported")); }
+        if kind == 42 { return Err(error("TLS early data is unsupported")); }
         if kind != 0 { continue; }
         if found.is_some() { return Err(error("duplicate TLS SNI extension")); }
         let names = take_u16(&mut body)?;
@@ -217,6 +221,7 @@ fn verified_client_hello(client: &mut UnixStream, host: &str) -> io::Result<Vec<
         let size = (usize::from(handshake[1]) << 16) | (usize::from(handshake[2]) << 8) | usize::from(handshake[3]);
         if size > MAX_CLIENT_HELLO - 4 { return Err(error("TLS ClientHello exceeds bound")); }
         if handshake.len() < size + 4 { continue; }
+        if handshake.len() != size + 4 { return Err(error("extra handshake bytes in TLS ClientHello record")); }
         if client_hello_sni(&handshake[4..size + 4])? != host { return Err(error("TLS SNI differs from CONNECT authority")); }
         return Ok(records);
     }
@@ -273,16 +278,18 @@ fn serve(mut client: UnixStream, hosts: &AllowedHosts, resolver: &Resolver, conn
         let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
         return Err(error("CONNECT DNS answer contains reserved address"));
     }
-    let upstream = match addresses.into_iter().find_map(|address| connector(address).ok()) {
-        Some(stream) => stream,
-        None => { let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n"); return Err(error("CONNECT upstream unavailable")); }
-    };
     if stop.load(Ordering::Acquire) { return Err(error("gateway stopped")); }
     client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
     let hello = verified_client_hello(&mut client, &host)?;
     if stop.load(Ordering::Acquire) { return Err(error("gateway stopped")); }
+    // Never open even an outbound TCP connection until the worker has sent a
+    // bounded hello with the same exact SNI. The 200 response precedes the
+    // upstream dial, so a failed dial closes the tunnel and surfaces as a TLS
+    // error to the client rather than sending a second HTTP response.
+    let mut upstream = addresses.into_iter().find_map(|address| connector(address).ok())
+        .ok_or_else(|| error("CONNECT upstream unavailable"))?;
+    if stop.load(Ordering::Acquire) { return Err(error("gateway stopped")); }
     // The checked IP is held in this socket; no second DNS lookup occurs.
-    let mut upstream = upstream;
     upstream.write_all(&hello)?;
     tunnel(client, upstream, stop)
 }
@@ -293,6 +300,14 @@ pub struct EgressGateway {
     socket: PathBuf, identity: (u64, u64), stop: Arc<AtomicBool>, worker: Option<JoinHandle<()>>,
 }
 impl EgressGateway {
+    /// Reserved production entry point. It cannot open a socket until quota
+    /// enforcement is verified on this exact session after restart. A fixture
+    /// receipt is insufficient, even if a caller changes its Boolean fields.
+    pub fn start_hardened_for_session(manifest_path: &Path, quota_receipt: &[u8], hosts: AllowedHosts) -> io::Result<Self> {
+        let manifest = read_manifest(manifest_path)?;
+        crate::hardened::require_session_hard_quota(&manifest, quota_receipt)?;
+        Self::start_for_session(manifest_path, hosts)
+    }
     /// Guarded host preparation path. It refuses a saved profile with any
     /// worker network, an unverified rootless Engine, or an altered container.
     /// The caller must retain this handle for the complete session lifetime.
@@ -508,15 +523,47 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_or_missing_sni_never_sends_worker_bytes_upstream() {
+    fn mismatched_or_missing_sni_never_opens_an_upstream_connection() {
         for hello in [client_hello("other.example.test"), vec![22, 3, 3, 0, 4, 1, 0, 0, 0]] {
-            let root = fixture_dir(); let (upstream_addr, upstream_thread) = upstream();
+            let root = fixture_dir(); let calls = Arc::new(AtomicUsize::new(0));
             let gateway = gateway(root.path(), vec!["1.1.1.1:443".parse().unwrap()],
-                upstream_addr, Arc::new(AtomicUsize::new(0)));
+                "127.0.0.1:1".parse().unwrap(), calls.clone());
             let mut bytes = b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n".to_vec();
             bytes.extend_from_slice(&hello);
             assert!(request(gateway.socket(), &bytes).starts_with(b"HTTP/1.1 200"));
-            assert!(upstream_thread.join().unwrap().is_empty());
+            assert_eq!(calls.load(Ordering::Acquire), 0);
+        }
+    }
+
+    fn append_tls_extension(mut hello: Vec<u8>, kind: u16, body: &[u8]) -> Vec<u8> {
+        hello.extend_from_slice(&kind.to_be_bytes());
+        hello.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        hello.extend_from_slice(body);
+        let record_size = (hello.len() - 5) as u16;
+        let handshake_size = hello.len() - 9;
+        let extensions_size = (hello.len() - 52) as u16;
+        hello[3..5].copy_from_slice(&record_size.to_be_bytes());
+        hello[6..9].copy_from_slice(&[(handshake_size >> 16) as u8, (handshake_size >> 8) as u8, handshake_size as u8]);
+        hello[50..52].copy_from_slice(&extensions_size.to_be_bytes());
+        hello
+    }
+
+    #[test]
+    fn early_data_and_extra_handshake_bytes_fail_before_dial() {
+        let hello = client_hello("api.example.test");
+        let early_data = append_tls_extension(hello.clone(), 42, &[]);
+        let mut extra_handshake = hello;
+        extra_handshake.extend_from_slice(&[0, 0, 0, 0]);
+        let extra_size = (extra_handshake.len() - 5) as u16;
+        extra_handshake[3..5].copy_from_slice(&extra_size.to_be_bytes());
+        for malformed in [early_data, extra_handshake] {
+            let root = fixture_dir(); let calls = Arc::new(AtomicUsize::new(0));
+            let gateway = gateway(root.path(), vec!["1.1.1.1:443".parse().unwrap()],
+                "127.0.0.1:1".parse().unwrap(), calls.clone());
+            let mut request_bytes = b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n".to_vec();
+            request_bytes.extend_from_slice(&malformed);
+            assert!(request(gateway.socket(), &request_bytes).starts_with(b"HTTP/1.1 200"));
+            assert_eq!(calls.load(Ordering::Acquire), 0);
         }
     }
 
@@ -674,6 +721,8 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let error = EgressGateway::start_for_session(&path, hosts()).err().unwrap();
+        assert!(error.to_string().contains("network-none Docker session"));
+        let error = EgressGateway::start_hardened_for_session(&path, b"{}", hosts()).err().unwrap();
         assert!(error.to_string().contains("network-none Docker session"));
         assert!(!session.join("egress.sock").exists());
     }

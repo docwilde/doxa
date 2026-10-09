@@ -1,7 +1,7 @@
 //! Bounded child supervision for a future plugin sandbox launcher.
 //! This accepts a caller-built Command and does not certify its isolation.
 //! It is unwired from native-plugin commands and the TUI.
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -10,6 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const MAX_STREAM_BYTES: usize = 64 * 1024;
+// Header plus the maximum module size. The caller's frame is copied nowhere:
+// the parent writes it into one nonblocking pipe while draining both outputs.
+const MAX_INPUT_BYTES: usize = 8 * 1024 * 1024 + 44;
 const POLL: Duration = Duration::from_millis(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,15 +104,32 @@ pub(crate) fn supervise(
     cancel: &AtomicBool,
     deadline: Instant,
 ) -> io::Result<Capture> {
+    supervise_with_input(command, None, cancel, deadline)
+}
+
+/// Supervise a caller-built child and deliver at most one bounded input frame.
+/// Output is drained while the input pipe is written, so a child which writes
+/// before reading cannot deadlock the parent. An overlong input is refused
+/// before spawn. The child sees EOF after the final byte.
+pub(crate) fn supervise_with_input(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> io::Result<Capture> {
+    if input.is_some_and(|bytes| bytes.len() > MAX_INPUT_BYTES) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "child input exceeds frame limit"));
+    }
     if cancel.load(Ordering::Acquire) || Instant::now() >= deadline {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "child cancelled before spawn"));
     }
     command.process_group(0)
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn()?;
     let group_id = child.id();
+    let mut stdin = child.stdin.take();
     let Some(mut stdout) = child.stdout.take() else {
         let _ = stop_group(&mut child, group_id);
         return Err(io::Error::other("missing child stdout"));
@@ -118,7 +138,9 @@ pub(crate) fn supervise(
         let _ = stop_group(&mut child, group_id);
         return Err(io::Error::other("missing child stderr"));
     };
-    if let Err(error) = nonblocking(stdout.as_raw_fd()).and_then(|_| nonblocking(stderr.as_raw_fd())) {
+    if let Err(error) = nonblocking(stdout.as_raw_fd())
+        .and_then(|_| nonblocking(stderr.as_raw_fd()))
+        .and_then(|_| stdin.as_ref().map_or(Ok(()), |pipe| nonblocking(pipe.as_raw_fd()))) {
         let _ = stop_group(&mut child, group_id);
         return Err(error);
     }
@@ -127,6 +149,7 @@ pub(crate) fn supervise(
     let mut out_eof = false;
     let mut err_eof = false;
     let mut exited = false;
+    let mut input_position = 0;
     let result = loop {
         if cancel.load(Ordering::Acquire) { break Ok(StopReason::Cancelled); }
         if Instant::now() >= deadline { break Ok(StopReason::Timeout); }
@@ -139,6 +162,19 @@ pub(crate) fn supervise(
             Ok(true) => break Ok(StopReason::OutputLimit),
             Err(error) => break Err(error),
             Ok(false) => {}
+        }
+        if let (Some(pipe), Some(bytes)) = (stdin.as_mut(), input) {
+            if input_position < bytes.len() {
+                let end = (input_position + 64 * 1024).min(bytes.len());
+                match pipe.write(&bytes[input_position..end]) {
+                    Ok(count) => input_position += count,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+                    Err(error) if error.kind() == io::ErrorKind::BrokenPipe => { stdin = None; },
+                    Err(error) => break Err(error),
+                }
+            }
+            if input_position == bytes.len() { stdin = None; }
         }
         if !exited {
             match peek_exited(group_id) {
@@ -285,5 +321,36 @@ mod tests {
         // Bubblewrap maps its child's signal to exit code 128 + signal.
         // This cannot be distinguished from a child that exits 137 itself.
         assert_eq!(capture.outcome, Outcome::Exit(128 + libc::SIGKILL));
+    }
+
+    #[test]
+    fn input_pipe_delivers_exact_frame_and_eof() {
+        let bytes = vec![b'x'; 256 * 1024];
+        let mut command = Command::new("/usr/bin/wc");
+        command.arg("-c");
+        let capture = supervise_with_input(&mut command, Some(&bytes), &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(3)).unwrap();
+        assert_eq!(capture.outcome, Outcome::Exit(0));
+        assert_eq!(String::from_utf8(capture.stdout).unwrap().trim(), bytes.len().to_string());
+    }
+
+    #[test]
+    fn child_that_never_reads_input_is_stopped_at_deadline() {
+        let bytes = vec![b'x'; MAX_INPUT_BYTES];
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let capture = supervise_with_input(&mut command, Some(&bytes), &AtomicBool::new(false),
+            Instant::now() + Duration::from_millis(120)).unwrap();
+        assert_eq!(capture.outcome, Outcome::Timeout);
+    }
+
+    #[test]
+    fn oversized_input_refuses_spawn() {
+        let bytes = vec![b'x'; MAX_INPUT_BYTES + 1];
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        let error = supervise_with_input(&mut command, Some(&bytes), &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(1)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 }

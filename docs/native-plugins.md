@@ -120,12 +120,11 @@ inodes and current owner approval against the earlier review, and returns the
 validated module bytes. A future runner must use those bytes without re-opening
 a path, enforce each grant and isolate crashes and resource use.
 
-Wasmi 2.0.0 now supplies an unwired interpreter core and bounded,
-digest-checked request and response frames for approved packages with zero
-grants. A separate unwired child supervisor now has a wall deadline,
-cancellation and 64 KiB limits for each output stream. It kills its owned
-process group and reaps the leader. This still has no public run command or
-package child: OS resource limits and file/network isolation have not passed.
-The interpreter is currently exercised only by tests; running untrusted code
-inside DOXA would be unsafe. Native shared libraries, scripts, provider backends, hooks
-and automatic startup remain unsupported.
+Wasmi 2.0.0 supplies a grantless interpreter and bounded, digest-checked
+request and response frames. A separate `doxa-plugin-worker` binary decodes
+the frame itself. The unwired Linux supervisor stages a private namespace,
+cgroup resource limits, a wall deadline and bounded output; tests exercise
+the worker and namespace fixtures. No public run command or TUI activation
+exists until the complete cgroup path passes containment tests on a delegated
+host. Native shared libraries, scripts, provider backends, hooks and automatic
+startup remain unsupported.

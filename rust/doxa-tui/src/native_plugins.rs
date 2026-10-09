@@ -13,13 +13,19 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub const API_VERSION: u32 = 1;
 pub mod packages;
-// Staged worker contract has no production caller until the OS sandbox lands.
+// Staged worker contract has no TUI or plugin-command caller.
 #[allow(dead_code)]
 pub(crate) mod runner;
 // Child lifecycle component is staged without any package execution route.
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 pub(crate) mod runner_process;
+#[cfg(target_os = "linux")]
+pub(crate) mod runner_sandbox;
+
+/// Entry used only by the separate `doxa-plugin-worker` binary. Native TUI
+/// commands never invoke it in-process.
+pub fn plugin_worker_stdio() -> io::Result<()> { runner::serve_stdio() }
 const MAX_CONFIG: u64 = 1024 * 1024;
 const MAX_MANIFEST: u64 = 16 * 1024;
 const MAX_PLUGINS: usize = 16;

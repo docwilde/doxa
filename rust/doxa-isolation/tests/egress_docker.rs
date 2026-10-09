@@ -123,6 +123,43 @@ with ssl.create_default_context().wrap_socket(raw, server_hostname=host) as tls:
     print(json.dumps({'tls_verified': True, 'http_status': status}))
 "#;
 
+// A credential-free standard-library client exercises the common provider
+// pattern: HTTPS_PROXY, streaming body reads, a second denied destination and
+// an attempted direct fallback. This is not a Claude/Codex login proof.
+const PROVIDER_STYLE_REQUEST: &str = r#"
+import json, sys, urllib.error, urllib.request
+host = sys.argv[1]
+proxy = urllib.request.getproxies().get('https')
+if proxy != 'http://127.0.0.1:33128':
+    raise RuntimeError('HTTPS_PROXY was not selected')
+with urllib.request.urlopen('https://' + host + '/', timeout=12) as response:
+    status = response.status
+    chunks = 0
+    while chunks < 4:
+        part = response.read(128)
+        if not part:
+            break
+        chunks += 1
+    if not 200 <= status < 300 or chunks == 0:
+        raise RuntimeError('provider-style HTTPS stream unavailable')
+try:
+    urllib.request.urlopen('https://denied.example/', timeout=5)
+except urllib.error.URLError as exc:
+    if '403' not in str(exc):
+        raise RuntimeError('denied destination did not reach the gateway') from exc
+else:
+    raise RuntimeError('denied destination unexpectedly reached')
+direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    direct.open('https://' + host + '/', timeout=2)
+except urllib.error.URLError:
+    pass
+else:
+    raise RuntimeError('direct fallback bypassed network-none')
+print(json.dumps({'proxy_selected': True, 'stream_chunks': chunks,
+                  'denied_connect': True, 'direct_fallback_blocked': True}, sort_keys=True))
+"#;
+
 fn verified_probe_reply(bytes: &[u8]) -> io::Result<u16> {
     if bytes.len() > 128 { return Err(io::Error::other("upstream probe reply exceeded bound")); }
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
@@ -191,6 +228,31 @@ fn network_none_worker_reaches_one_allowlisted_public_https_upstream_only() {
         "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "python3", "-c",
         "import socket; socket.create_connection(('1.1.1.1',443),timeout=2)"]).unwrap();
     assert!(!direct_ip.status.success(), "network-none worker reached a public IP directly");
+    drop(gateway);
+    fixture.runtime.stop().unwrap();
+}
+
+#[test]
+#[ignore = "requires explicit public 2xx upstream with a body, pinned Python fixture image and task-local rootless Engine"]
+fn network_none_provider_style_proxy_stream_denies_second_host_and_direct_fallback() {
+    let upstream = std::env::var("DOXA_ISOLATION_TEST_EGRESS_UPSTREAM")
+        .expect("explicit credential-free public HTTPS hostname");
+    let mut fixture = fixture();
+    let gateway = EgressGateway::start_for_session(
+        &manifest_path(&fixture.home, &fixture.id).unwrap(),
+        AllowedHosts::new(&[upstream.clone()]).unwrap()).unwrap();
+    proxy(&fixture);
+    let output = docker(&fixture.container.host, &["exec", &fixture.container.id,
+        "/usr/bin/env", "-i", "PATH=/usr/bin:/bin",
+        "HTTPS_PROXY=http://127.0.0.1:33128", "HTTP_PROXY=http://127.0.0.1:33128",
+        "NO_PROXY=", "python3", "-c", PROVIDER_STYLE_REQUEST, &upstream]).unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stdout.len() <= 256);
+    let proof: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(proof, serde_json::json!({"proxy_selected":true,
+        "stream_chunks":proof["stream_chunks"],"denied_connect":true,
+        "direct_fallback_blocked":true}));
+    assert!(proof["stream_chunks"].as_u64().is_some_and(|n| (1..=4).contains(&n)));
     drop(gateway);
     fixture.runtime.stop().unwrap();
 }
