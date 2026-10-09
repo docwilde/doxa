@@ -157,7 +157,13 @@ def check_bwrap() -> str:
         "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
         "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
         "--proc", "/proc", "--dev", "/dev", "--size", "16777216",
-        "--tmpfs", "/tmp", "--", "/bin/true",
+        "--tmpfs", "/tmp", "--", "/bin/sh", "-ec",
+        "for tool in /bin/bash /bin/sh /bin/sleep /usr/bin/awk /usr/bin/python3 "
+        "/usr/bin/readlink /usr/bin/seq /usr/bin/setsid; do "
+        "test -x \"$tool\" || { echo \"sandbox tool missing: $tool\" >&2; exit 1; }; done\n"
+        "/bin/bash -c :\n/bin/sleep 0\n/usr/bin/awk 'BEGIN { exit 0 }' /dev/null\n"
+        "/usr/bin/python3 -c pass\n/usr/bin/readlink /proc/self/ns/net >/dev/null\n"
+        "/usr/bin/seq 1 1 >/dev/null\n/usr/bin/setsid /bin/true",
     ], capture_output=True, timeout=5, check=False)
     require(smoke.returncode == 0,
             "Bubblewrap cannot create the required private namespaces: "
