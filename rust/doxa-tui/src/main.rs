@@ -59,6 +59,8 @@ Commands:
                        Discover plugins or change sanitized adoption for new sessions
   native-plugin preflight NAME
                        Review one owner-local WebAssembly package without running it
+  native-plugin run NAME --grantless-prototype
+                       Run a zero-grant, owner-approved package in a Linux cgroup sandbox
   codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH
                        Query current Rust syntax and structural module files with source hashes
   codegraph --lore-map [--root WORKTREE] file|imports|calls|modules PATH
@@ -239,7 +241,9 @@ fn run(args: &[String]) -> io::Result<()> {
                 match args {
                     [_, action, name] if action == "preflight" =>
                         print!("{}", operations::native_plugin_package_preflight(name)?),
-                    _ => return Err(invalid("usage: doxa native-plugin preflight NAME")),
+                    [_, action, name, flag] if action == "run" && flag == "--grantless-prototype" =>
+                        println!("isolated plugin returned {}", operations::native_plugin_run_grantless(name)?),
+                    _ => return Err(invalid("usage: doxa native-plugin preflight NAME | run NAME --grantless-prototype")),
                 }
                 return Ok(());
             }

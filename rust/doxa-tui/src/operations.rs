@@ -3,6 +3,8 @@
 
 use std::io;
 use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -354,6 +356,31 @@ pub(crate) fn doxa_home() -> io::Result<PathBuf> {
 
 pub fn native_plugin_package_preflight(name: &str) -> io::Result<String> {
     Ok(crate::native_plugins::packages::preflight(&doxa_home()?, name)?.report())
+}
+
+/// This explicit CLI action is the only app route to the grantless child.
+/// Signal flags let the sandbox supervisor kill its cgroup before CLI exit.
+#[cfg(target_os = "linux")]
+pub fn native_plugin_run_grantless(name: &str) -> io::Result<i32> {
+    use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
+    use signal_hook::{flag, low_level, SigId};
+
+    struct Signals { cancel: Arc<AtomicBool>, ids: Vec<SigId> }
+    impl Drop for Signals {
+        fn drop(&mut self) {
+            for id in self.ids.drain(..) { low_level::unregister(id); }
+        }
+    }
+    let mut signals = Signals { cancel: Arc::new(AtomicBool::new(false)), ids: Vec::new() };
+    for signal in [SIGINT, SIGTERM, SIGHUP] {
+        signals.ids.push(flag::register(signal, Arc::clone(&signals.cancel))?);
+    }
+    crate::native_plugins::run_grantless_package(&doxa_home()?, name, &signals.cancel)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn native_plugin_run_grantless(_name: &str) -> io::Result<i32> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "isolated plugin runner requires Linux"))
 }
 
 fn safe_report_value(value: &str) -> String {

@@ -40,8 +40,8 @@ struct OwnerApproval {
     grants: Vec<String>,
 }
 
-/// A review result, never an activation token. A future runner must use a
-/// fresh recheck and enforce its own sandbox, resource limits and grants.
+/// A review result, never an activation token. The grantless CLI runner uses
+/// a fresh recheck and enforces its own sandbox and resource limits.
 #[derive(Debug)]
 pub struct Review {
     pub name: String,
@@ -55,7 +55,7 @@ pub struct Review {
 }
 
 /// Immutable bytes from a fresh approved identity recheck. This is not an
-/// executable handle: DOXA has no module runner or grant implementation.
+/// executable handle: only the explicit grantless sandbox route can run it.
 #[derive(Debug)]
 pub struct RecheckedPackage {
     review: Review,
@@ -71,7 +71,10 @@ impl Review {
     pub fn report(&self) -> String {
         let grants = if self.requested_grants.is_empty() { "none".to_owned() }
             else { self.requested_grants.join(", ") };
-        format!("Package: {} {}\nFormat: wasm-core-v1 (fully validated WebAssembly 1.0, no imports or start)\nManifest SHA-256: {}\nModule SHA-256: {}\nRequested grants: {}\nOwner approval: {}\nOpened inodes (device:inode): manifest {}:{}, module {}:{}\nExecution: unavailable (no approved runner command)\n",
+        let execution = if self.owner_approved && self.requested_grants.is_empty() {
+            "explicit Linux grantless CLI prototype eligible; delegated cgroup still required"
+        } else { "unavailable (requires exact zero-grant approval)" };
+        format!("Package: {} {}\nFormat: wasm-core-v1 (fully validated WebAssembly 1.0, no imports or start)\nManifest SHA-256: {}\nModule SHA-256: {}\nRequested grants: {}\nOwner approval: {}\nOpened inodes (device:inode): manifest {}:{}, module {}:{}\nExecution: {execution}\n",
             self.name, self.version, self.manifest_sha256, self.module_sha256,
             grants, if self.owner_approved { "exact identity and grants match" } else { "review required" },
             self.manifest_inode.0, self.manifest_inode.1, self.module_inode.0, self.module_inode.1)

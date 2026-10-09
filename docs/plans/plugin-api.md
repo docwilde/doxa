@@ -1,6 +1,6 @@
 # Native DOXA plugin API
 
-Status: **data-only v1; package preflight, isolated-child components and tests staged; executable plugins remain unavailable**.
+Status: **data-only TUI v1; explicit Linux grantless CLI prototype; delegated-host containment proof open**.
 This plan supersedes the Python/Textual `Plugin` and `PANE_COMMANDS` draft. The
 Rust frontend uses its own command registry, palette and help panel. Claude Code
 plugin adoption through `/plugins` is a separate provider feature.
@@ -86,10 +86,12 @@ also rejects any memory or table without a declared maximum, memory above
 static admission bounds, **not runtime enforcement**. Validation does not
 make the module safe to run.
 
-Activation still needs cgroup-backed containment proof on a delegated host and
-an explicit grantless command with reviewed failure reporting. Preflight
-cannot establish safe execution. Native shared libraries and in-process
-callbacks remain out of scope.
+The explicit `doxa native-plugin run NAME --grantless-prototype` command now
+routes an approved zero-grant package through the cgroup-gated child boundary.
+It refuses execution when the delegated cgroup controls are unavailable.
+Aggregate containment still needs proof on a delegated host before TUI
+activation or broader plugin capabilities. Native shared libraries and
+in-process callbacks remain out of scope.
 
 ### Runner design and test seam
 
@@ -104,12 +106,12 @@ a freshly rechecked, owner-approved package with **zero grants**. Focused tests 
 a return value, infinite loop fuel exhaustion, trap, wrong signature, memory
 growth at the cap, changed approval and malformed request/response frames.
 
-This interpreter core is **not wired to a command or TUI path**. Unit tests
+This interpreter core is **not wired into the TUI process**. Unit tests
 invoke it in-process; production must not. The separate `doxa-plugin-worker`
 binary independently decodes and validates the bounded frame, executes the
 grantless module, and emits only the fixed 13-byte result. Child-process tests
 cover success, malformed, truncated, oversized and changed-digest requests,
-fuel exhaustion and traps. A separate, unwired child supervisor starts a caller-built
+fuel exhaustion and traps. A separate child supervisor starts a caller-built
 command in its own process group, bounds captured stdout and stderr to 64 KiB
 each, and can send one input frame of at most 8 MiB plus its header through a
 nonblocking pipe. It polls a wall deadline and cancellation flag, sends SIGKILL
@@ -119,7 +121,7 @@ death and no surviving marked descendant.
 The fixture also shows a diagnostic limit: Bubblewrap maps a child killed by
 SIGKILL to exit code 137, which is indistinguishable from a deliberate exit 137.
 
-An unwired Linux sandbox seam now requires a delegated cgroup v2 subtree with
+A Linux sandbox seam requires a delegated cgroup v2 subtree with
 `memory`, `pids` and `cpu` controllers before it can build a child command. It
 installs 256 MiB memory, zero swap, 16 PIDs and one CPU of aggregate bandwidth;
 the child also gets address-space, CPU-time, file-descriptor and core-dump
@@ -134,7 +136,7 @@ stopped by kernel limits. This host has no user-delegated cgroup subtree, so
 the aggregate limits and cgroup cleanup **cannot be exercised here**; admission
 refuses to spawn in that condition.
 
-The sandbox now opens the trusted worker executable with `O_NOFOLLOW` and
+The sandbox opens the trusted worker executable with `O_NOFOLLOW` and
 binds that descriptor into the private mount; replacing its pathname after
 open cannot replace the executed inode. Bubblewrap writes a bounded status
 receipt to a separate anonymous descriptor. The child emits a fixed entry
@@ -144,17 +146,18 @@ cancellations, output overflow, malformed responses and module traps have
 separate result classes. Bubblewrap cannot distinguish a signalled child from
 a deliberate nonzero exit, so those remain one abnormal-worker class. A
 setup failure and a worker failure before its entry marker remain one
-conservative class. There is still no end-to-end cgroup acceptance run on a
-delegated host. Thus DOXA has **no runner command or plugin execution path**.
-Do not treat owner approval,
+conservative class. The explicit CLI command now calls this seam with a
+five-second deadline and signal-driven cancellation. There is still no
+end-to-end cgroup acceptance run on a delegated host, so TUI execution stays
+disabled. Do not treat owner approval,
 the request frame, fuel or store limits as an execution switch. The handoff is
 `recheck_approved(home, review) -> RecheckedPackage`: it returns the exact,
 revalidated bytes and fails if either owner file, inode, digest, approval, or
 requested grant changed. The encoder consumes those bytes, never a reopened
 path.
 
-The first runnable prototype should be an explicit, grantless developer-only
-command, never TUI startup or a native slash command. It must require an
+The runnable prototype is an explicit, grantless developer-only CLI command,
+never TUI startup or a native slash command. It requires an
 approved package with **zero** requested grants and a single exported
 `doxa_main: () -> i32`; no WASI, host functions, imports, start function,
 ambient credentials, home directory, repository path, or provider connection.
@@ -167,8 +170,8 @@ exist.
 
 The remaining step is to prove the complete child path on a host with
 delegated controllers, including aggregate memory/CPU/PID enforcement and
-fork and process-group escape attempts. An explicit developer command may
-follow only after those gates pass. Parent-side deadlines and module-declared
+fork and process-group escape attempts. Wider activation may follow only after
+those gates pass. Parent-side deadlines and module-declared
 maxima are not hard resource guarantees. Other platforms stay unavailable
 until equivalent isolation is proven.
 
