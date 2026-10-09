@@ -49,9 +49,13 @@ fn delegated_parent_at(root: &Path, membership: &str, uid: u32, pid: u32) -> io:
     if leaf == root { return Err(unavailable("plugin supervisor leaf is the cgroup root")); }
     let parent = leaf.parent().filter(|parent| *parent != root && parent.starts_with(root))
         .ok_or_else(|| unavailable("plugin supervisor leaf lacks a delegated parent"))?;
-    let leaf_metadata = fs::symlink_metadata(&leaf)?;
-    if !leaf_metadata.is_dir() || leaf_metadata.file_type().is_symlink() {
-        return Err(unavailable("plugin supervisor cgroup is not a directory"));
+    let mut group = leaf.as_path();
+    while group != root {
+        let metadata = fs::symlink_metadata(group)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(unavailable("cgroup membership traverses a non-directory or symlink"));
+        }
+        group = group.parent().ok_or_else(|| unavailable("cgroup membership escaped the hierarchy"))?;
     }
     let leaf_procs = fs::read_to_string(leaf.join("cgroup.procs"))?;
     if !leaf_procs.lines().any(|line| line.parse::<u32>().ok() == Some(pid)) {
@@ -458,6 +462,12 @@ mod tests {
         }
         std::os::unix::fs::symlink(&parent, root.join("linked")).unwrap();
         assert!(delegated_parent_at(&root, "0::/linked/supervisor\n", uid, 4242).is_err());
+        let nested = parent.join("supervisor/nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(parent.join("supervisor/cgroup.procs"), "").unwrap();
+        fs::write(parent.join("supervisor/cgroup.subtree_control"), "cpu memory pids\n").unwrap();
+        fs::write(nested.join("cgroup.procs"), "4242\n").unwrap();
+        assert!(delegated_parent_at(&root, "0::/linked/supervisor/nested\n", uid, 4242).is_err());
     }
 
     #[test]
