@@ -94,11 +94,12 @@ endpoint has a different protocol and cannot accept an FCM token.
 
 There is no persistent shared key, file browser, or direct host command
 endpoint in this client. Protocol and hub tests cover registration scope,
-rotation, expiry, and generic payloads. This source change has not yet been
-built as an APK in the current environment, which lacks a JDK compiler and
-Android SDK 37. It has not been installed on a Firebase-enabled Android device
-or exercised against a provisioned FCM project and two-host tailnet. Device QA
-must cover token issuance and rotation, background delivery after process
+rotation, expiry, and generic payloads. An unconfigured debug APK was assembled
+locally on 2026-10-09 with Temurin JDK 21.0.12.1, Android SDK 37.0, and Gradle
+9.3.1; `:protocol:test` and `:app:lintDebug` passed in the same run. It has not
+been installed on a Firebase-enabled Android device or exercised against a
+provisioned FCM project and two-host tailnet. Device QA must cover token
+issuance and rotation, background delivery after process
 restart, opt-out while offline, Android notification permission, Tailscale
 reconnect, encrypted/plaintext sessions, duplicate request, stale approval,
 and host loss. No test sends a real notification.
