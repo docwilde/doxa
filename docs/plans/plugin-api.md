@@ -162,12 +162,15 @@ including cgroup writes, passed on a disposable delegated Ubuntu guest. This
 does not authorize TUI execution or nonempty grants.
 
 The sandbox opens the trusted worker executable with `O_NOFOLLOW` and
-binds that descriptor into the private mount; replacing its pathname after
-open cannot replace the executed inode. It also executes Bubblewrap through
-its checked descriptor, with an inode check immediately before `exec`, so a
-pathname replacement after validation cannot switch the wrapper. These
-checks assume trusted host executables cannot be rewritten in place by
-another process with the same user's privileges. Bubblewrap writes a bounded
+binds that descriptor into the private mount. It also executes Bubblewrap
+through its checked descriptor. Replacing either pathname after open now
+refuses launch; it cannot switch which binary starts. These
+checks now compare both opened executables' device, inode, ownership, mode,
+link count, size and modification/change timestamps again just before `exec`.
+The delegated cgroup path must also have no group- or world-writable component
+below the cgroup root. This narrows post-open mutation and cross-user cgroup
+interference, but still assumes a same-user process cannot rewrite trusted
+executables in the final check-to-exec interval. Bubblewrap writes a bounded
 status receipt to a separate anonymous descriptor. The child emits a fixed entry
 marker before reading the module, allowing the parent to distinguish a worker
 that fails after entry from sandbox or pre-entry failure. Timeouts,
