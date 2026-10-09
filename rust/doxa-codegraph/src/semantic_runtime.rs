@@ -907,6 +907,22 @@ else:
     }
 
     #[test]
+    fn observed_launcher_rederives_plan_before_any_docker_command() {
+        let mut fixture = observed_fixture();
+        fixture.plan.args.insert(1, "--privileged".into());
+        assert!(run_observed(&fixture).unwrap_err().contains("changed after validation"));
+        assert!(!fixture.root.path().join("docker-invocations").exists());
+        let mut fixture = observed_fixture();
+        fixture.plan.initialize["params"]["initializationOptions"]["procMacro"]["enable"] = json!(true);
+        assert!(run_observed(&fixture).unwrap_err().contains("changed after validation"));
+        assert!(!fixture.root.path().join("docker-invocations").exists());
+        let mut fixture = observed_fixture();
+        fixture.plan.docker_host = "unix:///var/run/docker.sock".into();
+        assert!(run_observed(&fixture).is_err());
+        assert!(!fixture.root.path().join("docker-invocations").exists());
+    }
+
+    #[test]
     fn docker_probe_has_wall_clock_and_output_bounds() {
         for (mode, reason) in [("hang", "deadline"), ("flood", "exceeds")] {
             let fixture = observed_fixture();

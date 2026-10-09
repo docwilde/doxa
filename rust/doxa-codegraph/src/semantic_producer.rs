@@ -110,8 +110,13 @@ impl ProducerPlan {
         if !docker_binary.is_absolute() || !cidfile.is_absolute() || cidfile.symlink_metadata().is_ok() {
             return Err("Docker binary and fresh CID file must be absolute paths".into());
         }
-        if self.args.last().and_then(|arg| arg.to_str()) != Some(self.image.as_str()) {
-            return Err("Docker plan image and arguments differ".into());
+        // ProducerPlan's fields are public for inspection, so rederive the
+        // complete profile before granting a launch. A caller must not be
+        // able to add --privileged or change LSP configuration after planning.
+        let expected = plan_rust_analyzer(&self.root, &self.image, &self.docker_host, true)?;
+        if self.args != expected.args || self.initialize != expected.initialize
+            || self.attestation != expected.attestation || self.root != expected.root {
+            return Err("Docker producer plan changed after validation".into());
         }
         let parent = cidfile.parent().ok_or("missing private CID directory")?;
         let metadata = parent.symlink_metadata().map_err(|_| "missing private CID directory")?;
