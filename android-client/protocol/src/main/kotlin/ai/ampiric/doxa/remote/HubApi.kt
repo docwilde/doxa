@@ -31,6 +31,7 @@ data class PendingCommand(
 
 class HubApi(rawOrigin: String, private val key: ByteArray?) {
     private val origin = Wire.origin(rawOrigin)
+    @Volatile private var hubBoot: String? = null
     private fun route(path: String): URL = java.net.URI(origin + path).toURL()
 
     private fun connection(path: String, method: String, stream: Boolean = false): HttpURLConnection {
@@ -110,10 +111,12 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
         delete("api/push/android", JSONObject().put("token", token))
     }
 
-    suspend fun sessions(): List<Session> = withContext(Dispatchers.IO) {
-        val items = get("api/sessions").getJSONArray("sessions")
+    internal fun parseInventory(inventory: JSONObject): List<Session> {
+        val boot = inventory.getString("hub_boot")
+        require(AndroidWriteId.validBoot(boot)) { "Invalid hub boot nonce" }
+        val items = inventory.getJSONArray("sessions")
         require(items.length() <= 64) { "Invalid hub session inventory" }
-        List(items.length()) { index ->
+        val sessions = List(items.length()) { index ->
             val row = items.getJSONObject(index)
             val id = row.getString("id")
             require(Wire.target(id)) { "Invalid hub session target" }
@@ -121,25 +124,50 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
                 row.optString("engine", "session").take(32), row.optBoolean("encrypted"),
                 row.optString("incarnation").take(64))
         }
+        hubBoot = boot
+        return sessions
     }
 
-    fun prepare(target: String, operation: String, payload: JSONObject, encrypted: Boolean): PendingCommand {
+    suspend fun sessions(): List<Session> = withContext(Dispatchers.IO) {
+        parseInventory(get("api/sessions"))
+    }
+
+    fun prepare(target: String, operation: String, payload: JSONObject, encrypted: Boolean,
+                incarnation: String? = null): PendingCommand {
         require(Wire.target(target) && operation in setOf("prompt", "answer", "transcript"))
         require(!encrypted || key != null) { "Choose the shared key to open this session" }
-        val requestId = UUID.randomUUID().toString()
+        val write = operation != "transcript"
+        val boot = if (write) hubBoot ?: error("Refresh the hub inventory before writing") else null
+        if (write) require(PendingWriteScope(origin, target, incarnation ?: "").valid()) {
+            "Invalid session incarnation"
+        }
+        val requestId = if (boot != null) AndroidWriteId.new(boot) else UUID.randomUUID().toString()
         val plain = JSONObject(payload.toString()).put("request_id", requestId)
             .put("issued_at", System.currentTimeMillis() / 1000)
+        if (write) plain.put("hub_boot", boot).put("incarnation", incarnation)
         val body = if (encrypted) JSONObject().put("request_id", requestId)
             .put("sealed", Wire.seal(key!!, "$target|command|$operation", plain)) else plain
+        if (write && encrypted) body.put("hub_boot", boot).put("incarnation", incarnation)
         return PendingCommand(target, operation, requestId, System.currentTimeMillis(), body,
             JSONObject(payload.toString()), encrypted)
+    }
+
+    suspend fun fence(marker: PendingWriteMarker): WriteFenceResult = withContext(Dispatchers.IO) {
+        require(marker.valid() && marker.scope.origin == origin) { "Invalid write recovery scope" }
+        val result = post("api/android/requests/${marker.requestId}/fence", JSONObject()
+            .put("target", marker.scope.target).put("operation", marker.operation)
+            .put("incarnation", marker.scope.incarnation))
+        WriteFenceResult.decode(result)
     }
 
     suspend fun submit(command: PendingCommand, encrypted: Boolean): JSONObject = withContext(Dispatchers.IO) {
         require(System.currentTimeMillis() - command.createdAt < 120_000) {
             "Request expired; inspect the session before sending a new request"
         }
-        val queued = post("api/sessions/${command.target}/${command.operation}", command.body)
+        val path = if (command.operation == "transcript")
+            "api/sessions/${command.target}/transcript"
+        else "api/android/sessions/${command.target}/${command.operation}"
+        val queued = post(path, command.body)
         val id = queued.optString("command_id")
         require(Wire.id(id)) { "Hub returned no command ID" }
         repeat(240) {

@@ -1,6 +1,38 @@
 package ai.ampiric.doxa.remote
 
 import org.json.JSONObject
+import java.util.UUID
+
+/** Boot-scoped IDs let the hub reject a delayed POST after its volatile state restarts. */
+object AndroidWriteId {
+    private val boot = Regex("[0-9a-f]{32}")
+    private val id = Regex("[0-9a-f]{32}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+    fun validBoot(value: String): Boolean = boot.matches(value)
+    fun valid(value: String): Boolean = id.matches(value)
+    fun new(boot: String): String {
+        require(validBoot(boot)) { "Invalid hub boot nonce" }
+        return "$boot-${UUID.randomUUID()}"
+    }
+}
+
+/** Only the hub's documented terminal/undelivered fence states permit review. */
+class WriteFenceResult private constructor(val status: String, val safeToClear: Boolean) {
+    companion object {
+        private val SAFE = setOf("absent_fenced", "queued_cancelled", "expired_undelivered", "terminal")
+        private val UNSAFE = setOf("delivered_unsettled", "unknown_old_boot")
+        fun decode(value: JSONObject): WriteFenceResult {
+            val status = value.getString("status")
+            val safe = value.getBoolean("safe_to_clear")
+            require(status in SAFE || status in UNSAFE) { "Unknown write fence status" }
+            require(safe == (status in SAFE)) { "Contradictory write fence result" }
+            if (status == "terminal") require(value.optString("command_status") in setOf("accepted", "refused")) {
+                "Missing terminal command status"
+            }
+            return WriteFenceResult(status, safe)
+        }
+    }
+}
 
 /** Body-free scope for a write whose outcome may be unknown after process death. */
 data class PendingWriteScope(val origin: String, val target: String, val incarnation: String) {
@@ -17,7 +49,7 @@ data class PendingWriteMarker(
     val createdAt: Long
 ) {
     fun valid(): Boolean = scope.valid() && operation in setOf("prompt", "answer") &&
-        Wire.id(requestId) && createdAt > 0
+        AndroidWriteId.valid(requestId) && createdAt > 0
 
     fun encode(): String {
         require(valid()) { "Invalid pending write marker" }
@@ -63,6 +95,7 @@ class PendingWriteGuard(private val store: PendingWriteMarkerStore) {
     var marker: PendingWriteMarker? = null
         private set
     private var observedScope: PendingWriteScope? = null
+    private var fencedMarker: PendingWriteMarker? = null
 
     init {
         val raw = try { store.read() } catch (_: Exception) { unreadable = true; null }
@@ -79,6 +112,7 @@ class PendingWriteGuard(private val store: PendingWriteMarkerStore) {
         if (blocked || !next.valid() || !runCatching { store.write(next.encode()) }.getOrDefault(false)) return false
         marker = next
         observedScope = null
+        fencedMarker = null
         return true
     }
 
@@ -88,24 +122,33 @@ class PendingWriteGuard(private val store: PendingWriteMarkerStore) {
         if (!matches(current) || !runCatching { store.clear() }.getOrDefault(false)) return false
         marker = null
         observedScope = null
+        fencedMarker = null
         return true
+    }
+
+    fun recordFence(current: PendingWriteMarker, result: WriteFenceResult): Boolean {
+        if (!matches(current)) return false
+        fencedMarker = if (result.safeToClear) current else null
+        observedScope = null
+        return result.safeToClear
     }
 
     fun forgetSnapshot() { observedScope = null }
 
     fun observeSnapshot(scope: PendingWriteScope, pendingInputsComplete: Boolean) {
         observedScope = if (!unreadable && blocked && pendingInputsComplete && scope.valid() &&
-            marker?.scope == scope) scope else null
+            marker?.scope == scope && fencedMarker == marker) scope else null
     }
 
     fun canAcknowledge(scope: PendingWriteScope): Boolean = !unreadable && blocked &&
-        observedScope == scope && marker?.scope == scope
+        observedScope == scope && marker?.scope == scope && fencedMarker == marker
 
     fun acknowledgeAfterReview(scope: PendingWriteScope): Boolean {
         if (!canAcknowledge(scope) || !runCatching { store.clear() }.getOrDefault(false)) return false
         marker = null
         unreadable = false
         observedScope = null
+        fencedMarker = null
         return true
     }
 
@@ -115,6 +158,7 @@ class PendingWriteGuard(private val store: PendingWriteMarkerStore) {
             !runCatching { store.write(next.encode()) }.getOrDefault(false)) return false
         marker = next
         observedScope = null
+        fencedMarker = null
         return true
     }
 }

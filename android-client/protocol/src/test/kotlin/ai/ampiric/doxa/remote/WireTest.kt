@@ -37,12 +37,39 @@ class WireTest {
 
     @Test fun retriesKeepTheExactRequestAndId() {
         val api = HubApi("https://owner.tailnet.ts.net/", ByteArray(32) { 7 })
-        val request = api.prepare("host~session", "prompt", JSONObject().put("text", "hello"), true)
+        val boot = "0123456789abcdef0123456789abcdef"
+        api.parseInventory(JSONObject().put("hub_boot", boot).put("sessions", org.json.JSONArray()))
+        val request = api.prepare("host~session", "prompt", JSONObject().put("text", "hello"), true,
+            "incarnation-1")
         assertTrue(Wire.id(request.requestId))
+        assertTrue(AndroidWriteId.valid(request.requestId))
+        assertTrue(request.requestId.startsWith("$boot-"))
         assertEquals(request.requestId, request.body.getString("request_id"))
+        assertEquals(boot, request.body.getString("hub_boot"))
+        assertEquals("incarnation-1", request.body.getString("incarnation"))
         val plain = Wire.open(ByteArray(32) { 7 }, "host~session|command|prompt",
             request.body.getJSONObject("sealed"))
         assertEquals(request.requestId, plain.getString("request_id"))
+        assertEquals(boot, plain.getString("hub_boot"))
+        assertEquals("incarnation-1", plain.getString("incarnation"))
         assertEquals("hello", plain.getString("text"))
+        val plainRequest = api.prepare("host~session", "answer", JSONObject().put("id", "question-1")
+            .put("answer", JSONObject().put("decision", "deny")), false, "incarnation-1")
+        assertEquals(boot, plainRequest.body.getString("hub_boot"))
+        assertEquals("incarnation-1", plainRequest.body.getString("incarnation"))
+        assertThrows(Exception::class.java) {
+            HubApi("https://owner.tailnet.ts.net/", null).prepare("host~session", "prompt",
+                JSONObject().put("text", "hello"), false, "incarnation-1")
+        }
+        assertThrows(Exception::class.java) {
+            api.prepare("host~session", "prompt", JSONObject().put("text", "hello"), false,
+                "different\nincarnation")
+        }
+        assertFalse(AndroidWriteId.valid("00000000-0000-4000-8000-000000000001"))
+        assertFalse(AndroidWriteId.valid("$boot-00000000-0000-4000-8000-00000000000A"))
+        assertThrows(Exception::class.java) {
+            HubApi("https://owner.tailnet.ts.net/", null).parseInventory(JSONObject()
+                .put("sessions", org.json.JSONArray()))
+        }
     }
 }

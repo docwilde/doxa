@@ -45,12 +45,16 @@ encrypted envelope. After the host's two-minute freshness window, **Retry same
 request** first reloads the transcript. The user can review it before choosing
 **Send new request** and confirming the new submission.
 
-After process death, the body is gone and the app never replays the write. It
-blocks all new prompts and answers, including after changing hub or session,
-until a fresh authoritative snapshot of the saved hub and session incarnation,
-including a complete pending-input review, has loaded and the user explicitly
-acknowledges the uncertain result in the
-app. If that exact scope is unavailable, the readable marker stays blocked.
+After process death, the body is gone and the app never replays the write. The
+app first asks the hub to fence the saved request ID. Each Android write carries
+a hub-boot-scoped ID and exact session incarnation, so a delayed POST cannot
+arrive after a successful fence or cross a hub restart. A queued request is
+cancelled; an already delivered request stays blocked until the host reports a
+terminal result. Only then does the app load a fresh authoritative snapshot of
+the saved hub and session incarnation, including complete pending inputs, and
+offer explicit acknowledgment. New prompts and answers remain blocked across
+hub or session changes. If that exact scope is unavailable, or the hub rebooted
+while the request was uncertain, the readable marker stays blocked.
 An unreadable marker stays blocked because its request ID and scope cannot be
 fenced or verified. The app offers no in-app bypass; clearing app storage is a
 last resort after independent outcome review and also removes local settings

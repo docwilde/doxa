@@ -67,6 +67,8 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         private set
     var recoveryScopeChanged by mutableStateOf(false)
         private set
+    var recoveryFenceStatus by mutableStateOf<String?>(null)
+        private set
     var confirmRecovery by mutableStateOf(false)
         private set
     var confirmFresh by mutableStateOf(false)
@@ -117,9 +119,10 @@ private class RemoteController(private val prefs: SharedPreferences, private val
     fun acknowledgeRecovery() {
         val session = selected ?: return
         confirmRecovery = false
-        status = if (writeRecovery.acknowledgeAfterReview(writeScope(session)))
-            "Prior outcome acknowledged; new writes are available"
-        else "Could not clear the recovery marker; writes remain blocked"
+        val cleared = writeRecovery.acknowledgeAfterReview(writeScope(session))
+        if (cleared) recoveryFenceStatus = null
+        status = if (cleared) "Prior outcome acknowledged; new writes are available"
+            else "Could not clear the recovery marker; writes remain blocked"
         refreshRecovery()
     }
 
@@ -169,7 +172,8 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         connected = false; sessions = emptyList(); selected = null
         entries = emptyList(); pending = emptyList(); olderBefore = null
         uncertain = null; confirmFresh = false; readyFresh = false
-        confirmRecovery = false; writeRecovery.forgetSnapshot(); refreshRecovery()
+        confirmRecovery = false; recoveryFenceStatus = null
+        writeRecovery.forgetSnapshot(); refreshRecovery()
         status = "Disconnected; shared key cleared"
     }
 
@@ -186,7 +190,11 @@ private class RemoteController(private val prefs: SharedPreferences, private val
                     eventJob?.cancel(); selected = null; push.clearSelection(); entries = emptyList(); pending = emptyList()
                     writeRecovery.forgetSnapshot(); refreshRecovery()
                     status = "Session went offline"
-                } else status = "Session list refreshed"
+                } else {
+                    status = "Session list refreshed"
+                    if (active != null && uncertain == null && writeRecovery.marker?.scope == writeScope(active))
+                        select(active)
+                }
             } catch (error: Exception) { status = error.message ?: "Refresh failed" }
         }
     }
@@ -204,11 +212,15 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         selected = session; push.select(origin, session); entries = emptyList(); pending = emptyList(); olderBefore = null
         uncertain = null; readyFresh = false; questionIndex = 0; answers = emptyMap(); currentText = false
         confirmRecovery = false; writeRecovery.forgetSnapshot(); refreshRecovery()
+        recoveryFenceStatus = null
         prefs.edit().putString("session", session.id).apply()
         status = "Loading ${session.title}"
         scope.launch {
             try {
-                snapshot(client, session, mine)
+                val marker = writeRecovery.marker
+                if (marker != null && marker.scope == writeScope(session))
+                    fenceAndSnapshot(client, session, mine, marker)
+                else snapshot(client, session, mine)
                 if (mine == generation) follow(client, session, mine)
             } catch (error: Exception) {
                 if (mine == generation) status = error.message ?: "Session unavailable"
@@ -253,6 +265,25 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         refreshRecovery()
         status = if (pendingInputsComplete)
             "${session.title} · connected" else "Pending input review incomplete; refresh before answering"
+    }
+
+    private fun fenceMessage(status: String): String = when (status) {
+        "delivered_unsettled" -> "The earlier write is still unsettled at the host; refresh later"
+        "unknown_old_boot" -> "The hub restarted; the earlier delivery cannot be ruled out and writes remain blocked"
+        else -> "Write fence unavailable; writes remain blocked"
+    }
+
+    private suspend fun fenceAndSnapshot(client: HubApi, session: Session, mine: Int,
+                                         marker: PendingWriteMarker): WriteFenceResult? {
+        val fence = client.fence(marker)
+        if (mine != generation || api !== client) return null
+        val safe = writeRecovery.recordFence(marker, fence)
+        recoveryFenceStatus = fence.status
+        refreshRecovery()
+        snapshot(client, session, mine)
+        if (mine != generation || api !== client) return null
+        if (!safe) status = fenceMessage(fence.status)
+        return fence
     }
 
     fun older() {
@@ -360,13 +391,18 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         val item = pending.firstOrNull() ?: return
         val id = item.optString("id")
         if (!Wire.id(id) || busy || uncertain != null || writeRecovery.blocked) return
+        val mine = generation
         scope.launch {
             busy = true
             var submittedMarker: PendingWriteMarker? = null
+            var clientForWrite: HubApi? = null
             try {
                 val client = api ?: return@launch
+                if (mine != generation) return@launch
+                clientForWrite = client
                 // Re-read authoritative pending inputs; an SSE event alone cannot authorize an answer.
                 val latest = client.transcript(session.id, session.encrypted)
+                if (mine != generation || api !== client) return@launch
                 require(latest.optBoolean("pending_inputs_complete")) { "Pending input review incomplete" }
                 val latestInputs = latest.getJSONArray("pending_inputs")
                 val current = (0 until latestInputs.length()).map { latestInputs.getJSONObject(it) }
@@ -375,26 +411,29 @@ private class RemoteController(private val prefs: SharedPreferences, private val
                     "Pending input changed; review it again"
                 }
                 val payload = JSONObject().put("id", id).put("answer", answer)
-                val command = client.prepare(session.id, "answer", payload, session.encrypted)
+                val command = client.prepare(session.id, "answer", payload, session.encrypted,
+                    session.incarnation)
                 val marker = markerFor(session, command)
                 require(writeRecovery.begin(marker)) { "Could not save recovery marker; answer not sent" }
                 submittedMarker = marker
                 uncertain = command; readyFresh = false
+                recoveryFenceStatus = null
                 refreshRecovery()
                 val result = client.submit(command, session.encrypted)
-                if (!finishWrite(marker)) return@launch
+                if (!finishWrite(marker, mine, client)) return@launch
                 uncertain = null
                 pending = pending.filterNot { it.optString("id") == id }
                 questionIndex = 0; answers = emptyMap()
                 status = result.optString("status", "Answer delivered")
             } catch (error: RemoteRefusal) {
                 val marker = submittedMarker
-                if (marker != null && finishWrite(marker)) {
+                if (marker != null && finishWrite(marker, mine, clientForWrite)) {
                     uncertain = null
                     status = error.message ?: "Answer refused"
-                }
-            } catch (error: Exception) { status = error.message ?: "Answer outcome uncertain" }
-            finally { busy = false }
+                } else if (marker == null && mine == generation) status = error.message ?: "Answer refused"
+            } catch (error: Exception) {
+                if (mine == generation) status = error.message ?: "Answer outcome uncertain"
+            } finally { if (mine == generation) busy = false }
         }
     }
 
@@ -402,40 +441,49 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         val client = api ?: return
         if (writeRecovery.blocked || uncertain != null) return
         try {
-            val command = client.prepare(session.id, operation, payload, session.encrypted)
+            val command = client.prepare(session.id, operation, payload, session.encrypted,
+                session.incarnation)
             val marker = markerFor(session, command)
             require(writeRecovery.begin(marker)) { "Could not save recovery marker; request not sent" }
             uncertain = command; readyFresh = false
+            recoveryFenceStatus = null
             refreshRecovery()
-            scope.launch { deliver(client, command, marker) }
+            val mine = generation
+            scope.launch { deliver(client, command, marker, mine) }
         } catch (error: Exception) { status = error.message ?: "Invalid request" }
     }
 
-    private fun finishWrite(marker: PendingWriteMarker): Boolean {
+    private fun finishWrite(marker: PendingWriteMarker, mine: Int, client: HubApi?): Boolean {
+        if (mine != generation || client == null || api !== client) return false
         // A terminal response is known even when the local delete fails. Never offer a retry then.
         uncertain = null
         readyFresh = false
         val cleared = writeRecovery.finish(marker)
+        if (cleared) recoveryFenceStatus = null
         refreshRecovery()
         if (!cleared) status = "Outcome received, but recovery marker could not be cleared; writes remain blocked"
         return cleared
     }
 
-    private suspend fun deliver(client: HubApi, command: PendingCommand, marker: PendingWriteMarker) {
+    private suspend fun deliver(client: HubApi, command: PendingCommand, marker: PendingWriteMarker,
+                                mine: Int) {
+        if (mine != generation || api !== client) return
         busy = true
         try {
             client.submit(command, command.encrypted)
-            if (!finishWrite(marker)) return
+            if (!finishWrite(marker, mine, client)) return
             uncertain = null
             if (command.operation == "prompt" && draft.trim() == command.payload.optString("text")) updateDraft("")
             status = if (command.operation == "prompt") "Prompt delivered" else "Answer delivered"
         } catch (error: RemoteRefusal) {
-            if (finishWrite(marker)) {
+            if (finishWrite(marker, mine, client)) {
                 uncertain = null
                 status = error.message ?: "Request refused"
             }
-        } catch (error: Exception) { status = error.message ?: "Request outcome uncertain" }
-        finally { busy = false }
+        } catch (error: Exception) {
+            if (mine == generation && api === client) status = error.message ?: "Request outcome uncertain"
+        }
+        finally { if (mine == generation) busy = false }
     }
 
     fun retry() {
@@ -446,17 +494,23 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         val marker = markerFor(session, command)
         if (!writeRecovery.matches(marker)) return
         if (System.currentTimeMillis() - command.createdAt >= 120_000) {
+            val mine = generation
             scope.launch {
                 busy = true
                 try {
                     val session = selected ?: return@launch
-                    snapshot(client, session, generation)
-                    status = "Review the refreshed transcript before a new request"
-                    readyFresh = true
-                } catch (error: Exception) { status = error.message ?: "Review unavailable" }
-                finally { busy = false }
+                    val fence = fenceAndSnapshot(client, session, mine, marker)
+                    readyFresh = fence?.safeToClear == true &&
+                        writeRecovery.canAcknowledge(writeScope(session))
+                    if (readyFresh) status = "Review the refreshed transcript before a new request"
+                } catch (error: Exception) {
+                    if (mine == generation) status = error.message ?: "Review unavailable"
+                } finally { if (mine == generation) busy = false }
             }
-        } else scope.launch { deliver(client, command, marker) }
+        } else {
+            val mine = generation
+            scope.launch { deliver(client, command, marker, mine) }
+        }
     }
 
     fun cancelFresh() { confirmFresh = false }
@@ -468,16 +522,19 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         val session = selected ?: return
         confirmFresh = false; readyFresh = false
         if (busy || session.id != prior.target) return
+        val mine = generation
         scope.launch {
             busy = true
             var submittedMarker: PendingWriteMarker? = null
             try {
+                if (mine != generation || api !== client) return@launch
                 if (prior.operation == "answer") {
                     require(pending.any { it.optString("id") == prior.payload.optString("id") }) {
                         "The pending input is gone; no new answer sent"
                     }
                 }
-                val fresh = client.prepare(session.id, prior.operation, prior.payload, session.encrypted)
+                val fresh = client.prepare(session.id, prior.operation, prior.payload, session.encrypted,
+                    session.incarnation)
                 val previous = markerFor(session, prior)
                 require(writeRecovery.matches(previous)) { "Earlier recovery marker is unavailable" }
                 val marker = markerFor(session, fresh)
@@ -486,20 +543,22 @@ private class RemoteController(private val prefs: SharedPreferences, private val
                 }
                 submittedMarker = marker
                 uncertain = fresh
+                recoveryFenceStatus = null
                 refreshRecovery()
                 client.submit(fresh, session.encrypted)
-                if (!finishWrite(marker)) return@launch
+                if (!finishWrite(marker, mine, client)) return@launch
                 uncertain = null
                 if (prior.operation == "prompt" && draft.trim() == prior.payload.optString("text")) updateDraft("")
                 status = "New request delivered"
             } catch (error: RemoteRefusal) {
                 val marker = submittedMarker
-                if (marker != null && finishWrite(marker)) {
+                if (marker != null && finishWrite(marker, mine, client)) {
                     uncertain = null
                     status = error.message ?: "New request refused"
                 }
-            } catch (error: Exception) { status = error.message ?: "New request failed" }
-            finally { busy = false }
+            } catch (error: Exception) {
+                if (mine == generation) status = error.message ?: "New request failed"
+            } finally { if (mine == generation) busy = false }
         }
     }
 }
@@ -587,6 +646,14 @@ private fun RemoteScreen(state: RemoteController, alerts: LocalAlerts, push: Bac
                         "The selected hub or session incarnation differs from the saved write. " +
                             "Return to that exact scope and load its snapshot before clearing this block.",
                         style = MaterialTheme.typography.bodySmall)
+                    state.recoveryFenceStatus?.let { fence ->
+                        val message = when (fence) {
+                            "delivered_unsettled" -> "The host has not settled the earlier write. Refresh to check again."
+                            "unknown_old_boot" -> "The hub restarted and cannot prove the earlier write finished. Writes stay blocked."
+                            else -> null
+                        }
+                        if (message != null) Text(message, style = MaterialTheme.typography.bodySmall)
+                    }
                     if (!state.recoveryUnreadable) {
                         Text(if (state.recoveryReviewed) "Fresh snapshot loaded. Review the transcript and pending inputs."
                             else "Connect and load a complete snapshot of the saved session and pending inputs.",

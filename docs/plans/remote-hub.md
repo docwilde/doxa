@@ -168,10 +168,14 @@ submission is uncertain in the live process and shows an explicit confirmation
 before retrying an expired write. Before each POST, it synchronously saves a
 versioned, bounded marker containing only hub origin, target/incarnation,
 operation, request ID, and creation time. A failed save prevents submission.
-After process death or a scope change, it never replays a lost body and blocks
-new writes until an authoritative snapshot of the saved hub/session incarnation
-with complete pending inputs and explicit user acknowledgment. An unreadable
-marker remains blocked; it lacks a trustworthy request ID and scope to fence.
+After process death or a scope change, it never replays a lost body. Android
+writes use a hub-boot-scoped request ID and exact incarnation. Before review,
+the client fences that ID at the hub; a queued command is cancelled, while an
+already delivered command remains blocked until a terminal host result. Only a
+safe fence followed by an authoritative snapshot of the original incarnation
+with complete pending inputs and explicit user acknowledgment permits new writes.
+A changed hub boot or unreadable marker remains blocked; neither can prove the
+earlier delivery outcome from the volatile hub state.
 The host lease never leaves the connector.
 
 Keep session IDs, cursors, unsent drafts, the body-free uncertain-write marker,

@@ -5,8 +5,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PendingWriteRecoveryTest {
+    private val boot = "0123456789abcdef0123456789abcdef"
+    private val firstId = "$boot-00000000-0000-4000-8000-000000000001"
+    private val secondId = "$boot-00000000-0000-4000-8000-000000000002"
     private val scope = PendingWriteScope("https://owner.tailnet.ts.net/", "host~session", "incarnation-1")
-    private val marker = PendingWriteMarker(scope, "prompt", "write-1", 1_000)
+    private val marker = PendingWriteMarker(scope, "prompt", firstId, 1_000)
+    private val safeFence = WriteFenceResult.decode(JSONObject()
+        .put("status", "absent_fenced").put("safe_to_clear", true))
 
     private class Store(var value: String? = null) : PendingWriteMarkerStore {
         var failWrite = false
@@ -37,7 +42,7 @@ class PendingWriteRecoveryTest {
     }
 
     @Test fun malformedOrOversizedMarkersFailClosed() {
-        for (raw in listOf("", "{}", marker.encode().replace("write-1", "../write"),
+        for (raw in listOf("", "{}", marker.encode().replace(firstId, "../write"),
             marker.encode().replace("host~session", "other"),
             marker.encode().replace("\"v\":1", "\"v\":2"),
             marker.encode().replace("\"operation\":\"prompt\"", "\"operation\":12"),
@@ -46,8 +51,8 @@ class PendingWriteRecoveryTest {
             assertThrows(Exception::class.java) { PendingWriteMarker.decode(raw) }
             assertTrue(PendingWriteGuard(Store(raw)).blocked)
         }
-        assertFalse(PendingWriteMarker(scope.copy(incarnation = "x\n"), "prompt", "write-1", 1).valid())
-        assertFalse(PendingWriteMarker(scope.copy(incarnation = ""), "prompt", "write-1", 1).valid())
+        assertFalse(PendingWriteMarker(scope.copy(incarnation = "x\n"), "prompt", firstId, 1).valid())
+        assertFalse(PendingWriteMarker(scope.copy(incarnation = ""), "prompt", firstId, 1).valid())
     }
 
     @Test fun failedDurableSavePreventsSubmissionAndProcessRestartRetainsBlock() {
@@ -61,8 +66,11 @@ class PendingWriteRecoveryTest {
         val restarted = PendingWriteGuard(store)
         assertTrue(restarted.blocked)
         assertEquals(marker, restarted.marker)
-        assertFalse(restarted.begin(marker.copy(requestId = "write-2")))
+        assertFalse(restarted.begin(marker.copy(requestId = secondId)))
         assertFalse(restarted.canAcknowledge(scope))
+        restarted.observeSnapshot(scope, true)
+        assertFalse(restarted.canAcknowledge(scope))
+        assertTrue(restarted.recordFence(marker, safeFence))
         restarted.observeSnapshot(scope, true)
         assertTrue(restarted.canAcknowledge(scope))
         store.failClear = true
@@ -88,6 +96,7 @@ class PendingWriteRecoveryTest {
         val store = Store(marker.encode())
         val guard = PendingWriteGuard(store)
         val other = scope.copy(target = "host~other", incarnation = "incarnation-2")
+        assertTrue(guard.recordFence(marker, safeFence))
         guard.observeSnapshot(scope, true)
         assertTrue(guard.canAcknowledge(scope))
         for (changed in listOf(other, scope.copy(origin = "https://other.tailnet.ts.net/"),
@@ -129,6 +138,7 @@ class PendingWriteRecoveryTest {
         val answer = marker.copy(operation = "answer")
         val store = Store(answer.encode())
         val guard = PendingWriteGuard(store)
+        assertTrue(guard.recordFence(answer, safeFence))
         guard.observeSnapshot(scope, false)
         assertFalse(guard.canAcknowledge(scope))
         assertFalse(guard.acknowledgeAfterReview(scope))
@@ -144,9 +154,10 @@ class PendingWriteRecoveryTest {
         val store = Store()
         val guard = PendingWriteGuard(store)
         assertTrue(guard.begin(marker))
-        assertFalse(guard.finish(marker.copy(requestId = "write-2")))
-        val fresh = marker.copy(requestId = "write-2", createdAt = 2_000)
+        assertFalse(guard.finish(marker.copy(requestId = secondId)))
+        val fresh = marker.copy(requestId = secondId, createdAt = 2_000)
         assertFalse(guard.replaceAfterReview(marker, fresh, scope))
+        assertTrue(guard.recordFence(marker, safeFence))
         guard.observeSnapshot(scope, true)
         store.failWrite = true
         assertFalse(guard.replaceAfterReview(marker, fresh, scope))
@@ -160,5 +171,22 @@ class PendingWriteRecoveryTest {
         store.failClear = false
         assertTrue(guard.finish(fresh))
         assertFalse(guard.blocked)
+    }
+
+    @Test fun onlySafeFenceStatesEnablePostFenceSnapshotReview() {
+        val guard = PendingWriteGuard(Store(marker.encode()))
+        for (status in listOf("delivered_unsettled", "unknown_old_boot")) {
+            val result = WriteFenceResult.decode(JSONObject().put("status", status).put("safe_to_clear", false))
+            assertFalse(guard.recordFence(marker, result))
+            guard.observeSnapshot(scope, true)
+            assertFalse(guard.canAcknowledge(scope))
+        }
+        assertThrows(Exception::class.java) {
+            WriteFenceResult.decode(JSONObject().put("status", "delivered_unsettled").put("safe_to_clear", true))
+        }
+        assertTrue(guard.recordFence(marker, safeFence))
+        assertFalse(guard.canAcknowledge(scope))
+        guard.observeSnapshot(scope, true)
+        assertTrue(guard.canAcknowledge(scope))
     }
 }
