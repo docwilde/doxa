@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shlex
 import selectors
 import shutil
 import signal
@@ -173,6 +174,18 @@ def check_namespace_receipt(stdout: bytes, host: dict[str, str]) -> None:
                 f"Bubblewrap reused host {name} namespace")
 
 
+def sandbox_visible_tool(path: Path, visible_root: Path = Path("/usr")) -> str:
+    """Resolve host alternatives before entering a sandbox that mounts only /usr."""
+    resolved = path.resolve(strict=True)
+    require(resolved.is_relative_to(visible_root.resolve(strict=True)),
+            f"{path}: executable resolves outside the sandbox's /usr mount")
+    meta = resolved.stat()
+    require(stat.S_ISREG(meta.st_mode) and meta.st_uid in (0, os.geteuid())
+            and meta.st_mode & 0o022 == 0 and meta.st_mode & 0o111,
+            f"{path}: resolved executable is not trusted and executable")
+    return str(resolved)
+
+
 def check_bwrap() -> str:
     meta = BWRAP.lstat()
     require(stat.S_ISREG(meta.st_mode) and meta.st_uid in (0, os.geteuid())
@@ -185,14 +198,9 @@ def check_bwrap() -> str:
             "Bubblewrap lacks a launcher flag (especially --ro-bind-fd or --json-status-fd)")
     version = subprocess.run([str(BWRAP), "--version"], capture_output=True,
                              text=True, timeout=5, check=True).stdout.strip()
+    awk = shlex.quote(sandbox_visible_tool(Path("/usr/bin/awk")))
     host_namespaces = {name: os.readlink(f"/proc/self/ns/{name}") for name in NAMESPACES}
-    smoke = subprocess.run([
-        str(BWRAP), "--unshare-all", "--unshare-user", "--die-with-parent",
-        "--disable-userns", "--cap-drop", "ALL", "--clearenv",
-        "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
-        "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
-        "--proc", "/proc", "--dev", "/dev", "--size", "16777216",
-        "--tmpfs", "/tmp", "--", "/bin/sh", "-ec",
+    smoke_script = (
         "for tool in /bin/bash /bin/sh /bin/sleep /usr/bin/awk /usr/bin/python3 "
         "/usr/bin/readlink /usr/bin/seq /usr/bin/setsid; do "
         "test -x \"$tool\" || { echo \"sandbox tool missing: $tool\" >&2; exit 1; }; done\n"
@@ -208,7 +216,15 @@ def check_bwrap() -> str:
         "\"$(/usr/bin/readlink /proc/self/ns/net)\" "
         "\"$(/usr/bin/readlink /proc/self/ns/mnt)\" "
         "\"$(/usr/bin/readlink /proc/self/ns/user)\" "
-        "\"$(/usr/bin/readlink /proc/self/ns/pid)\"",
+        "\"$(/usr/bin/readlink /proc/self/ns/pid)\""
+    ).replace("/usr/bin/awk", awk)
+    smoke = subprocess.run([
+        str(BWRAP), "--unshare-all", "--unshare-user", "--die-with-parent",
+        "--disable-userns", "--cap-drop", "ALL", "--clearenv",
+        "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
+        "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+        "--proc", "/proc", "--dev", "/dev", "--size", "16777216",
+        "--tmpfs", "/tmp", "--", "/bin/sh", "-ec", smoke_script,
     ], capture_output=True, timeout=5, check=False)
     require(smoke.returncode == 0,
             "Bubblewrap cannot create the required private namespaces: "
