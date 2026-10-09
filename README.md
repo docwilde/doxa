@@ -93,7 +93,7 @@ DOXA loads selected provider plugins with scoped adoption rules. Remote access n
 - [Engine capabilities](docs/engine-capabilities.md) — what each provider supports.
 - [Session isolation](docs/session-isolation.md) — Docker profiles and their limits.
 - [Fleet supervision](docs/fleet-supervision.md) — independent review and message judging.
-- [Code graph queries](docs/plans/code-graph.md) — bounded, read-only Rust and Python syntax with unverified call-site candidates.
+- [Code graph queries](docs/plans/code-graph.md) — bounded Rust call candidates and Python definitions and imports.
 - [Native plugins](docs/native-plugins.md) — owner-approved text commands, status files and WASM package preflight.
 - [Plans and open work](docs/plans/README.md) — current implementation status.
 
