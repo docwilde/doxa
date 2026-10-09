@@ -175,8 +175,9 @@ DOXA_PLUGIN_CGROUP_ACCEPTANCE=1 DOXA_PLUGIN_DISPOSABLE_HOST=1 \
   python3 scripts/plugin-delegated-host-proof.py --run
 ```
 
-`--run` requires both explicit environment switches and repeats the preflight
-before the ignored Rust fixture. It creates only per-worker child cgroups in
+`--run` requires both explicit environment switches and an absolute real-disk
+`CARGO_TARGET_DIR`. It repeats the preflight, builds the actual
+`doxa-plugin-worker`, then runs the ignored Rust fixture. It creates only per-worker child cgroups in
 the delegated parent; it does not configure systemd, enable controllers or
 change host networking. Missing prerequisites or proof observations fail the
 run, rather than skipping it. The fixture uses the same descriptor-mounted
@@ -184,7 +185,10 @@ launcher, private cgroup and process supervisor as the grantless CLI. Each
 case prints one bounded counter summary, followed by `cleanup=removed` only
 after `cgroup.kill` empties and removes the group.
 
-The six cases check distinct network, mount, user and PID namespace identities;
+The seven cases include an approved zero-grant Wasm module returning 17 through
+the production review, frame, worker and sandbox path; stale approval is
+refused before a worker cgroup is created. The other six cases check distinct
+network, mount, user and PID namespace identities;
 no non-loopback interface or route; host file, environment and TCP isolation;
 the installed 256 MiB memory, zero swap, 16 PID and one-CPU quotas; actual
 worker cgroup membership; aggregate PID denial and memory OOM under multiple
@@ -192,6 +196,6 @@ children; CPU throttling; a `setsid` descendant killed on cancellation; and
 timeout cleanup.
 The evidence is limited to cgroup counters, outcomes, byte counts and elapsed
 time. The preflight prints the kernel, cgroup parent, CPU count and Bubblewrap
-version; retain that line and all six `plugin-acceptance` case lines with the
+version; retain that line and all seven `plugin-acceptance` case lines with the
 test result for review. Passing this fixture on one host does not grant plugin
 permissions or enable TUI execution.

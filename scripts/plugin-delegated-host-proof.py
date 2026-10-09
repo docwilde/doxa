@@ -119,6 +119,23 @@ def check_scratch() -> Path:
     return scratch
 
 
+def check_target_dir(raw: str) -> Path:
+    target = Path(raw)
+    require(raw and target.is_absolute() and not target.is_relative_to("/tmp")
+            and not target.resolve(strict=False).is_relative_to("/tmp"),
+            "CARGO_TARGET_DIR must be an absolute real-disk path outside /tmp")
+    existing = target
+    while not existing.exists():
+        require(existing != existing.parent, "CARGO_TARGET_DIR has no existing parent")
+        existing = existing.parent
+    require(existing.is_dir(), "CARGO_TARGET_DIR parent is not a directory")
+    result = subprocess.run(["stat", "-f", "-c", "%T", str(existing)],
+                            capture_output=True, text=True, timeout=5, check=True)
+    require(result.stdout.strip() not in {"tmpfs", "ramfs"},
+            "CARGO_TARGET_DIR must use real-disk storage")
+    return target
+
+
 def check_bwrap() -> str:
     meta = BWRAP.lstat()
     require(stat.S_ISREG(meta.st_mode) and meta.st_uid in (0, os.geteuid())
@@ -175,6 +192,7 @@ def main() -> int:
         require(os.environ.get("DOXA_PLUGIN_CGROUP_ACCEPTANCE") == "1"
                 and os.environ.get("DOXA_PLUGIN_DISPOSABLE_HOST") == "1",
                 "--run requires both DOXA_PLUGIN_CGROUP_ACCEPTANCE=1 and DOXA_PLUGIN_DISPOSABLE_HOST=1")
+        target = check_target_dir(os.environ.get("CARGO_TARGET_DIR", ""))
     parent, scratch, version = preflight()
     print(f"plugin-proof host-ready kernel={platform.release()} bwrap={version} "
           f"uid={os.geteuid()} cpus={len(os.sched_getaffinity(0))} "
@@ -182,10 +200,16 @@ def main() -> int:
     if options.check:
         return 0
     root = Path(__file__).resolve().parent.parent
+    build = ["cargo", "build", "--locked", "-p", "doxa-tui", "--bin", "doxa-plugin-worker"]
+    if subprocess.run(build, cwd=root, check=False).returncode != 0:
+        return 1
+    worker = target / "debug" / "doxa-plugin-worker"
+    require(worker.is_file(), "cargo build did not produce the plugin worker")
     command = ["cargo", "test", "--locked", "-p", "doxa-tui", "--lib",
                "delegated_cgroup_containment_acceptance", "--", "--ignored", "--nocapture"]
     environment = os.environ.copy()
     environment["RUST_TEST_THREADS"] = "1"
+    environment["DOXA_PLUGIN_ACCEPTANCE_WORKER"] = str(worker)
     return subprocess.run(command, cwd=root, env=environment, check=False).returncode
 
 

@@ -6,6 +6,7 @@ use std::io;
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::Ordering;
+use sha2::{Digest, Sha256};
 
 const POLL: Duration = Duration::from_millis(10);
 const PROBE_WAIT: Duration = Duration::from_secs(3);
@@ -109,6 +110,57 @@ fn worker_script(dir: &Path, body: &str) -> PathBuf {
     worker
 }
 
+fn write_private(path: &Path, bytes: impl AsRef<[u8]>) {
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+fn plugin_cgroups(parent: &Path) -> io::Result<usize> {
+    let mut count = 0;
+    for (visited, entry) in fs::read_dir(parent)?.enumerate() {
+        if visited >= 4096 { return Err(unavailable("delegated parent has too many children to audit")); }
+        if entry?.file_name().to_string_lossy().starts_with("doxa-plugin-") {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn approved_wasm_case(parent: &Path) {
+    let worker = PathBuf::from(std::env::var_os("DOXA_PLUGIN_ACCEPTANCE_WORKER")
+        .expect("proof harness must build and supply DOXA_PLUGIN_ACCEPTANCE_WORKER"));
+    assert!(worker.is_absolute(), "acceptance worker path must be absolute");
+    let home = fixture_dir();
+    let package_dir = home.path().join("native-plugin-packages/demo");
+    fs::create_dir_all(&package_dir).unwrap();
+    for path in [home.path().to_path_buf(), home.path().join("native-plugin-packages"), package_dir.clone()] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let module = wat::parse_str("(module (func (export \"doxa_main\") (result i32) i32.const 17))").unwrap();
+    let manifest = b"package_api_version = 1\nname = 'demo'\nversion = '1.0'\nartifact_format = 'wasm-core-v1'\nrequested_grants = []\n";
+    write_private(&package_dir.join("manifest.toml"), manifest);
+    write_private(&package_dir.join("module.wasm"), &module);
+    let config = format!(
+        "[[native_plugin_packages]]\nname = 'demo'\nmanifest_sha256 = '{:x}'\nmodule_sha256 = '{:x}'\ngrants = []\n",
+        Sha256::digest(manifest), Sha256::digest(&module));
+    write_private(&home.path().join("config.toml"), config.as_bytes());
+    let review = super::super::packages::preflight(home.path(), "demo").unwrap();
+    assert!(review.owner_approved && review.requested_grants.is_empty());
+    assert_eq!(plugin_cgroups(parent).unwrap(), 0, "disposable host already has plugin worker cgroups");
+    let start = Instant::now();
+    let result = supervise_reviewed(home.path(), &review, &worker, &AtomicBool::new(false),
+        start + Duration::from_secs(5)).expect("approved worker failed its sandbox");
+    assert_eq!(result, IsolatedOutcome::Return(17));
+    assert_eq!(plugin_cgroups(parent).unwrap(), 0, "approved worker cgroup survived return");
+    // Changed approval must be refused before the runner creates a cgroup.
+    write_private(&home.path().join("config.toml"), b"");
+    assert!(supervise_reviewed(home.path(), &review, &worker, &AtomicBool::new(false),
+        Instant::now() + Duration::from_secs(5)).is_err());
+    assert_eq!(plugin_cgroups(parent).unwrap(), 0, "stale approval created a worker cgroup");
+    eprintln!("plugin-acceptance case=approved-wasm outcome=Return(17) elapsed_ms={} stale_approval=refused cleanup=removed",
+        start.elapsed().as_millis());
+}
+
 struct Case {
     capture: Capture,
     counters: Counters,
@@ -167,6 +219,7 @@ fn delegated_cgroup_containment_acceptance() {
         "CPU throttling proof needs at least two available processors");
     let parent = delegated_cgroup_parent().expect("empty delegated parent and supervisor leaf required");
     assert!(parent.starts_with(CGROUP_ROOT));
+    approved_wasm_case(&parent);
 
     let host_marker = fixture_dir();
     let secret = host_marker.path().join("host-secret");

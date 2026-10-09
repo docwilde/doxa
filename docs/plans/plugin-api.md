@@ -142,7 +142,10 @@ now measures the actual aggregate limits, namespace boundary and cgroup
 cleanup in one bounded run. The opt-in `scripts/plugin-delegated-host-proof.py`
 checks the disposable host's delegated cgroup shape, writable cgroup v2 mount,
 fixed tools, Bubblewrap features and namespace support, private real-disk
-scratch, and available CPUs before running the fixture. Its boundary case
+scratch, and available CPUs before building the real worker and running the
+fixture. One case sends an approved zero-grant Wasm module through the
+production review, frame and sandbox path, and rejects stale approval before
+spawn. Its boundary case
 compares worker network, mount, user and PID namespace identities with the
 host and rejects any non-loopback network interface or route. It has not yet
 run the cgroup-writing cases on a disposable delegated host.

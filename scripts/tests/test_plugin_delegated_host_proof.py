@@ -93,6 +93,19 @@ class DelegatedShapeTests(unittest.TestCase):
                 with mock.patch("sys.argv", [str(SCRIPT), "--run"]):
                     with self.assertRaises(proof.ProofError):
                         proof.main()
+            with mock.patch.dict(os.environ, {
+                "DOXA_PLUGIN_CGROUP_ACCEPTANCE": "1",
+                "DOXA_PLUGIN_DISPOSABLE_HOST": "1",
+            }, clear=True):
+                with mock.patch("sys.argv", [str(SCRIPT), "--run"]):
+                    with self.assertRaises(proof.ProofError):
+                        proof.main()  # A real-disk CARGO_TARGET_DIR is also mandatory.
+
+    def test_target_dir_rejects_tmpfs_paths_and_accepts_real_disk_parent(self) -> None:
+        with self.assertRaises(proof.ProofError):
+            proof.check_target_dir("/tmp/doxa-plugin-target")
+        target = Path(self.temp.name) / "target"
+        self.assertEqual(proof.check_target_dir(str(target)), target)
 
 
 if __name__ == "__main__":
