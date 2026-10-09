@@ -124,8 +124,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap(); let exe = dir.path().join("fixture"); let pid = dir.path().join("pid");
         std::fs::write(&exe, format!("#!/bin/sh\nprintf '%s' $$ > '{}'\nsleep 10\n", pid.display())).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(run_at(&exe, "doctor", None, &AtomicBool::new(false), Duration::from_millis(100)).is_err());
-        let pid: i32 = std::fs::read_to_string(pid).unwrap().parse().unwrap();
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::spawn(move || run_at(&exe, "doctor", None, &worker_cancel, Duration::from_secs(10)));
+        let started = Instant::now();
+        let pid: i32 = loop {
+            if let Ok(value) = std::fs::read_to_string(&pid) {
+                if let Ok(pid) = value.parse() { break pid; }
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                cancel.store(true, Ordering::Release);
+                let _ = worker.join();
+                panic!("maintenance fixture did not start");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        cancel.store(true, Ordering::Release);
+        assert!(worker.join().unwrap().is_err());
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
     }
 }
