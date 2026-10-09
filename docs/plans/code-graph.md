@@ -158,8 +158,8 @@ is read-only and creates no second memory authority.
 
 - Decide whether reviewed snapshots need an operator index, retention policy,
   and explicit invalidation across worktree lifecycle. The current read is
-  exact worktree/query/path; it verifies the requested source and reports
-  freshness only for included references.
+  exact worktree/query/path; it verifies the requested source, included
+  references, and complete Git-listed Rust scan inputs when a digest exists.
 - Resolve imports and actual Rust call bindings with crate, trait, type, and
   conditional-compilation context. Module edges remain top-level and structural;
   `cfg_attr` and conditional reachability are unresolved. Call candidates stop
