@@ -20,6 +20,12 @@ for command in cargo cpio gzip qemu-system-x86_64 rg sha256sum timeout; do
 done
 repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 evidence=$(mktemp -d "$evidence_parent/egress-origin-guest.XXXXXXXX")
+git -C "$repo" rev-parse HEAD > "$evidence/BASE_COMMIT"
+git -C "$repo" status --porcelain=v1 --untracked-files=all > "$evidence/SOURCE_STATUS.before"
+if [[ -s $evidence/SOURCE_STATUS.before ]]; then
+  echo "guest proof requires a clean source tree; inspect $evidence/SOURCE_STATUS.before" >&2
+  exit 2
+fi
 rootfs=$evidence/rootfs
 mkdir -p "$rootfs"/{bin,proc,sys,dev,run}
 cp /usr/bin/busybox "$rootfs/bin/busybox"
@@ -41,9 +47,16 @@ if ! rg -q 'DOXA_EGRESS_ORIGIN_GUEST_PASS cases=4 hardened_admission=false' "$ev
   echo "guest proof refused; inspect $evidence/serial.log" >&2
   exit 1
 fi
+git -C "$repo" status --porcelain=v1 --untracked-files=all > "$evidence/SOURCE_STATUS.after"
+if [[ $(git -C "$repo" rev-parse HEAD) != $(cat "$evidence/BASE_COMMIT") \
+      || -s $evidence/SOURCE_STATUS.after ]]; then
+  echo "source tree changed during guest proof; inspect $evidence" >&2
+  exit 2
+fi
 sha256sum "$kernel" "$rootfs/egress-origin-guest" "$evidence/initramfs.cpio.gz" \
   "$evidence/serial.log" "$repo/rust/doxa-isolation/examples/egress_origin_guest.rs" \
+  "$repo/rust/doxa-isolation/src/broker_origin.rs" \
   "$repo/scripts/egress-origin-guest/init" "$repo/scripts/egress-origin-guest/run.sh" \
+  "$evidence/BASE_COMMIT" "$evidence/SOURCE_STATUS.before" "$evidence/SOURCE_STATUS.after" \
   > "$evidence/SHA256SUMS"
-git -C "$repo" rev-parse HEAD > "$evidence/BASE_COMMIT"
 echo "guest scope proof passed: $evidence"
