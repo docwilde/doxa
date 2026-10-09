@@ -40,8 +40,9 @@ chmod 0755 "$rootfs/init"
 
 TMPDIR=$TMPDIR CARGO_TARGET_DIR="$evidence/target" RUSTFLAGS='-C target-feature=+crt-static' \
   cargo build --locked --target x86_64-unknown-linux-gnu -p doxa-isolation \
-  --bin doxa-quota-helper --release --manifest-path "$repo/Cargo.toml"
+  --bin doxa-quota-helper --example quota_helper_client_read --release --manifest-path "$repo/Cargo.toml"
 cp "$evidence/target/x86_64-unknown-linux-gnu/release/doxa-quota-helper" "$rootfs/doxa-quota-helper"
+cp "$evidence/target/x86_64-unknown-linux-gnu/release/examples/quota_helper_client_read" "$rootfs/quota_helper_client_read"
 gcc -static -O2 -Wall -Wextra -o "$rootfs/guest_harness" "$repo/scripts/quota-helper-guest/harness.c"
 zstd -dc "$module_root/fs/quota/quota_tree.ko.zst" > "$rootfs/lib/modules/quota_tree.ko"
 zstd -dc "$module_root/fs/quota/quota_v2.ko.zst" > "$rootfs/lib/modules/quota_v2.ko"
@@ -57,12 +58,12 @@ timeout 120s qemu-system-x86_64 -machine accel=tcg -m 1024 -smp 2 -nographic \
   -initrd "$evidence/initramfs.cpio.gz" -append 'console=ttyS0 panic=1' \
   -drive "file=$evidence/quota.raw,format=raw,if=virtio" \
   > "$evidence/serial.log" 2>&1
-if ! rg -q 'DOXA_QUOTA_HELPER_GUEST_PASS cases=21 admission=false' "$evidence/serial.log" \
+if ! rg -q 'DOXA_QUOTA_HELPER_GUEST_PASS cases=25 admission=false' "$evidence/serial.log" \
    || ! rg -q 'DOXA_QUOTA_VM_STATUS=0' "$evidence/serial.log"; then
   echo "guest proof refused; inspect $evidence/serial.log" >&2
   exit 1
 fi
-sha256sum "$kernel" "$rootfs/doxa-quota-helper" "$rootfs/guest_harness" \
+sha256sum "$kernel" "$rootfs/doxa-quota-helper" "$rootfs/quota_helper_client_read" "$rootfs/guest_harness" \
   "$evidence/initramfs.cpio.gz" "$evidence/quota.raw" "$evidence/serial.log" \
   > "$evidence/SHA256SUMS"
 sha256sum "$repo/rust/doxa-isolation/src/quota_helper.rs" \

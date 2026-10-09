@@ -12,6 +12,7 @@ use std::{ffi::CString, fs::File, io::{self, Read, Write},
     path::{Component, Path, PathBuf}, time::{Duration, Instant}};
 
 const MAX_POLICY: u64 = 8192;
+const MAX_REPLY: u64 = 4096;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +32,9 @@ pub struct QuotaHelperPolicy {
 pub struct QuotaHelperResult<'a> {
     pub version: u32,
     pub session_id: &'a str,
+    pub root: &'a Path,
+    pub owner_uid: u32,
+    pub bindings: &'a QuotaBindings,
     pub verified: bool,
     pub admissible_as_hard_quota: bool,
     pub project_id: Option<u32>,
@@ -93,7 +97,8 @@ impl QuotaHelperPolicy {
 
     pub fn result(&self) -> QuotaHelperResult<'_> {
         let snapshot = self.inspect().ok();
-        QuotaHelperResult { version: 1, session_id: &self.session_id,
+        QuotaHelperResult { version: 2, session_id: &self.session_id,
+            root: &self.root, owner_uid: self.owner_uid, bindings: &self.bindings,
             verified: snapshot.is_some(), admissible_as_hard_quota: false,
             project_id: snapshot.as_ref().map(|value| value.project_id),
             hard_limit_bytes: snapshot.as_ref().map(|value| value.hard_limit_bytes),
@@ -101,6 +106,113 @@ impl QuotaHelperPolicy {
             descendants_checked: snapshot.as_ref().map(|value| value.descendants_checked),
             broker_entries_checked: snapshot.as_ref().map(|value| value.broker_entries_checked) }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuotaHelperReply {
+    version: u32,
+    session_id: String,
+    root: PathBuf,
+    owner_uid: u32,
+    bindings: QuotaBindings,
+    verified: bool,
+    admissible_as_hard_quota: bool,
+    project_id: Option<u32>,
+    hard_limit_bytes: Option<u64>,
+    mount_id: Option<u64>,
+    descendants_checked: Option<usize>,
+    broker_entries_checked: Option<usize>,
+}
+
+/// A current read-only report from the root-owned helper. It is deliberately
+/// not an admission capability or a durable EDQUOT/restart proof.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AdvisoryQuotaEvidence {
+    pub project_id: u32,
+    pub hard_limit_bytes: u64,
+    pub mount_id: u64,
+    pub descendants_checked: usize,
+    pub broker_entries_checked: usize,
+}
+
+fn validate_reply(manifest: &Manifest, reply: QuotaHelperReply) -> io::Result<AdvisoryQuotaEvidence> {
+    let root = manifest.checkout.parent().ok_or_else(|| error("quota client session root missing"))?;
+    if manifest.profile != Profile::DockerOffline || manifest.state != "ready"
+        || manifest.session_id.is_empty() || manifest.session_id.len() > 128
+        || !manifest.session_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || manifest.checkout != root.join("checkout") || manifest.private_home != root.join("home")
+        || manifest.cache != root.join("cache") || manifest.broker != root.join("broker") {
+        return Err(error("quota client requires an exact ready offline session"));
+    }
+    if reply.version != 2 || !reply.verified || reply.admissible_as_hard_quota
+        || reply.session_id != manifest.session_id || reply.root != root
+        || reply.owner_uid == 0 || reply.owner_uid == unsafe { libc::geteuid() }
+        || (reply.bindings.checkout.device, reply.bindings.checkout.inode)
+            != (manifest.checkout_device, manifest.checkout_inode) {
+        return Err(error("quota helper report does not match the saved session"));
+    }
+    let bindings = [reply.bindings.root, reply.bindings.checkout, reply.bindings.home,
+        reply.bindings.cache, reply.bindings.broker];
+    if bindings[0].device == 0 || bindings[0].inode == 0 || bindings[0].mount_id == 0
+        || bindings.iter().any(|entry| entry.device != bindings[0].device
+            || entry.mount_id != bindings[0].mount_id || entry.inode == 0)
+        || bindings.iter().enumerate().any(|(index, entry)|
+            bindings[..index].iter().any(|prior| prior.inode == entry.inode)) {
+        return Err(error("quota helper report has invalid bind identities"));
+    }
+    let (Some(project_id), Some(hard_limit_bytes), Some(mount_id),
+        Some(descendants_checked), Some(broker_entries_checked)) = (
+        reply.project_id, reply.hard_limit_bytes, reply.mount_id,
+        reply.descendants_checked, reply.broker_entries_checked) else {
+        return Err(error("quota helper report is incomplete"));
+    };
+    if project_id == 0 || project_id > i32::MAX as u32 || hard_limit_bytes == 0
+        || hard_limit_bytes % 512 != 0 || hard_limit_bytes > 1024 * 1024 * 1024 * 1024
+        || mount_id == 0 || mount_id != reply.bindings.root.mount_id
+        || descendants_checked > 4096 || broker_entries_checked > 2 {
+        return Err(error("quota helper report has invalid limits or counts"));
+    }
+    Ok(AdvisoryQuotaEvidence { project_id, hard_limit_bytes, mount_id,
+        descendants_checked, broker_entries_checked })
+}
+
+/// Connect only to the fixed administrator-owned endpoint for this session.
+/// No caller-supplied socket path or request body can select a different tree.
+#[cfg(target_os = "linux")]
+pub fn query_advisory_quota(manifest: &Manifest) -> io::Result<AdvisoryQuotaEvidence> {
+    let id = &manifest.session_id;
+    if id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
+        return Err(error("invalid quota client session identity"));
+    }
+    let socket_path = Path::new("/run/doxa/quota").join(format!("{id}.sock"));
+    let pinned = verify_socket_path(&socket_path)?;
+    let stream = connect_challenge_path(&socket_path)?;
+    let visible = verify_socket_path(&socket_path)?;
+    let before = pinned.metadata()?; let after = visible.metadata()?;
+    if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
+        return Err(error("quota helper socket changed during connection"));
+    }
+    read_root_reply(manifest, stream)
+}
+
+#[cfg(target_os = "linux")]
+fn read_root_reply(manifest: &Manifest, stream: UnixStream) -> io::Result<AdvisoryQuotaEvidence> {
+    if peer_uid(&stream)? != 0 { return Err(error("quota helper peer is not root")); }
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    let mut bytes = Vec::new();
+    stream.take(MAX_REPLY + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_REPLY as usize || !bytes.ends_with(b"\n") {
+        return Err(error("quota helper report is missing or exceeds its bound"));
+    }
+    let reply: QuotaHelperReply = serde_json::from_slice(&bytes)
+        .map_err(|_| error("quota helper report is malformed"))?;
+    validate_reply(manifest, reply)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn query_advisory_quota(_: &Manifest) -> io::Result<AdvisoryQuotaEvidence> {
+    Err(error("quota helper client requires Linux"))
 }
 
 fn safe_absolute(path: &Path) -> bool {
@@ -352,6 +464,67 @@ mod tests {
             hard_limit_bytes: 64 * 1024 * 1024,
             bindings: QuotaBindings { root: bind(1), checkout: bind(2), home: bind(3),
                 cache: bind(4), broker: bind(5) } }
+    }
+
+    fn client_manifest(policy: &QuotaHelperPolicy) -> Manifest {
+        let mut manifest = policy.manifest();
+        manifest.checkout_device = policy.bindings.checkout.device;
+        manifest.checkout_inode = policy.bindings.checkout.inode;
+        manifest
+    }
+
+    fn verified_reply(policy: &QuotaHelperPolicy) -> QuotaHelperReply {
+        QuotaHelperReply { version: 2, session_id: policy.session_id.clone(),
+            root: policy.root.clone(), owner_uid: policy.owner_uid, bindings: policy.bindings,
+            verified: true, admissible_as_hard_quota: false,
+            project_id: Some(policy.project_id), hard_limit_bytes: Some(policy.hard_limit_bytes),
+            mount_id: Some(policy.bindings.root.mount_id), descendants_checked: Some(4),
+            broker_entries_checked: Some(1) }
+    }
+
+    #[test]
+    fn advisory_client_binds_reply_to_exact_saved_tree_and_refuses_admission_flags() {
+        let policy = policy();
+        let manifest = client_manifest(&policy);
+        let valid = verified_reply(&policy);
+        assert_eq!(validate_reply(&manifest, verified_reply(&policy)).unwrap(),
+            AdvisoryQuotaEvidence { project_id: 41, hard_limit_bytes: 64 * 1024 * 1024,
+                mount_id: 8, descendants_checked: 4, broker_entries_checked: 1 });
+        let mut changed = verified_reply(&policy); changed.session_id = "other".into();
+        assert!(validate_reply(&manifest, changed).is_err());
+        let mut changed = verified_reply(&policy); changed.root = PathBuf::from("/owner/sessions/other");
+        assert!(validate_reply(&manifest, changed).is_err());
+        let mut changed = verified_reply(&policy); changed.bindings.checkout.inode += 1;
+        assert!(validate_reply(&manifest, changed).is_err());
+        let mut changed = verified_reply(&policy); changed.bindings.broker = changed.bindings.home;
+        assert!(validate_reply(&manifest, changed).is_err());
+        let mut changed = verified_reply(&policy); changed.bindings.cache.mount_id += 1;
+        assert!(validate_reply(&manifest, changed).is_err());
+        let mut changed = verified_reply(&policy); changed.mount_id = Some(9);
+        assert!(validate_reply(&manifest, changed).is_err());
+        let mut changed = verified_reply(&policy); changed.owner_uid = unsafe { libc::geteuid() };
+        assert!(validate_reply(&manifest, changed).is_err());
+        let mut changed = verified_reply(&policy); changed.verified = false;
+        assert!(validate_reply(&manifest, changed).is_err());
+        let mut changed = verified_reply(&policy); changed.admissible_as_hard_quota = true;
+        assert!(validate_reply(&manifest, changed).is_err());
+        let mut changed = verified_reply(&policy); changed.project_id = None;
+        assert!(validate_reply(&manifest, changed).is_err());
+        let mut changed = verified_reply(&policy); changed.hard_limit_bytes = Some(0);
+        assert!(validate_reply(&manifest, changed).is_err());
+        let mut changed = verified_reply(&policy); changed.broker_entries_checked = Some(3);
+        assert!(validate_reply(&manifest, changed).is_err());
+        let mut native = manifest.clone(); native.profile = Profile::Native;
+        assert!(validate_reply(&native, valid).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn same_uid_socket_server_cannot_impersonate_root_quota_helper() {
+        if unsafe { libc::geteuid() } == 0 { return; }
+        let (client, _server) = UnixStream::pair().unwrap();
+        let refusal = read_root_reply(&client_manifest(&policy()), client).unwrap_err();
+        assert!(refusal.to_string().contains("peer is not root"));
     }
 
     #[test]

@@ -232,8 +232,12 @@ denied the XFS/ext4 project-limit query (`EPERM`/`EACCES`); hardened admission
 then refuses. An uninstalled read-only helper now binds an administrator-owned
 policy to the exact session tree and passed a disposable 21-case QEMU fixture;
 it requires distinct trusted caller and tree-owner UIDs and always refuses
-hardened admission. Installed-host systemd and runtime integration remain
-open. The socket
+hardened admission. A host client now caps the helper response at 4 KiB and
+verifies the root-owned endpoint, kernel server UID and exact saved session
+root and checkout identity before accepting advisory evidence. The disposable guest runner now
+contains four additional client identity cases, all passed in a disposable
+QEMU guest. Installed-host systemd and session
+launcher integration remain open. The socket
 inventory also permits zero sockets and does not tie a visible socket inode
 to the live host listener. Exact live endpoint identity, broker peer/protocol
 attestation, and production EDQUOT/restart/remount proof remain open. The

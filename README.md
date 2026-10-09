@@ -11,7 +11,7 @@
 > [!WARNING]
 > Rust 2.0 is in beta. Agents can edit files and run commands with your privileges. Choose a [session isolation profile](docs/session-isolation.md) and review the [platform limits](#platform-and-scope) before using DOXA on important work.
 
-![DOXA Rust beta.37 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.37-hero.png)
+![DOXA Rust beta.38 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.38-hero.png)
 
 [How the gallery was captured](docs/rust-gallery.md)
 
@@ -76,13 +76,13 @@ Remote control is opt in. `doxa remote serve` exposes a private Rust browser vie
 
 ## Gallery
 
-These beta.37 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
+These beta.38 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
 
-The gallery also shows the [read-only code graph modal](assets/shots/rust-2.0.0-beta.37-codegraph.png), [explicit project label](assets/shots/rust-2.0.0-beta.37-project-label.png), and [pane-row rail](assets/shots/rust-2.0.0-beta.37-pane-triage.png).
+The gallery also shows the [read-only code graph modal](assets/shots/rust-2.0.0-beta.38-codegraph.png), [explicit project label](assets/shots/rust-2.0.0-beta.38-project-label.png), and [pane-row rail](assets/shots/rust-2.0.0-beta.38-pane-triage.png).
 
 | Image preview | Isolation details | Fleet release review |
 | --- | --- | --- |
-| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.37-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.37-isolation.png) | ![Synthetic checkpoint and handoff evidence in the fleet release modal](assets/shots/rust-2.0.0-beta.37-fleet-release-review.png) |
+| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.38-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.38-isolation.png) | ![Synthetic checkpoint and handoff evidence in the fleet release modal](assets/shots/rust-2.0.0-beta.38-fleet-release-review.png) |
 
 ## Platform and scope
 
@@ -94,10 +94,10 @@ DOXA loads selected provider plugins with scoped adoption rules. Remote access n
 
 - [Rust guide](rust/README.md) — install, sessions, review, fleets, and remote use.
 - [Engine capabilities](docs/engine-capabilities.md) — what each provider supports.
-- [Session isolation](docs/session-isolation.md) — Docker profiles and their limits.
+- [Session isolation](docs/session-isolation.md) — Docker profiles and their limits; the [advisory quota helper](docs/hard-quota-preflight.md) has a read-only host client, but hardened admission remains closed.
 - [Fleet supervision](docs/fleet-supervision.md) — independent review and message judging.
-- [Code graph queries](docs/plans/code-graph.md) — bounded Rust candidates and Python definitions, imports, and lexical call sites; [scan benchmark](docs/codegraph-scan-benchmark-2026-10-09.md).
-- [Native plugins](docs/native-plugins.md) — owner-approved text commands, status files and WASM package preflight.
+- [Code graph queries](docs/plans/code-graph.md) — bounded Rust candidates and Python definitions, imports, and lexical call sites; the [disabled semantic stream probe](docs/plans/codegraph-semantic-verification.md) remains `binding=unknown`; [scan benchmark](docs/codegraph-scan-benchmark-2026-10-09.md).
+- [Native plugins](docs/native-plugins.md) — owner-approved text commands, status files, WASM package preflight, and read-only `host-check` inventory without TUI authority.
 - [Plans and open work](docs/plans/README.md) — current implementation status.
 
 DOXA is licensed under [AGPL-3.0-only](LICENSE), with a [commercial licence](LICENSE-COMMERCIAL.md) available. The name and mark follow the [trademark policy](TRADEMARK.md).

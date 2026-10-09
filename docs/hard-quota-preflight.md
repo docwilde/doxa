@@ -149,6 +149,14 @@ peer through `SO_PEERCRED`, and requires a dedicated caller UID distinct from
 the session tree owner. The peer supplies no request body, path, project ID or
 expected limit. The result always says `admissible_as_hard_quota=false`. The
 helper does not configure quotas, call Docker, or enable `docker-hardened`.
+The host-side `query_advisory_quota` client connects only to
+`/run/doxa/quota/SESSION_ID.sock`, checks its root-owned path and `SO_PEERCRED`
+server UID, caps the response at 4 KiB, and compares the administrator-pinned
+root and checkout identity with the saved offline session. It rejects a
+missing or malformed report, any claimed admission flag, or a changed session
+identity. Its result is read-only evidence; the session launcher does not call
+it for admission. The socket's three-second timeout applies to each read,
+not to the whole response; a trickling privileged peer may take longer.
 
 The service is inert unless an administrator explicitly installs a policy and
 socket unit. The policy path and socket path must be absolute; every policy
@@ -196,7 +204,7 @@ pathname inode is pinned and rechecked before each reply. A changed path
 stops the helper.
 
 The [disposable helper guest runner](../scripts/quota-helper-guest/run.sh)
-builds a static helper and purpose-built initramfs, then uses QEMU with a
+builds a static helper and client plus a purpose-built initramfs, then uses QEMU with a
 private ext4 `prjquota` image. Set `TMPDIR` to real disk and pass a matching
 kernel and an existing evidence directory. It never installs a host unit or
 changes host quotas:
@@ -208,15 +216,19 @@ TMPDIR=/path/on/real/disk scripts/quota-helper-guest/run.sh \
 
 On a disposable Linux 7.0.0-38 guest, project 1002 with a 32 MiB enforced
 limit and four private bind sources returned the exact privileged snapshot
-to caller UID 2001 for tree owner UID 2002. Twenty-one fixture cases passed:
+to caller UID 2001 for tree owner UID 2002. The original twenty-one helper
+fixture cases cover:
 wrong and prequeued callers, caller-supplied FD data, wrong project/limit/bind
 identity, same-inode different mount, wrong activation FD, root-owned socket
 path replacement before and after activation, unsafe policy ownership/mode
 and symlink, and replaced bind source. A failed path challenge closed its
 queued caller without a positive response. Every reply kept
-`admissible_as_hard_quota=false`. This tests systemd-shaped socket activation
-inside QEMU; an actual installed systemd service and a DOXA runtime caller
-remain unverified.
+`admissible_as_hard_quota=false`. The runner now includes four client cases
+for the exact session, wrong checkout inode, wrong root and wrong session ID.
+On a task-local Linux 7.0.0-38 QEMU guest, all 25 cases passed: the client
+accepted the exact tree with project 1002 and a 32 MiB limit while refusing
+the three substitutions. The reply still said `admission=false`. An actual
+installed systemd service and session-launcher integration remain unverified.
 
 The descendant walk covers the three data bind sources; it does not establish
 an immutable tree. The broker audit may report zero sockets, and its socket

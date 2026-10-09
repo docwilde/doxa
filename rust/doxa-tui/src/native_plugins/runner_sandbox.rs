@@ -18,6 +18,7 @@ use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::{Duration, Instant};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 const BWRAP: &str = "/usr/bin/bwrap";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
@@ -28,6 +29,7 @@ const PROCESS_AS_BYTES: libc::rlim_t = 256 * 1024 * 1024;
 const PROCESS_CPU_SECONDS: libc::rlim_t = 4;
 const PROCESS_FDS: libc::rlim_t = 64;
 const CGROUP_EVENTS_MAX_BYTES: u64 = 4_096;
+const MAX_TRUSTED_EXE_BYTES: u64 = 256 * 1024 * 1024;
 
 fn unavailable(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message.into())
@@ -91,6 +93,153 @@ fn delegated_cgroup_parent() -> io::Result<PathBuf> {
     let membership = fs::read_to_string("/proc/self/cgroup")?;
     delegated_parent_at(Path::new(CGROUP_ROOT), &membership,
         unsafe { libc::geteuid() }, std::process::id())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ExecutableIdentity {
+    device: u64,
+    inode: u64,
+    bytes: u64,
+    sha256: String,
+}
+
+fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.dev() == right.dev() && left.ino() == right.ino()
+        && left.uid() == right.uid() && left.mode() == right.mode()
+        && left.nlink() == right.nlink() && left.len() == right.len()
+        && left.mtime() == right.mtime() && left.mtime_nsec() == right.mtime_nsec()
+        && left.ctime() == right.ctime() && left.ctime_nsec() == right.ctime_nsec()
+}
+
+/// Hash the opened, trusted inode and refuse a replacement or in-place edit
+/// during observation. A later launch reopens and checks its binaries again;
+/// this identity is an operator observation, never an execution permit.
+fn executable_identity(path: &Path) -> io::Result<ExecutableIdentity> {
+    executable_identity_with(path, || {})
+}
+
+fn executable_identity_with(path: &Path, after_open: impl FnOnce()) -> io::Result<ExecutableIdentity> {
+    let mut file = open_trusted_executable(path)?;
+    let before = file.metadata()?;
+    if before.len() > MAX_TRUSTED_EXE_BYTES {
+        return Err(unavailable("trusted plugin executable exceeds identity read limit"));
+    }
+    after_open();
+    let mut hash = Sha256::new();
+    let mut bytes = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = match file.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if count == 0 { break; }
+        bytes += count as u64;
+        if bytes > MAX_TRUSTED_EXE_BYTES {
+            return Err(unavailable("trusted plugin executable grew beyond identity read limit"));
+        }
+        hash.update(&buffer[..count]);
+    }
+    let after = file.metadata()?;
+    let pathname = fs::symlink_metadata(path)?;
+    if bytes != before.len() || !same_file_identity(&before, &after)
+        || !same_file_identity(&before, &pathname) || !pathname.is_file() {
+        return Err(unavailable("trusted plugin executable changed during identity read"));
+    }
+    Ok(ExecutableIdentity { device: before.dev(), inode: before.ino(),
+        bytes, sha256: format!("{:x}", hash.finalize()) })
+}
+
+#[derive(Debug)]
+struct HostObservation {
+    parent: PathBuf,
+    parent_device: u64,
+    parent_inode: u64,
+    supervisor_device: u64,
+    supervisor_inode: u64,
+    frontend: ExecutableIdentity,
+    worker: ExecutableIdentity,
+    bwrap: ExecutableIdentity,
+}
+
+impl HostObservation {
+    fn report(&self) -> String {
+        format!("Read-only installed plugin host observation (TUI execution disabled)\n\
+            delegated_parent={} device={} inode={}\n\
+            supervisor_device={} supervisor_inode={}\n\
+            frontend device={} inode={} bytes={} sha256={}\n\
+            worker device={} inode={} bytes={} sha256={}\n\
+            bwrap device={} inode={} bytes={} sha256={}\n\
+            This does not verify namespace isolation, limits or descendant cleanup; no TUI authority was issued.\n",
+            self.parent.display(), self.parent_device, self.parent_inode,
+            self.supervisor_device, self.supervisor_inode,
+            self.frontend.device, self.frontend.inode, self.frontend.bytes, self.frontend.sha256,
+            self.worker.device, self.worker.inode, self.worker.bytes, self.worker.sha256,
+            self.bwrap.device, self.bwrap.inode, self.bwrap.bytes, self.bwrap.sha256)
+    }
+}
+
+fn no_plugin_children(parent: &Path) -> io::Result<()> {
+    let mut count = 0usize;
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        count += 1;
+        if count > 4_096 { return Err(unavailable("delegated cgroup has too many children to inspect")); }
+        if entry.file_name().as_bytes().starts_with(b"doxa-plugin-") {
+            return Err(unavailable("delegated cgroup retains a plugin worker child"));
+        }
+    }
+    Ok(())
+}
+
+fn host_observation_at(root: &Path, membership: &str, uid: u32, pid: u32,
+    frontend: &Path, worker: &Path, bwrap: &Path) -> io::Result<HostObservation> {
+    let parent = delegated_parent_at(root, membership, uid, pid)?;
+    no_plugin_children(&parent)?;
+    let relative = membership.lines().find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| unavailable("unified cgroup membership disappeared"))?;
+    if !relative.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(unavailable("delegated cgroup membership is unsafe to report"));
+    }
+    let supervisor = root.join(relative.trim_start_matches('/'));
+    let parent_before = fs::symlink_metadata(&parent)?;
+    let supervisor_before = fs::symlink_metadata(&supervisor)?;
+    let frontend = executable_identity(frontend)
+        .map_err(|error| unavailable(format!("frontend identity: {error}")))?;
+    let worker = executable_identity(worker)
+        .map_err(|error| unavailable(format!("worker identity: {error}")))?;
+    let bwrap = executable_identity(bwrap)
+        .map_err(|error| unavailable(format!("Bubblewrap identity: {error}")))?;
+    if [(frontend.device, frontend.inode), (worker.device, worker.inode),
+        (bwrap.device, bwrap.inode)].iter().collect::<HashSet<_>>().len() != 3 {
+        return Err(unavailable("frontend, worker and Bubblewrap are not distinct inodes"));
+    }
+    no_plugin_children(&parent)?;
+    delegated_parent_at(root, membership, uid, pid)?;
+    if !same_file_identity(&parent_before, &fs::symlink_metadata(&parent)?)
+        || !same_file_identity(&supervisor_before, &fs::symlink_metadata(&supervisor)?) {
+        return Err(unavailable("delegated cgroup identity changed during host observation"));
+    }
+    Ok(HostObservation { parent, parent_device: parent_before.dev(),
+        parent_inode: parent_before.ino(), supervisor_device: supervisor_before.dev(),
+        supervisor_inode: supervisor_before.ino(), frontend, worker, bwrap })
+}
+
+/// Read-only operator inventory for the current process and exact binaries.
+/// It proves prerequisites only: namespace isolation, aggregate limits and
+/// descendant cleanup require an accepted installed-host exercise.
+pub(crate) fn host_preflight_report(frontend: &Path, worker: &Path) -> io::Result<String> {
+    let expected_parent = delegated_cgroup_parent()?; // checks cgroup2 mount
+    let membership = fs::read_to_string("/proc/self/cgroup")?;
+    let observation = host_observation_at(Path::new(CGROUP_ROOT), &membership,
+        unsafe { libc::geteuid() }, std::process::id(), frontend, worker, Path::new(BWRAP))?;
+    if observation.parent != expected_parent
+        || fs::read_to_string("/proc/self/cgroup")? != membership
+        || delegated_cgroup_parent()? != expected_parent {
+        return Err(unavailable("installed host cgroup membership changed during observation"));
+    }
+    Ok(observation.report())
 }
 
 fn write_and_check(path: &Path, value: &str) -> io::Result<()> {
@@ -200,7 +349,7 @@ fn open_trusted_executable(path: &Path) -> io::Result<File> {
         || metadata.permissions().mode() & 0o022 != 0
         || metadata.permissions().mode() & 0o111 == 0
         || metadata.nlink() != 1 {
-        return Err(unavailable("plugin worker executable is not private or root-owned"));
+        return Err(unavailable("trusted plugin executable is not private or root-owned"));
     }
     Ok(file)
 }
@@ -463,6 +612,84 @@ mod tests {
         fs::write(parent.join("cgroup.subtree_control"), "cpu memory pids\n").unwrap();
         fs::write(leaf.join("cgroup.procs"), "4242\n").unwrap();
         (dir, root, parent)
+    }
+
+    fn trusted_file(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn host_observation_binds_current_leaf_and_opened_binary_digests_without_writes() {
+        let (dir, root, parent) = fake_delegated_tree();
+        let frontend = dir.path().join("doxa-rs");
+        let worker = dir.path().join("doxa-plugin-worker");
+        let bwrap = dir.path().join("bwrap");
+        trusted_file(&frontend, b"frontend-v1");
+        trusted_file(&worker, b"worker-v1");
+        trusted_file(&bwrap, b"bwrap-v1");
+        let before_procs = fs::read(parent.join("cgroup.procs")).unwrap();
+        let observed = host_observation_at(&root, "0::/delegated/supervisor\n",
+            unsafe { libc::geteuid() }, 4242, &frontend, &worker, &bwrap).unwrap();
+        assert_eq!(observed.parent, parent);
+        assert_eq!(observed.worker.bytes, 9);
+        assert_eq!(observed.worker.sha256, format!("{:x}", Sha256::digest(b"worker-v1")));
+        let report = observed.report();
+        assert!(report.contains(&observed.worker.sha256));
+        assert!(report.contains("TUI execution disabled"));
+        assert!(report.contains("no TUI authority was issued"));
+        assert_eq!(fs::read(parent.join("cgroup.procs")).unwrap(), before_procs);
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 3);
+        assert!(super::super::installed_host_authority().is_err());
+    }
+
+    #[test]
+    fn host_observation_refuses_stale_worker_group_or_wrong_supervisor() {
+        let (dir, root, parent) = fake_delegated_tree();
+        let frontend = dir.path().join("frontend");
+        let worker = dir.path().join("worker");
+        let bwrap = dir.path().join("bwrap");
+        for path in [&frontend, &worker, &bwrap] { trusted_file(path, b"trusted"); }
+        let uid = unsafe { libc::geteuid() };
+        let observe = || host_observation_at(&root, "0::/delegated/supervisor\n",
+            uid, 4242, &frontend, &worker, &bwrap);
+        assert!(observe().is_ok());
+        assert!(host_observation_at(&root, "0::/delegated/supervisor\n",
+            uid, 4242, &frontend, &frontend, &bwrap).is_err());
+        fs::create_dir(parent.join("doxa-plugin-stale")).unwrap();
+        assert!(observe().is_err());
+        fs::remove_dir(parent.join("doxa-plugin-stale")).unwrap();
+        assert!(host_observation_at(&root, "0::/delegated/supervisor\n",
+            uid, 9999, &frontend, &worker, &bwrap).is_err());
+    }
+
+    #[test]
+    fn executable_identity_refuses_path_swap_in_place_edit_and_unsafe_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("worker");
+        trusted_file(&executable, b"original-worker");
+        assert!(executable_identity_with(&executable, || {
+            let replacement = dir.path().join("replacement");
+            trusted_file(&replacement, b"replacement");
+            fs::rename(&replacement, &executable).unwrap();
+        }).is_err());
+        trusted_file(&executable, b"original-worker");
+        assert!(executable_identity_with(&executable, || {
+            fs::write(&executable, b"changed-worker!").unwrap();
+        }).is_err());
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&executable, &link).unwrap();
+        assert!(executable_identity(&link).is_err());
+        let hardlink = dir.path().join("hardlink");
+        fs::hard_link(&executable, &hardlink).unwrap();
+        assert!(executable_identity(&executable).is_err());
+        fs::remove_file(hardlink).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o722)).unwrap();
+        assert!(executable_identity(&executable).is_err());
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::OpenOptions::new().write(true).open(&executable).unwrap()
+            .set_len(MAX_TRUSTED_EXE_BYTES + 1).unwrap();
+        assert!(executable_identity(&executable).is_err());
     }
 
     #[test]

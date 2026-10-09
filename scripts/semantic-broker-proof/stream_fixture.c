@@ -30,7 +30,8 @@ static int send_packet(int client, const char *text) {
     return send(client, text, size, MSG_NOSIGNAL) == (ssize_t)size ? 0 : -1;
 }
 
-static int rest(int client, const char *mode, const char *nonce, const char *query) {
+static int rest(int client, const char *mode, const char *nonce, const char *query,
+    const char *rust_scan) {
     char packet[1024];
     const char *cid = !strcmp(mode, "cid_swap")
         ? "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
@@ -48,7 +49,8 @@ static int rest(int client, const char *mode, const char *nonce, const char *que
         "\"query_sha256\":\"%s\",\"cid\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\","
         "\"phase\":\"closed\",\"chunks\":1,"
         "\"stream_sha256\":\"8808496a20662ce284ee12c8544c64bb04c3554629f42b2d3cf628ff21756b7c\","
-        "\"status\":\"observation_only\"}", nonce, query);
+        "\"rust_scan_input_sha256\":\"%s\",\"status\":\"observation_only\"}",
+        nonce, query, rust_scan);
     if (send_packet(client, packet) < 0) return 0;
     if (!strcmp(mode, "extra")) (void)send_packet(client, packet);
     return 0;
@@ -62,31 +64,33 @@ static int serve(int listener, const char *mode) {
     if (count <= 0 || count > 4096) return 15;
     request[count] = 0;
     if (!strstr(request, "\"operation\":\"observe_stream\"")) return 16;
-    char nonce[65], query[65], source[65], target[65];
+    char nonce[65], query[65], source[65], target[65], rust_scan[65];
     if (field64(request, "nonce", nonce) < 0 || field64(request, "query_sha256", query) < 0
         || field64(request, "source_sha256", source) < 0
-        || field64(request, "target_sha256", target) < 0) return 17;
+        || field64(request, "target_sha256", target) < 0
+        || field64(request, "rust_scan_input_sha256", rust_scan) < 0) return 17;
     char packet[1024];
     snprintf(packet, sizeof packet,
         "{\"protocol\":\"doxa-semantic-stream-observation-v1\",\"nonce\":\"%s\","
         "\"query_sha256\":\"%s\",\"cid\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\","
         "\"phase\":\"opened\",\"source_sha256\":\"%s\",\"target_sha256\":\"%s\","
+        "\"rust_scan_input_sha256\":\"%s\","
         "\"image_id\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\","
-        "\"status\":\"observation_only\"}", nonce, query, source, target);
+        "\"status\":\"observation_only\"}", nonce, query, source, target, rust_scan);
     if (send_packet(client, packet) < 0) return 18;
     if (!strcmp(mode, "mid_handoff") || !strcmp(mode, "root_switch")) {
         pid_t child = fork();
         if (child < 0) return 19;
         if (child == 0) {
             if (!strcmp(mode, "mid_handoff") && (setgid(1000) < 0 || setuid(1000) < 0)) _exit(20);
-            _exit(rest(client, mode, nonce, query));
+            _exit(rest(client, mode, nonce, query, rust_scan));
         }
         close(client);
         int status = 0;
         if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) return 21;
         return WEXITSTATUS(status);
     }
-    int status = rest(client, mode, nonce, query);
+    int status = rest(client, mode, nonce, query, rust_scan);
     close(client);
     return status;
 }

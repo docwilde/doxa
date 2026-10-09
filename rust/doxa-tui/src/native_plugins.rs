@@ -44,6 +44,21 @@ pub(crate) fn test_installed_host_authority() -> InstalledHostAuthority {
     InstalledHostAuthority { _private: () }
 }
 
+/// Observe the current CLI's delegated host shape and exact opened binaries.
+/// This is read-only evidence for an operator, not TUI execution authority.
+#[cfg(target_os = "linux")]
+pub fn host_preflight_report() -> io::Result<String> {
+    let frontend = std::env::current_exe()?;
+    let worker = frontend.with_file_name("doxa-plugin-worker");
+    runner_sandbox::host_preflight_report(&frontend, &worker)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn host_preflight_report() -> io::Result<String> {
+    Err(io::Error::new(io::ErrorKind::Unsupported,
+        "installed plugin host preflight requires Linux"))
+}
+
 /// An explicit CLI prototype. No TUI startup, slash command, plugin discovery,
 /// or grantful package can reach the worker through this function.
 #[cfg(target_os = "linux")]

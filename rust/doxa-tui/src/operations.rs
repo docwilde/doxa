@@ -358,6 +358,10 @@ pub fn native_plugin_package_preflight(name: &str) -> io::Result<String> {
     Ok(crate::native_plugins::packages::preflight(&doxa_home()?, name)?.report())
 }
 
+pub fn native_plugin_host_check() -> io::Result<String> {
+    crate::native_plugins::host_preflight_report()
+}
+
 /// This explicit CLI action is the only app route to the grantless child.
 /// Signal flags let the sandbox supervisor kill its cgroup before CLI exit.
 #[cfg(target_os = "linux")]

@@ -59,7 +59,8 @@ policy. No production caller uses the verifier.
 
 `run-stream.sh` builds a separate offline QEMU initramfs with a synthetic
 three-packet LSP stream. The client sends one fresh challenge naming the
-query digest and source/target hashes. It requires a root sender on **every**
+query digest, source/target hashes, and Git-listed Rust scan-input digest.
+The opening and closing packets must echo that scan digest. It requires a root sender on **every**
 packet, one sender PID and container ID, ordered chunks, the exact byte hash,
 and EOF. The root-owned socket cannot be replaced by the UID-1000 client.
 
@@ -88,3 +89,10 @@ the fixture. The uncompressed serial log's SHA-256 is
 `44c76b762e875213196741b274fdff8da22c53ea8febd1ef7ff7a0abbbdd2ba8`.
 The kernel digest matches the prior disposable anchor guest receipt; the
 kernel bytes came from the Ubuntu package recorded there.
+That retained run predates the scan-digest packet field. Its sender-continuity
+result remains historical evidence for the earlier packet format. The updated
+format passed a separate [six-case offline guest run](evidence/stream-source-basis-2026-10-09/RUN.md)
+against source commit `d5b2347f`, with input hashes and the full serial log
+retained there. After requiring the originating complete Rust `calls` answer,
+the [corrected source passed the same six cases](evidence/stream-complete-answer-2026-10-09/RUN.md)
+at `ef4aa64f`. The synthetic sender still proves no Engine or analyzer origin.

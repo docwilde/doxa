@@ -147,7 +147,14 @@ The CLI still never calls either socket seam.
 
 `semantic_broker::observe_stream_definition` rederives the restrictive
 producer plan, rehashes the call and target sources before and after the
-exchange, and passes a fresh nonce, exact query digest, and both hashes to a
+exchange, and accepts a Rust `calls` answer with a complete scan digest, zero
+skipped or unparseable Rust inputs, and a source hash matching the selected
+displayed edge. It selects that edge and candidate from the answer by index;
+a separately recomputed digest or stale candidate cannot be passed to this
+entry point. It re-enumerates and rehashes those Rust files before
+and after the stream, and includes the digest in the challenge and opening and
+closing receipts. A changed third Rust file or added Rust path fails the
+observation. It passes a fresh nonce, source-bound query digest, and both hashes to a
 root-owned `SOCK_SEQPACKET` endpoint. A three-phase, size-bounded response
 must keep the same kernel-reported UID-zero sender PID, 64-digit container
 ID, nonce, and query digest across `opened`, ordered byte chunks, and
@@ -164,11 +171,17 @@ This proves packet-origin and transcript consistency only in that guest.
 Its root fixture sends a synthetic LSP frame. It does **not** inspect a
 rootless Engine, launch rust-analyzer, establish a complete workspace
 snapshot, prove that the inspected container produced the frame, or attest
-the broker executable. Same-UID replacement of the DOXA client and
+the broker executable. The caller-supplied in-process answer is not a
+cryptographic proof of query origin. Same-UID replacement of the DOXA client and
 namespace-relative UID observations remain unresolved. The claimed image
 ID and container ID are syntax-checked, not verified against image bytes or
-Engine state. PID continuity alone does not pin an executable or exclude PID
-reuse after process exit.
+Engine state. The Rust digest covers Git-listed, nonignored `.rs` files at
+separate read times; it excludes ignored files, manifests, configuration, and
+other bytes visible to a whole-worktree mount. Edits restored between reads
+can escape it. The [corrected six-case offline guest receipt](../../scripts/semantic-broker-proof/evidence/stream-complete-answer-2026-10-09/RUN.md)
+covers the added packet field but still uses a synthetic LSP frame. PID
+continuity alone does not pin an executable or exclude PID reuse after process
+exit.
 
 To advance the binding, install a reviewed broker outside the DOXA user's
 write and ptrace authority. It must preserve a kernel-stable broker identity,

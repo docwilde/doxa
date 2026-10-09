@@ -245,6 +245,43 @@ static void expect_query(const char *label, pid_t helper, uid_t uid, gid_t gid,
     printf("GUEST_CASE %s verified=%d reply=%s\n", label, got, output);
     (void)helper;
 }
+static void expect_client(const char *label, const char *session, const char *root,
+                          struct binding checkout, bool accepted) {
+    int output[2]; if (pipe(output)) die("client example pipe");
+    pid_t child = fork(); if (child < 0) die("fork client example");
+    if (child == 0) {
+        close(output[0]);
+        if (dup2(output[1], STDOUT_FILENO) < 0 || dup2(output[1], STDERR_FILENO) < 0)
+            die("redirect client example");
+        close(output[1]);
+        if (setresgid(CALLER, CALLER, CALLER) || setresuid(CALLER, CALLER, CALLER))
+            die("drop client example UID");
+        char device[32], inode[32];
+        snprintf(device, sizeof(device), "%llu", (unsigned long long)checkout.device);
+        snprintf(inode, sizeof(inode), "%llu", (unsigned long long)checkout.inode);
+        execl("/quota_helper_client_read", "/quota_helper_client_read",
+            session, root, device, inode, NULL);
+        die("exec client example");
+    }
+    close(output[1]);
+    char response[1024]; size_t used = 0;
+    while (used < sizeof(response) - 1) {
+        ssize_t count = read(output[0], response + used, sizeof(response) - 1 - used);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) die("read client example");
+        if (count == 0) break;
+        used += (size_t)count;
+    }
+    response[used] = 0; close(output[0]);
+    int status = 0;
+    require(waitpid(child, &status, 0) == child && WIFEXITED(status), "client example process failed");
+    require((WEXITSTATUS(status) == 0) == accepted, label);
+    if (accepted) {
+        require(strstr(response, "project_id=1002 hard_limit_bytes=33554432") != NULL, label);
+        require(strstr(response, "admission=false") != NULL, "client example claimed admission");
+    }
+    printf("GUEST_CASE %s accepted=%d response=%s", label, accepted, response);
+}
 int main(void) {
     make_dir("/quota", 0755); make_dir("/alias", 0755);
     make_dir("/alias/session-1", 0700);
@@ -269,6 +306,11 @@ int main(void) {
     write_policy(pinned, ROOT, PROJECT, LIMIT, 0, 0600);
     pid_t helper = start_helper(SOCK);
     expect_query("exact_policy", helper, CALLER, CALLER, true, -1);
+    expect_client("client_exact_tree", "session-1", ROOT, pinned.checkout, true);
+    struct binding wrong_checkout = pinned.checkout; wrong_checkout.inode++;
+    expect_client("client_wrong_checkout", "session-1", ROOT, wrong_checkout, false);
+    expect_client("client_wrong_root", "session-1", "/quota/other", pinned.checkout, false);
+    expect_client("client_wrong_session", "session-2", ROOT, pinned.checkout, false);
     expect_query("wrong_caller", helper, 2003, CALLER, false, -1);
     expect_query("tree_owner_caller", helper, OWNER, CALLER, false, -1);
     stop_helper(helper, SOCK);
@@ -396,6 +438,6 @@ int main(void) {
     expect_query("replaced_bind_directory", helper, CALLER, CALLER, false, -1);
     stop_helper(helper, SOCK);
 
-    printf("DOXA_QUOTA_HELPER_GUEST_PASS cases=21 admission=false\n");
+    printf("DOXA_QUOTA_HELPER_GUEST_PASS cases=25 admission=false\n");
     return 0;
 }
