@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.35 — 2026-10-09
+
+**Plugin lifecycle**
+
+- Add an owner-bound, cancellable TUI `/native-plugin run NAME` review path. It rechecks approved zero-grant package identity, then reports `HostUnverified` without dispatching a worker.
+- Clear completed refusal results on pane or session changes. Installed-host delegation, TUI worker cleanup and an operator activation policy remain open; executable plugin grants stay disabled.
+
 ## 2.0.0-beta.34 — 2026-10-09
 
 **Trust boundary probes**
