@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import platform
@@ -30,6 +32,8 @@ BWRAP_FLAGS = (
     "--ro-bind", "--tmpfs", "--size",
 )
 NAMESPACES = ("net", "mnt", "user", "pid")
+PROOF_CASES = frozenset({"approved-wasm", "boundary", "pids", "memory", "cpu", "setsid-cancel", "timeout"})
+PROOF_LOG_LIMIT = 128 * 1024
 IPV4_ROUTE_POLICY = 'NR == 1 { if (NF != 11 || $1 != "Iface") exit 1; next } { if (NF != 11 || $1 != "lo") exit 1 } END { if (NR == 0) exit 1 }'
 IPV6_ROUTE_POLICY = 'NF { if (NF != 10 || $10 != "lo") exit 1 }'
 
@@ -265,17 +269,152 @@ def staged_worker(source: Path, scratch: Path):
         yield worker
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC), "rb") as stream:
+        before = os.fstat(stream.fileno())
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+        after = os.fstat(stream.fileno())
+    require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+            f"{path}: executable changed during hashing")
+    return digest.hexdigest()
+
+
+def source_identity(root: Path) -> dict[str, str]:
+    def git(*args: str) -> str:
+        result = subprocess.run(["git", *args], cwd=root, capture_output=True,
+                                text=True, timeout=10, check=True)
+        return result.stdout.strip()
+
+    require(not git("status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"),
+            "proof source checkout must be clean, including untracked and ignored files")
+    commit = git("rev-parse", "--verify", "HEAD")
+    tree = git("rev-parse", "--verify", "HEAD^{tree}")
+    require(re.fullmatch(r"[0-9a-f]{40,64}", commit) is not None
+            and re.fullmatch(r"[0-9a-f]{40,64}", tree) is not None,
+            "proof source commit or tree identity is invalid")
+    return {"commit": commit, "tree": tree}
+
+
+def cgroup_identity(parent: Path, root: Path = CGROUP_ROOT,
+                    membership: str | None = None) -> dict[str, str | int]:
+    parent_meta = parent.lstat()
+    membership = membership if membership is not None else bounded_read(Path("/proc/self/cgroup"))
+    unified = [row[3:] for row in membership.splitlines() if row.startswith("0::")]
+    require(len(unified) == 1, "cgroup proof identity requires one unified membership")
+    relative = unified[0]
+    parts = relative.split("/")
+    require(relative.startswith("/") and all(part not in ("", ".", "..") for part in parts[1:]),
+            "cgroup proof identity has invalid membership")
+    leaf = root.joinpath(*parts[1:])
+    require(leaf.parent == parent, "cgroup proof supervisor is no longer under delegated parent")
+    leaf_meta = leaf.lstat()
+    require(stat.S_ISDIR(parent_meta.st_mode) and stat.S_ISDIR(leaf_meta.st_mode),
+            "cgroup proof identity is no longer a directory")
+    return {"parent": str(parent), "parent_device": parent_meta.st_dev,
+            "parent_inode": parent_meta.st_ino, "supervisor": str(leaf),
+            "supervisor_device": leaf_meta.st_dev, "supervisor_inode": leaf_meta.st_ino}
+
+
+def require_no_plugin_cgroups(parent: Path) -> None:
+    entries = list(parent.iterdir())
+    require(len(entries) <= 4096, "delegated parent has too many children to audit")
+    require(not any(entry.name.startswith("doxa-plugin-") for entry in entries),
+            "private plugin worker cgroup remains in delegated parent")
+
+
+def proof_cases(output: bytes) -> dict[str, dict[str, str]]:
+    require(len(output) <= PROOF_LOG_LIMIT, "plugin proof output exceeded 128 KiB")
+    try:
+        lines = output.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ProofError("plugin proof output is not UTF-8") from exc
+    require(any("test result: ok. 1 passed;" in line for line in lines),
+            "plugin proof did not report exactly one passing Rust test")
+    cases: dict[str, dict[str, str]] = {}
+    for line in lines:
+        marker = "plugin-acceptance case="
+        if marker not in line:
+            continue
+        prefix, _, suffix = line.partition(marker)
+        require(not prefix or prefix.startswith("test native_plugins::runner_sandbox::acceptance::delegated_cgroup_containment_acceptance ... "),
+                "plugin proof case has unexpected test-runner prefix")
+        line = marker + suffix
+        fields: dict[str, str] = {}
+        for word in line.split()[1:]:
+            key, separator, value = word.partition("=")
+            require(separator == "=" and key not in fields and value,
+                    "plugin proof case contains a malformed or duplicate field")
+            fields[key] = value
+        name = fields.get("case", "")
+        require(name in PROOF_CASES and name not in cases,
+                "plugin proof case is unexpected or duplicated")
+        require(fields.get("cleanup") == "removed", "plugin proof case did not remove its cgroup")
+        required = {"case", "outcome", "elapsed_ms", "cleanup"}
+        if name == "approved-wasm":
+            required.add("stale_approval")
+            require(fields.get("outcome") == "Return(17)"
+                    and fields.get("stale_approval") == "refused",
+                    "approved Wasm or stale-approval proof failed")
+        else:
+            required.update({"memory_peak", "oom_kill", "pids_peak", "pids_max",
+                             "cpu_usec", "cpu_throttled", "stdout_bytes", "stderr_bytes"})
+        require(set(fields) == required, "plugin proof case fields do not match the reviewed contract")
+        for key in required - {"case", "outcome", "stale_approval", "cleanup"}:
+            require(fields[key].isdecimal(), f"plugin proof case has invalid {key}")
+        expected = {"boundary": "Exit(0)", "cpu": "Timeout", "setsid-cancel": "Cancelled",
+                    "timeout": "Timeout"}
+        if name in expected:
+            require(fields["outcome"] == expected[name], f"plugin proof {name} outcome changed")
+        elif name == "pids":
+            require(fields["outcome"] == "Cancelled" or re.fullmatch(r"Exit\([0-9]+\)", fields["outcome"]) is not None,
+                    "PID proof outcome changed")
+        elif name == "memory":
+            require(fields["outcome"] == "Cancelled" or re.fullmatch(r"(?:Exit|Crash)\([0-9]+\)", fields["outcome"]) is not None,
+                    "memory proof outcome changed")
+        cases[name] = fields
+    require(set(cases) == PROOF_CASES, "plugin proof is missing one or more of the seven required cases")
+    return cases
+
+
+def receipt_name(raw: str | None, scratch: Path) -> Path:
+    require(raw is not None and re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,95}", raw) is not None
+            and raw not in (".", ".."),
+            "--run requires a simple --receipt NAME inside private TMPDIR")
+    return scratch / raw
+
+
+def write_receipt(path: Path, evidence: dict[str, object]) -> None:
+    data = (json.dumps(evidence, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    print(f"plugin-proof receipt={path} sha256={hashlib.sha256(data).hexdigest()} "
+          "purpose=review-only tui-execution=disabled", flush=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--check", action="store_true", help="read-only host prerequisite check")
     group.add_argument("--run", action="store_true", help="run the ignored proof after explicit opt-in")
+    parser.add_argument("--receipt", metavar="NAME", help="exclusive private JSON receipt name for --run")
     options = parser.parse_args()
     if options.run:
         require(os.environ.get("DOXA_PLUGIN_CGROUP_ACCEPTANCE") == "1"
                 and os.environ.get("DOXA_PLUGIN_DISPOSABLE_HOST") == "1",
                 "--run requires both DOXA_PLUGIN_CGROUP_ACCEPTANCE=1 and DOXA_PLUGIN_DISPOSABLE_HOST=1")
         target = check_target_dir(os.environ.get("CARGO_TARGET_DIR", ""))
+    else:
+        require(options.receipt is None, "--check does not create an acceptance receipt")
     parent, scratch, version = preflight()
     print(f"plugin-proof host-ready namespace=isolated net=loopback-only routes=loopback-only "
           f"kernel={platform.release()} bwrap={version} "
@@ -284,6 +423,12 @@ def main() -> int:
     if options.check:
         return 0
     root = Path(__file__).resolve().parent.parent
+    receipt = receipt_name(options.receipt, scratch)
+    require(not receipt.exists(), "plugin proof receipt already exists")
+    source = source_identity(root)
+    cgroup = cgroup_identity(parent)
+    require_no_plugin_cgroups(parent)
+    bwrap_sha256 = file_sha256(BWRAP)
     build = ["cargo", "build", "--locked", "-p", "doxa-tui", "--bin", "doxa-plugin-worker"]
     if subprocess.run(build, cwd=root, check=False).returncode != 0:
         return 1
@@ -292,9 +437,38 @@ def main() -> int:
                "delegated_cgroup_containment_acceptance", "--", "--ignored", "--nocapture"]
     environment = os.environ.copy()
     environment["RUST_TEST_THREADS"] = "1"
+    environment["CARGO_TERM_COLOR"] = "never"
+    environment["DOXA_PLUGIN_ACCEPTANCE_PARENT"] = str(parent)
+    environment["DOXA_PLUGIN_ACCEPTANCE_PARENT_ID"] = (
+        f"{cgroup['parent_device']}:{cgroup['parent_inode']}")
     with staged_worker(worker, scratch) as private_worker:
         environment["DOXA_PLUGIN_ACCEPTANCE_WORKER"] = str(private_worker)
-        return subprocess.run(command, cwd=root, env=environment, check=False).returncode
+        worker_sha256 = file_sha256(private_worker)
+        with tempfile.TemporaryFile(dir=scratch) as capture:
+            result = subprocess.run(command, cwd=root, env=environment,
+                                    stdout=capture, stderr=subprocess.STDOUT, check=False)
+            capture.seek(0)
+            output = capture.read(PROOF_LOG_LIMIT + 1)
+        require(len(output) <= PROOF_LOG_LIMIT, "plugin proof output exceeded 128 KiB")
+        sys.stdout.buffer.write(output)
+        sys.stdout.flush()
+        if result.returncode != 0:
+            return result.returncode
+        cases = proof_cases(output)
+    require_no_plugin_cgroups(parent)
+    require(cgroup_identity(parent) == cgroup, "delegated cgroup identity changed during proof")
+    require(file_sha256(BWRAP) == bwrap_sha256, "Bubblewrap binary changed during proof")
+    require(source_identity(root) == source, "proof source checkout changed during proof")
+    write_receipt(receipt, {
+        "format_version": 1, "purpose": "review-only; does not authorize TUI execution",
+        "tui_execution_authorized": False, "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "source": source, "worker_sha256": worker_sha256, "bwrap_sha256": bwrap_sha256,
+        "host": {"kernel": platform.release(), "bwrap_version": version,
+                 "uid": os.geteuid(), "cpus": len(os.sched_getaffinity(0)), "cgroup": cgroup},
+        "proof_log_sha256": hashlib.sha256(output).hexdigest(),
+        "cases": {name: cases[name] for name in sorted(cases)},
+    })
+    return 0
 
 
 if __name__ == "__main__":

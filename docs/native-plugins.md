@@ -184,11 +184,12 @@ export TMPDIR="$HOME/t"
 export CARGO_TARGET_DIR="$HOME/ssd-cache/doxa-plugin-acceptance-target"
 python3 scripts/plugin-delegated-host-proof.py --check
 DOXA_PLUGIN_CGROUP_ACCEPTANCE=1 DOXA_PLUGIN_DISPOSABLE_HOST=1 \
-  python3 scripts/plugin-delegated-host-proof.py --run
+  python3 scripts/plugin-delegated-host-proof.py --run --receipt plugin-proof.json
 ```
 
-`--run` requires both explicit environment switches and an absolute real-disk
-`CARGO_TARGET_DIR`. It repeats the preflight, builds the actual
+`--run` requires both explicit environment switches, an absolute real-disk
+`CARGO_TARGET_DIR`, and a new receipt name inside the private `TMPDIR`. It
+refuses a dirty source checkout or an existing receipt. It repeats the preflight, builds the actual
 `doxa-plugin-worker`, then runs the ignored Rust fixture. It creates only per-worker child cgroups in
 the delegated parent; it does not configure systemd, enable controllers or
 change host networking. Missing prerequisites or proof observations fail the
@@ -206,8 +207,13 @@ the installed 256 MiB memory, zero swap, 16 PID and one-CPU quotas; actual
 worker cgroup membership; aggregate PID denial and memory OOM under multiple
 children; CPU throttling; a `setsid` descendant killed on cancellation; and
 timeout cleanup.
-The evidence is limited to cgroup counters, outcomes, byte counts and elapsed
-time. The preflight prints the kernel, cgroup parent, CPU count and Bubblewrap
-version; retain that line and all seven `plugin-acceptance` case lines with the
-test result for review. Passing this fixture on one host does not grant plugin
-permissions or enable TUI execution.
+The proof validates all seven case lines and their cleanup markers, checks that
+no plugin worker cgroup remains, and writes a private JSON receipt only after
+the Rust test passes. The receipt binds the clean Git commit and tree, SHA-256
+of the staged worker and Bubblewrap binary, delegated cgroup parent and
+supervisor device/inode, host details, seven observed cases and SHA-256 of the
+bounded test log. The terminal prints the receipt SHA-256; retain that line and
+the test log separately so reviewers can detect later receipt or log changes.
+This is operator evidence, not a signature or an activation token. No TUI code
+reads the receipt, and TUI execution remains disabled. A different installed
+host, worker build or cgroup fixture needs its own proof and review.

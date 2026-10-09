@@ -4,6 +4,7 @@ use super::*;
 use super::super::runner_process::{supervise_with_input, Capture, Outcome};
 use std::io;
 use std::net::TcpListener;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::Ordering;
 use sha2::{Digest, Sha256};
@@ -245,6 +246,14 @@ fn delegated_cgroup_containment_acceptance() {
         "CPU throttling proof needs at least two available processors");
     let parent = delegated_cgroup_parent().expect("empty delegated parent and supervisor leaf required");
     assert!(parent.starts_with(CGROUP_ROOT));
+    let expected_parent = std::env::var("DOXA_PLUGIN_ACCEPTANCE_PARENT")
+        .expect("proof harness must bind the delegated cgroup parent");
+    assert_eq!(parent, PathBuf::from(expected_parent), "test moved to another delegated parent");
+    let metadata = fs::symlink_metadata(&parent).unwrap();
+    let expected_identity = std::env::var("DOXA_PLUGIN_ACCEPTANCE_PARENT_ID")
+        .expect("proof harness must bind delegated cgroup device and inode");
+    assert_eq!(format!("{}:{}", metadata.dev(), metadata.ino()), expected_identity,
+        "delegated parent inode changed before the acceptance cases");
     approved_wasm_case(&parent);
 
     let host_marker = fixture_dir();
