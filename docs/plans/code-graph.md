@@ -205,5 +205,7 @@ is read-only and creates no second memory authority.
 - Decide whether other languages justify a parser dependency and coverage bar.
   Python module resolution, runtime imports, and type-aware
   binding remain outside the shipped syntax slice.
-- Benchmark scan latency on large repositories before using this query in an
-  automatic turn path or adding a persisted incremental index.
+- The [warm-cache scan benchmark](../codegraph-scan-benchmark-2026-10-09.md)
+  measured 0.372 s median on DOXA and 1.641 s on a 6,944-file Python-heavy
+  checkout. Define a repeated-query latency budget and measure cold-cache
+  tails before adding an automatic turn path or a worktree-scoped index.
