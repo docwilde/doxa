@@ -98,8 +98,13 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
     if (broker_meta.dev(), broker_meta.ino()) != (visible_meta.dev(), visible_meta.ino()) {
         return Err(error("session broker changed during quota inspection"));
     }
-    let limit = reader.limit(&root, expected.project_id)
-        .map_err(|_| error("effective project hard block limit unavailable"))?;
+    let limit = reader.limit(&root, expected.project_id).map_err(|cause| {
+        if cause.kind() == io::ErrorKind::PermissionDenied {
+            error("project hard-limit query denied; a privileged read-only helper is required before hardened admission")
+        } else {
+            error("effective project hard block limit unavailable")
+        }
+    })?;
     if limit.id != expected.project_id || !limit.accounting || !limit.enforcing
         || limit.hard_limit_bytes != expected.hard_limit_bytes {
         return Err(error("effective project hard block limit or enforcement differs from policy"));
@@ -479,7 +484,10 @@ mod tests {
             self.states.get(&file.metadata()?.ino()).copied().ok_or_else(|| error("unknown inode"))
         }
         fn limit(&self, _: &File, _: u32) -> io::Result<LimitState> {
-            self.limit.as_ref().copied().map_err(|_| error("fake quota read failure"))
+            self.limit.as_ref().copied().map_err(|cause| match cause.raw_os_error() {
+                Some(code) => io::Error::from_raw_os_error(code),
+                None => error("fake quota read failure"),
+            })
         }
     }
     fn fixture() -> (tempfile::TempDir, Manifest, FakeReader, QuotaExpectation) {
@@ -681,6 +689,15 @@ mod tests {
         }
         reader.limit = Err(error("unavailable"));
         assert!(inspect_with(&manifest, expected, &reader).is_err());
+    }
+    #[test]
+    fn rootless_project_limit_permission_denial_reports_missing_helper_and_refuses() {
+        let (_temp, manifest, mut reader, expected) = fixture();
+        for code in [libc::EPERM, libc::EACCES] {
+            reader.limit = Err(io::Error::from_raw_os_error(code));
+            let refusal = inspect_with(&manifest, expected, &reader).unwrap_err();
+            assert!(refusal.to_string().contains("privileged read-only helper"));
+        }
     }
     #[test]
     fn symlink_replacement_and_checkout_inode_change_refuse() {

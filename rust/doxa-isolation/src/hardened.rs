@@ -65,8 +65,8 @@ pub(crate) fn require_session_hard_quota(manifest: &Manifest, receipt: &[u8]) ->
 
 fn require_runtime_enforcement_proof(_snapshot: QuotaSnapshot) -> io::Result<()> {
     // A read-only data-bind snapshot and forgeable JSON cannot attest the
-    // live broker path, EDQUOT through binds, or restart/remount behavior.
-    Err(error("per-session EDQUOT, broker-path and restart verification is unavailable"))
+    // live broker endpoint identity, EDQUOT through binds, or restart/remount behavior.
+    Err(error("per-session EDQUOT, live broker endpoint identity and restart verification is unavailable"))
 }
 
 #[cfg(test)]
@@ -122,11 +122,13 @@ mod tests {
             .unwrap_err().to_string().contains("network-none"));
     }
     #[test]
-    fn positive_kernel_snapshot_still_cannot_admit_without_runtime_proof() {
-        let snapshot = QuotaSnapshot { project_id: 42, hard_limit_bytes: 64 * 1024 * 1024,
-            mount_id: 123, filesystem_device: 456, descendants_checked: 3,
-            broker_entries_checked: 1 };
-        assert!(require_runtime_enforcement_proof(snapshot).unwrap_err().to_string()
-            .contains("EDQUOT, broker-path and restart"));
+    fn kernel_snapshot_with_zero_or_one_broker_entry_cannot_admit_without_runtime_proof() {
+        for broker_entries_checked in [0, 1] {
+            let snapshot = QuotaSnapshot { project_id: 42, hard_limit_bytes: 64 * 1024 * 1024,
+                mount_id: 123, filesystem_device: 456, descendants_checked: 3,
+                broker_entries_checked };
+            assert!(require_runtime_enforcement_proof(snapshot).unwrap_err().to_string()
+                .contains("live broker endpoint identity"));
+        }
     }
 }

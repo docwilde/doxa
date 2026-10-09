@@ -137,9 +137,18 @@ the effective project hard block limit with accounting and enforcement enabled.
 It requires an explicit exact limit; the fixture's maximum write size is
 **not** that limit.
 Unsupported filesystems, unavailable `quotactl_fd`, and any mismatch refuse
-verification. The descendant walk covers the three data bind sources; it does
-not establish an immutable tree or authenticate the live broker peer and
-protocol. This is a point-in-time snapshot, not an EDQUOT/restart proof. The
+verification. A rootless owner can receive `EPERM` or `EACCES` from the
+project-limit query: XFS/ext4 `Q_XGETQUOTA` requires `CAP_SYS_ADMIN` for this
+project ID. The verifier reports that denial and refuses. Production needs a
+narrow privileged **read-only** helper bound to the exact session directory
+descriptor and owner-controlled quota policy; it must not pass quota-changing
+privileges or Docker access to the worker. No such helper exists yet.
+The descendant walk covers the three data bind sources; it does not establish
+an immutable tree. The broker audit may report zero sockets, and its socket
+names and inode snapshots do not bind an entry to the live host listener or
+authenticate a connecting peer. Admission needs the expected live endpoint
+identity and a kernel-stable peer-to-container check for each connection.
+This is a point-in-time snapshot, not an EDQUOT/restart proof. The
 receipt is not an owner-controlled policy, and the admission seam still
 refuses even a
 hand-edited `admissible_as_hard_quota=true`. Selecting `docker-hardened` remains
@@ -151,8 +160,9 @@ routes those calls through ext4's quota state and limit operations, including
 separate project accounting and enforcement flags. The code checks the exact
 project ID and 512-byte block limit. This branch has unit coverage but has
 not yet been exercised against a live ext4 project-quota mount; a disposable
-read-only syscall probe and negative controls for disabled enforcement remain
-required before counting it as production evidence.
+read-only syscall probe, a privileged-helper permission check, and negative
+controls for disabled enforcement remain required before counting it as
+production evidence.
 
 The Codex hook broker checks the Unix peer owner UID and a bounded
 `PreCompact` frame. A local same-UID process with the session capability can

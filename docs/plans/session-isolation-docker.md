@@ -220,8 +220,13 @@ authorize it; even a changed receipt flag is refused until a live kernel
 limit/restart verifier exists. A Linux XFS/ext4 read-only verifier checks the four
 exact session directories, bounded existing descendants in the three data
 binds, only the expected owner-private broker sockets, and the effective
-project hard limit through open descriptors. Live broker peer/protocol
-attestation and production EDQUOT/restart/remount proof remain open. The
+project hard limit through open descriptors. A rootless controller can be
+denied the XFS/ext4 project-limit query (`EPERM`/`EACCES`); hardened admission
+then refuses. A narrowly privileged read-only helper bound to the exact
+session descriptor and owner-controlled policy is still required. The socket
+inventory also permits zero sockets and does not tie a visible socket inode
+to the live host listener. Exact live endpoint identity, broker peer/protocol
+attestation, and production EDQUOT/restart/remount proof remain open. The
 Codex compaction hook broker now checks the connecting Unix peer's rootless
 owner UID, accepts one bounded `PreCompact` frame with a session-private
 transcript path, and bounds its response. A disposable local Unix-socket test
