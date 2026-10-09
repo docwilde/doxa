@@ -1293,11 +1293,24 @@ else:
 
     #[test]
     fn fake_daemon_cleanup_failure_overrides_protocol_match() {
-        let fixture = observed_fixture();
-        fs::write(fixture.root.path().join("probe-mode"), "cleanup_fail").unwrap();
-        assert!(run_observed(&fixture).unwrap_err().contains("Docker cleanup unconfirmed"));
-        assert!(fixture.root.path().join("container-active").exists());
-        assert_reaped(&fixture.root.path().join("child.pid"));
+        // A busy macOS runner can exhaust the prelaunch probe's two-second
+        // budget before the fake Docker child starts. Retry only that case;
+        // once `run` was invoked, any other error must fail this assertion.
+        for attempt in 0..3 {
+            let fixture = observed_fixture();
+            fs::write(fixture.root.path().join("probe-mode"), "cleanup_fail").unwrap();
+            let error = run_observed(&fixture).unwrap_err();
+            let invocations = fs::read_to_string(fixture.root.path().join("docker-invocations"))
+                .unwrap_or_default();
+            if !invocations.lines().any(|line| line.starts_with("[\"run\",")) {
+                assert!(attempt < 2, "fake Docker never launched: {error}");
+                continue;
+            }
+            assert!(error.contains("Docker cleanup unconfirmed"), "{error}");
+            assert!(fixture.root.path().join("container-active").exists());
+            assert_reaped(&fixture.root.path().join("child.pid"));
+            return;
+        }
     }
 
     #[test]
