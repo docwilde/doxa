@@ -1,12 +1,15 @@
 //! Disposable guest exercise of the production connector-origin probe.
 //! This creates real PID namespaces and cgroup membership, but no Docker
 //! Engine; it cannot authenticate an Engine report or a later socket writer.
-#![cfg(target_os = "linux")]
-
+#[cfg(target_os = "linux")]
 pub use doxa_isolation::error;
+#[cfg(target_os = "linux")]
 #[path = "../src/broker_origin.rs"]
 mod broker_origin;
 
+#[cfg(target_os = "linux")]
+mod linux {
+use super::{broker_origin, error};
 use broker_origin::ContainerOriginPin;
 use std::{fs, io, os::unix::net::{UnixListener, UnixStream},
     path::Path, time::{Duration, Instant}};
@@ -129,9 +132,16 @@ fn run() -> io::Result<()> {
     Ok(())
 }
 
-fn main() {
+pub fn main() {
     if let Err(err) = run() {
         eprintln!("DOXA_EGRESS_ORIGIN_GUEST_FAIL: {err}");
         std::process::exit(1);
     }
 }
+}
+
+#[cfg(target_os = "linux")]
+fn main() { linux::main(); }
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}
