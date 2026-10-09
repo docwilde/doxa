@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 const POLL: Duration = Duration::from_millis(10);
 const PROBE_WAIT: Duration = Duration::from_secs(3);
 const EVIDENCE_LIMIT: u64 = 4_096;
+const IPV4_ROUTE_POLICY: &str = r#"NR == 1 { if (NF != 11 || $1 != "Iface") exit 1; next } { if (NF != 11 || $1 != "lo") exit 1 } END { if (NR == 0) exit 1 }"#;
+const IPV6_ROUTE_POLICY: &str = r#"NF { if (NF != 10 || $10 != "lo") exit 1 }"#;
 
 fn bounded_text(path: &Path) -> io::Result<String> {
     let mut bytes = Vec::new();
@@ -208,6 +210,30 @@ fn acceptance_counter_parser_rejects_missing_duplicate_and_invalid_rows() {
     }
 }
 
+#[test]
+fn acceptance_route_policy_allows_only_loopback() {
+    use std::io::Write as _;
+    fn accepts(policy: &str, rows: &str) -> bool {
+        let mut child = std::process::Command::new("/usr/bin/awk")
+            .arg(policy)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        child.stdin.take().unwrap().write_all(rows.as_bytes()).unwrap();
+        child.wait().unwrap().success()
+    }
+    let header = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n";
+    let route = "lo 00000000 00000000 0001 0 0 0 00000000 0 0 0\n";
+    assert!(accepts(IPV4_ROUTE_POLICY, &(header.to_owned() + route)));
+    assert!(!accepts(IPV4_ROUTE_POLICY, &(header.to_owned() + &route.replacen("lo", "eth0", 1))));
+    assert!(!accepts(IPV4_ROUTE_POLICY, route));
+
+    let ipv6 = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000000 00000000 00000001 lo\n";
+    assert!(accepts(IPV6_ROUTE_POLICY, ipv6));
+    assert!(!accepts(IPV6_ROUTE_POLICY, &ipv6.replacen("lo", "eth0", 1)));
+}
+
 /// Run only on a disposable delegated Linux host, explicitly opted in. This
 /// tests the actual cgroup-backed Bubblewrap launcher and its cleanup path.
 #[test]
@@ -232,8 +258,8 @@ fn delegated_cgroup_containment_acceptance() {
     let host_user_namespace = fs::read_link("/proc/self/ns/user").unwrap();
     let host_pid_namespace = fs::read_link("/proc/self/ns/pid").unwrap();
     let boundary = run_case("boundary", &format!(
-        "sleep 1\ntest ! -e /home || exit 31\ntest ! -e '{}' || exit 32\ntest -z \"${{DOXA_PLUGIN_TEST_SECRET-}}\" || exit 33\nif /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}' 2>/dev/null; then exit 34; fi\n/usr/bin/awk 'NR > 2 {{ split($0, a, \":\"); gsub(/[[:space:]]/, \"\", a[1]); if (a[1] != \"lo\") exit 1 }}' /proc/net/dev || exit 35\n/usr/bin/awk 'NR > 1 {{ exit 1 }}' /proc/net/route || exit 36\nprintf 'net=%s\\nmnt=%s\\nuser=%s\\npid=%s\\n' \"$(/usr/bin/readlink /proc/self/ns/net)\" \"$(/usr/bin/readlink /proc/self/ns/mnt)\" \"$(/usr/bin/readlink /proc/self/ns/user)\" \"$(/usr/bin/readlink /proc/self/ns/pid)\"",
-        secret.display()), Duration::from_secs(4), |budget, _| {
+        "sleep 1\ntest ! -e /home || exit 31\ntest ! -e '{}' || exit 32\ntest -z \"${{DOXA_PLUGIN_TEST_SECRET-}}\" || exit 33\nif /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}' 2>/dev/null; then exit 34; fi\n/usr/bin/awk 'NR > 2 {{ split($0, a, \":\"); gsub(/[[:space:]]/, \"\", a[1]); if (a[1] != \"lo\") exit 1 }}' /proc/net/dev || exit 35\n/usr/bin/awk '{ipv4_policy}' /proc/net/route || exit 36\nif test -f /proc/net/ipv6_route; then /usr/bin/awk '{ipv6_policy}' /proc/net/ipv6_route || exit 37; fi\nprintf 'net=%s\\nmnt=%s\\nuser=%s\\npid=%s\\n' \"$(/usr/bin/readlink /proc/self/ns/net)\" \"$(/usr/bin/readlink /proc/self/ns/mnt)\" \"$(/usr/bin/readlink /proc/self/ns/user)\" \"$(/usr/bin/readlink /proc/self/ns/pid)\"",
+        secret.display(), ipv4_policy = IPV4_ROUTE_POLICY, ipv6_policy = IPV6_ROUTE_POLICY), Duration::from_secs(4), |budget, _| {
         wait_for("worker cgroup membership", || {
             members(budget).ok()?.into_iter().find(|pid| {
                 is_member(budget, *pid)
