@@ -201,8 +201,16 @@ impl Renderer {
                 Tag::Emphasis => self.enter(Style::default().add_modifier(Modifier::ITALIC)),
                 Tag::Strong => self.enter(Style::default().add_modifier(Modifier::BOLD)),
                 Tag::Strikethrough => self.enter(Style::default().add_modifier(Modifier::CROSSED_OUT)),
-                Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
+                Tag::Link { dest_url, .. } => {
                     self.links.push(Arc::from(sanitize(&dest_url).replace('\n', " ")));
+                    self.enter(Style::default().fg(theme::ACCENT).add_modifier(Modifier::UNDERLINED));
+                }
+                Tag::Image { dest_url, .. } => {
+                    // An image wrapped by a Markdown link uses the outer link's
+                    // destination for its visible alt text.
+                    let destination = self.links.last().cloned().unwrap_or_else(||
+                        Arc::from(sanitize(&dest_url).replace('\n', " ")));
+                    self.links.push(destination);
                     self.enter(Style::default().fg(theme::ACCENT).add_modifier(Modifier::UNDERLINED));
                 }
                 Tag::Table(alignments) => {

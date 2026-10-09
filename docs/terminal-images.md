@@ -1,11 +1,13 @@
 # Images in the Rust transcript
 
-The Rust TUI renders a standalone Markdown image with an absolute local path
-inside the session's verified workspace,
-for example `![Build graph](/home/user/project/graph.png)`. Its alt text stays
-visible above the preview. Inline images, relative paths and remote URLs keep
-their existing text/link rendering. The preview is local UI content; it does
-not send image pixels to the model or fetch them from a network service.
+The Rust TUI renders Markdown images with absolute local paths inside the
+session's verified workspace, including images within ordinary prose:
+`See ![Build graph](/home/user/project/graph.png) and [details](https://example.com).`
+The alt text stays visible above each preview; the surrounding prose and links
+retain their order. Images nested inside links, lists, quotes, or formatting,
+as well as relative paths and remote URLs, keep text/link rendering. The
+preview is local UI content; it does not send pixels to the model or fetch
+them from a network service.
 
 `image_mode` in Settings chooses `halfblock` (the default, portable Unicode
 cells), `probe` (detect Kitty, Sixel or iTerm2 graphics), a forced protocol

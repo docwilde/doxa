@@ -145,6 +145,16 @@ fn link_label_is_visible_without_destination_in_table_cell() {
 }
 
 #[test]
+fn linked_image_alt_uses_outer_click_destination() {
+    use doxa_tui::markdown::render_with_links;
+    let rendered = render_with_links(
+        "[![chart](/home/user/chart.png)](https://example.com/chart)", 40);
+    assert_eq!(rendered.lines[0].to_string(), "chart");
+    assert_eq!(rendered.links.len(), 1);
+    assert_eq!(rendered.links[0].url.as_ref(), "https://example.com/chart");
+}
+
+#[test]
 fn link_cells_track_duplicate_labels_emphasis_wrapping_and_table_alignment() {
     use doxa_tui::markdown::{render_with_links, LinkRegion};
     let source = "[same **bold** label](https://one.example/path) and [same **bold** label](https://two.example/path)";
