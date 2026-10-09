@@ -8,8 +8,8 @@ use crate::{error, quota_verify::{inspect_pinned_session_hard_quota, QuotaBindin
     QuotaExpectation, QuotaSnapshot}, Manifest, Profile};
 use serde::{Deserialize, Serialize};
 use std::{ffi::CString, fs::File, io::{self, Read, Write},
-    os::{fd::{AsRawFd, FromRawFd}, unix::{ffi::OsStrExt, fs::MetadataExt, net::{UnixListener, UnixStream}}},
-    path::{Component, Path, PathBuf}, time::Duration};
+    os::{fd::{AsRawFd, FromRawFd}, unix::{ffi::OsStrExt, fs::{FileTypeExt, MetadataExt}, net::{UnixListener, UnixStream}}},
+    path::{Component, Path, PathBuf}, time::{Duration, Instant}};
 
 const MAX_POLICY: u64 = 8192;
 
@@ -204,19 +204,32 @@ pub fn serve_systemd_socket(policy_path: &Path) -> io::Result<()> {
     if listener.local_addr()?.as_pathname() != Some(policy.socket_path.as_path()) {
         return Err(error("quota helper activation socket differs from administrator policy"));
     }
-    verify_socket_path(&policy.socket_path)?;
+    let pinned_path = verify_socket_path(&policy.socket_path)?;
+    let queued = challenge_listener_path(&listener, &policy.socket_path)?;
     // The request contains no bytes. A connection selects exactly the one
     // administrator-pinned policy loaded at startup.
+    for stream in queued { serve_checked_peer(&policy, &pinned_path, stream)?; }
     for incoming in listener.incoming() {
-        let stream = incoming?;
-        // An authenticated peer closing early cannot terminate the service.
-        let _ = respond_to_peer(&policy, stream);
+        serve_checked_peer(&policy, &pinned_path, incoming?)?;
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn verify_socket_path(path: &Path) -> io::Result<()> {
+fn serve_checked_peer(policy: &QuotaHelperPolicy, pinned_path: &File, stream: UnixStream) -> io::Result<()> {
+    let visible = verify_socket_path(&policy.socket_path)?;
+    let old = pinned_path.metadata()?;
+    let now = visible.metadata()?;
+    if (old.dev(), old.ino()) != (now.dev(), now.ino()) {
+        return Err(error("quota helper socket pathname changed after activation"));
+    }
+    // An authenticated peer closing early cannot terminate the service.
+    let _ = respond_to_peer(policy, stream);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_socket_path(path: &Path) -> io::Result<File> {
     let parent_path = path.parent().ok_or_else(|| error("quota helper socket has no parent"))?;
     let mut directory = File::open("/")?;
     for component in parent_path.components().skip(1) {
@@ -233,14 +246,82 @@ fn verify_socket_path(path: &Path) -> io::Result<()> {
     }
     let name = CString::new(path.file_name().ok_or_else(|| error("quota helper socket has no name"))?
         .as_bytes()).map_err(|_| error("unsafe quota helper socket name"))?;
-    let mut socket: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstatat(directory.as_raw_fd(), name.as_ptr(), &mut socket,
-        libc::AT_SYMLINK_NOFOLLOW) } < 0 { return Err(io::Error::last_os_error()); }
-    if (socket.st_mode & libc::S_IFMT) != libc::S_IFSOCK || socket.st_uid != 0
-        || socket.st_mode & 0o007 != 0 {
+    let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(),
+        libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if fd < 0 { return Err(io::Error::last_os_error()); }
+    let socket = unsafe { File::from_raw_fd(fd) };
+    let meta = socket.metadata()?;
+    if !meta.file_type().is_socket() || meta.uid() != 0 || meta.mode() & 0o007 != 0 {
         return Err(error("quota helper socket path is not root-owned and private"));
     }
-    Ok(())
+    Ok(socket)
+}
+
+#[cfg(target_os = "linux")]
+fn challenge_listener_path(listener: &UnixListener, path: &Path) -> io::Result<Vec<UnixStream>> {
+    // A Unix listener FD lives in sockfs and has a different dev/inode from
+    // its pathname entry. A nonce sent to the pathname and read from this
+    // exact listening FD establishes their current kernel connection instead.
+    let mut nonce = [0u8; 32];
+    if unsafe { libc::getrandom(nonce.as_mut_ptr() as *mut libc::c_void, nonce.len(), libc::GRND_NONBLOCK) }
+        != nonce.len() as isize {
+        return Err(error("quota helper listener challenge has no kernel randomness"));
+    }
+    let mut client = connect_challenge_path(path)?;
+    client.set_write_timeout(Some(Duration::from_secs(1)))?;
+    client.write_all(&nonce)?;
+    listener.set_nonblocking(true)?;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut queued = Vec::new();
+    loop {
+        if Instant::now() >= deadline {
+            return Err(error("quota helper listener path challenge timed out"));
+        }
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                if peer_uid(&stream)? != 0 {
+                    if queued.len() >= 16 {
+                        return Err(error("quota helper activation has too many queued peers"));
+                    }
+                    queued.push(stream);
+                    continue;
+                }
+                stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+                let mut received = [0u8; 32];
+                if stream.read_exact(&mut received).is_ok() && received == nonce { break; }
+            },
+            Err(cause) if cause.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            },
+            Err(cause) if cause.kind() == io::ErrorKind::WouldBlock => {
+                return Err(error("quota helper listener does not own the configured pathname"));
+            },
+            Err(cause) => return Err(cause),
+        }
+    }
+    listener.set_nonblocking(false)?;
+    Ok(queued)
+}
+
+#[cfg(target_os = "linux")]
+fn connect_challenge_path(path: &Path) -> io::Result<UnixStream> {
+    let bytes = path.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.is_empty() || bytes.len() >= address.sun_path.len() {
+        return Err(error("quota helper socket pathname is too long"));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (index, byte) in bytes.iter().enumerate() { address.sun_path[index] = *byte as libc::c_char; }
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 { return Err(io::Error::last_os_error()); }
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    if unsafe { libc::connect(fd, &address as *const _ as *const libc::sockaddr,
+        std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t) } < 0 {
+        // A full backlog or unavailable path refuses the helper immediately.
+        return Err(io::Error::last_os_error());
+    }
+    stream.set_nonblocking(false)?;
+    Ok(stream)
 }
 
 #[cfg(target_os = "linux")]

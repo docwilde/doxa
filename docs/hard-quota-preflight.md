@@ -185,6 +185,39 @@ refuses their existing arrangement; a separated service identity and reviewed
 runtime integration are still needed. Root privilege or `CAP_SYS_ADMIN` for
 the project quota syscall must stay with the helper. No live host service is
 installed by the repository.
+
+The socket activation descriptor lives in Linux sockfs, so its `fstat`
+device/inode does not equal the filesystem socket pathname's device/inode.
+The helper proves their live connection by sending a one-use kernel-random
+nonce to the configured pathname and reading it from that exact listener FD.
+It retains up to 16 callers already queued by socket activation and serves
+them after the challenge. The challenge has a one-second deadline; the
+pathname inode is pinned and rechecked before each reply. A changed path
+stops the helper.
+
+The [disposable helper guest runner](../scripts/quota-helper-guest/run.sh)
+builds a static helper and purpose-built initramfs, then uses QEMU with a
+private ext4 `prjquota` image. Set `TMPDIR` to real disk and pass a matching
+kernel and an existing evidence directory. It never installs a host unit or
+changes host quotas:
+
+```sh
+TMPDIR=/path/on/real/disk scripts/quota-helper-guest/run.sh \
+  /absolute/vmlinuz-VERSION /absolute/evidence-parent
+```
+
+On a disposable Linux 7.0.0-38 guest, project 1002 with a 32 MiB enforced
+limit and four private bind sources returned the exact privileged snapshot
+to caller UID 2001 for tree owner UID 2002. Twenty-one fixture cases passed:
+wrong and prequeued callers, caller-supplied FD data, wrong project/limit/bind
+identity, same-inode different mount, wrong activation FD, root-owned socket
+path replacement before and after activation, unsafe policy ownership/mode
+and symlink, and replaced bind source. A failed path challenge closed its
+queued caller without a positive response. Every reply kept
+`admissible_as_hard_quota=false`. This tests systemd-shaped socket activation
+inside QEMU; an actual installed systemd service and a DOXA runtime caller
+remain unverified.
+
 The descendant walk covers the three data bind sources; it does not establish
 an immutable tree. The broker audit may report zero sockets, and its socket
 names and inode snapshots do not bind an entry to the live host listener or
