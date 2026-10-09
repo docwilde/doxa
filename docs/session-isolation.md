@@ -160,8 +160,25 @@ falling back to direct access:
 
     DOXA_ISOLATION_TEST_IMAGE=sha256:CONTENT_ID \
     DOXA_ISOLATION_TEST_HOST=unix:///run/user/UID/doxa-test-docker.sock \
-    cargo test -p doxa-isolation --test egress_docker -- --ignored
+    cargo test -p doxa-isolation --test egress_docker \
+      network_none_worker_reaches_only_guarded_gateway_and_fails_closed_on_loss -- --ignored
 
 Use a task-local rootless Engine and a real-disk `TMPDIR` for the fixture. It
-does not exercise an allowed upstream, provider streaming, login or refresh,
-and it does not enable a production restricted-egress profile.
+does not enable a production restricted-egress profile.
+
+To probe one explicitly selected public HTTPS upstream without credentials,
+choose a DNS hostname whose `/` response is 2xx or 3xx and whose certificate
+is trusted by the pinned fixture image. This opt-in test sends `GET /` through
+the worker's loopback proxy, validates TLS and the response, then verifies a
+denied `CONNECT` and direct hostname and public-IP connection failures:
+
+    DOXA_ISOLATION_TEST_IMAGE=sha256:CONTENT_ID \
+    DOXA_ISOLATION_TEST_HOST=unix:///run/user/UID/doxa-test-docker.sock \
+    DOXA_ISOLATION_TEST_EGRESS_UPSTREAM=PUBLIC_HTTPS_HOST \
+    cargo test -p doxa-isolation --test egress_docker \
+      network_none_worker_reaches_one_allowlisted_public_https_upstream_only -- --ignored
+
+The test sends no token, cookie, URL query or request body and does not follow
+redirects. A pass proves only that this exact hostname's TLS and HTTP transport
+worked in the selected image and rootless Engine. Provider streaming, login,
+refresh, redirects and alternate outbound paths remain unverified.

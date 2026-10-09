@@ -221,7 +221,11 @@ refused, but provider-specific destination behavior and future TLS extensions
 must be reviewed before claiming a hardened boundary. An opt-in, credential-free
 rootless fixture now checks the network-none worker's loopback adapter, a
 disallowed CONNECT, direct-IP failure and gateway-loss behavior. Permitted
-upstream traffic and provider flows still need live rootless proof.
+upstream traffic can be probed separately against one operator-selected,
+credential-free public HTTPS hostname with certificate verification, a denied
+CONNECT and direct-hostname bypass refusal. This ignored rootless test records
+transport evidence for that exact host and image only; provider flows, redirects,
+all alternate outbound paths and production admission still need live proof.
 
 API vendor keys stay in the host supervisor; it performs provider HTTP calls
 or grants a narrowly scoped per-session provider proxy. Claude and Codex may
