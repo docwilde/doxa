@@ -18,6 +18,25 @@ doxa fleet start --pool deepseek:deepseek-flash -n 2 \
   --message-review shadow --message-judge jev:jev-1.13.0 --dry-run
 ```
 
+For an OpenAI API reviewer, the exact GPT-6 Astra selectors are
+`--alignment-supervisor codex:gpt-6-astra` and
+`--message-judge llm:codex:gpt-6-astra`. They are independent selections;
+neither uses the Codex subscription session. For a conservative allocation
+across the [published service tiers and regional uplift](https://developers.openai.com/api/docs/pricing),
+set `--review-input-price 165 --review-output-price 495` (USD per million
+tokens) and choose a review budget that covers the planned call ceiling. The
+generic $100/$100 review defaults are not the all-tier Astra bounds. The
+[model page](https://developers.openai.com/api/docs/models/gpt-6-astra)
+documents a 1,050,000-token context, 128,000 maximum output tokens, Standard
+short-context rates of $10 input/$50 output per million, and reasoning efforts
+`low`, `medium`, `high`, `xhigh`, and `max`. The
+[GPT-6 guide](https://developers.openai.com/api/docs/guides/latest-model)
+excludes `none` for Astra. DOXA sends bounded text to the Responses API with
+no tools and a 512-output-token cap; incomplete output fails closed. Account
+availability, effective latency, and review quality remain unverified without
+an owner-run live evaluation. Selecting Astra as the message judge does not
+establish that it meets the fast judge's latency needs.
+
 Reviewer providers `claude`, `codex`, `deepseek`, and `glm` use stateless API
 calls and their API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
 `DEEPSEEK_API_KEY`, and `ZAI_API_KEY`). DeepSeek and GLM also use the

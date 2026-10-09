@@ -25,7 +25,7 @@ node -e 'const p=require(process.argv[1]); if(p.version!=="12.0.0") process.exit
 node -e 'const p=require(process.argv[1]); if(p.version!=="25.13.0") process.exit(1)' "$puppeteer_package" 2>/dev/null \
   || fail 'Puppeteer is not the pinned 25.13.0 release'
 browser_version=$("$chrome" --version 2>/dev/null) || fail 'browser version probe failed'
-[[ "$browser_version" == 'Google Chrome for Testing 131.0.6778.85' ]] \
+[[ "$browser_version" =~ ^Google\ Chrome\ for\ Testing\ 131\.0\.6778\.85[[:space:]]*$ ]] \
   || fail 'browser is not the pinned Chrome for Testing 131.0.6778.85'
 
 printf 'Mermaid CLI: 12.0.0\nPuppeteer: 25.13.0 (lockfile)\nBrowser: %s\nNode: %s\n' \

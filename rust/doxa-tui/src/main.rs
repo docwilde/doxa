@@ -57,9 +57,12 @@ Commands:
                        Run the explicitly selected provider authentication
   plugins [refresh | adopt on|off]
                        Discover plugins or change sanitized adoption for new sessions
+  native-plugin preflight NAME
+                       Review one owner-local WebAssembly package without running it
   codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH
                        Query current Rust syntax and structural module files with source hashes
   codegraph --lore-map [--root WORKTREE] file|imports|calls|modules PATH
+  codegraph --stored [--root WORKTREE] file|imports|calls|modules PATH
                        Export one syntax snapshot with read-only LORE purpose candidates
   fleet ...            Inspect or start native fleet runs
   mesh serve           Serve the private peer graph until Ctrl-C
@@ -164,6 +167,18 @@ fn run(args: &[String]) -> io::Result<()> {
                 return update();
             }
             "codegraph" => {
+                if args.get(1).is_some_and(|arg| arg == "--stored") {
+                    let (root, request) = doxa_codegraph::parse_cli(&args[2..]).map_err(invalid)?;
+                    let (kind, path) = request.file_scope()
+                        .ok_or_else(|| invalid("--stored requires a file-scoped query"))?;
+                    let root = doxa_codegraph::worktree_root(&root).map_err(invalid)?;
+                    let cwd = root.to_str().ok_or_else(|| invalid("worktree path is not UTF-8"))?;
+                    let mut lore = doxa_lore::LoreClient::open(Duration::from_secs(3))
+                        .map_err(io::Error::other)?;
+                    let snapshot = lore.codegraph_snapshot(cwd, kind, path).map_err(io::Error::other)?;
+                    println!("{}", serde_json::to_string(&snapshot.to_value()).map_err(io::Error::other)?);
+                    return Ok(());
+                }
                 let with_lore_map = args.get(1).is_some_and(|arg| arg == "--lore-map");
                 let query_args = if with_lore_map { &args[2..] } else { &args[1..] };
                 let answer = doxa_codegraph::query_cli(query_args).map_err(invalid)?;
@@ -217,6 +232,14 @@ fn run(args: &[String]) -> io::Result<()> {
                     [_, action] if action == "refresh" => println!("{}", operations::plugins_reload()?),
                     [_, action, value] if action == "adopt" && (value == "on" || value == "off") => println!("{}", operations::plugins_change(value == "on")?),
                     _ => return Err(invalid("usage: doxa plugins [refresh | adopt on|off]")),
+                }
+                return Ok(());
+            }
+            "native-plugin" => {
+                match args {
+                    [_, action, name] if action == "preflight" =>
+                        print!("{}", operations::native_plugin_package_preflight(name)?),
+                    _ => return Err(invalid("usage: doxa native-plugin preflight NAME")),
                 }
                 return Ok(());
             }

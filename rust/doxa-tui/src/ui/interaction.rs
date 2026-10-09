@@ -3311,7 +3311,7 @@ impl App {
                                 self.focus = Focus::Rail;
                                 return true;
                             }
-                            Some(RailRow::Session(index)) => {
+                            Some(RailRow::Session(index) | RailRow::Pane { active: index, .. }) => {
                                 let id = self.sessions[*index].id.clone();
                                 let now = Instant::now();
                                 let double_click = self.last_rail_click.as_ref().is_some_and(|(previous, at)|

@@ -86,7 +86,7 @@ fn scene(name: &str) -> App {
                 worktree: Some("feat".into()),
             });
         }
-        "triage" => {
+        "triage" | "pane-triage" => {
             app.rail_visible = true;
             app.groups[0].tabs = vec!["demo-codex-01".into(), "demo-claude-02".into(), "demo-deepseek-03".into()];
             for id in ["demo-codex-01", "demo-claude-02", "demo-deepseek-03"] {
@@ -103,7 +103,11 @@ fn scene(name: &str) -> App {
                     "options":[{"label":"Approve", "description":"Continue the fixture"},
                                {"label":"Revise", "description":"Keep reviewing"}]}]
             }));
-            app.notice = format!("Rust {} · hidden tab #3 needs input · fixture", env!("CARGO_PKG_VERSION"));
+            if name == "pane-triage" {
+                app.notice = format!("Rust {} · pane rail · fixture", env!("CARGO_PKG_VERSION"));
+            } else {
+                app.notice = format!("Rust {} · hidden tab #3 needs input · fixture", env!("CARGO_PKG_VERSION"));
+            }
         }
         "image-preview" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];
@@ -422,7 +426,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "triage" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
+        "hero" | "triage" | "pane-triage" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
@@ -439,6 +443,7 @@ fn main() {
         }).unwrap();
     } else {
         if name == "image-preview" { std::env::set_var("DOXA_IMAGE_MODE", "halfblock"); }
+        if name == "pane-triage" { std::env::set_var("DOXA_RAIL_ENTRIES", "panes"); }
         let app=scene(&name);
         if name == "image-preview" { app.configure_terminal_images("halfblock"); }
         terminal.draw(|frame| app.draw(frame)).unwrap();

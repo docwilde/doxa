@@ -1342,6 +1342,7 @@ impl RenderedTranscript {
 enum RailRow {
     Heading(usize),
     Session(usize),
+    Pane { group: usize, active: usize },
     ProjectHeading(String),
     PastHeading,
 }
@@ -1510,7 +1511,7 @@ pub struct App {
     visible_links: RefCell<Vec<(Rect, String)>>,
     pending_open_urls: Vec<String>,
     chip_info: Option<ChipInfo>,
-    codegraph_pending: Option<(String, PathBuf, Receiver<Result<doxa_codegraph::Answer, String>>)>,
+    codegraph_pending: Option<(String, PathBuf, Receiver<Result<Vec<String>, String>>)>,
     // Mouse coordinates must come from the last painted frame, which may
     // differ from the terminal size reported by an earlier resize event.
     rendered_chip_hits: RefCell<Option<Vec<ChipHit>>>,

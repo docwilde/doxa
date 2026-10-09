@@ -15,7 +15,7 @@ const PALETTE: [(&str, Color); 6] = [
     ("green", Color::Rgb(0x9B, 0xCE, 0x8F)),
 ];
 
-fn named(name: &str) -> Option<Color> {
+pub(super) fn named(name: &str) -> Option<Color> {
     PALETTE.iter().find(|(candidate, _)| *candidate == name).map(|(_, colour)| *colour)
 }
 
@@ -107,6 +107,19 @@ impl App {
         }
     }
 
+    /// A pane can mix projects, or include a tab whose root is not yet
+    /// verified. Keep that provenance visible and withhold a project hue.
+    pub(super) fn pane_project_marker(&self, group: usize) -> &'static str {
+        let Some(pane) = self.groups.get(group) else { return " [root?]" };
+        let mut root: Option<&Path> = None;
+        for id in &pane.tabs {
+            let Some(candidate) = self.project_roots.get(id).map(PathBuf::as_path) else { return " [root?]" };
+            if root.is_some_and(|known| known != candidate) { return " [mixed]"; }
+            root = Some(candidate);
+        }
+        if root.is_none() { " [root?]" } else { "" }
+    }
+
     /// A display label can collide across unrelated roots. In that case (or
     /// while any root is unknown) the label remains, but its hue is withheld.
     pub(super) fn rail_project_colour(&self, label: &str) -> Option<Color> {
@@ -118,6 +131,11 @@ impl App {
                 || self.rail_project_label(index) != label { continue; }
             found = true;
             let candidate = self.project_roots.get(&session.id)?.as_path();
+            if self.preferences.value("rail_entries") == "panes" {
+                if let Some(group) = self.groups.iter().position(|group| group.active_id() == Some(session.id.as_str())) {
+                    if !self.pane_project_marker(group).is_empty() { return None; }
+                }
+            }
             if root.is_some_and(|known| known != candidate) { return None; }
             root = Some(candidate);
         }

@@ -16,6 +16,7 @@ impl Kind {
         match value { "needs_input" => Some(Self::NeedsInput),
             "turn_done" | "turn_refused" => Some(Self::TurnDone), _ => None }
     }
+    pub fn as_str(self) -> &'static str { match self { Self::NeedsInput => "needs_input", Self::TurnDone => "turn_done" } }
     fn payload(self) -> &'static [u8] {
         match self {
             Self::NeedsInput => br#"{"kind":"needs_input"}"#,

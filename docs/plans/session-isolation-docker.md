@@ -8,12 +8,18 @@ settings and commands. A bounded allocated-block scan now gates launches,
 resumes, migrations and new turns against a saved soft ceiling and host
 free-space floor. The chip reports usage as monitoring, not a hard quota.
 Hard quotas still require administrator-managed filesystem project quotas and
-verified enforcement across bind mounts. New Docker sessions request a private
+verified enforcement across bind mounts. A [read-only operator preflight](../hard-quota-preflight.md)
+checks fixture mount and project-inheritance prerequisites but never certifies
+an enforced limit. New Docker sessions request a private
 cgroup namespace, and the worker checks actual cgroup v2 memory, swap, CPU and
 PID ceilings before admission and each CLI provider turn. Beta.16 adds an opt-in
 rootless restricted-egress transport smoke; it does not verify production cgroup
 or hard-quota enforcement. Hardened egress, macOS Docker Desktop,
 remote Engines and a containerized controller remain open.
+A [read-only remote Engine fixture preflight](../remote-engine-preflight.md)
+checks the evidence shape for rootless identity, private broker transport,
+daemon-host mount ownership and effective cgroup limits. Its output never
+authorizes remote or Docker Desktop admission.
 
 Target: Linux first. This
 spec covers both a DOXA controller running on the host and a DOXA controller
@@ -215,7 +221,11 @@ refused, but provider-specific destination behavior and future TLS extensions
 must be reviewed before claiming a hardened boundary. An opt-in, credential-free
 rootless fixture now checks the network-none worker's loopback adapter, a
 disallowed CONNECT, direct-IP failure and gateway-loss behavior. Permitted
-upstream traffic and provider flows still need live rootless proof.
+upstream traffic can be probed separately against one operator-selected,
+credential-free public HTTPS hostname with certificate verification, a denied
+CONNECT and direct-hostname bypass refusal. This ignored rootless test records
+transport evidence for that exact host and image only; provider flows, redirects,
+all alternate outbound paths and production admission still need live proof.
 
 API vendor keys stay in the host supervisor; it performs provider HTTP calls
 or grants a narrowly scoped per-session provider proxy. Claude and Codex may

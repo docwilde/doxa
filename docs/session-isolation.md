@@ -40,6 +40,10 @@ The system rootful socket is refused; the Engine must report rootless operation
 and cgroup v2 memory, CPU and PID support. Before admission and each CLI provider
 turn, the worker checks its own finite kernel cgroup memory, CPU, PID and swap
 limits. An unavailable controller or ineffective limit refuses the turn.
+The [remote Engine fixture preflight](remote-engine-preflight.md) evaluates
+mock rootless, broker, mount and cgroup evidence without connecting to an
+endpoint. It cannot authorize remote Docker or Docker Desktop; both remain
+unavailable until daemon-host and worker proofs run in the admission path.
 
 ## Resource limits and disk monitoring
 
@@ -72,6 +76,11 @@ project ID to each private session tree, set a hard block limit, and verify
 that writes through every bind source hit that limit. For XFS, that means a
 `prjquota` mount and project setup/limit with `xfs_quota`; owner-only rootless
 Docker cannot silently provision this. Hard quotas remain an open stage.
+The [read-only hard-quota preflight](hard-quota-preflight.md) checks an
+owner-private **fixture** for mount and project-inheritance prerequisites. It
+always refuses to certify enforcement; an administrator-set hard limit and a
+real rootless-container `EDQUOT` test across checkout, home and cache remain
+necessary before a hard-quota profile can ship.
 See [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/),
 [Docker's storage option requirements](https://docs.docker.com/reference/cli/docker/container/run/),
 and [XFS project quotas](https://man7.org/linux/man-pages/man8/xfs_quota.8.html).
@@ -151,8 +160,25 @@ falling back to direct access:
 
     DOXA_ISOLATION_TEST_IMAGE=sha256:CONTENT_ID \
     DOXA_ISOLATION_TEST_HOST=unix:///run/user/UID/doxa-test-docker.sock \
-    cargo test -p doxa-isolation --test egress_docker -- --ignored
+    cargo test -p doxa-isolation --test egress_docker \
+      network_none_worker_reaches_only_guarded_gateway_and_fails_closed_on_loss -- --ignored
 
 Use a task-local rootless Engine and a real-disk `TMPDIR` for the fixture. It
-does not exercise an allowed upstream, provider streaming, login or refresh,
-and it does not enable a production restricted-egress profile.
+does not enable a production restricted-egress profile.
+
+To probe one explicitly selected public HTTPS upstream without credentials,
+choose a DNS hostname whose `/` response is 2xx or 3xx and whose certificate
+is trusted by the pinned fixture image. This opt-in test sends `GET /` through
+the worker's loopback proxy, validates TLS and the response, then verifies a
+denied `CONNECT` and direct hostname and public-IP connection failures:
+
+    DOXA_ISOLATION_TEST_IMAGE=sha256:CONTENT_ID \
+    DOXA_ISOLATION_TEST_HOST=unix:///run/user/UID/doxa-test-docker.sock \
+    DOXA_ISOLATION_TEST_EGRESS_UPSTREAM=PUBLIC_HTTPS_HOST \
+    cargo test -p doxa-isolation --test egress_docker \
+      network_none_worker_reaches_one_allowlisted_public_https_upstream_only -- --ignored
+
+The test sends no token, cookie, URL query or request body and does not follow
+redirects. A pass proves only that this exact hostname's TLS and HTTP transport
+worked in the selected image and rootless Engine. Provider streaming, login,
+refresh, redirects and alternate outbound paths remain unverified.

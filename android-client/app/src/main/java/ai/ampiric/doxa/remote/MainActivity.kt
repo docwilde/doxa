@@ -3,10 +3,13 @@ package ai.ampiric.doxa.remote
 import android.Manifest
 import android.content.pm.PackageManager
 import android.content.SharedPreferences
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,7 +30,7 @@ private data class Entry(val kind: String, val text: String)
 private class ReplayGap : Exception()
 
 private class RemoteController(private val prefs: SharedPreferences, private val scope: CoroutineScope,
-                               private val alerts: LocalAlerts) {
+                               private val alerts: LocalAlerts, private val push: BackgroundPush) {
     var origin by mutableStateOf(prefs.getString("hub", "") ?: "")
     var status by mutableStateOf("Connect through your user-owned Tailscale device")
         private set
@@ -108,6 +111,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         eventJob?.cancel(); eventJob = null
         api?.close(); api = null
         key?.fill(0); key = null; keySelected = false
+        push.clearSelection()
         connected = false; sessions = emptyList(); selected = null
         entries = emptyList(); pending = emptyList(); olderBefore = null
         uncertain = null; confirmFresh = false; readyFresh = false
@@ -123,8 +127,8 @@ private class RemoteController(private val prefs: SharedPreferences, private val
                 val inventory = client.sessions()
                 sessions = inventory
                 val active = selected
-                if (active != null && inventory.none { it.id == active.id && it.encrypted == active.encrypted }) {
-                    eventJob?.cancel(); selected = null; entries = emptyList(); pending = emptyList()
+                if (active != null && inventory.none { it.id == active.id && it.encrypted == active.encrypted && it.incarnation == active.incarnation }) {
+                    eventJob?.cancel(); selected = null; push.clearSelection(); entries = emptyList(); pending = emptyList()
                     status = "Session went offline"
                 } else status = "Session list refreshed"
             } catch (error: Exception) { status = error.message ?: "Refresh failed" }
@@ -141,7 +145,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         generation++
         val mine = generation
         eventJob?.cancel(); eventJob = null
-        selected = session; entries = emptyList(); pending = emptyList(); olderBefore = null
+        selected = session; push.select(origin, session); entries = emptyList(); pending = emptyList(); olderBefore = null
         uncertain = null; readyFresh = false; questionIndex = 0; answers = emptyMap(); currentText = false
         prefs.edit().putString("session", session.id).apply()
         status = "Loading ${session.title}"
@@ -402,8 +406,12 @@ class MainActivity : ComponentActivity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var state: RemoteController
     private lateinit var alerts: LocalAlerts
+    private lateinit var push: BackgroundPush
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         alerts.updateEnabled(granted)
+    }
+    private val pushPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) push.enable() else state.statusMessage("Android notifications are required for background alerts")
     }
     private val chooseKey = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) try {
@@ -423,23 +431,34 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.DKGRAY),
+            navigationBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.DKGRAY),
+        )
         val prefs = getSharedPreferences("doxa-remote", MODE_PRIVATE)
         alerts = LocalAlerts(this, prefs)
-        state = RemoteController(prefs, scope, alerts)
+        push = BackgroundPush(this, prefs, scope) { message -> scope.launch { state.statusMessage(message) } }
+        state = RemoteController(prefs, scope, alerts, push)
         setContent { MaterialTheme {
-            RemoteScreen(state, alerts,
+            RemoteScreen(state, alerts, push,
                 onChooseKey = { chooseKey.launch(arrayOf("text/plain", "application/octet-stream")) },
                 onEnableAlerts = {
                     if (Build.VERSION.SDK_INT >= 33 &&
                         checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
                         notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
                     else alerts.updateEnabled(true)
+                },
+                onEnablePush = {
+                    if (Build.VERSION.SDK_INT >= 33 &&
+                        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                        pushPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    else push.enable()
                 })
         } }
     }
 
-    override fun onStart() { super.onStart(); if (::alerts.isInitialized) alerts.visible = true }
-    override fun onStop() { if (::alerts.isInitialized) alerts.visible = false; super.onStop() }
+    override fun onStart() { super.onStart(); LocalAlerts.appVisible = true; if (::alerts.isInitialized) alerts.visible = true }
+    override fun onStop() { LocalAlerts.appVisible = false; if (::alerts.isInitialized) alerts.visible = false; super.onStop() }
 
     override fun onDestroy() {
         state.close()
@@ -449,11 +468,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun RemoteScreen(state: RemoteController, alerts: LocalAlerts,
-                         onChooseKey: () -> Unit, onEnableAlerts: () -> Unit) {
+private fun RemoteScreen(state: RemoteController, alerts: LocalAlerts, push: BackgroundPush,
+                         onChooseKey: () -> Unit, onEnableAlerts: () -> Unit, onEnablePush: () -> Unit) {
     val session = state.selected
     val question = state.pending.firstOrNull()
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    Column(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
         Text("DOXA Remote", style = MaterialTheme.typography.headlineSmall)
         Text(state.status, style = MaterialTheme.typography.bodySmall)
         Spacer(Modifier.height(8.dp))
@@ -475,7 +494,13 @@ private fun RemoteScreen(state: RemoteController, alerts: LocalAlerts,
             OutlinedButton(onClick = { if (alerts.enabled) alerts.updateEnabled(false) else onEnableAlerts() }) {
                 Text(if (alerts.enabled) "Local alerts on" else "Enable local alerts")
             }
-            Text("Alerts need this app's live connection; they stop if Android closes it.",
+            OutlinedButton(onClick = { if (push.enabled) push.disable() else onEnablePush() },
+                enabled = session != null || push.enabled) {
+                Text(if (push.registered) "Background alerts on" else if (push.enabled) "Background alerts pending" else "Enable background alerts")
+            }
+            Text("Background alerts follow the selected live session and need a configured Firebase build.",
+                style = MaterialTheme.typography.bodySmall)
+            Text("Local alerts need this app's live connection; they stop if Android closes it.",
                 style = MaterialTheme.typography.bodySmall)
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(state.sessions, key = { it.id }) { item ->

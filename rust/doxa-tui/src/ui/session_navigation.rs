@@ -791,6 +791,23 @@ impl App {
             self.input_cursor = 0;
             return;
         }
+        if verb == "view" {
+            if !["sessions", "panes"].contains(&rest) {
+                self.notice = "Usage: /collection view sessions|panes".into();
+                return;
+            }
+            self.notice = match crate::settings::config_path().and_then(|path|
+                crate::settings::save(&path, &[("rail_entries".into(), Some(rest.into()))], "claude")) {
+                Ok(()) => {
+                    self.preferences = crate::preferences::Preferences::load();
+                    self.rail_selected = self.rail_selected.min(self.rail_order().len().saturating_sub(1));
+                    self.input.clear(); self.input_cursor = 0;
+                    format!("Rail view: {rest}")
+                }
+                Err(error) => format!("Rail view unchanged: {error}"),
+            };
+            return;
+        }
         if verb == "sort" {
             let mode = if rest.is_empty() {
                 if self.preferences.value("collection_sort") == "urgency" { "manual" } else { "urgency" }
@@ -1064,6 +1081,14 @@ impl App {
             .and_then(|index| self.sessions.get(index))
             .map(|session| session.id.clone())
         {
+            if self.preferences.value("rail_entries") == "panes" {
+                if let Some(group) = self.groups.iter().position(|group| group.active_id() == Some(id.as_str())) {
+                    self.active_group = group;
+                    self.groups[group].scroll = 0;
+                    self.focus = Focus::Transcript;
+                    return;
+                }
+            }
             if !self.groups[self.active_group].tabs.contains(&id)
                 && !self.manual_tab_available_for(Some(&id))
             {

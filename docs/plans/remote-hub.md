@@ -15,9 +15,12 @@ layout file contains pane geometry and tab IDs, never transcript, input or
 event cursors; each restored stream obtains a new host snapshot and cursor.
 `/local` selects an open local tab. Remote tabs use an `◎` marker.
 The browser can receive encrypted background Web Push after explicit opt-in.
-An Android Kotlin/Compose client project is now in `android-client/`. Its debug
-APK and protocol tests build locally; device integration and private-tailnet
-QA remain open, so Android is not yet shipped.
+An Android Kotlin/Compose client project is in `android-client/`. Its FCM
+background-push source and protocol tests exist, with owner- and
+incarnation-scoped registration and generic tagged notifications. This host
+cannot build the APK because its JDK compiler and Android SDK 37 are absent;
+provisioned-device, FCM and private-tailnet QA remain open, so Android is not
+yet shipped.
 
 ## User journey
 
@@ -136,11 +139,17 @@ the app fetches current state after Tailscale authentication.
 Subscriptions remain volatile and the browser registers them again on its next
 visit after a hub restart; the VAPID key file must be retained. Outbound sends
 are limited to known HTTPS browser push services. A device needs browser Push
-API support and private hub access to enable alerts. Android now has opt-in
-generic local alerts while its SSE connection survives. Native background
-push needs a Firebase app configuration and an authenticated FCM sender; an
-FCM token cannot use the existing Web Push endpoint. A future receiver will
-reopen at the last cursor and fetch current state.
+API support and private hub access to enable browser alerts. Android local
+alerts still work only while SSE survives. Native Android background FCM data
+push now has source and protocol tests: a configured build opts in per selected
+session, the private hub registers its token only under the attested owner and
+exact live incarnation, and the hub signs a short-lived Google OAuth request
+before sending a generic kind plus opaque routing tag to FCM HTTP v1. The
+Android receiver checks sender, opt-in, and current tag before notification.
+Changing sessions rotates the tag, and opening the app refreshes current state.
+Unconfigured builds and hubs keep this path disabled. Registrations are
+volatile with a 24-hour lease and bounded send concurrency. The APK build,
+provisioned Firebase and device delivery QA are still open.
 
 ## Android client contract
 
@@ -153,11 +162,10 @@ command-result API as the browser. It retains a stable `request_id` while a
 submission is uncertain and shows an explicit confirmation before retrying an
 expired write. The host lease never leaves the connector.
 
-Keep only session IDs, cursors, and unsent drafts on the device, in Android's
-app-private storage. On reconnect, refresh the inventory and pending inputs
-before offering an approval. A future push token registers per device and
-owner; the notification opens that session and fetches current state through
-the authenticated hub. Tailscale Serve login headers are absent for tagged
+Keep session IDs, cursors, unsent drafts, and the opt-in FCM token and random
+routing tag in Android's app-private storage. On reconnect, refresh the inventory and pending inputs
+before offering an approval. The push token registers for the selected session and owner; the notification
+opens the app, which fetches current state through the authenticated hub. Tailscale Serve login headers are absent for tagged
 source devices, so the initial Android path assumes a user-owned device.
 
 ## Delivery stages
@@ -175,8 +183,9 @@ source devices, so the initial Android path assumes a user-owned device.
 4. **Background delivery:** private browser Web Push with service worker is
    implemented. The Android client project renders transcript and events,
    sends prompts and answers, and uses the existing Serve sign-in. Android SDK
-   debug APK build passes. Device QA and Android background push remain open.
-   Generic Android alerts from a live SSE connection are implemented.
+   push source and protocol tests pass. A debug APK build and provisioned device
+   QA for Android background FCM push remain open in this environment. Generic
+   Android alerts from a live SSE connection are implemented.
 
 Release gates for each stage: opt-in off by default; denied and forged identity
 tests; replay, duplicate command and stale approval tests; connection-loss tests;

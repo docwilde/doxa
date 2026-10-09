@@ -352,6 +352,10 @@ pub(crate) fn doxa_home() -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "DOXA_HOME and HOME are unset"))
 }
 
+pub fn native_plugin_package_preflight(name: &str) -> io::Result<String> {
+    Ok(crate::native_plugins::packages::preflight(&doxa_home()?, name)?.report())
+}
+
 fn safe_report_value(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()
         && !matches!(*c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))

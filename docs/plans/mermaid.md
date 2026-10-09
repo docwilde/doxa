@@ -1,6 +1,6 @@
 # Mermaid in the Rust transcript
 
-Status: **local preview, sandbox doctor and Settings preflight implemented; pinned real CLI harness added, host run open**.
+Status: **local preview, sandbox doctor and Settings preflight implemented; pinned real CLI sandbox suite passed on Linux**.
 
 The native Ratatui transcript recognizes complete, standalone `mermaid` code
 fences. Without explicit configuration, it renders the source fence exactly as
@@ -29,11 +29,10 @@ explicit, and a failed preview still leaves the source fence visible.
 
 ## Still open
 
-- Run the [pinned real CLI harness](../../scripts/mermaid-validation/README.md)
-  after explicitly provisioning its reviewed package root. This host has Node,
-  bubblewrap and browsers but no installed Mermaid CLI; flowchart, sequence,
-  class and Gantt fidelity remain unverified. A `TERM=dumb` agent terminal
-  also cannot validate Kitty, Sixel, iTerm2 or on-screen halfblock quality.
+- Validate Kitty, Sixel, iTerm2 and on-screen halfblock quality in real
+  terminals. The [pinned local CLI suite](../../scripts/mermaid-validation/README.md)
+  passed fixed flowchart, sequence, class and Gantt sandbox renders on Linux,
+  but this agent terminal reports `TERM=dumb`.
 - Decide whether the installer should offer the large optional Node/Chromium
   dependency. It should state the cost before installation and never install
   Node silently.

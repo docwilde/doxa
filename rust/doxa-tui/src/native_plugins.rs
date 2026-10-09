@@ -12,6 +12,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
 
 pub const API_VERSION: u32 = 1;
+pub mod packages;
 const MAX_CONFIG: u64 = 1024 * 1024;
 const MAX_MANIFEST: u64 = 16 * 1024;
 const MAX_PLUGINS: usize = 16;

@@ -191,6 +191,29 @@ mod tests {
         for field in ["status","incomplete_details","model"]{let mut bad=response.clone();bad[field]=json!("foreign");assert!(parse_response(&codex,&bad,1).is_err());}
     }
     #[test]
+    fn astra_is_an_exact_stateless_responses_selector_for_both_review_roles(){
+        let supervisor=Model::parse("codex:gpt-6-astra").unwrap();
+        let judge=Model::parse("llm:codex:gpt-6-astra").unwrap();
+        assert_eq!(supervisor,judge);
+        assert_eq!(supervisor.display(),"codex:gpt-6-astra");
+        assert_eq!(supervisor.service().0,"https://api.openai.com/v1/responses");
+        for instructions in [SUPERVISOR_INSTRUCTIONS,SEMANTIC_INSTRUCTIONS]{
+            let body=request(&supervisor,instructions,&json!({"charter":"bounded"})).unwrap();
+            assert_eq!(body["model"],"gpt-6-astra");
+            assert_eq!(body["tools"],json!([]));
+            assert_eq!(body["store"],false);
+            assert_eq!(body["max_output_tokens"],OUTPUT_TOKENS);
+            for unsupported in ["temperature","top_p","top_logprobs"]{assert!(body.get(unsupported).is_none());}
+        }
+        let verdict=json!({"verdict":"aligned","evidence_refs":[],"charter_clause":"task","reason":"on scope","recommended_action":"continue"});
+        let complete=json!({"model":"gpt-6-astra","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":verdict.to_string()}]}],"usage":{"input_tokens":10,"output_tokens":20}});
+        assert_eq!(parse_response(&supervisor,&complete,1).unwrap().result,verdict);
+        let mut incomplete=complete.clone();incomplete["status"]=json!("incomplete");
+        assert!(parse_response(&supervisor,&incomplete,1).is_err());
+        let mut switched=complete;switched["model"]=json!("gpt-6-luna");
+        assert!(parse_response(&supervisor,&switched,1).is_err());
+    }
+    #[test]
     fn shared_review_reservation_survives_failure_and_reaches_call_ceiling(){
         use crate::{Assignment,Charter,ReviewConfig};use std::os::unix::fs::PermissionsExt;
         let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();

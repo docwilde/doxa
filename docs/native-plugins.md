@@ -70,3 +70,53 @@ permissioned, malformed and control-character values count as failures. The
 status never enters an agent prompt or runs plugin code.
 At most eight allowlisted statuses are active. The same manifest may also
 declare static commands.
+
+## Executable package identity review
+
+Executable plugins are **not available yet**. The separate `native-plugin`
+preflight command lets the owner inspect a proposed WebAssembly package without
+loading or running it. It does not change the data-only `native_plugins` list.
+The command reads only the name you provide; it never searches a repository or
+enumerates packages.
+
+Put private files at `$DOXA_HOME/native-plugin-packages/demo/manifest.toml`
+and `module.wasm` (owner-only directories and files). The manifest is:
+
+```toml
+package_api_version = 1
+name = "demo"
+version = "1.0"
+artifact_format = "wasm-core-v1"
+requested_grants = ["render-local-panel-v1"]
+```
+
+Run `doxa native-plugin preflight demo`. It prints the exact manifest and module
+SHA-256 digests, requested grants, opened inode/device identities, and review
+state. The only recognized proposed grant is `render-local-panel-v1`; it is a
+reserved name, not a capability the current DOXA grants or exercises. The
+command fully validates a WebAssembly 1.0 core module using the pinned
+`wasmparser` validator. Imports and start functions are refused because no host
+ABI or safe startup contract exists. Newer WebAssembly proposals are also
+refused until a runner explicitly supports them.
+
+After reviewing both files and the requested grant, the owner can record the
+exact identity in private `$DOXA_HOME/config.toml`:
+
+```toml
+[[native_plugin_packages]]
+name = "demo"
+manifest_sha256 = "<64 lowercase hexadecimal digits from preflight>"
+module_sha256 = "<64 lowercase hexadecimal digits from preflight>"
+grants = ["render-local-panel-v1"]
+```
+
+Preflight then reports an exact approval match. Changed bytes or grants fail
+closed; an unapproved package remains review-only. Approval is not an execution
+switch. The digests pin local bytes; they do not authenticate a publisher. A
+fresh `recheck_approved` call re-opens both files, checks their digests, opened
+inodes and current owner approval against the earlier review, and returns the
+validated module bytes. A future runner must use those bytes without re-opening
+a path, enforce each grant, isolate crashes and resource use, and define a
+bounded host protocol
+before executable plugins can run. Native shared libraries, scripts, provider
+backends, hooks and automatic startup remain unsupported.

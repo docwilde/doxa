@@ -1,6 +1,6 @@
 # Native DOXA plugin API
 
-Status: **data-only v1 command and status slices implemented; executable plugins remain open**.
+Status: **data-only v1 and explicit package identity preflight implemented; executable plugins remain open**.
 This plan supersedes the Python/Textual `Plugin` and `PANE_COMMANDS` draft. The
 Rust frontend uses its own command registry, palette and help panel. Claude Code
 plugin adoption through `/plugins` is a separate provider feature.
@@ -9,6 +9,7 @@ plugin adoption through `/plugins` is a separate provider feature.
 
 - [Shipped slice](#shipped-slice)
 - [Trust boundary](#trust-boundary)
+- [Executable package preflight](#executable-package-preflight)
 - [Open extension work](#open-extension-work)
 - [Acceptance bar](#acceptance-bar)
 
@@ -60,6 +61,33 @@ provider passthrough and cannot override a native command name.
   discovery path to a later executable API.
 
 ## Open extension work
+
+### Executable package preflight
+
+`doxa native-plugin preflight NAME` now opens only the explicitly named,
+owner-private `$DOXA_HOME/native-plugin-packages/NAME` package. It binds a
+versioned manifest and bounded WebAssembly 1.0 core-module file to their SHA-256
+digests and opened inodes. The optional owner-private config entry must match
+both digests and the requested grants exactly. A mismatch rejects the package;
+an absent entry yields a review-required result. No package is loaded at TUI
+startup, and neither preflight nor a matching config entry executes code. The
+only reserved grant name is `render-local-panel-v1`; no runtime capability is
+implemented. See [Native text plugins](../native-plugins.md#executable-package-identity-review)
+for the concrete format and owner review flow.
+
+Preflight now uses pinned `wasmparser` validation of the complete module and
+refuses imports, start functions and features outside WebAssembly 1.0. A fresh
+`recheck_approved` re-opens the owner files, requires exact digest, grant and
+inode matches against the earlier approved review, and retains the validated
+module bytes so a future runner need not race a second path open. Validation
+does not make the module safe to run.
+
+The next execution slice needs an isolated, resource-limited runner with a
+narrow host protocol, grant enforcement, cancellation and crash reporting.
+Preflight cannot establish safe execution. Native shared libraries and
+in-process callbacks remain out of scope.
+
+### Other extensions
 
 The Python draft also proposed transcript renderers, lifecycle hooks, LORE
 access, settings rows and provider backends. None is a Rust-native plugin

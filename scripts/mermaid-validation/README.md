@@ -36,18 +36,21 @@ portable halfblock protocol. It prints only fixture names and static failure
 reasons, never transcript text or renderer output. A successful run still
 needs a real terminal trial for Kitty, Sixel and iTerm2 quality.
 
-## Host observation, 2026-10-09
+## Host validation, 2026-10-09
 
 Linux `7.0.0-34-generic` x86-64 has Node `22.22.1`, npm `9.2.0`, bubblewrap
 `0.11.1`, Google Chrome `154.0.8037.97`, Chromium snap `155.0.8059.39`, and
-a cached Chrome for Testing `131.0.6778.85`. The DOXA-style bubblewrap
-capability probe succeeded with the system runtime mounts. No Mermaid CLI is
-installed globally or on `PATH`; the locked package and browser have not been
-copied to an owner-reviewed root. The four real CLI fixtures and `doxa doctor`
-against that package therefore remain unverified. The agent terminal reports
-`TERM=dumb`, so no Kitty, Sixel, iTerm2 or on-screen halfblock quality claim is
-made. The regular stub-renderer tests validate fallback and bounded decoding,
-not CLI syntax fidelity.
+a cached Chrome for Testing `131.0.6778.85`. In an isolated task-local root,
+`npm ci` installed the exact lockfile tree with browser downloads and lifecycle
+scripts disabled. The lockfile contains 205 entries, and each resolved archive
+has an integrity hash; `npm ls --all` confirmed Mermaid CLI `12.0.0` and
+Puppeteer `25.13.0`.
+The copied browser binary matched the cached one byte-for-byte and reported the
+pinned version. A configured `doxa doctor --engine fixture` smoke render passed,
+followed by bounded flowchart, sequence, class and Gantt sandbox render and
+halfblock decode tests. The agent terminal reports `TERM=dumb`, so Kitty,
+Sixel, iTerm2 and on-screen
+halfblock quality remain untested. No Mermaid CLI was installed globally.
 
 The optional `npm ci` command above fetches locked JavaScript packages; its
 explicit download skip and `--ignore-scripts` prevent Puppeteer from installing

@@ -7,6 +7,12 @@ must be an `https://*.ts.net/` origin reachable from a user-owned Tailscale
 device. The app supplies no Tailscale identity header: Serve authenticates the
 device and forwards its attested login to the hub.
 
+![DOXA Remote disconnected setup screen on an offline Android emulator](../assets/shots/android-remote-beta17-offline.png)
+
+This capture uses an unconfigured debug APK on an offline Android 36 emulator;
+no Tailscale account, hub, or shared key was entered. A connected session view
+requires a user-owned device and private hub.
+
 ## Build and connect
 
 Open this directory in Android Studio with Android SDK 37.0 and JDK 21,
@@ -45,31 +51,66 @@ reloads the host transcript and pending inputs. Transcript and event text are
 bounded in memory and rendered as plain text. The Android client never calls
 the daemon or provider directly.
 
-## Local alerts and background push
+## Alerts and background push
 
-With explicit permission, the app can show generic Android notifications for
-`needs_input` and turn completion while its live SSE connection continues and
-the app is hidden. Notifications contain no session ID, transcript, tool
-content, or answer action. They are rate-limited per kind. Android can stop the
-process and connection at any time, so these are local live alerts, not
-reliable background push.
+Local alerts remain available while the app's SSE connection is alive. Background
+alerts are a separate, explicit opt-in for the selected live session. A
+configured build uses Firebase Cloud Messaging (FCM) data messages; the hub
+uses its own service account to authenticate with FCM HTTP v1. The notification
+contains only `needs_input` or `turn_done` and an opaque routing tag. It has no
+session ID, transcript, tool content, or approval action. Opening the app
+reloads the authoritative session inventory and transcript through Tailscale
+Serve. The receiver checks the configured Firebase sender, opt-in, and current
+tag before displaying anything. Changing sessions rotates the tag; disabling
+clears it immediately and deletes the FCM token. Hub registration is bound to
+the attested owner and exact live session incarnation.
 
-The hub's `/api/push/subscriptions` endpoint accepts browser Web Push
-subscriptions with endpoint and `p256dh`/`auth` keys. A native Android FCM
-registration token is a different protocol and cannot use that endpoint.
-Reliable Android push needs a Firebase project configuration in the app and
-an authenticated FCM sender on the hub. Neither is configured here, and the
-app does not register a token or add a token-only endpoint that cannot send.
+Unconfigured builds need no Firebase account or key. To configure one, provide
+these public app identifiers as Gradle properties, using a local untracked
+`~/.gradle/gradle.properties` or `-P` arguments:
+
+```text
+doxaFirebaseAppId=1:...:android:...
+doxaFirebaseApiKey=...
+doxaFirebaseProjectId=...
+doxaFirebaseSenderId=...
+```
+
+Keep the service account JSON **off the device**. On the private hub host, put
+it at `$DOXA_HUB_RUNTIME_DIR/fcm-service-account.json`, owned by the hub UID,
+mode `0600`, with one link and no symlink. The hub accepts a Google service
+account whose `token_uri` is the standard OAuth endpoint; it obtains a
+short-lived access token with the Firebase Messaging scope and sends only to
+FCM HTTP v1. Enable the Firebase Cloud Messaging API and grant that service
+account permission to send messages for the configured project. The Android
+app project and service account must belong to the same Firebase project. The
+hub starts with Android push disabled when the file is absent; no registration
+can succeed until it is provisioned. Server registrations are volatile,
+owner-scoped, capped, and expire after 24 hours. Reopening the app refreshes
+the lease; token rotation also attempts registration. An offline disable still
+stops local display immediately, while the server may retain the old token
+until its lease expires.
+
+The native endpoint is `POST` and `DELETE /api/push/android` with a private
+Tailscale identity. POST includes `target`, `incarnation`, `token`, and a
+32-character random `tag`; DELETE includes `token`. The browser Web Push
+endpoint has a different protocol and cannot accept an FCM token.
 
 ## Scope and verification
 
-There is no Android background push registration, background service, persistent key,
-file browser, or host command endpoint in this client. The debug APK builds
-with SDK 37.0 and its protocol tests pass. It has not yet been installed on a
-device or exercised against a two-host private tailnet. The remaining gate is
-a device test covering
-Tailscale authentication, encrypted/plaintext sessions, reconnect, duplicate
-request, stale approval, and host loss.
+There is no persistent shared key, file browser, or direct host command
+endpoint in this client. Protocol and hub tests cover registration scope,
+rotation, expiry, and generic payloads. An unconfigured debug APK was assembled
+locally on 2026-10-09 with Temurin JDK 21.0.12.1, Android SDK 37.0, and Gradle
+9.3.1; `:protocol:test` and `:app:lintDebug` passed in the same run. The
+disconnected screen was captured and inspected in an offline Android 36
+emulator, including system-bar clearance. It has not been installed on a
+Firebase-enabled device or exercised against a provisioned FCM project and
+two-host tailnet. Device QA must cover token issuance and rotation,
+background delivery after process
+restart, opt-out while offline, Android notification permission, Tailscale
+reconnect, encrypted/plaintext sessions, duplicate request, stale approval,
+and host loss. No test sends a real notification.
 
 The build versions follow the [Android Compose setup guide](https://developer.android.com/develop/ui/compose/setup-compose-dependencies-and-compiler),
 [AGP 9.1 compatibility table](https://developer.android.com/build/releases/agp-9-1-0-release-notes),

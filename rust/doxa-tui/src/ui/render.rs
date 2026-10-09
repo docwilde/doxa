@@ -2075,7 +2075,7 @@ impl App {
                     lines.push(Line::styled(
                         label,
                         Style::default()
-                            .fg(theme::ACCENT)
+                            .fg(item.colour.as_deref().and_then(super::triage::named).unwrap_or(theme::ACCENT))
                             .add_modifier(Modifier::BOLD),
                     ));
                 }
@@ -2092,13 +2092,14 @@ impl App {
                     "  Past sessions",
                     Style::default().fg(theme::SECONDARY).add_modifier(Modifier::ITALIC),
                 )),
-                RailRow::Session(index) => {
+                RailRow::Session(index) | RailRow::Pane { active: index, .. } => {
                     let session = &self.sessions[*index];
                     let hovered = self.rail_hover.as_deref() == Some(session.id.as_str());
                     let offline = self.offline_ids.contains(&session.id);
                     let waiting = self.waiting_for_input(&session.id);
                     let running = self.session_activity.get(&session.id).is_some_and(|activity| activity.0)
                         || self.local_shell_jobs.iter().any(|job| job.session == session.id);
+                    let pane_row = matches!(row, RailRow::Pane { .. });
                     let mark = if offline {
                         if Some(*index) == selected { "▸" } else { " " }
                     } else if waiting {
@@ -2107,6 +2108,8 @@ impl App {
                         SPINNER_FRAMES[self.spinner_frame]
                     } else if self.unread_sessions.contains(&session.id) {
                         "●"
+                    } else if pane_row {
+                        "▣"
                     } else if Some(*index) == selected {
                         "▸"
                     } else if active == Some(session.id.as_str()) {
@@ -2118,7 +2121,11 @@ impl App {
                         + self.pending_prompts.iter().filter(|(id, _)| id == &session.id).count();
                     let pane = self.pane_signal(&session.id).map(|signal| signal.badge()).unwrap_or_default();
                     let queue = if queued > 0 { format!(" [q{queued}]") } else { String::new() };
-                    let badge = format!("{pane}{queue}");
+                    let provenance = match row {
+                        RailRow::Pane { group, .. } => self.pane_project_marker(*group),
+                        _ => "",
+                    };
+                    let badge = format!("{pane}{provenance}{queue}");
                     let title_width = usize::from(area.width.saturating_sub(5))
                         .saturating_sub(badge.width());
                     let title = clipped_title(&session.title, title_width).0;

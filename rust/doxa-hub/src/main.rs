@@ -1,6 +1,7 @@
 //! Private owner-scoped server broker. No direct daemon RPC or public TCP bind.
 mod state;
 mod push;
+mod fcm;
 use bytes::Bytes;
 use doxa_peers::remote_policy as policy;
 use futures_util::stream;
@@ -90,7 +91,7 @@ fn stream_body(receiver:mpsc::Receiver<Bytes>)->Body{
         receiver.recv().await.map(|bytes|(Ok::<_,Infallible>(Frame::data(bytes)),receiver))
     });StreamBody::new(stream).boxed_unsync()
 }
-async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool,push:Option<Arc<push::Runtime>>)->Response<Body>{
+async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool,push:Option<Arc<push::Runtime>>,fcm:Option<Arc<fcm::Runtime>>)->Response<Body>{
     let origin=extension_origin(request.headers());
     if request.method()==Method::OPTIONS {
         let allowed=origin.is_some()
@@ -104,17 +105,17 @@ async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool,pu
         reply.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_HEADERS,hyper::header::HeaderValue::from_static("content-type"));
         return reply;
     }
-    let mut reply=handle_inner(request,state,attested,push).await;
+    let mut reply=handle_inner(request,state,attested,push,fcm).await;
     extension_headers(&mut reply,origin.as_deref());
     reply
 }
-async fn handle_inner(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool,push:Option<Arc<push::Runtime>>)->Response<Body>{
+async fn handle_inner(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool,push:Option<Arc<push::Runtime>>,fcm:Option<Arc<fcm::Runtime>>)->Response<Body>{
     let method=request.method().clone();
     let path=request.uri().path().to_owned();
     let parts=path.trim_matches('/').split('/').collect::<Vec<_>>();
     let kind=match (method.clone(),parts.as_slice()){
         (Method::GET,["api","sessions"]|["api","push","config"]|[]|["remote.js"]|["remote.css"]|["remote-sw.js"])=>"read_status",
-        (Method::POST|Method::DELETE,["api","push","subscriptions"])=>"read_status",
+        (Method::POST|Method::DELETE,["api","push","subscriptions"]|["api","push","android"])=>"read_status",
         (Method::GET,["api","commands",_]|["api","sessions",_,"events"])=>"read_transcript",
         (Method::POST,["api","sessions",_,"transcript"])=>"read_transcript",
         (Method::POST,["api","host","register"]|["api","host",_,"result"]|["api","host",_,"event"]|["api","host",_,"events"]|["api","host",_,"commands"]|["api","sessions",_,"prompt"])=>"send_prompt",
@@ -187,6 +188,19 @@ async fn handle_inner(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:b
             match body["endpoint"].as_str().filter(|endpoint|endpoint.len()<=2048){
                 Some(endpoint)=>Ok(state.unsubscribe(&owner,endpoint)),None=>Err("push endpoint required")}
         },
+        (Method::POST,["api","push","android"])=>{
+            if fcm.is_none(){return unavailable("Android push is disabled")}
+            match (body["target"].as_str(),body["incarnation"].as_str(),body["token"].as_str(),body["tag"].as_str()) {
+                (Some(target),Some(incarnation),Some(token),Some(tag))=>state.subscribe_android(&owner,target,incarnation,token,tag),
+                _=>Err("Android subscription fields required")
+            }
+        },
+        (Method::DELETE,["api","push","android"])=>{
+            if fcm.is_none(){return unavailable("Android push is disabled")}
+            match body["token"].as_str().filter(|token|fcm::valid_token(token)) {
+                Some(token)=>Ok(state.unsubscribe_android(&owner,token)),None=>Err("Android token required")
+            }
+        },
         (Method::GET,["api","commands",id]) if valid_id(id)=>state.result(&owner,id),
         (Method::GET,["api","sessions",id,"events"])=>{
             match id.split_once('~'){Some((host,session)) if valid_id(host)&&valid_id(session)=>state.history(&owner,host,session,cursor),_=>Err("invalid session target")}
@@ -235,6 +249,7 @@ async fn handle_inner(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:b
         _=>Err("unknown hub route"),
     };
     let deliveries=state.take_push();
+    let android_deliveries=state.take_android();
     drop(state);
     if let Some(push)=push{
         for (owner,subscription,kind) in deliveries{
@@ -243,6 +258,17 @@ async fn handle_inner(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:b
             tokio::spawn(async move{
                 if push.send(&subscription,kind,permit).await{
                     if let Ok(mut hub)=state.lock(){hub.unsubscribe(&owner,&subscription.endpoint);}
+                }
+            });
+        }
+    }
+    if let Some(fcm)=fcm {
+        for (owner,token,tag,kind) in android_deliveries {
+            let Some(permit)=fcm.permit() else {continue};
+            let fcm=fcm.clone();let state=hub_state.clone();
+            tokio::spawn(async move {
+                if fcm.send(&token,&tag,kind,permit).await {
+                    if let Ok(mut hub)=state.lock(){hub.unsubscribe_android(&owner,&token);}
                 }
             });
         }
@@ -272,6 +298,7 @@ async fn main()->io::Result<()> {
     if policy::setting("remote_allowed_logins","DOXA_REMOTE_ALLOWED_LOGINS").trim().is_empty(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"remote allow-list is empty"));}
     if policy::proxy_uid().is_none(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"unsafe proxy UID"));}
     let push=push::Runtime::load(&runtime)?.map(Arc::new);
+    let fcm=fcm::Runtime::load(&runtime)?.map(Arc::new);
     let path=runtime.join("hub.sock");
     if fs::symlink_metadata(&path).is_ok(){return Err(io::Error::new(io::ErrorKind::AlreadyExists,"hub socket already exists"));}
     let listener=UnixListener::bind(&path)?;
@@ -286,6 +313,7 @@ async fn main()->io::Result<()> {
         let Ok(permit)=slots.clone().try_acquire_owned() else{continue};
         let state=state.clone();
         let push=push.clone();
+        let fcm=fcm.clone();
         tokio::spawn(async move{
             let _permit=permit;
             let std_stream=match stream.into_std(){Ok(stream)=>stream,Err(_)=>return};
@@ -293,7 +321,7 @@ async fn main()->io::Result<()> {
             let _=std_stream.set_nonblocking(true);
             let stream=match UnixStream::from_std(std_stream){Ok(stream)=>stream,Err(_)=>return};
             let push=push.clone();
-            let service=hyper::service::service_fn(move |request|{let state=state.clone();let push=push.clone();async move{Ok::<_,Infallible>(handle(request,state,attested,push).await)}});
+            let service=hyper::service::service_fn(move |request|{let state=state.clone();let push=push.clone();let fcm=fcm.clone();async move{Ok::<_,Infallible>(handle(request,state,attested,push,fcm).await)}});
             let mut server=hyper::server::conn::http1::Builder::new();
             server.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(3))
                 .keep_alive(false).max_headers(32).max_buf_size(8192);
@@ -324,7 +352,7 @@ async fn main()->io::Result<()> {
         let (server,mut client)=UnixStream::pair().unwrap();
         let task=tokio::spawn(async move{
             let service=hyper::service::service_fn(move |request|{
-                let state=state.clone();async move{Ok::<_,Infallible>(handle(request,state,attested,None).await)}
+                let state=state.clone();async move{Ok::<_,Infallible>(handle(request,state,attested,None,None).await)}
             });
             let mut builder=hyper::server::conn::http1::Builder::new();builder.keep_alive(false);
             builder.serve_connection(hyper_util::rt::TokioIo::new(server),service).await.unwrap();
@@ -370,6 +398,8 @@ async fn main()->io::Result<()> {
             "GET /api/push/config HTTP/1.1\r\nHost: hub.test\r\nTailscale-User-Login: owner@example.com\r\n\r\n".into()).await;
         assert_eq!(json_body(&config)["enabled"],false);
         assert!(wire(state.clone(),true,request("/api/push/subscriptions","{}","owner@example.com","")).await.starts_with("HTTP/1.1 409"));
+        assert!(wire(state.clone(),true,request("/api/push/android","{}","owner@example.com","")).await.starts_with("HTTP/1.1 409"));
+        assert!(wire(state.clone(),false,request("/api/push/android","{}","owner@example.com","")).await.starts_with("HTTP/1.1 403"));
         let body=r#"{"host_id":"workstation","sessions":[{"id":"s1","title":"Session"}]}"#;
         let raw=request("/api/host/register",body,"owner@example.com","");
         assert!(wire(state.clone(),false,raw.clone()).await.starts_with("HTTP/1.1 403"));

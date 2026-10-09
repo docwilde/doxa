@@ -82,6 +82,17 @@ def turn(wire, prompt, expected):
             raise RuntimeError("native prompt rejected")
 
 
+def stop_and_wait(wire, process):
+    """Require a stop acknowledgement and native exit before claiming success."""
+    reply = wire.call("stop", timeout=5)
+    if reply.get("ok") is not True:
+        raise RuntimeError("native stop was not acknowledged")
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired as error:
+        raise TimeoutError("native daemon did not exit after stop") from error
+
+
 def run():
     daemon = os.environ.get("DOXA_NATIVE_DAEMON", "")
     claude = shutil.which("claude")
@@ -129,6 +140,7 @@ def run():
         try:
             registry = root / "runtime/registry" / f"{session}.json"
             wire, hello = attach(process, registry)
+            result["launch_attached"] = True
             result["initial_model_reported"] = bool(hello.get("model"))
             result["catalog_available"] = bool(wire.call("list_models").get("models"))
             if not result["initial_model_reported"] or not result["catalog_available"]:
@@ -140,7 +152,8 @@ def run():
             if not result["first"]["ok"]:
                 result["result"] = "first_turn_failed"
                 return result
-            wire.call("stop", timeout=5)
+            stop_and_wait(wire, process)
+            result["first_stop_exited"] = True
             wire.sock.close()
             wire = None
             terminate_group(process)
@@ -149,6 +162,7 @@ def run():
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                        start_new_session=True)
             wire, resumed = attach(process, registry)
+            result["resume_attached"] = True
             result["resumed_model_reported"] = bool(resumed.get("model"))
             if not result["resumed_model_reported"]:
                 result["result"] = "resumed_model_unknown_no_second_turn"
@@ -156,7 +170,12 @@ def run():
             result["submitted_turns"] += 1
             result["second"] = turn(wire,
                 "Repeat only the synthetic token from your previous answer. No tools.", token)
-            result["result"] = "passed" if result["second"]["ok"] else "resume_turn_failed"
+            if not result["second"]["ok"]:
+                result["result"] = "resume_turn_failed"
+                return result
+            stop_and_wait(wire, process)
+            result["final_stop_exited"] = True
+            result["result"] = "passed"
         except (TimeoutError, RuntimeError, OSError, ValueError) as error:
             # Native stderr and exception bodies may carry account/private data.
             result["result"] = type(error).__name__

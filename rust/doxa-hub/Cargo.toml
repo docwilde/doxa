@@ -1,6 +1,6 @@
 [package]
 name = "doxa-hub"
-version = "2.0.0-beta.16"
+version = "2.0.0-beta.17"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -18,7 +18,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "signal",
 uuid = { version = "1", features = ["v4"] }
 subtle = "2"
 base64 = "0.22"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 web-push-native = "0.5"
 
 [dev-dependencies]

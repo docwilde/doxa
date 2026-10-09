@@ -1,0 +1,61 @@
+# Hard disk quota preflight (operator fixture)
+
+DOXA's Docker disk ceiling is a **monitored turn gate**. A worker can write
+between samples. The isolation chip therefore reports no hard filesystem quota.
+This read-only Linux preflight helps an operator identify missing prerequisites
+for an administrator-managed project quota. It neither configures quotas nor
+enables a hard-quota session profile.
+
+## Run on a private fixture
+
+Run on the Docker daemon host in its mount namespace. Create an owner-only
+directory on real disk with empty `checkout`, `home` and `cache` children. Use
+a task-local path, never a live DOXA session root or provider home. From the
+repository root:
+
+```sh
+export TMPDIR=/path/on/real/disk
+fixture=$(mktemp -d "$TMPDIR/doxa-quota-fixture.XXXXXXXX")
+install -d -m 0700 "$fixture/checkout" "$fixture/home" "$fixture/cache"
+python3 scripts/check_docker_quota_preflight.py "$fixture"
+```
+
+The command reads `/proc/self/mountinfo` and Linux `FS_IOC_FSGETXATTR`; it
+opens directories without following symlinks and writes nothing. JSON always
+sets `hard_enforcement_verified` and `admissible_as_hard_quota` to `false`.
+Exit **2** means a prerequisite failed or could not be inspected. Exit **3**
+means the root and three bind sources are an unverified capability candidate;
+it is still deliberately nonzero. Remove the empty fixture after review.
+
+The candidate check requires private owner-owned directories, no nested host
+mount, one mount and filesystem for all sources, explicit `prjquota`/`pquota`
+on XFS or ext4, and one nonzero project ID with project inheritance on the
+root and each bind source. These are necessary hints, not proof of an active
+hard block limit. Existing descendants may have different project IDs. A
+mount can change after this snapshot, and the test does not exercise Docker.
+
+## Evidence required before production support
+
+An administrator must provision a unique per-session project ID, enable
+accounting **and enforcement** on the backing filesystem, set a nonzero hard
+block limit, and show the effective limit through filesystem quota tooling.
+For XFS, record the `prjquota` mount and a numeric project report from
+`xfs_quota`; consult the filesystem administrator for ext4 tooling. Check
+every existing descendant's project ID, not only the three top directories.
+
+Then use a separate, credential-free fixture with a deliberately small hard
+limit on a task-local rootless Engine.
+Bind its checkout, home and cache exactly as a session worker would. Write
+from inside the container through each path, and verify aggregate writes
+receive `EDQUOT` at the configured project limit while unrelated host space
+remains free. Verify the same result after stop/restart and source remounts.
+Do not use a live provider, DOXA store, or host quota changes for this probe.
+Only after that evidence and a reviewed runtime admission path may DOXA label
+any profile as hard-quota enforced. Docker writable-layer limits alone do not
+bound these bind mounts.
+
+The focused fixtures run with:
+
+```sh
+TMPDIR=/path/on/real/disk python3 -m unittest discover -s scripts -p test_docker_quota_preflight.py
+```
