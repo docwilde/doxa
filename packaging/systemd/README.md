@@ -25,11 +25,17 @@ An administrator must complete these actions for one isolated test session:
    under `/etc/systemd/system/`, root-owned mode `0644`. Every ancestor must
    be root-owned and not group/other writable; `/usr/libexec/doxa` must be a
    real directory, not a symlink. Do not enable the socket yet.
-4. Run `systemd-analyze verify` on the two staged unit files, then run
-   `/usr/libexec/doxa/doxa-quota-install-preflight SESSION_ID` as root. It
-   reads the installed files and current quota state without starting the
-   service. It refuses a live socket, changed unit, drop-in override, unsafe
-   helper binary, unavailable caller group, wrong policy or quota snapshot.
+4. Record the SHA-256 of the reviewed helper build before installation and
+   compare it with the staged artifact. Run `systemd-analyze verify` on the
+   two staged unit files, then run
+   `/usr/libexec/doxa/doxa-quota-install-preflight SESSION_ID --reviewed-helper-sha256 DIGEST`
+   as root, with that independently recorded lowercase digest. It
+   reads the staged files and current quota state without starting the
+   service. It refuses a live socket, changed template, several exact
+   template/instance overrides, an unsafe helper binary or digest,
+   unavailable caller group, wrong policy or quota snapshot. The report says
+   `effective_unit_verified=false`: systemd also applies dash-prefix drop-ins
+   and other unit search paths that this preflight does not enumerate.
 
 The preflight result always has `admissible_as_hard_quota=false`. An operator
 must separately review systemd's effective unit configuration, installed-host

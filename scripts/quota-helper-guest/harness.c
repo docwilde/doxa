@@ -28,6 +28,7 @@
 #define OTHER_SOCK "/run/doxa/quota/other.sock"
 #define PROJECT 1002
 #define LIMIT (32ULL * 1024 * 1024)
+static char reviewed_helper_digest[65];
 #define OWNER 2002
 #define CALLER 2001
 
@@ -291,7 +292,8 @@ static void expect_preflight(const char *label, uid_t uid, bool accepted) {
             die("redirect preflight");
         close(output[1]);
         if (uid && (setresgid(uid, uid, uid) || setresuid(uid, uid, uid))) die("drop preflight UID");
-        execl("/doxa-quota-install-preflight", "/doxa-quota-install-preflight", "session-1", NULL);
+        execl("/doxa-quota-install-preflight", "/doxa-quota-install-preflight", "session-1",
+            "--reviewed-helper-sha256", reviewed_helper_digest, NULL);
         die("exec preflight");
     }
     close(output[1]);
@@ -310,13 +312,19 @@ static void expect_preflight(const char *label, uid_t uid, bool accepted) {
         fprintf(stderr, "GUEST_DIAG %s status=%d response=%s\n", label, WEXITSTATUS(status), response);
     require((WEXITSTATUS(status) == 0) == accepted, label);
     if (accepted) {
-        require(strstr(response, "\"installed_files_verified\":true") != NULL, label);
+        require(strstr(response, "\"staged_files_verified\":true") != NULL, label);
+        require(strstr(response, "\"effective_unit_verified\":false") != NULL, label);
         require(strstr(response, "\"socket_inactive\":true") != NULL, label);
         require(strstr(response, "\"admissible_as_hard_quota\":false") != NULL, label);
     }
     printf("GUEST_CASE %s accepted=%d response=%s", label, accepted, response);
 }
 int main(void) {
+    FILE *reviewed = fopen("/reviewed-helper.sha256", "r");
+    if (!reviewed || !fgets(reviewed_helper_digest, sizeof(reviewed_helper_digest), reviewed))
+        die("read reviewed helper digest");
+    fclose(reviewed);
+    require(strlen(reviewed_helper_digest) == 64, "invalid reviewed helper digest fixture");
     make_dir("/quota", 0755); make_dir("/alias", 0755);
     make_dir("/alias/session-1", 0700);
     make_dir("/etc/doxa", 0755); make_dir("/etc/doxa/quota", 0755); make_dir("/run/doxa", 0755);
@@ -350,6 +358,10 @@ int main(void) {
     stop_helper(helper, SOCK);
 
     expect_preflight("install_exact_inactive", 0, true);
+    char original_digest = reviewed_helper_digest[0];
+    reviewed_helper_digest[0] = original_digest == 'a' ? 'b' : 'a';
+    expect_preflight("install_wrong_helper_digest_refused", 0, false);
+    reviewed_helper_digest[0] = original_digest;
     expect_preflight("install_nonroot_refused", CALLER, false);
     const char *service_unit = "/etc/systemd/system/doxa-quota-helper@.service";
     if (rename(service_unit, "/etc/systemd/system/doxa-quota-helper@.service.saved")) die("save unit");
@@ -493,6 +505,6 @@ int main(void) {
     expect_query("replaced_bind_directory", helper, CALLER, CALLER, false, -1);
     stop_helper(helper, SOCK);
 
-    printf("DOXA_QUOTA_HELPER_GUEST_PASS cases=31 admission=false\n");
+    printf("DOXA_QUOTA_HELPER_GUEST_PASS cases=32 admission=false\n");
     return 0;
 }

@@ -52,6 +52,7 @@ cp "$evidence/target/x86_64-unknown-linux-gnu/release/doxa-quota-helper" "$rootf
 cp "$evidence/target/x86_64-unknown-linux-gnu/release/doxa-quota-helper" "$rootfs/usr/libexec/doxa/doxa-quota-helper"
 cp "$evidence/target/x86_64-unknown-linux-gnu/release/doxa-quota-install-preflight" "$rootfs/doxa-quota-install-preflight"
 chmod 0755 "$rootfs/doxa-quota-helper" "$rootfs/usr/libexec/doxa/doxa-quota-helper" "$rootfs/doxa-quota-install-preflight"
+sha256sum "$rootfs/usr/libexec/doxa/doxa-quota-helper" | cut -d ' ' -f1 > "$rootfs/reviewed-helper.sha256"
 cp "$evidence/target/x86_64-unknown-linux-gnu/release/examples/quota_helper_client_read" "$rootfs/quota_helper_client_read"
 gcc -static -O2 -Wall -Wextra -o "$rootfs/guest_harness" "$repo/scripts/quota-helper-guest/harness.c"
 zstd -dc "$module_root/fs/quota/quota_tree.ko.zst" > "$rootfs/lib/modules/quota_tree.ko"
@@ -68,7 +69,7 @@ timeout 120s qemu-system-x86_64 -machine accel=tcg -m 1024 -smp 2 -nographic \
   -initrd "$evidence/initramfs.cpio.gz" -append 'console=ttyS0 panic=1' \
   -drive "file=$evidence/quota.raw,format=raw,if=virtio" \
   > "$evidence/serial.log" 2>&1
-if ! rg -q 'DOXA_QUOTA_HELPER_GUEST_PASS cases=31 admission=false' "$evidence/serial.log" \
+if ! rg -q 'DOXA_QUOTA_HELPER_GUEST_PASS cases=32 admission=false' "$evidence/serial.log" \
    || ! rg -q 'DOXA_QUOTA_VM_STATUS=0' "$evidence/serial.log"; then
   echo "guest proof refused; inspect $evidence/serial.log" >&2
   exit 1

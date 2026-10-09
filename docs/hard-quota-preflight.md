@@ -160,10 +160,12 @@ not to the whole response; a trickling privileged peer may take longer.
 
 The [inactive systemd package](../packaging/systemd/README.md) supplies a
 root-owned socket and read-only helper service template. A new root-only
-`doxa-quota-install-preflight` checks exact staged units, helper binary
-ownership, caller group membership, an absent socket and the current kernel
+`doxa-quota-install-preflight` checks exact staged units, the installed helper
+against an independently reviewed SHA-256, caller group membership, an absent socket and the current kernel
 quota snapshot without activating the service. Its report always says
-`admissible_as_hard_quota=false`. The service is inert unless an administrator
+`admissible_as_hard_quota=false` and `effective_unit_verified=false`. Exact
+template and instance overrides are checked, but dash-prefix drop-ins and
+systemd's complete effective unit search are not. The service is inert unless an administrator
 explicitly installs a policy and socket unit. The policy path and socket path must be absolute; every policy
 ancestor must be root-owned and not group/other writable. The policy itself
 must be a regular single-link root-owned file with exact mode `0600` and at
@@ -235,10 +237,11 @@ accepted the exact tree with project 1002 and a 32 MiB limit while refusing
 the three substitutions. The reply still said `admission=false`. An actual
 installed systemd service and session-launcher integration remain unverified.
 The inactive service package was also staged in a disposable ext4 quota guest.
-Its root-only installation preflight accepted the exact policy, units, helper
-binary and current quota snapshot, then refused non-root execution, a changed
-unit, a symlinked helper binary, an already live socket and a unit override.
-The expanded guest passed 31 cases with `admissible_as_hard_quota=false`.
+Its root-only installation preflight accepted the exact policy, units, reviewed
+helper SHA-256 and current quota snapshot, then refused non-root execution, a
+changed unit, a wrong helper digest, a symlinked helper binary, an already live
+socket and an exact template override. The expanded guest passed 32 cases with
+`admissible_as_hard_quota=false` and `effective_unit_verified=false`.
 The templates passed `systemd-analyze verify` in a task-local staging root;
 systemd activation on an installed host remains untested.
 

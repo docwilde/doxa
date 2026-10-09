@@ -2,6 +2,7 @@
 //! This reports a current prerequisite snapshot, never hardened admission.
 use crate::{error, quota_helper::load_root_policy};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{ffi::{CStr, CString}, fs::{self, File}, io::{self, Read},
     os::{fd::{AsRawFd, FromRawFd}, unix::{ffi::OsStrExt, fs::MetadataExt}},
     path::{Component, Path, PathBuf}};
@@ -20,7 +21,9 @@ pub struct QuotaInstallPreflight {
     pub mount_id: u64,
     pub descendants_checked: usize,
     pub broker_entries_checked: usize,
-    pub installed_files_verified: bool,
+    pub staged_files_verified: bool,
+    pub effective_unit_verified: bool,
+    pub helper_sha256: String,
     pub socket_inactive: bool,
     pub admissible_as_hard_quota: bool,
 }
@@ -121,9 +124,13 @@ fn caller_can_open_socket(_: u32) -> io::Result<()> { Err(error("quota helper in
 
 /// Check only installed files and the live read-only kernel quota snapshot.
 /// This does not start a service, create a socket, or issue admission proof.
-pub fn preflight_installed_quota_helper(id: &str) -> io::Result<QuotaInstallPreflight> {
+pub fn preflight_installed_quota_helper(id: &str, reviewed_helper_sha256: &str) -> io::Result<QuotaInstallPreflight> {
     if unsafe { libc::geteuid() } != 0 { return Err(error("quota helper installation preflight requires root")); }
     session_id(id)?;
+    if reviewed_helper_sha256.len() != 64
+        || !reviewed_helper_sha256.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) {
+        return Err(error("reviewed quota helper SHA-256 must be 64 lowercase hex digits"));
+    }
     let policy_path = Path::new(POLICIES).join(format!("{id}.json"));
     let policy = load_root_policy(&policy_path)?;
     let socket_path = Path::new("/run/doxa/quota").join(format!("{id}.sock"));
@@ -133,7 +140,18 @@ pub fn preflight_installed_quota_helper(id: &str) -> io::Result<QuotaInstallPref
     let unit_dir = Path::new(UNITS);
     exact_unit(&unit_dir.join("doxa-quota-helper@.service"), SERVICE)?;
     exact_unit(&unit_dir.join("doxa-quota-helper@.socket"), SOCKET)?;
-    let _helper = root_file(Path::new(HELPER), 0o755, 32 * 1024 * 1024)?;
+    let mut helper = root_file(Path::new(HELPER), 0o755, 32 * 1024 * 1024)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = helper.read(&mut buffer)?;
+        if count == 0 { break; }
+        digest.update(&buffer[..count]);
+    }
+    let helper_sha256 = format!("{:x}", digest.finalize());
+    if helper_sha256 != reviewed_helper_sha256 {
+        return Err(error("installed quota helper differs from reviewed SHA-256"));
+    }
     caller_can_open_socket(policy.caller_uid)?;
     absent(&socket_path)?;
     for name in ["service", "socket"] {
@@ -153,7 +171,8 @@ pub fn preflight_installed_quota_helper(id: &str) -> io::Result<QuotaInstallPref
         hard_limit_bytes: snapshot.hard_limit_bytes, mount_id: snapshot.mount_id,
         descendants_checked: snapshot.descendants_checked,
         broker_entries_checked: snapshot.broker_entries_checked,
-        installed_files_verified: true, socket_inactive: true,
+        staged_files_verified: true, effective_unit_verified: false,
+        helper_sha256, socket_inactive: true,
         admissible_as_hard_quota: false })
 }
 
