@@ -88,7 +88,9 @@ markers for operator review. It does **not** restart the Docker Engine or
 remount the filesystem.
 
 `ENOSPC`, no error before the cap, an unexpected receipt, a changed mount,
-a non-rootless Engine, or low host free space refuses the proof. The JSON
+a non-rootless Engine, or low host free space refuses the proof. The 512 MiB
+host-space floor is read from the enclosing mount root because XFS can report
+the small project limit as `statvfs` free space at the fixture path. The JSON
 reports `aggregate_restart_verified_for_fixture` separately and always sets
 `admissible_as_hard_quota` to `false`. These are observations for this disposable
 fixture, not runtime admission or a broker-path/remount proof. No quota is

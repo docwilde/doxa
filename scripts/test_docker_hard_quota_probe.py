@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -58,6 +59,18 @@ class HardQuotaProbeTests(unittest.TestCase):
                                                                 "reasons": ["different project ID"]}):
             with self.assertRaisesRegex(ValueError, "different project ID"):
                 quota._checked_fixture(self.root)
+
+    def test_host_free_floor_uses_enclosing_mount_not_quota_limited_fixture(self) -> None:
+        # A real XFS project quota makes statvfs(fixture) report its small
+        # remaining project allowance, even when the mount has ample space.
+        high = SimpleNamespace(f_bavail=quota.MIN_HOST_FREE // 4096, f_frsize=4096)
+        low = SimpleNamespace(f_bavail=1, f_frsize=4096)
+        with (mock.patch.object(quota.os, "statvfs", side_effect=AssertionError("fixture statvfs used")),
+              mock.patch.object(quota.os, "fstatvfs", return_value=high)):
+            quota._host_free_check(self.root)
+        with mock.patch.object(quota.os, "fstatvfs", return_value=low):
+            with self.assertRaisesRegex(ValueError, "host free space"):
+                quota._host_free_check(self.root)
 
     def test_bounded_rootless_run_uses_three_binds_and_keeps_admission_false(self) -> None:
         invocations = []
