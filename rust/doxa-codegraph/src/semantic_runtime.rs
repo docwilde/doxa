@@ -285,6 +285,13 @@ impl AttachTransport {
     /// attach FD. Notifications and stderr fail closed; this is a byte-path
     /// fixture, not a full analyzer session or semantic verification.
     fn exchange_lsp_frame(&mut self, request: &Value, timeout: Duration) -> Result<Value, String> {
+        let request_id = request.get("id").and_then(Value::as_u64)
+            .ok_or("LSP exchange requires a numeric request ID")?;
+        if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+            || !request.get("method").and_then(Value::as_str).is_some_and(|method| !method.is_empty())
+            || request.get("result").is_some() || request.get("error").is_some() {
+            return Err("invalid LSP exchange request".into());
+        }
         let deadline = Instant::now() + timeout.min(SESSION_TIMEOUT);
         let frame = encode_lsp_frame(request)?;
         write_until(&mut self.stream, &frame, deadline)?;
@@ -310,7 +317,16 @@ impl AttachTransport {
                 if size == 0 || size > MAX_FRAME { return Err("LSP body exceeds 32 KiB".into()); }
                 let total = header_end + size;
                 if bytes.len() > total { return Err("extra bytes after LSP reply".into()); }
-                if bytes.len() == total { return read_lsp_frame(&mut Cursor::new(bytes)); }
+                if bytes.len() == total {
+                    let reply = read_lsp_frame(&mut Cursor::new(bytes))?;
+                    let object = reply.as_object().ok_or("LSP reply is not an object")?;
+                    if object.len() != 3 || reply.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+                        || reply.get("id").and_then(Value::as_u64) != Some(request_id)
+                        || !object.contains_key("result") {
+                        return Err("LSP reply does not match the request".into());
+                    }
+                    return Ok(reply);
+                }
             } else if bytes.len() > MAX_HEADER {
                 return Err("invalid or oversized LSP header".into());
             }
@@ -1160,6 +1176,49 @@ mod tests {
         assert!(transport.exchange_lsp_frame(&json!({"jsonrpc":"2.0","id":7,"method":"test"}),
             Duration::from_secs(2)).unwrap_err().contains("32 KiB"));
         server.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inspected_attach_lsp_exchange_rejects_unmatched_json_rpc_replies() {
+        let cid = "a".repeat(64);
+        for (name, reply) in [
+            ("wrong_id", json!({"jsonrpc":"2.0","id":8,"result":[]})),
+            ("string_id", json!({"jsonrpc":"2.0","id":"7","result":[]})),
+            ("wrong_version", json!({"jsonrpc":"1.0","id":7,"result":[]})),
+            ("error", json!({"jsonrpc":"2.0","id":7,"error":{"code":-1,"message":"failed"}})),
+            ("error_with_result", json!({"jsonrpc":"2.0","id":7,"result":[],"error":null})),
+            ("notification", json!({"jsonrpc":"2.0","method":"window/logMessage","params":{}})),
+            ("missing_result", json!({"jsonrpc":"2.0","id":7})),
+            ("extra_field", json!({"jsonrpc":"2.0","id":7,"result":[],"method":"forged"})),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("engine.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+            let server_cid = cid.clone();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                fake_engine_header(&mut stream);
+                stream.write_all(&inspected_reply(&server_cid)).unwrap();
+                fake_engine_header(&mut stream);
+                stream.write_all(ATTACH_101.as_bytes()).unwrap();
+                read_lsp_frame(&mut std::io::BufReader::new(&mut stream)).unwrap();
+                let payload = encode_lsp_frame(&reply).unwrap();
+                let mut frame = vec![1, 0, 0, 0];
+                frame.extend((payload.len() as u32).to_be_bytes());
+                frame.extend(payload);
+                stream.write_all(&frame).unwrap();
+            });
+            let host = format!("unix://{}", socket.display());
+            let mut transport = open_disabled_inspected_attach_transport(&host, &cid).unwrap();
+            let error = transport.exchange_lsp_frame(
+                &json!({"jsonrpc":"2.0","id":7,"method":"textDocument/definition"}),
+                Duration::from_secs(2)).unwrap_err();
+            assert!(error.contains("does not match"), "{name}: {error}");
+            server.join().unwrap();
+        }
     }
 
     #[cfg(target_os = "linux")]

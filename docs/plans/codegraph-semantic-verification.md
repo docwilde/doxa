@@ -64,10 +64,11 @@ therefore insufficient evidence of a semantic binding.
 A further **private, disabled** test seam now issues `GET
 /containers/{CID}/json` and the upgraded `POST /containers/{CID}/attach`
 on the same Unix FD. It requires the bounded inspect reply's `Id` to equal
-the requested CID, then carries one bounded LSP request and reply over that
-same FD, including Docker stdout frame reassembly. Fake-daemon tests reject
+the requested CID, then carries one bounded LSP request and matching JSON-RPC
+reply over that same FD, including Docker stdout frame reassembly. Fake-daemon tests reject
 CID drift, malformed or oversized HTTP replies, stderr, trailing LSP bytes,
-oversized frames, and stalls. This closes the separate-CLI-pipes gap for this
+oversized frames, stalls, wrong reply IDs, error replies, and notifications.
+This closes the separate-CLI-pipes gap for this
 one transport fixture only: it neither launches nor removes a container, and
 the inspect response proves only what an untrusted daemon reported. A same-UID
 fake daemon passes the entire exchange. The next implementation must establish
