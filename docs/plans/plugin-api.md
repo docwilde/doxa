@@ -138,8 +138,12 @@ refuses to spawn in that condition.
 
 The sandbox opens the trusted worker executable with `O_NOFOLLOW` and
 binds that descriptor into the private mount; replacing its pathname after
-open cannot replace the executed inode. Bubblewrap writes a bounded status
-receipt to a separate anonymous descriptor. The child emits a fixed entry
+open cannot replace the executed inode. It also executes Bubblewrap through
+its checked descriptor, with an inode check immediately before `exec`, so a
+pathname replacement after validation cannot switch the wrapper. These
+checks assume trusted host executables cannot be rewritten in place by
+another process with the same user's privileges. Bubblewrap writes a bounded
+status receipt to a separate anonymous descriptor. The child emits a fixed entry
 marker before reading the module, allowing the parent to distinguish a worker
 that fails after entry from sandbox or pre-entry failure. Timeouts,
 cancellations, output overflow, malformed responses and module traps have
