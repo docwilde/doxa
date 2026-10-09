@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.39 — 2026-10-09
+
+**Quota helper staging**
+
+- Stage inactive **`doxa-quota-helper@`** units and a read-only install preflight bound to a reviewed helper SHA-256. The 32-case ext4 guest passed; installed-host activation and hardened admission remain closed.
+
+**Native plugin proof**
+
+- Add review-only **`plugin-installed-host-proof.py`** with a read-only check and nine-case acceptance run. The live run has not occurred, and no receipt issues TUI authority.
+
+**Code graph reads**
+
+- Bound source opens and reads to a two-second caller deadline and fail closed after timeout. A blocked worker can linger until process exit; semantic **`binding=unknown`**.
+
 ## 2.0.0-beta.38 — 2026-10-09
 
 **Native plugin host review**

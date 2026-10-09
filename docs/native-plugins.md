@@ -192,7 +192,8 @@ an owner-approved acceptance host with spare capacity. A receipt records
 sampled executable identities, cgroup identity and clean source identity.
 The pathname checks before and after the exercise are sequential, not an
 atomic snapshot or a promise that a binary cannot be replaced between cases.
-It remains non-authorizing; TUI requests still return `HostUnverified`.
+The nine-case installed-host run has not been performed. It remains
+non-authorizing; TUI requests still return `HostUnverified`.
 
 After reviewing both files and the requested grant, the owner can record the
 exact identity in private `$DOXA_HOME/config.toml`:
