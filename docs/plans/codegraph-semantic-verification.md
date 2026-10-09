@@ -118,6 +118,9 @@ or enforced containment. The CLI never calls this seam and still reports
 `binding: unknown`. The current workstation user's Docker/sudo group access
 also prevents treating this workstation as an adversarial same-UID proof host;
 use a disposable guest with a restricted client account for positive testing.
+The threat model also assumes the client binary and process are protected from
+replacement or ptrace by the attacker; endpoint authentication cannot repair
+a compromised client.
 The [offline guest fixture](../../scripts/semantic-broker-proof/README.md)
 does exactly that: the kernel peer is root, the client is UID 1000, the root
 socket cannot be removed by that client, and the identity-only exchange

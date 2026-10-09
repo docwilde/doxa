@@ -49,6 +49,9 @@ fn root_owned_socket(path: &Path) -> Result<(u64, u64), String> {
     if !path.is_absolute() || path.components().any(|part| matches!(part, Component::CurDir | Component::ParentDir)) {
         return Err("broker socket path must be absolute without traversal".into());
     }
+    if path.canonicalize().ok().as_deref() != Some(path) {
+        return Err("broker socket path must be canonical".into());
+    }
     let mut current = PathBuf::from("/");
     let components = path.components().filter(|part| matches!(part, Component::Normal(_))).collect::<Vec<_>>();
     if components.is_empty() { return Err("broker socket path is empty".into()); }
