@@ -10,7 +10,7 @@ the stable 2.0 release has not been cut.
 **Runtime verification**
 
 - Audit bounded existing XFS quota descendants through pinned descriptors and refuse special entries; hardened Docker admission still awaits live broker-path, `EDQUOT`, and restart/remount proof.
-- Preserve a live egress gateway socket when its backlog is full; only a refused, unchanged owned socket is reclaimed. Restricted egress still awaits live rootless provider and bypass proof.
+- Serialize egress gateway startup with a private host-only lock; a full backlog no longer causes live-socket reclamation. Restricted egress still awaits live rootless provider and bypass proof.
 - Stop surviving LSP process-group helpers after successful server exit. Semantic binding remains unknown pending effective container attestation and real analyzer evidence.
 - Launch Bubblewrap from its checked open descriptor to close pathname replacement at spawn. Plugin TUI activation and delegated-cgroup aggregate proof remain open.
 
