@@ -204,9 +204,13 @@ network and host-file denial, stale approval, and cgroup cleanup. A separate
 review-only receipt workflow now binds an exact test executable and clean
 source tree. Installed-host acceptance and an operator activation policy
 remain open. The current TUI request can abandon a stalled private-file read
-after setting cancellation; before activation, worker cleanup on window exit
-must also be accepted on the installed host. Parent deadlines and module maxima
-are not hard resource guarantees; other platforms need equivalent isolation proof.
+after setting cancellation, but an atomic fence prevents that read from later
+dispatching a worker. Once admitted, panel or window close waits for the
+supervisor's cleanup attempt to return. Local tests cover that ordering and a
+real process-group cancellation. Successful cgroup cleanup on window exit,
+including error paths, still needs installed-host acceptance. Parent deadlines
+and module maxima are not hard resource guarantees; other platforms need
+equivalent isolation proof.
 
 ### Other extensions
 

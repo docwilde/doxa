@@ -112,7 +112,13 @@ task validates exact owner approval, refuses every requested grant, and rechecks
 the reviewed bytes and inodes. The installed-host admission gate is closed, so
 this request reports why execution is unavailable and never starts the worker.
 Closing the panel or its tab, changing tabs, or exiting the window cancels the
-task and drops late results. A future installed-host acceptance policy must
+task and drops late results. Cancellation races with admission through one
+atomic fence: a cancelled preflight cannot later dispatch a worker, while an
+already admitted request blocks tab/window exit until its supervisor returns
+from its cleanup attempt. A stalled read before admission may outlive its panel
+but cannot cross that fence. This exit contract has local process-group tests;
+an installed-host proof of successful cgroup cleanup, including error paths,
+is still required before activation. A future installed-host acceptance policy must
 authenticate the current TUI/worker/Bubblewrap identities, delegated cgroup
 parent and membership, kernel namespace/egress enforcement, current-host proof
 freshness, and revocation independently of owner-editable config or a
