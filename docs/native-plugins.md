@@ -97,7 +97,9 @@ reserved name, not a capability the current DOXA grants or exercises. The
 command fully validates a WebAssembly 1.0 core module using the pinned
 `wasmparser` validator. Imports and start functions are refused because no host
 ABI or safe startup contract exists. Newer WebAssembly proposals are also
-refused until a runner explicitly supports them.
+refused until a runner explicitly supports them. Modules that contain memory
+or tables must declare maxima no greater than 16 MiB and 1,024 entries. Those
+static bounds do not enforce runtime use.
 
 After reviewing both files and the requested grant, the owner can record the
 exact identity in private `$DOXA_HOME/config.toml`:

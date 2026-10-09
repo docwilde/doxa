@@ -13,6 +13,10 @@ use wasmparser::{Parser, Payload, Validator, WasmFeatures};
 const MAX_PACKAGE_MANIFEST: u64 = 16 * 1024;
 const MAX_MODULE: u64 = 8 * 1024 * 1024;
 const MAX_PACKAGES: usize = 16;
+// Admission bounds for a future runner, not a substitute for a runtime store
+// limiter and an operating-system memory limit in a separate process.
+const MAX_MEMORY_PAGES: u64 = 256; // 16 MiB at the WebAssembly 1.0 page size
+const MAX_TABLE_ENTRIES: u64 = 1024;
 const WASM_CORE_V1: &[u8; 8] = b"\0asm\x01\0\0\0";
 const GRANTS: &[&str] = &["render-local-panel-v1"];
 
@@ -93,12 +97,33 @@ fn validate_module(bytes: &[u8]) -> io::Result<()> {
         .map_err(|_| invalid("invalid or unsupported WebAssembly 1.0 module"))?;
     // No host ABI exists. Keep implicit startup and host imports out of the
     // approved contract until a separate runner defines them explicitly.
+    // A missing declared maximum allows memory.grow beyond this policy's cap.
+    // These static caps are only an admission seam:
+    // a runner must enforce them again during instantiation and growth.
     for payload in Parser::new(0).parse_all(bytes) {
         match payload.map_err(|_| invalid("invalid WebAssembly payload"))? {
             Payload::ImportSection(_) =>
                 return Err(invalid("plugin module imports are unsupported")),
             Payload::StartSection { .. } =>
                 return Err(invalid("plugin module start function is unsupported")),
+            Payload::MemorySection(memories) => {
+                for memory in memories {
+                    let memory = memory.map_err(|_| invalid("invalid WebAssembly memory"))?;
+                    if memory.maximum.is_none_or(|max| max > MAX_MEMORY_PAGES)
+                        || memory.initial > MAX_MEMORY_PAGES {
+                        return Err(invalid("plugin module memory must declare a maximum of at most 256 pages"));
+                    }
+                }
+            }
+            Payload::TableSection(tables) => {
+                for table in tables {
+                    let table = table.map_err(|_| invalid("invalid WebAssembly table"))?;
+                    if table.ty.maximum.is_none_or(|max| max > MAX_TABLE_ENTRIES)
+                        || table.ty.initial > MAX_TABLE_ENTRIES {
+                        return Err(invalid("plugin module table must declare a maximum of at most 1024 entries"));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -328,6 +353,33 @@ mod tests {
             b"\x03\x02\x01\x00\x08\x01\x00\x0a\x04\x01\x02\x00\x0b"].concat();
         write(&module, started);
         assert!(preflight(dir.path(), "demo").unwrap_err().to_string().contains("start"));
+    }
+
+    #[test]
+    fn future_runner_admission_requires_bounded_memory_and_table() {
+        let dir = fixture();
+        let module = dir.path().join("native-plugin-packages/demo/module.wasm");
+        for (section, reason) in [
+            (&b"\x05\x03\x01\x00\x00"[..], "memory"), // no maximum
+            (&b"\x05\x05\x01\x01\x00\x81\x02"[..], "memory"), // 257 pages
+            (&b"\x04\x04\x01\x70\x00\x00"[..], "table"), // no maximum
+            (&b"\x04\x06\x01\x70\x01\x00\x81\x08"[..], "table"), // 1025 entries
+        ] {
+            write(&module, [MODULE, section].concat());
+            assert!(preflight(dir.path(), "demo").unwrap_err().to_string().contains(reason));
+        }
+        // The package stays review-only even when both limits are declared.
+        let bounded_memory = b"\x05\x05\x01\x01\x00\x80\x02"; // 256 pages
+        write(&module, [MODULE, bounded_memory].concat());
+        assert!(!preflight(dir.path(), "demo").unwrap().owner_approved);
+        let bounded_table = b"\x04\x06\x01\x70\x01\x00\x80\x08"; // 1024 entries
+        let bounded = [MODULE, bounded_table, bounded_memory].concat();
+        write(&module, &bounded);
+        assert!(!preflight(dir.path(), "demo").unwrap().owner_approved);
+        write(&dir.path().join("config.toml"), approval().replace(&digest(MODULE), &digest(&bounded)));
+        let reviewed = preflight(dir.path(), "demo").unwrap();
+        assert!(reviewed.owner_approved);
+        assert_eq!(recheck_approved(dir.path(), &reviewed).unwrap().module_bytes(), bounded);
     }
 
     #[test]

@@ -9,8 +9,9 @@ plugin adoption through `/plugins` is a separate provider feature.
 
 - [Shipped slice](#shipped-slice)
 - [Trust boundary](#trust-boundary)
-- [Executable package preflight](#executable-package-preflight)
 - [Open extension work](#open-extension-work)
+- [Executable package preflight](#executable-package-preflight)
+- [Runner design and test seam](#runner-design-and-test-seam)
 - [Acceptance bar](#acceptance-bar)
 
 ## Shipped slice
@@ -80,12 +81,57 @@ refuses imports, start functions and features outside WebAssembly 1.0. A fresh
 `recheck_approved` re-opens the owner files, requires exact digest, grant and
 inode matches against the earlier approved review, and retains the validated
 module bytes so a future runner need not race a second path open. Validation
-does not make the module safe to run.
+also rejects any memory or table without a declared maximum, memory above
+256 WebAssembly pages (16 MiB), and tables above 1,024 entries. These are
+static admission bounds, **not runtime enforcement**. Validation does not
+make the module safe to run.
 
 The next execution slice needs an isolated, resource-limited runner with a
 narrow host protocol, grant enforcement, cancellation and crash reporting.
 Preflight cannot establish safe execution. Native shared libraries and
 in-process callbacks remain out of scope.
+
+### Runner design and test seam
+
+No WASM execution engine is pinned in this workspace's lockfile or available
+in the local build cache. DOXA therefore has **no runner command, child binary,
+or plugin execution path**. Do not treat owner approval or the new static
+memory/table limits as an execution switch. The concrete handoff is
+`recheck_approved(home, review) -> RecheckedPackage`: it returns the exact,
+revalidated bytes and fails if either owner file, inode, digest, approval, or
+requested grant changed. Tests cover stale identities and unbounded/excessive
+declared memory and tables.
+
+The first runnable prototype should be an explicit, grantless developer-only
+command, never TUI startup or a native slash command. It should require an
+approved package with **zero** requested grants and a single exported
+`doxa_main: () -> i32`; no WASI, host functions, imports, start function,
+ambient credentials, home directory, repository path, or provider connection.
+The parent must pipe the `RecheckedPackage` bytes to a dedicated child rather
+than passing a path. The child must independently validate the length, digest,
+module shape and export signature before instantiation. Only a fixed-size
+integer result and bounded failure reason may return. `render-local-panel-v1`
+remains a reserved name until a separate reviewed protocol and grant gate
+exist.
+
+Pin a WASM engine with fuel accounting and an enforceable store memory/table
+limiter, then run it only in a separate process whose sandbox setup fails
+closed. On Linux, prove a private mount and network namespace, no inherited
+secrets or writable host mounts, `no_new_privs`, a process/cgroup memory and
+CPU budget, and a file-descriptor/process limit. Enforce an independent wall
+deadline; cancellation must kill and reap the entire child process group.
+Bound pipe input/output, close inherited descriptors, and report timeout,
+cancel, trap, crash and sandbox failure distinctly. Neither a parent-side
+timeout nor the module's declared maximum is a hard resource guarantee. Other
+platforms stay unavailable until equivalent isolation is proven.
+
+The acceptance fixture must run a valid return module, an infinite loop,
+memory growth at the cap, a trap and a crashing child; exercise cancellation
+and attempt file/network access from a compromised child, checking that the
+sandbox prevents it. Verify no orphan remains after timeout/cancellation,
+that oversized/truncated frames fail closed, and that stale approval refuses
+the child spawn. These are prerequisites for a future prototype, not claims
+about current production support.
 
 ### Other extensions
 
