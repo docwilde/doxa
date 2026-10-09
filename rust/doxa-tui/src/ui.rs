@@ -1517,6 +1517,7 @@ pub struct App {
     codegraph_pending: Option<(String, PathBuf, Receiver<Result<Vec<String>, String>>)>,
     native_package_pending: Option<(String, Receiver<Result<crate::native_plugins::packages::Review, String>>)>,
     native_package_run: Option<native_package_run::PendingRun>,
+    native_package_run_display_owner: Option<(usize, String)>,
     // Mouse coordinates must come from the last painted frame, which may
     // differ from the terminal size reported by an earlier resize event.
     rendered_chip_hits: RefCell<Option<Vec<ChipHit>>>,
@@ -1803,6 +1804,7 @@ impl Default for App {
             codegraph_pending: None,
             native_package_pending: None,
             native_package_run: None,
+            native_package_run_display_owner: None,
             rendered_chip_hits: RefCell::new(None),
             blink_on: true,
             blink_at: Instant::now(),

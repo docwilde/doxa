@@ -130,6 +130,7 @@ impl App {
             return;
         }
         let owner = self.prompt_owner();
+        self.native_package_run_display_owner = None;
         self.chip_info = Some(ChipInfo {
             kind: RUN_KIND,
             label: name.into(),
@@ -158,17 +159,30 @@ impl App {
 
     pub(super) fn cancel_native_package_run(&mut self) {
         self.native_package_run = None;
+        self.native_package_run_display_owner = None;
+        if self.chip_info.as_ref().is_some_and(|info| info.kind == RUN_KIND) {
+            self.chip_info = None;
+        }
     }
 
     /// Called after input reduction and before polling, so a closed modal,
     /// changed tab, or exiting window cannot receive a late worker result.
     pub(super) fn reconcile_native_package_run(&mut self) -> bool {
-        let Some(run) = &self.native_package_run else { return false; };
-        let visible = self.chip_info.as_ref().is_some_and(|info|
-            info.kind == RUN_KIND && info.label == run.name);
-        if self.should_quit || self.prompt_owner() != run.owner || !visible {
-            self.cancel_native_package_run();
-            return true;
+        if let Some(run) = &self.native_package_run {
+            let visible = self.chip_info.as_ref().is_some_and(|info|
+                info.kind == RUN_KIND && info.label == run.name);
+            if self.should_quit || self.prompt_owner() != run.owner || !visible {
+                self.cancel_native_package_run();
+                return true;
+            }
+        }
+        if let Some(owner) = &self.native_package_run_display_owner {
+            let visible = self.chip_info.as_ref().is_some_and(|info| info.kind == RUN_KIND);
+            if self.should_quit || self.prompt_owner() != *owner {
+                self.cancel_native_package_run();
+                return true;
+            }
+            if !visible { self.native_package_run_display_owner = None; }
         }
         false
     }
@@ -181,10 +195,12 @@ impl App {
             Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => RunOutcome::WorkerStopped,
         };
-        self.cancel_native_package_run();
+        let owner = run.owner.clone();
+        self.native_package_run = None;
         if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == RUN_KIND) {
             info.lines = result.lines();
             info.scroll = 0;
+            self.native_package_run_display_owner = Some(owner);
             return true;
         }
         false
@@ -350,6 +366,39 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 1);
         assert!(app.native_package_run.is_none());
         assert_eq!(app.chip_info.as_ref().unwrap().lines, vec!["Isolated plugin returned 17"]);
+    }
+
+    #[test]
+    fn completed_refusal_panel_is_retired_on_owner_switch_and_detach() {
+        let home = fixture(true, &[]);
+        let mut app = App::default();
+        app.groups[0].tabs.push("session-one".into());
+        app.groups[0].tabs.push("session-two".into());
+        app.handle(Event::Resize(100, 30));
+        app.open_native_package_run_at(home.path(), "demo");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.poll_native_package_run() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(app.native_package_run.is_none());
+        assert_eq!(app.native_package_run_display_owner, Some((0, "session-one".into())));
+        assert!(app.chip_info.as_ref().unwrap().lines[0].contains("TUI execution disabled"));
+
+        app.groups[0].active = 1;
+        assert!(app.reconcile_native_package_run());
+        assert!(app.chip_info.is_none());
+        assert!(app.native_package_run_display_owner.is_none());
+
+        app.groups[0].active = 0;
+        app.open_native_package_run_at(home.path(), "demo");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.poll_native_package_run() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(app.chip_info.is_some());
+        app.detach_active_tab();
+        assert!(app.chip_info.is_none());
+        assert!(app.native_package_run_display_owner.is_none());
     }
 
     #[test]
