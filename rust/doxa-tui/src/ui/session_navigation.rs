@@ -829,6 +829,22 @@ impl App {
             };
             return;
         }
+        if verb == "project-label" {
+            if rest.is_empty() {
+                self.notice = "Usage: /collection project-label <label>|--clear".into();
+                return;
+            }
+            let label = (rest != "--clear").then_some(rest);
+            self.notice = match (|| {
+                let path = crate::settings::config_path().map_err(|error| error.to_string())?;
+                let notice = self.edit_project_label(&path, label)?;
+                self.input.clear(); self.input_cursor = 0;
+                Ok::<_, String>(notice)
+            })() {
+                Ok(note) | Err(note) => note,
+            };
+            return;
+        }
         let active = self.groups[self.active_group]
             .active_id()
             .map(str::to_owned);

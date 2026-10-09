@@ -1,8 +1,9 @@
-//! Read-only rail signals. Project identity and urgency use separate channels.
+//! Rail signals and explicit owner-side project label edits.
 use super::{clipped_title, safe_label, App};
 use ratatui::style::Color;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,62 @@ pub(super) fn configured_colours() -> Option<HashMap<PathBuf, String>> {
     let path = crate::settings::config_path().ok()?;
     let config = doxa_state::load_config_checked(&path).ok()?;
     colours_from_config(&config)
+}
+
+/// Project aliases are owner config keyed by the same canonical root used for
+/// project hues. Bad entries suppress aliases instead of becoming rail text.
+pub(super) fn configured_labels() -> Option<HashMap<PathBuf, String>> {
+    let path = crate::settings::config_path().ok()?;
+    let config = doxa_state::load_config_checked(&path).ok()?;
+    labels_from_config(&config)
+}
+
+fn labels_from_config(config: &toml::Table) -> Option<HashMap<PathBuf, String>> {
+    let Some(value) = config.get("project_labels") else { return Some(HashMap::new()); };
+    let table = value.as_table()?;
+    if table.len() > 512 { return None; }
+    let labels: HashMap<PathBuf, String> = table.iter().map(|(path, value)| {
+        if !Path::new(path).is_absolute() { return None; }
+        let label = clean_project_label(value.as_str()?)?;
+        Some((PathBuf::from(path), label))
+    }).collect::<Option<_>>()?;
+    let mut names = std::collections::HashSet::new();
+    if !labels.values().all(|label| names.insert(label.to_lowercase())) { return None; }
+    Some(labels)
+}
+
+fn clean_project_label(raw: &str) -> Option<String> {
+    if raw.len() > 96 || raw.chars().any(super::unsafe_input_char) { return None; }
+    let label = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!label.is_empty() && label.chars().count() <= 48).then_some(label)
+}
+
+pub(super) fn save_project_label(path: &Path, root: &Path, label: Option<&str>) -> io::Result<()> {
+    if !root.is_absolute() || root.canonicalize().ok().as_deref() != Some(root) || !root.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "project root is no longer verified"));
+    }
+    let key = root.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "project root is not UTF-8"))?;
+    let label = label.map(|raw| clean_project_label(raw)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "label must be 1–48 visible characters and at most 96 bytes")))
+        .transpose()?;
+    doxa_state::update_config(path, |config| {
+        if labels_from_config(config).is_none() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid project_labels config"));
+        }
+        if let Some(label) = label {
+            let table = config.entry("project_labels".to_owned())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new())).as_table_mut()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid project_labels config"))?;
+            table.insert(key.to_owned(), toml::Value::String(label));
+        } else if let Some(table) = config.get_mut("project_labels").and_then(toml::Value::as_table_mut) {
+            table.remove(key);
+            if table.is_empty() { config.remove("project_labels"); }
+        }
+        if root.canonicalize().ok().as_deref() != Some(root) || labels_from_config(config).is_none() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "project root or labels changed during edit"));
+        }
+        Ok(())
+    })
 }
 
 fn colours_from_config(config: &toml::Table) -> Option<HashMap<PathBuf, String>> {
@@ -74,6 +131,69 @@ impl PaneSignal {
 }
 
 impl App {
+    fn derived_project_label(&self, index: usize) -> &str {
+        let session = &self.sessions[index];
+        let fallback = session.collection.trim();
+        let fallback = if fallback.is_empty() { "Other sessions" } else { fallback };
+        match self.repo_cache.get(&session.id).and_then(|(status, _)| status.as_ref()) {
+            Some(doxa_worktrees::RepoStatus::Repository { repo, .. }) => repo,
+            Some(doxa_worktrees::RepoStatus::Directory { name }) => name,
+            None => fallback,
+        }
+    }
+
+    /// Editing a project heading needs every tab in the selected pane to
+    /// resolve to the same root, both in the background snapshot and now.
+    pub(super) fn active_verified_project_root(&self) -> Result<PathBuf, String> {
+        let pane = self.groups.get(self.active_group).ok_or("select a local project pane")?;
+        if pane.tabs.is_empty() { return Err("select a local project pane".into()); }
+        let mut root: Option<PathBuf> = None;
+        for id in &pane.tabs {
+            if self.offline_ids.contains(id) || !self.sessions.iter().any(|session| session.id == *id) {
+                return Err("project label unchanged: pane contains an offline or missing tab".into());
+            }
+            let cached = self.project_roots.get(id)
+                .ok_or("project label unchanged: project root is unresolved")?;
+            let cwd = self.session_cwds.get(id)
+                .ok_or("project label unchanged: session directory is unresolved")?;
+            if doxa_worktrees::project_root(cwd).as_ref() != Some(cached) {
+                return Err("project label unchanged: project root changed; wait for a fresh probe".into());
+            }
+            if root.as_ref().is_some_and(|known| known != cached) {
+                return Err("project label unchanged: pane mixes project roots".into());
+            }
+            root = Some(cached.clone());
+        }
+        root.ok_or_else(|| "select a local project pane".into())
+    }
+
+    pub(super) fn project_label_collides(&self, root: &Path, label: &str) -> bool {
+        self.project_labels.as_ref().is_some_and(|labels| labels.iter().any(|(other, current)|
+            other != root && current.eq_ignore_ascii_case(label)))
+            || self.sessions.iter().enumerate().any(|(index, session)|
+                !self.offline_ids.contains(&session.id)
+                    && self.project_roots.get(&session.id).is_none_or(|other| other != root)
+                    && self.rail_project_label(index).eq_ignore_ascii_case(label))
+            || self.collections.iter().any(|item| item.name.eq_ignore_ascii_case(label))
+    }
+
+    pub(super) fn edit_project_label(&mut self, path: &Path, label: Option<&str>) -> Result<String, String> {
+        let root = self.active_verified_project_root()?;
+        if label.is_some_and(|name| self.project_label_collides(&root, name)) {
+            return Err("project label unchanged: another group already uses that label".into());
+        }
+        save_project_label(path, &root, label)
+            .map_err(|error| format!("project label unchanged: {error}"))?;
+        self.project_labels = doxa_state::load_config_checked(path).ok()
+            .and_then(|config| labels_from_config(&config));
+        self.rail_sort_signature.clear();
+        self.rail_sort_order.clear();
+        Ok(match label {
+            Some(label) => format!("Project label for {}: {label}", root.display()),
+            None => format!("Project label cleared for {}", root.display()),
+        })
+    }
+
     /// Aggregate the existing urgency ranks over every tab in a pane. The
     /// active row carries the count and names a hidden source when it wins.
     pub(super) fn pane_signal(&self, active_id: &str) -> Option<PaneSignal> {
@@ -98,13 +218,23 @@ impl App {
 
     pub(super) fn rail_project_label(&self, index: usize) -> &str {
         let session = &self.sessions[index];
-        let fallback = session.collection.trim();
-        let fallback = if fallback.is_empty() { "Other sessions" } else { fallback };
-        match self.repo_cache.get(&session.id).and_then(|(status, _)| status.as_ref()) {
-            Some(doxa_worktrees::RepoStatus::Repository { repo, .. }) => repo,
-            Some(doxa_worktrees::RepoStatus::Directory { name }) => name,
-            None => fallback,
+        if let Some(root) = self.project_roots.get(&session.id) {
+            let mixed_or_unknown_pane = self.groups.iter().enumerate()
+                .find(|(_, pane)| pane.tabs.iter().any(|id| id == &session.id))
+                .is_some_and(|(index, _)| !self.pane_project_marker(index).is_empty());
+            if !mixed_or_unknown_pane {
+                if let Some(label) = self.project_labels.as_ref().and_then(|labels| labels.get(root)) {
+                    // A later session can introduce a heading collision after
+                    // the edit was saved. Prefer the derived name in that case.
+                    let collision = self.sessions.iter().enumerate().any(|(other, peer)|
+                        index != other && !self.offline_ids.contains(&peer.id)
+                            && self.project_roots.get(&peer.id) != Some(root)
+                            && self.derived_project_label(other).eq_ignore_ascii_case(label));
+                    if !collision { return label; }
+                }
+            }
         }
+        self.derived_project_label(index)
     }
 
     /// A pane can mix projects, or include a tab whose root is not yet
@@ -161,5 +291,37 @@ mod tests {
         assert_eq!(parsed.get(root).map(String::as_str), Some("teal"));
         let invalid = "[project_colours]\nrelative = 'blue'\n".parse::<toml::Table>().unwrap();
         assert!(colours_from_config(&invalid).is_none());
+    }
+
+    #[test]
+    fn project_labels_validate_and_preserve_other_owner_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let path = directory.path().join("owner").join("config.toml");
+        doxa_state::update_config(&path, |config| {
+            config.insert("future_setting".into(), toml::Value::String("kept".into()));
+            Ok(())
+        }).unwrap();
+        save_project_label(&path, &root, Some("  Client   Work  ")).unwrap();
+        let stored = doxa_state::load_config_checked(&path).unwrap();
+        assert_eq!(stored["future_setting"].as_str(), Some("kept"));
+        assert_eq!(labels_from_config(&stored).unwrap().get(&root).map(String::as_str), Some("Client Work"));
+        assert!(save_project_label(&path, &root, Some("\u{202e}spoof")).is_err());
+        assert_eq!(doxa_state::load_config_checked(&path).unwrap(), stored);
+        save_project_label(&path, &root, None).unwrap();
+        let cleared = doxa_state::load_config_checked(&path).unwrap();
+        assert!(cleared.get("project_labels").is_none());
+        assert_eq!(cleared["future_setting"].as_str(), Some("kept"));
+        let invalid = "[project_labels]\nrelative = 'Wrong'\n".parse::<toml::Table>().unwrap();
+        assert!(labels_from_config(&invalid).is_none());
+        let duplicate = "[project_labels]\n'/one' = 'Same'\n'/two' = 'same'\n"
+            .parse::<toml::Table>().unwrap();
+        assert!(labels_from_config(&duplicate).is_none());
+        let malformed = b"project_labels = 7\nfuture_setting = 'kept'\n";
+        std::fs::write(&path, malformed).unwrap();
+        assert!(save_project_label(&path, &root, Some("Valid")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), malformed);
     }
 }

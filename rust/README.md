@@ -76,6 +76,10 @@ the rail. Session rows within each group never move.
 
 Project headings get stable palette hues only after the background probe
 verifies a unique project root; `[project_colours]` can override an exact root.
+`/collection project-label <label>` sets the selected pane's project heading
+for that verified canonical root; `--clear` restores its derived name. All tabs
+in the pane must resolve to the same root. DOXA stores explicit edits in
+`[project_labels]` in owner config and never renames them automatically.
 The active row of a multi-tab pane shows its tab count and strongest urgency,
 including the number and short title of a hidden tab that needs attention.
 Unknown roots and conflicting labels keep the neutral style.

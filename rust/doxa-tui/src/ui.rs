@@ -1489,6 +1489,7 @@ pub struct App {
     repo_cache: HashMap<String, (Option<doxa_worktrees::RepoStatus>, Instant)>,
     project_roots: HashMap<String, PathBuf>,
     project_colours: Option<HashMap<PathBuf, String>>,
+    project_labels: Option<HashMap<PathBuf, String>>,
     repo_pending: Option<(
         String,
         PathBuf,
@@ -1777,6 +1778,7 @@ impl Default for App {
             repo_cache: HashMap::new(),
             project_roots: HashMap::new(),
             project_colours: triage::configured_colours(),
+            project_labels: triage::configured_labels(),
             repo_pending: None,
             repo_epoch: HashMap::new(),
             chip_offsets: vec![0; panes::MAX_PANES],
