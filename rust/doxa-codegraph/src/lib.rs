@@ -28,6 +28,9 @@ const MAX_PYTHON_NODES: usize = 200_000;
 const MAX_PYTHON_SCOPE_DEPTH: usize = 128;
 const MAX_PYTHON_PARSE_TIME: Duration = Duration::from_secs(2);
 const MAX_PYTHON_SCAN_TIME: Duration = Duration::from_secs(10);
+const MAX_PYTHON_MODULE_IMPORTS: usize = 10_000;
+const MAX_PYTHON_CALL_TARGET_BYTES: usize = 4 * 1024;
+const MAX_PYTHON_RETAINED_CALL_TEXT_BYTES: usize = 32 * 1024;
 const MAX_ROWS: usize = 100;
 const MAX_ISSUE_EXAMPLES: usize = 20;
 const MAX_REPLY_BYTES: usize = 64 * 1024;
@@ -186,7 +189,7 @@ pub struct ModuleEdge {
     pub conditional_candidate_read_unix_ms: Option<u128>,
 }
 
-const NOTE: &str = "Rust and Python syntax only; semantic binding is unknown. Rust call candidates match a final name segment, not bindings; even one candidate is unverified. Imports are declarations. Rust module edges resolve file layout only, not compilation reachability; cfg-gated files are candidates, never verified targets. Python calls and modules are unsupported. cfg predicates, cfg_attr, macro expansion, local definitions/imports, and other expression calls are not resolved.";
+const NOTE: &str = "Rust and Python syntax only; semantic binding is unknown. Rust call candidates match a final name segment, not bindings; even one candidate is unverified. Imports are declarations. Rust module edges resolve file layout only, not compilation reachability; cfg-gated files are candidates, never verified targets. Python calls are lexical sites with unknown binding, including indirect expression calls. Python module edges are import spellings with unknown targets. cfg predicates, cfg_attr, macro expansion, and runtime import resolution are not evaluated.";
 
 fn source_language(path: &str) -> Option<&'static str> {
     match Path::new(path).extension().and_then(|s| s.to_str()) {
@@ -278,7 +281,7 @@ fn file_bytes(root: &Path, relative: &str) -> Result<(String, String, u128), Str
     Ok((content, sha, read_unix_ms))
 }
 
-/// Recheck one recorded Rust source without following symlinks in any path
+/// Recheck one recorded Rust or Python source without following symlinks in any path
 /// component. This uses the same 1 MiB, descriptor-anchored read as queries.
 pub fn source_sha256(root: &Path, relative: &str) -> Result<String, String> {
     file_bytes(root, relative).map(|(_, sha, _)| sha)
@@ -576,7 +579,8 @@ fn python_import_name(node: tree_sitter::Node<'_>, source: &str)
 }
 
 fn python_imports(node: tree_sitter::Node<'_>, source: &str, file: &str, sha: &str,
-    read_unix_ms: u128, rows: &mut Vec<Row>) -> Result<(), String> {
+    read_unix_ms: u128, rows: &mut Vec<Row>, modules: &mut Vec<ModuleEdge>,
+    module_sites: &mut usize, collect_modules: bool) -> Result<(), String> {
     let module = if node.kind() == "import_from_statement" {
         Some(node.child_by_field_name("module_name")
             .ok_or("Python from-import lacks a module")?)
@@ -587,6 +591,10 @@ fn python_imports(node: tree_sitter::Node<'_>, source: &str, file: &str, sha: &s
         python_text(module, source)?
     } else { String::new() };
     let mut cursor = node.walk();
+    if collect_modules && node.kind() != "import_statement" {
+        python_module_edge(node, file, &prefix, sha, read_unix_ms, modules, module_sites,
+            "python_from_import_declaration")?;
+    }
     for child in node.named_children(&mut cursor) {
         if module.is_some_and(|module| module.id() == child.id()) { continue; }
         if !matches!(child.kind(), "dotted_name" | "aliased_import" | "wildcard_import") {
@@ -594,6 +602,10 @@ fn python_imports(node: tree_sitter::Node<'_>, source: &str, file: &str, sha: &s
         }
         let glob = child.kind() == "wildcard_import";
         let (name, alias) = python_import_name(child, source)?;
+        if collect_modules && node.kind() == "import_statement" {
+            python_module_edge(child, file, &name, sha, read_unix_ms, modules, module_sites,
+                "python_import_declaration")?;
+        }
         let full = if prefix.is_empty() { name }
             else if prefix.ends_with('.') { format!("{prefix}{name}") }
             else { format!("{prefix}.{name}") };
@@ -603,8 +615,38 @@ fn python_imports(node: tree_sitter::Node<'_>, source: &str, file: &str, sha: &s
     Ok(())
 }
 
-fn parse_python(content: &str, file: &str, sha: &str, read_unix_ms: u128, budget: Duration)
-    -> Result<(Vec<Row>, Vec<Row>), String> {
+fn python_module_edge(node: tree_sitter::Node<'_>, file: &str, module: &str, sha: &str,
+    read_unix_ms: u128, modules: &mut Vec<ModuleEdge>, module_sites: &mut usize,
+    reason: &'static str)
+    -> Result<(), String> {
+    *module_sites += 1;
+    if *module_sites > MAX_PYTHON_MODULE_IMPORTS {
+        return Err("file contains more than 10,000 Python module declarations; no partial answer".into());
+    }
+    if modules.len() >= MAX_ROWS { return Ok(()); }
+    modules.push(ModuleEdge {
+        source: file.into(), line: node.start_position().row + 1,
+        column: node.start_position().column + 1, module: module.into(),
+        target: None, conditional_candidate: None, resolution: "unknown", reason,
+        source_sha256: sha.into(), source_read_unix_ms: read_unix_ms,
+        target_sha256: None, target_read_unix_ms: None,
+        conditional_candidate_sha256: None, conditional_candidate_read_unix_ms: None,
+    });
+    Ok(())
+}
+
+struct PythonParsed {
+    symbols: Vec<Row>,
+    imports: Vec<Row>,
+    calls: Vec<CallEdge>,
+    call_sites: usize,
+    modules: Vec<ModuleEdge>,
+    module_sites: usize,
+}
+
+fn parse_python(content: &str, file: &str, sha: &str, read_unix_ms: u128, budget: Duration,
+    collect_calls: bool, collect_modules: bool)
+    -> Result<PythonParsed, String> {
     if budget.is_zero() { return Err("Python parse deadline exceeded".into()); }
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_python::LANGUAGE.into())
@@ -620,6 +662,11 @@ fn parse_python(content: &str, file: &str, sha: &str, read_unix_ms: u128, budget
     }
     let mut symbols = Vec::new();
     let mut imports = Vec::new();
+    let mut calls = Vec::new();
+    let mut call_sites = 0usize;
+    let mut retained_call_text_bytes = 0usize;
+    let mut modules = Vec::new();
+    let mut module_sites = 0usize;
     let mut stack = vec![(tree.root_node(), String::new(), false, 0usize)];
     let mut visited = 0usize;
     while let Some((node, scope, in_class, depth)) = stack.pop() {
@@ -652,17 +699,60 @@ fn parse_python(content: &str, file: &str, sha: &str, read_unix_ms: u128, budget
                 child_depth += 1;
             }
             "import_statement" | "import_from_statement" | "future_import_statement" => {
-                python_imports(node, content, file, sha, read_unix_ms, &mut imports)?;
+                python_imports(node, content, file, sha, read_unix_ms, &mut imports,
+                    &mut modules, &mut module_sites, collect_modules)?;
+            }
+            "call" if collect_calls => {
+                call_sites += 1;
+                if call_sites > MAX_CALL_SITES {
+                    return Err("file contains more than 10,000 call sites; no partial answer".into());
+                }
+                if calls.len() < MAX_ROWS {
+                    let function = node.child_by_field_name("function")
+                        .ok_or("Python call lacks a function expression")?;
+                    let target_bytes = function.byte_range().len();
+                    if target_bytes > MAX_PYTHON_CALL_TARGET_BYTES {
+                        return Err("Python call target expression exceeds 4 KiB; no partial answer".into());
+                    }
+                    retained_call_text_bytes += target_bytes;
+                    if retained_call_text_bytes > MAX_PYTHON_RETAINED_CALL_TEXT_BYTES {
+                        return Err("Python call target text exceeds 32 KiB; no partial answer".into());
+                    }
+                    let target = function.utf8_text(content.as_bytes())
+                        .map_err(|_| "Python call target is outside source bytes")?.to_owned();
+                    calls.push(CallEdge {
+                        file: file.into(), line: node.start_position().row + 1,
+                        column: node.start_position().column + 1,
+                        caller: if scope.is_empty() { "<module>".into() } else { scope.clone() },
+                        target,
+                        form: match function.kind() {
+                            "identifier" => "python_name", "attribute" => "python_attribute",
+                            _ => "python_expression",
+                        },
+                        binding: "unresolved", reason: "python_binding_unknown",
+                        candidates: Vec::new(), omitted_candidates: 0,
+                        sha256: sha.into(), read_unix_ms,
+                    });
+                }
             }
             _ => {}
         }
         let mut cursor = node.walk();
         let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+        let body = if matches!(node.kind(), "class_definition" | "function_definition") {
+            node.child_by_field_name("body")
+        } else { None };
         for child in children.into_iter().rev() {
-            stack.push((child, child_scope.clone(), child_in_class, child_depth));
+            if body.is_some_and(|body| body.id() == child.id()) {
+                stack.push((child, child_scope.clone(), child_in_class, child_depth));
+            } else {
+                stack.push((child, scope.clone(), in_class, depth));
+            }
         }
     }
-    Ok((symbols, imports))
+    calls.sort_by_key(|edge| (edge.line, edge.column));
+    modules.sort_by_key(|edge| (edge.line, edge.column));
+    Ok(PythonParsed { symbols, imports, calls, call_sites, modules, module_sites })
 }
 
 enum SourceFact {
@@ -818,6 +908,7 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
     let mut candidate_count = 0usize;
     let mut source_facts = BTreeMap::<String, SourceFact>::new();
     let mut requested_modules = None;
+    let rust_call_query = kind == "calls" && source_language(&value) == Some("rust");
     for path in &paths {
         match source_language(&path) {
             Some("rust") => {
@@ -846,7 +937,7 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                     }
                     continue;
                 }
-                if kind == "calls" {
+                if kind == "calls" && rust_call_query {
                     for symbol in parsed.symbols.iter().filter(|row| matches!(row.kind,
                         "function" | "method" | "trait_method")) {
                         candidate_count += 1;
@@ -864,6 +955,7 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                     }
                     continue;
                 }
+                if kind == "calls" { continue; }
                 let relevant = if kind == "symbol" {
                     parsed.symbols.into_iter().filter(|row| row.name == value || row.qualified == value).collect::<Vec<_>>()
                 } else if path == &value && kind == "imports" { parsed.imports }
@@ -889,7 +981,8 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                 if python_total > MAX_TOTAL_SOURCE_BYTES {
                     return Err("Python source scan exceeded 64 MiB; no partial answer".into());
                 }
-                let (symbols, imports) = match parse_python(&content, path, &sha, read_unix_ms, remaining) {
+                let parsed = match parse_python(&content, path, &sha, read_unix_ms, remaining,
+                    path == &value && kind == "calls", path == &value && kind == "modules") {
                     Ok(result) => result,
                     Err(reason) => {
                         if started.elapsed() >= MAX_PYTHON_SCAN_TIME {
@@ -905,16 +998,22 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                     answer.requested_source_sha256 = Some(sha);
                     answer.requested_source_read_unix_ms = Some(read_unix_ms);
                 }
-                if path == &value && matches!(kind, "calls" | "modules") {
-                    answer.status = format!("unsupported:python_{kind}");
+                if path == &value && kind == "calls" {
+                    answer.omitted_edges = parsed.call_sites.saturating_sub(MAX_ROWS);
+                    answer.edges = parsed.calls;
+                    continue;
+                }
+                if path == &value && kind == "modules" {
+                    answer.omitted_module_edges = parsed.module_sites.saturating_sub(MAX_ROWS);
+                    answer.module_edges = parsed.modules;
                     continue;
                 }
                 let relevant = if kind == "symbol" {
-                    symbols.into_iter().filter(|row| row.name == value || row.qualified == value)
+                    parsed.symbols.into_iter().filter(|row| row.name == value || row.qualified == value)
                         .collect::<Vec<_>>()
-                } else if path == &value && kind == "imports" { imports }
+                } else if path == &value && kind == "imports" { parsed.imports }
                 else if path == &value && kind == "file" {
-                    symbols.into_iter().chain(imports).collect::<Vec<_>>()
+                    parsed.symbols.into_iter().chain(parsed.imports).collect::<Vec<_>>()
                 } else { Vec::new() };
                 for row in relevant {
                     if answer.rows.len() < MAX_ROWS { answer.rows.push(row); } else { answer.omitted_rows += 1; }
@@ -1068,17 +1167,145 @@ mod tests {
         assert_eq!(imports.rows[2].alias.as_deref(), Some("first"));
         assert!(imports.rows[4].glob);
         assert_eq!(imports.rows[5].line, 6);
-        for kind in [Query::Calls("service.py".into()), Query::Modules("service.py".into())] {
-            let unsupported = query(root.path(), kind).unwrap();
-            assert!(unsupported.status.starts_with("unsupported:python_"));
-            assert!(unsupported.rows.is_empty() && unsupported.edges.is_empty()
-                && unsupported.module_edges.is_empty());
-        }
+        let calls = query(root.path(), Query::Calls("service.py".into())).unwrap();
+        assert_eq!(calls.status, "ok");
+        assert!(calls.edges.is_empty());
+        let modules = query(root.path(), Query::Modules("service.py".into())).unwrap();
+        assert_eq!(modules.status, "ok");
+        assert_eq!(modules.module_edges.iter().map(|edge| edge.module.as_str())
+            .collect::<Vec<_>>(), ["os.path", "json", ".helpers", "pkg.api", ".tasks"]);
+        assert!(modules.module_edges.iter().all(|edge| edge.target.is_none()
+            && edge.resolution == "unknown" && edge.source_sha256 == file.requested_source_sha256.clone().unwrap()));
         fs::write(root.path().join("service.py"), "def replacement(): pass\n").unwrap();
         let changed = query(root.path(), Query::File("service.py".into())).unwrap();
         assert_ne!(file.requested_source_sha256, changed.requested_source_sha256);
         assert_eq!(changed.rows.len(), 1);
         assert_eq!(changed.rows[0].name, "replacement");
+    }
+
+    #[test]
+    fn python_calls_report_lexical_sites_without_binding_claims() {
+        let root = worktree();
+        fs::write(root.path().join("service.py"), concat!(
+            "top()\n",
+            "factory[0]()\n",
+            "class Worker:\n",
+            "    def run(self):\n",
+            "        helper()\n",
+            "        self.send()\n",
+            "        def nested():\n",
+            "            inner()\n",
+            "        nested()\n",
+            "def helper(): pass\n",
+        )).unwrap();
+        let answer = query(root.path(), Query::Calls("service.py".into())).unwrap();
+        let edges = &answer.edges;
+        assert_eq!(edges.iter().map(|edge| (edge.caller.as_str(), edge.target.as_str()))
+            .collect::<Vec<_>>(), [
+                ("<module>", "top"), ("<module>", "factory[0]"),
+                ("Worker.run", "helper"),
+                ("Worker.run", "self.send"), ("Worker.run.nested", "inner"),
+                ("Worker.run", "nested"),
+            ]);
+        assert_eq!(edges[1].form, "python_expression");
+        assert_eq!(edges[2].form, "python_name");
+        assert_eq!(edges[3].form, "python_attribute");
+        assert!(edges.iter().all(|edge| edge.binding == "unresolved"
+            && edge.reason == "python_binding_unknown" && edge.candidates.is_empty()
+            && edge.omitted_candidates == 0 && edge.sha256 == answer.requested_source_sha256.clone().unwrap()
+            && edge.read_unix_ms > 0));
+        fs::write(root.path().join("service.py"), "replacement()\n").unwrap();
+        let changed = query(root.path(), Query::Calls("service.py".into())).unwrap();
+        assert_ne!(answer.requested_source_sha256, changed.requested_source_sha256);
+        assert_eq!(changed.edges[0].target, "replacement");
+    }
+
+    #[test]
+    fn python_call_targets_preserve_literal_whitespace_and_header_callers() {
+        let root = worktree();
+        fs::write(root.path().join("headers.py"), concat!(
+            "registry[\"foo bar\"]()\n",
+            "@register()\n",
+            "def task(arg=default()):\n",
+            "    body()\n",
+            "class Child(base_factory()):\n",
+            "    @class_decorator()\n",
+            "    def method(self, arg=method_default()):\n",
+            "        inside()\n",
+        )).unwrap();
+        let answer = query(root.path(), Query::Calls("headers.py".into())).unwrap();
+        assert_eq!(answer.edges.iter().map(|edge| (edge.caller.as_str(), edge.target.as_str()))
+            .collect::<Vec<_>>(), [
+                ("<module>", "registry[\"foo bar\"]"),
+                ("<module>", "register"), ("<module>", "default"),
+                ("task", "body"), ("<module>", "base_factory"),
+                ("Child", "class_decorator"), ("Child", "method_default"),
+                ("Child.method", "inside"),
+            ]);
+        assert_eq!(answer.edges[0].form, "python_expression");
+        assert_eq!(answer.edges[0].binding, "unresolved");
+    }
+
+    #[test]
+    fn python_call_target_text_is_bounded_before_copy() {
+        let root = worktree();
+        let oversized = format!("registry[\"{}\"]()\n", "x".repeat(MAX_PYTHON_CALL_TARGET_BYTES));
+        fs::write(root.path().join("oversized.py"), oversized).unwrap();
+        let error = query(root.path(), Query::Calls("oversized.py".into())).unwrap();
+        assert_eq!(error.status, "unparseable");
+        assert!(error.coverage.unparseable.examples.iter().any(|issue|
+            issue.reason.contains("target expression exceeds 4 KiB")));
+
+        let target = format!("registry[\"{}\"]", "y".repeat(1900));
+        fs::write(root.path().join("aggregate.py"),
+            format!("{}()\n", target).repeat(20)).unwrap();
+        let aggregate = query(root.path(), Query::Calls("aggregate.py".into())).unwrap();
+        assert_eq!(aggregate.status, "unparseable");
+        assert!(aggregate.coverage.unparseable.examples.iter().any(|issue|
+            issue.reason.contains("target text exceeds 32 KiB")));
+    }
+
+    #[test]
+    fn python_module_spellings_remain_unresolved_even_with_matching_files() {
+        let root = worktree();
+        fs::write(root.path().join("service.py"), concat!(
+            "import os.path as osp, package.helper\n",
+            "from .helpers import one, two as second\n",
+            "from .. import parent\n",
+            "from __future__ import annotations\n",
+            "def load():\n",
+            "    import importlib\n",
+            "    importlib.import_module('dynamic')\n",
+        )).unwrap();
+        fs::create_dir(root.path().join("package")).unwrap();
+        fs::write(root.path().join("package/helper.py"), "pass\n").unwrap();
+        let answer = query(root.path(), Query::Modules("service.py".into())).unwrap();
+        assert_eq!(answer.module_edges.iter().map(|edge| edge.module.as_str())
+            .collect::<Vec<_>>(), ["os.path", "package.helper", ".helpers", "..", "__future__", "importlib"]);
+        assert!(answer.module_edges.iter().all(|edge| edge.target.is_none()
+            && edge.target_sha256.is_none() && edge.resolution == "unknown"
+            && edge.source_sha256 == answer.requested_source_sha256.clone().unwrap()));
+        assert!(answer.module_edges.iter().all(|edge| edge.module != "dynamic"));
+    }
+
+    #[test]
+    fn python_call_and_module_pages_keep_bounded_omission_counts() {
+        let root = worktree();
+        fs::write(root.path().join("calls.py"), "execute()\n".repeat(MAX_ROWS + 7)).unwrap();
+        fs::write(root.path().join("imports.py"), "import package\n".repeat(MAX_ROWS + 9)).unwrap();
+        let calls = query(root.path(), Query::Calls("calls.py".into())).unwrap();
+        assert_eq!(calls.edges.len(), MAX_ROWS);
+        assert_eq!(calls.omitted_edges, 7);
+        let modules = query(root.path(), Query::Modules("imports.py".into())).unwrap();
+        assert_eq!(modules.module_edges.len(), MAX_ROWS);
+        assert_eq!(modules.omitted_module_edges, 9);
+        assert!(serde_json::to_vec(&calls).unwrap().len() <= MAX_REPLY_BYTES);
+        assert!(serde_json::to_vec(&modules).unwrap().len() <= MAX_REPLY_BYTES);
+        let nested = (0..=MAX_ROWS).fold("0".to_owned(), |inner, _| format!("f({inner})"));
+        fs::write(root.path().join("nested.py"), format!("{nested}\n")).unwrap();
+        let nested = query(root.path(), Query::Calls("nested.py".into())).unwrap();
+        assert_eq!(nested.edges.len(), MAX_ROWS);
+        assert_eq!(nested.omitted_edges, 1);
     }
 
     #[test]

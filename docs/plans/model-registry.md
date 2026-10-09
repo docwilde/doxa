@@ -81,6 +81,15 @@ price fields with their source host and check date when known. Selection still
 sends the exact catalog model ID. The registry does not change the fleet's
 owner-approved price ceiling or its fail-closed accounting behavior.
 
+`doxa model-facts ENGINE MODEL [--review-before YYYY-MM-DD]` prints every
+field's value or `unknown`, full primary-source URL, and check date for one
+exact registry key. With an operator-chosen cutoff, it marks facts checked
+before that date for review. The command is read-only: the date is a queue
+filter, not an expiry or live verification. Refreshing a fact requires an
+operator to inspect the exact provider source and change the registry in a
+reviewed code commit. The command cannot grant a model, effort level, or
+priced-budget admission.
+
 ## Token-budget bounds
 
 OpenAI's [pricing table](https://developers.openai.com/api/docs/pricing)
@@ -137,10 +146,11 @@ per-request tier would allow tighter accounting in a later slice.
 - Ingest trustworthy provider-supplied capability metadata where available,
   preserving its own source and observation time. Do not replace an unknown
   with a guessed family value.
-- Consider an operator-facing refresh and stale-fact review flow before using
-  the registry for automatic task routing. The budget status exposes the
-  review date and missing live billing evidence, but it has no automatic
-  expiry rule. No quality or benchmark score is planned without a maintained,
+- An operator-selected stale-fact review report exists, but it does not fetch
+  provider pages, update facts, or apply an automatic expiry rule. Before any
+  automatic task routing, add a source-verification and refresh workflow.
+  The budget status still exposes its review date and missing live billing
+  evidence. No quality or benchmark score is planned without a maintained,
   task-specific evaluation method.
 - Capture provider billing mode and per-request tier when available so a budget
   can use an exact billed rate rather than the documented upper token bound.

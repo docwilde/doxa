@@ -194,7 +194,9 @@ impl ReferenceCheck {
             self.issue("<missing>", "missing_reference_path", false);
             return;
         };
-        if path.is_empty() || path.len() > 4096 || !path.ends_with(".rs")
+        if path.is_empty() || path.len() > 4096
+            || !matches!(Path::new(path).extension().and_then(|ext| ext.to_str()),
+                Some("rs" | "py"))
             || path.chars().any(char::is_control)
             || !Path::new(path).components().all(|part|
                 matches!(part, std::path::Component::Normal(_))) {
@@ -1841,6 +1843,30 @@ mod codegraph_snapshot_tests {
             assert_eq!(checked.status, "unknown", "accepted missing {missing}");
             assert!(checked.issues.iter().any(|issue|
                 issue.reason == "malformed_reference_section"));
+        }
+    }
+
+    #[test]
+    fn python_call_and_module_references_are_rechecked_without_binding_claims() {
+        let owned = tempfile::tempdir().unwrap();
+        let cwd = owned.path().to_str().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"])
+            .arg(owned.path()).status().unwrap().success());
+        std::fs::write(owned.path().join("service.py"),
+            "from package import helper\nhelper()\n").unwrap();
+        for request in [doxa_codegraph::Query::Calls("service.py".into()),
+            doxa_codegraph::Query::Modules("service.py".into())] {
+            let graph = serde_json::to_value(doxa_codegraph::query(owned.path(), request).unwrap()).unwrap();
+            let checked = ReferenceFreshness::check(cwd, &graph);
+            assert_eq!((checked.status, checked.checked_files), ("verified", 1));
+            assert!(graph["edges"].as_array().unwrap().iter().all(|edge|
+                edge["binding"] == "unresolved"));
+            assert!(graph["module_edges"].as_array().unwrap().iter().all(|edge|
+                edge["target"].is_null()));
+            std::fs::write(owned.path().join("service.py"), "changed()\n").unwrap();
+            assert_eq!(ReferenceFreshness::check(cwd, &graph).status, "stale");
+            std::fs::write(owned.path().join("service.py"),
+                "from package import helper\nhelper()\n").unwrap();
         }
     }
 }

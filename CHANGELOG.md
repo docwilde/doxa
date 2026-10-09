@@ -5,6 +5,16 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.23 — 2026-10-09
+
+**Code graph**
+
+- Query bounded Python call sites and import-module spellings with lexical context and source hashes. Reviewed LORE snapshots recheck Python references; semantic binding and module targets remain unknown.
+
+**Model facts**
+
+- Add read-only **`doxa model-facts`** for exact model facts, source dates and operator-selected review candidates. It does not change provider availability or priced-budget admission.
+
 ## 2.0.0-beta.22 — 2026-10-09
 
 **Remote workspace**

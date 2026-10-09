@@ -1,6 +1,6 @@
 [package]
 name = "doxa-fleet"
-version = "2.0.0-beta.22"
+version = "2.0.0-beta.23"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
