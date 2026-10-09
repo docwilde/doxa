@@ -5,6 +5,8 @@
 //! The worker can reach only its mounted Unix socket; the host resolves an
 //! exact owner allowlist entry and connects to that resolved address itself.
 use crate::{error, inspect_network, preflight, private_directory, read_manifest, Profile};
+#[cfg(target_os = "linux")]
+use crate::{broker_origin::ContainerOriginPin, inspect};
 use std::{
     collections::HashSet,
     ffi::OsString,
@@ -32,6 +34,7 @@ use std::os::{fd::{FromRawFd, OwnedFd}, unix::ffi::OsStrExt};
 
 type Resolver = dyn Fn(&str) -> io::Result<Vec<SocketAddr>> + Send + Sync;
 type Connector = dyn Fn(SocketAddr) -> io::Result<TcpStream> + Send + Sync;
+type OriginGuard = dyn Fn(&UnixStream) -> io::Result<()> + Send + Sync;
 
 /// An exact, owner supplied hostname list. No wildcard or suffix matching.
 #[derive(Clone)]
@@ -397,21 +400,49 @@ impl EgressGateway {
         }
         preflight(manifest.policy.as_ref().ok_or_else(|| error("Docker policy missing"))?)?;
         inspect_network(&manifest)?;
-        let gateway = Self::start(&manifest.broker, hosts)?;
+        #[cfg(target_os = "linux")]
+        let (origin, init_pid): (Arc<OriginGuard>, libc::pid_t) = {
+            let actual = inspect(&manifest)?;
+            if actual["State"]["Running"] != true {
+                return Err(error("restricted egress requires a running container"));
+            }
+            let init_pid = actual["State"]["Pid"].as_i64()
+                .and_then(|pid| libc::pid_t::try_from(pid).ok())
+                .filter(|pid| *pid > 0)
+                .ok_or_else(|| error("inspected container init PID is unavailable"))?;
+            let pin = ContainerOriginPin::new(init_pid)?;
+            (Arc::new(move |stream| pin.require_connector(stream)), init_pid)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let gateway: Self = return Err(error("restricted egress origin verification requires Linux"));
+        #[cfg(target_os = "linux")]
+        let gateway = Self::start_with_origin(&manifest.broker, hosts, Some(origin))?;
         // A failed post-bind check drops the new socket instead of advertising
         // a gateway for a container whose network changed meanwhile.
         inspect_network(&manifest)?;
+        #[cfg(target_os = "linux")]
+        if inspect(&manifest)?["State"]["Pid"].as_i64() != Some(i64::from(init_pid)) {
+            return Err(error("container init PID changed during egress gateway startup"));
+        }
         Ok(gateway)
     }
     pub fn start(broker_dir: &Path, hosts: AllowedHosts) -> io::Result<Self> {
+        Self::start_with_origin(broker_dir, hosts, None)
+    }
+    fn start_with_origin(broker_dir: &Path, hosts: AllowedHosts, origin: Option<Arc<OriginGuard>>) -> io::Result<Self> {
         let resolver = Arc::new(|host: &str| format!("{host}.:443").to_socket_addrs().map(|rows| rows.collect()));
         let connector = Arc::new(|address| TcpStream::connect_timeout(&address, CONNECT_TIMEOUT));
-        Self::start_with(broker_dir, hosts, resolver, connector)
+        Self::start_with_after_lock_and_origin(broker_dir, hosts, resolver, connector, origin, || {})
     }
+    #[cfg(test)]
     fn start_with(broker_dir: &Path, hosts: AllowedHosts, resolver: Arc<Resolver>, connector: Arc<Connector>) -> io::Result<Self> {
         Self::start_with_after_lock(broker_dir, hosts, resolver, connector, || {})
     }
+    #[cfg(test)]
     fn start_with_after_lock(broker_dir: &Path, hosts: AllowedHosts, resolver: Arc<Resolver>, connector: Arc<Connector>, after_lock: impl FnOnce()) -> io::Result<Self> {
+        Self::start_with_after_lock_and_origin(broker_dir, hosts, resolver, connector, None, after_lock)
+    }
+    fn start_with_after_lock_and_origin(broker_dir: &Path, hosts: AllowedHosts, resolver: Arc<Resolver>, connector: Arc<Connector>, origin: Option<Arc<OriginGuard>>, after_lock: impl FnOnce()) -> io::Result<Self> {
         private_directory(broker_dir, false)?;
         let lock = gateway_lock(broker_dir)?;
         after_lock();
@@ -447,6 +478,12 @@ impl EgressGateway {
                     }
                     Err(_) => break,
                 };
+                // No CONNECT response, DNS query or upstream dial precedes
+                // the guarded connector check. A passed Unix FD still needs
+                // per-message writer attestation before hardened admission.
+                if origin.as_ref().is_some_and(|guard| guard(&stream).is_err()) {
+                    continue;
+                }
                 if active.load(Ordering::Acquire) >= MAX_CLIENTS {
                     let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"); continue;
                 }
@@ -571,6 +608,34 @@ mod tests {
         EgressGateway::start_with(root, hosts(),
             Arc::new(move |_| Ok(addresses.clone())),
             Arc::new(move |_| { calls.fetch_add(1, Ordering::AcqRel); TcpStream::connect(upstream) })).unwrap()
+    }
+    #[test]
+    fn guarded_gateway_rejects_connector_before_response_dns_or_dial() {
+        let root = fixture_dir();
+        let guard_calls = Arc::new(AtomicUsize::new(0));
+        let dns_calls = Arc::new(AtomicUsize::new(0));
+        let dial_calls = Arc::new(AtomicUsize::new(0));
+        let gateway = EgressGateway::start_with_after_lock_and_origin(
+            root.path(), hosts(),
+            { let calls = dns_calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Ok(vec!["1.1.1.1:443".parse().unwrap()])
+            }) },
+            { let calls = dial_calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Err(error("unexpected upstream dial"))
+            }) },
+            Some({ let calls = guard_calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Err(error("connector outside container"))
+            }) }), || {},
+        ).unwrap();
+        let mut client = UnixStream::connect(gateway.socket()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        client.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n").unwrap();
+        let mut response = [0; 128];
+        let read = client.read(&mut response);
+        assert!(matches!(read, Ok(0) | Err(_)), "unauthorized connector received gateway bytes: {read:?}");
+        assert_eq!(guard_calls.load(Ordering::Acquire), 1);
+        assert_eq!(dns_calls.load(Ordering::Acquire), 0);
+        assert_eq!(dial_calls.load(Ordering::Acquire), 0);
     }
     fn request(socket: &Path, bytes: &[u8]) -> Vec<u8> {
         let mut stream = UnixStream::connect(socket).unwrap();

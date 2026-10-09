@@ -213,7 +213,12 @@ the CONNECT handshake, matching and mismatched SNI, fragmented ClientHello,
 binary relay, malformed/unknown targets, DNS answers, socket replacement and
 gateway loss. The guarded `start_for_session` entry point requires a saved,
 ready `docker-offline` manifest, a verified local rootless Engine and an
-inspected network-none container before and after binding the socket.
+inspected network-none container before and after binding the socket. It now
+pins the Engine-reported container-init pidfd and refuses each gateway
+connector unless its live pidfd, owner UID, PID namespace and cgroup belong
+to that container scope. Replacing or restarting the init closes admission
+for subsequent connectors. A refusal occurs before CONNECT parsing, DNS or
+upstream dialing.
 
 No production profile starts the gateway or injects proxy variables yet.
 The reserved hardened gateway entry point requires a ready offline manifest
@@ -239,24 +244,25 @@ also demonstrates the remaining gap: a same-UID host client with the bearer
 capability passes those checks. Before hardened admission, bind every broker
 connection to the exact inspected container and live process namespace,
 reject host/sibling/changed-container peers, and rerun the protocol tests
-after worker, daemon and Engine restart. A disabled Linux probe now obtains
+after worker, daemon and Engine restart. The Linux origin probe obtains
 `SO_PEERPIDFD`, cross-checks the pinned connector against `SO_PEERCRED`, and
 observes its PID namespace and cgroup v2 path. It rejects host-scope
 candidates, but an inherited-descriptor test proves that the pidfd still
 names the original connector when another process writes the frame. No
-production broker calls this probe.
+production hook broker calls this probe.
 
 A disabled Linux probe now enables `SO_PASSPIDFD` and `SO_PASSCRED` before
 accepting a socket. Its 65,536-byte and five-second-bounded `recvmsg` loop
 requires one kernel-supplied sender pidfd and credentials for every frame
 segment and refuses empty frames, stalled or mixed senders, missing control
-messages, and unsupported kernel options. An inherited
-socket test shows `SCM_PIDFD` names the child that sent bytes, while the
-connect-time credentials name its parent. This is stronger sender evidence,
-but the probe is not wired into `HookBroker`: it has no authenticated binding
-to the exact inspected Docker container, no proof that sender cgroup membership
-cannot change after send, and no real provider hook compatibility result.
-Startup must refuse hardened mode without these proofs.
+messages, and unsupported kernel options. An inherited socket test shows
+`SCM_PIDFD` names the child that sent bytes, while connect-time credentials
+name its parent. This is stronger sender evidence, but the probe is not wired
+into `HookBroker`. Gateway connector checks alone do not authenticate the
+Engine or a later writer. An authenticated exact-container Engine observation,
+per-message writer provenance, process-movement proof and real provider hook
+compatibility remain necessary; startup must refuse hardened mode without
+them.
 The opt-in disposable quota fixture can compare aggregate writes through all
 three data binds and recheck EDQUOT after restarting the same container. A
 separate disposable four-bind guest proof retained EDQUOT on ext4 after an
