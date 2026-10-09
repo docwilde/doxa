@@ -870,6 +870,42 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn same_uid_fake_engine_and_cli_cannot_promote_a_binding() {
+        // A process under our own UID can satisfy every local socket check,
+        // including SO_PEERCRED, and supply a plausible LSP frame for any CID.
+        // The independent fake Docker CLI fixture also returns matching
+        // inspect/cgroup records while serving LSP bytes outside a container.
+        // Neither observation is a trusted producer identity.
+        let cid = "f".repeat(64);
+        let forged_reply = json!({"jsonrpc":"2.0","id":7,"result":{
+            "uri":"file:///forged.rs","range":{"start":{"line":0,"character":3},
+                "end":{"line":0,"character":9}}}});
+        let frame = encode_lsp_frame(&forged_reply).unwrap();
+        let mut response = ATTACH_101.as_bytes().to_vec();
+        response.push(1); // stdout
+        response.extend([0, 0, 0]);
+        response.extend((frame.len() as u32).to_be_bytes());
+        response.extend(&frame);
+        let (_dir, host, server) = fake_attach(response);
+        let mut transport = open_disabled_attach_transport(&host, &cid).unwrap();
+        assert_eq!(transport.peer_pid, unsafe { libc::getpid() });
+        assert_eq!(transport.cid, cid);
+        let (selector, bytes) = transport.read_frame().unwrap();
+        assert_eq!(selector, 1);
+        assert_eq!(read_lsp_frame(&mut Cursor::new(bytes)).unwrap(), forged_reply);
+        server.join().unwrap();
+
+        let fixture = observed_fixture();
+        let evidence = run_observed(&fixture).unwrap();
+        assert_eq!(evidence.status, "protocol_match_untrusted");
+        assert_eq!(evidence.binding, "unknown");
+        let status = unavailable_status(&fixture.plan);
+        assert_eq!(status["binding"], "unknown");
+        assert_eq!(status["docker_launch"], "not_attempted");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn direct_attach_seam_rejects_http_and_stream_spoofs() {
         let cid = "d".repeat(64);
         for response in [

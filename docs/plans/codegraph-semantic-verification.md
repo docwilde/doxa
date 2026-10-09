@@ -52,6 +52,13 @@ answer it, and the existing Docker CLI child still supplies the LSP pipes.
 The probe intentionally rejects a `200` response or a `raw-stream` content
 type; API version and response compatibility need review on the chosen live
 Engine before this transport can be used.
+The `same_uid_fake_engine_and_cli_cannot_promote_a_binding` regression
+fixture demonstrates the trust gap without Docker: a same-UID Unix server
+passes the private-socket and `SO_PEERCRED` checks, returns a plausible
+upgraded LSP frame for the requested CID, while a separate fake CLI supplies
+matching inspect/cgroup records and LSP bytes outside a container. Both
+paths still yield only `binding: unknown`. Protocol compliance alone is
+therefore insufficient evidence of a semantic binding.
 The next implementation must launch, inspect, and carry every LSP byte over
 one reviewed Engine endpoint, bind the attach request to the inspected CID,
 and preserve cleanup and resource checks across that exchange. Until then,
@@ -79,6 +86,21 @@ same ID and prove absence after every outcome. The live fixture must exercise
 daemon restart, socket replacement, late output, timeouts, and cleanup
 failure. Until those checks pass, direct Engine replies remain untrusted and
 the CLI's `binding` claim stays `unknown`.
+
+The recommended next artifact is a **host-managed broker proof fixture** on
+a disposable Linux host. The broker must run under a host-controlled identity
+distinct from DOXA's user, expose a Unix socket in a directory that DOXA's
+user cannot replace, and attest its reviewed binary/configuration and the
+rootless Engine it controls. DOXA must authenticate the broker's peer
+credentials on each connection and receive one transaction bound to a fresh
+nonce, exact container ID, image bytes, effective policy, attached LSP stream,
+and cleanup result. The fixture should first show that a same-UID attacker
+cannot substitute the broker socket or inject an LSP stream, then exercise
+daemon restart, socket replacement, policy drift, timeout, and failed cleanup.
+Only after that host-owned boundary and the containment checks above pass
+should the CLI gain an activatable semantic binding path. A same-UID helper,
+private directory, socket inode check, or process-PID check alone cannot
+provide this proof.
 
 The library-only LSP driver exercises a bounded initialize, quiescence,
 definition, and shutdown exchange against a fixture server. It caps messages
