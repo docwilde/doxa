@@ -137,10 +137,14 @@ class DelegatedShapeTests(unittest.TestCase):
 
     def test_namespace_receipt_requires_four_distinct_private_identities(self) -> None:
         host = {name: f"{name}:[100]" for name in proof.NAMESPACES}
+        child = {name: f"{name}:[{number}]" for name, number in
+                 zip(proof.NAMESPACES, (201, 202, 203, 204))}
         receipt = b"net=net:[201]\nmnt=mnt:[202]\nuser=user:[203]\npid=pid:[204]\n"
         proof.check_namespace_receipt(receipt, host)
+        for name in proof.NAMESPACES:
+            with self.subTest(reused=name), self.assertRaises(proof.ProofError):
+                proof.check_namespace_receipt(receipt, {**host, name: child[name]})
         for bad in (
-            b"net=net:[100]\nmnt=mnt:[202]\nuser=user:[203]\npid=pid:[204]\n",
             b"net=net:[201]\nmnt=mnt:[202]\nuser=user:[203]\n",
             receipt + b"net=net:[205]\n",
             b"mnt=mnt:[202]\nnet=net:[201]\nuser=user:[203]\npid=pid:[204]\n",
