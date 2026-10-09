@@ -967,7 +967,8 @@ else:
         assert!(!fixture.root.path().join("container-active").exists());
         let fixture = observed_fixture();
         fs::write(fixture.root.path().join("probe-mode"), "change_cid").unwrap();
-        assert!(run_observed(&fixture).unwrap_err().contains("CID changed"));
+        let error = run_observed_timeout(&fixture, Duration::from_secs(10)).unwrap_err();
+        assert!(error.contains("CID changed"), "{error}");
         assert_reaped(&fixture.root.path().join("child.pid"));
         assert!(!fixture.root.path().join("container-active").exists());
     }
