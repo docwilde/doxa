@@ -151,11 +151,12 @@ expected limit. The result always says `admissible_as_hard_quota=false`. The
 helper does not configure quotas, call Docker, or enable `docker-hardened`.
 The host-side `query_advisory_quota` client connects only to
 `/run/doxa/quota/SESSION_ID.sock`, checks its root-owned path and `SO_PEERCRED`
-server UID, reads a bounded response, and compares the administrator-pinned
+server UID, caps the response at 4 KiB, and compares the administrator-pinned
 root and checkout identity with the saved offline session. It rejects a
 missing or malformed report, any claimed admission flag, or a changed session
 identity. Its result is read-only evidence; the session launcher does not call
-it for admission.
+it for admission. The socket's three-second timeout applies to each read,
+not to the whole response; a trickling privileged peer may take longer.
 
 The service is inert unless an administrator explicitly installs a policy and
 socket unit. The policy path and socket path must be absolute; every policy
