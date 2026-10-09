@@ -143,8 +143,9 @@ canonical worktree. Module queries always scan afresh: their structural
 candidate checks also probe ignored and unlisted paths. Before reuse, it re-enumerates
 the complete Git path list and reads every listed Rust and Python source three
 times: one inventory pass and two hash rechecks. The check is capped at 64 MiB
-per language per pass and ten seconds overall, with the same no-symlink reader
-as a fresh query. It compares both language digests and the whole path listing;
+per language per pass and a ten-second elapsed check between reads, with the
+same no-symlink reader as a fresh query. A stalled filesystem read can exceed
+that time. It compares both language digests and the whole path listing;
 any mismatch triggers a fresh query. Skipped or unparseable inputs are never
 cached. The viewer labels a reused answer and preserves its original observed
 time, so a cache hit is not presented as a newly parsed graph. The CLI and
