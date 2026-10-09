@@ -15,9 +15,12 @@ layout file contains pane geometry and tab IDs, never transcript, input or
 event cursors; each restored stream obtains a new host snapshot and cursor.
 `/local` selects an open local tab. Remote tabs use an `◎` marker.
 The browser can receive encrypted background Web Push after explicit opt-in.
-An Android Kotlin/Compose client project is now in `android-client/`. Its debug
-APK and protocol tests build locally; device integration and private-tailnet
-QA remain open, so Android is not yet shipped.
+An Android Kotlin/Compose client project is in `android-client/`. Its FCM
+background-push source and protocol tests exist, with owner- and
+incarnation-scoped registration and generic tagged notifications. This host
+cannot build the APK because its JDK compiler and Android SDK 37 are absent;
+provisioned-device, FCM and private-tailnet QA remain open, so Android is not
+yet shipped.
 
 ## User journey
 

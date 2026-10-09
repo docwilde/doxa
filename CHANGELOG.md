@@ -5,6 +5,25 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.17 — 2026-10-09
+
+**Remote and workspace**
+
+- Add opt-in Android FCM background-push source and protocol tests with owner- and session-incarnation-scoped registration and generic tagged notifications. APK, device, Firebase and two-host QA remain open.
+- Add pane-row collection navigation, manual hues and label rename. Automatic project-label editing remains open.
+- Read reviewed LORE 0.62.20 code-graph snapshots explicitly in the CLI and TUI, rejecting stale or mismatched source data; DOXA does not write the store.
+
+**Plugins and isolation**
+
+- Preflight owner-pinned native WASM packages, validate complete WebAssembly 1.0 modules and recheck exact approval identity before a future runner receives bytes. Plugin execution and grants remain unimplemented.
+- Add fail-closed hard-quota and remote-Engine fixture preflights plus an opt-in rootless HTTPS allowlist/bypass probe. None authorizes production hardened admission.
+
+**Validation**
+
+- Document exact `gpt-6-astra` supervisor and fast-judge selectors with sourced registry bounds and regression tests. Live account availability and judge latency remain unknown.
+- Validate fixed Mermaid flowchart, sequence, class and Gantt renders with a pinned local CLI on Linux; real terminal graphics quality remains open.
+- Add an opt-in macOS Claude lifecycle verifier that requires delivery, resume, stop and process-exit receipts. Authenticated macOS results and protected Codex remain unverified.
+
 ## 2.0.0-beta.16 — 2026-10-09
 
 **Models and budgets**
