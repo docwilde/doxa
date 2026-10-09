@@ -89,13 +89,16 @@ restricted broker, while the owner fleet root and CLI stay on the host.
 The release is explicitly human-owned. A narrow, opt-in host test runner is
 available for supervised `docker-offline` fleets. Put a reviewed recipe in an
 owner-controlled JSON file and pass `--test-recipe /absolute/path/recipe.json`
-at launch. Its exact command is frozen in the charter:
+at launch. Its exact command is frozen in the charter. Add `--auto-test` to
+collect receipts after each host-observed completed worker turn; without it,
+the operator runs each test manually. The launch review records the choice:
 
 ```json
 {"argv":["/usr/bin/python3","-m","unittest","discover"],"cwd_relative":"","timeout_s":120}
 ```
 
-After a worker finishes, the operator runs `doxa fleet test RUN SLOT`. The
+After a worker finishes, the operator runs `doxa fleet test RUN SLOT` if
+automatic collection was not selected or a run needs explicit retry. The
 host copies bounded checkout source, including ignored regular files, into a
 private snapshot, then invokes the approved argv without a shell in a separate
 rootless Docker container.
@@ -109,6 +112,18 @@ execution never releases a dependent worker or grants scope. The first slice
 limits source to 4,096 files, 128 MiB total and 8 MiB per file; symlinks and
 special files fail closed. Ignored files outside the approved assignment scope
 block receipts; a checkout that exceeds the capture bounds also fails closed.
+Automatic collection runs one Docker test at a time, at most four attempts per
+worker and 32 per fleet. `fleet status RUN` shows pending, running, passed,
+failed, skipped, interrupted or limited attempts and the host-issued artifact IDs.
+An interrupted attempt is not replayed on resume. A failed or stale test does
+not prove completion; a worker completion message must still cite the exact
+signed diff and passing test IDs, and the host rechecks the current source and
+runner image. Test output is hashed and bounded, not injected into worker
+instructions. On controller stop or timeout, an active test is cancelled; the
+Docker CLI is reaped and container cleanup must be confirmed before fleet
+teardown reports completion. If cleanup cannot be confirmed, status retains
+`teardown_incomplete` for operator inspection. Dependency release remains a
+separate owner review.
 Rootless Docker end-to-end execution still needs a
 capable host and an owner-approved project recipe.
 
@@ -258,7 +273,7 @@ label fields are operator attestations; the scorer cannot verify them. No
 consented real-message corpus is shipped with DOXA, so these metrics remain
 unmeasured on real fleet traffic.
 
-Open coordination work includes automatic invocation of trusted project tests and
+Open coordination work includes live-host validation of automatic test collection and
 calibration against real fleet messages. The host checks the typed handoff chain and checkpoint provenance;
 the operator decides whether that evidence is sufficient to release a worker.
 

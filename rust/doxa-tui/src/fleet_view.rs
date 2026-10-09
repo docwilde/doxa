@@ -168,6 +168,13 @@ pub fn status(root: &Path, prefix: &str) -> io::Result<String> {
     if let Some(messages) = value["ledger"]["messages"].as_u64() {
         lines.push(format!("ledger messages {messages}"));
     }
+    if value["spec"]["auto_test"]==true {
+        lines.push(format!("automatic host tests enabled · attempts {}/32 · owner release required",
+            value["auto_test_runs"].as_u64().unwrap_or(0)));
+    }
+    if value["auto_test_cleanup_failed"]==true {
+        lines.push("automatic host test Docker cleanup unconfirmed · fleet teardown incomplete".into());
+    }
     if value["supervision"].is_object() {
         let guard = &value["supervision"];
         let review = &guard["context"]["review"];
@@ -202,6 +209,15 @@ pub fn status(root: &Path, prefix: &str) -> io::Result<String> {
                 short(slot["phase"].as_str().unwrap_or("?")),
                 short(slot["session_id"].as_str().unwrap_or("?"))));
             if let Some(enabled) = slot["lore"].as_bool() { lines.push(format!("    memory {}", if enabled { "on" } else { "off" })); }
+            if let Some(state)=slot["auto_test"]["state"].as_str() {
+                let mut line=format!("    host test {} · turn {}",short(state),slot["auto_test"]["turn_serial"].as_u64().unwrap_or(0));
+                if let Some(result)=slot["auto_test"]["result"].as_object() {
+                    if let (Some(diff),Some(test))=(result.get("diff_id").and_then(Value::as_str),result.get("test_id").and_then(Value::as_str)) {
+                        line.push_str(&format!(" · diff {} · test {}",short(diff),short(test)));
+                    }
+                }
+                lines.push(line);
+            }
             if slot["phase"]=="dependency_waiting" {
                 lines.push(format!("    waits for workers {} · review predecessor: doxa fleet dependency-review {} SLOT",slot["depends_on"],short(id)));
             }
@@ -412,10 +428,14 @@ mod tests {
     #[test]
     fn fleet_status_shows_independent_models_limits_and_explicit_human_recovery() {
         let temp=tempfile::tempdir().unwrap();let run=temp.path().join("review-run");fs::create_dir(&run).unwrap();
-        let manifest=serde_json::json!({"run_id":"review-run","live":true,"supervision":{"status":"drifted","paused":true,"reason":"outside scope","context":{"charter_sha256":"frozen-hash","review":{"supervisor":{"provider":"claude","model":"claude-sonnet-5-5"},"supervisor_mode":"enforce","message_judge":{"provider":"jev","model":"jev-1.13.0"},"message_mode":"shadow","budget_usd":2,"input_usd_per_million":100,"output_usd_per_million":100,"risk_threshold":0.7}},"review_reserved_usd":0.2,"review_estimated_usd":0.1,"calls":3}});
+        let manifest=serde_json::json!({"run_id":"review-run","live":true,"spec":{"auto_test":true},"auto_test_runs":1,
+            "slots":[{"index":1,"role":"worker","phase":"dispatched","session_id":"worker-one",
+                "auto_test":{"state":"passed","turn_serial":2,"result":{"diff_id":"signed-diff","test_id":"signed-test"}}}],
+            "supervision":{"status":"drifted","paused":true,"reason":"outside scope","context":{"charter_sha256":"frozen-hash","review":{"supervisor":{"provider":"claude","model":"claude-sonnet-5-5"},"supervisor_mode":"enforce","message_judge":{"provider":"jev","model":"jev-1.13.0"},"message_mode":"shadow","budget_usd":2,"input_usd_per_million":100,"output_usd_per_million":100,"risk_threshold":0.7}},"review_reserved_usd":0.2,"review_estimated_usd":0.1,"calls":3}});
         let path=run.join("manifest.json");fs::write(&path,manifest.to_string()).unwrap();fs::set_permissions(path,fs::Permissions::from_mode(0o600)).unwrap();
         let text=status(temp.path(),"review-run").unwrap();
-        for visible in ["claude-sonnet-5-5","jev-1.13.0","Paused: true","outside scope","Review reservation USD (estimate): 0.2","Review calls: 3","/fleet continue review-run frozen-hash"]{assert!(text.contains(visible),"{visible}");}
+        for visible in ["claude-sonnet-5-5","jev-1.13.0","Paused: true","outside scope","Review reservation USD (estimate): 0.2","Review calls: 3","/fleet continue review-run frozen-hash",
+            "automatic host tests enabled","owner release required","host test passed · turn 2","signed-diff","signed-test"]{assert!(text.contains(visible),"{visible}");}
     }
 
     #[test]

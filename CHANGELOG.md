@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.24 — 2026-10-09
+
+**Fleet supervision**
+
+- Add opt-in **`--auto-test`** for an owner-reviewed, frozen offline Docker recipe after host-observed worker turns. One test runs at a time, capped at four per worker and 32 per fleet.
+- Bind the exact recipe to launch and drain active tests on stop before confirming teardown. Receipts never release dependencies; live rootless cleanup remains unverified.
+
 ## 2.0.0-beta.23 — 2026-10-09
 
 **Code graph**
