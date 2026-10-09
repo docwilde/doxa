@@ -2,6 +2,7 @@
 //! Reviewers receive bounded data and have no tools or mutable worker history.
 pub mod judge;
 pub mod calibration;
+pub mod message_eval;
 pub mod evidence;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

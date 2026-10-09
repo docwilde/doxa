@@ -5,10 +5,12 @@ supervisor and fast message-judge models are selectable; the host applies
 typed admission, shared review budgets and an immutable charter. See [the operator guide](../fleet-supervision.md) for supported interfaces and
 remaining limits. The native dependency slice adds reviewed predecessor edges,
 durable waiting slots and a human-owned release after a typed coordinator
-handoff. An offline labeled-verdict threshold report is available. Real-message
-labeling, holdout evaluation and automatic trusted test-evidence collection
-remain open. A narrow operator-triggered offline Docker test receipt is
-available when the charter freezes a recipe; it never releases a dependency.
+handoff. An offline labeled-verdict threshold report and a private
+labeled-message holdout scorer are available. A consented, human-labeled
+real-message corpus and measured real-judge gate remain open. Automatic trusted
+test-evidence collection remains open. A narrow operator-triggered offline
+Docker test receipt is available when the charter freezes a recipe; it never
+releases a dependency.
 The native TUI now reviews a predecessor's host evidence and
 releases its dependent workers after full read-through and two explicit keys;
 see the [operator procedure](../fleet-supervision.md).

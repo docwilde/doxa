@@ -597,6 +597,14 @@ fn worktrees(args: &[String]) -> io::Result<()> {
 
 fn fleet(args: &[String]) -> io::Result<()> {
     if args.iter().any(|arg|matches!(arg.as_str(),"--help"|"-h")) {print!("{}",fleet_control::HELP);return Ok(());}
+    if let [command, path, flag, model] = args {
+        if command == "evaluate-messages" && flag == "--message-judge" {
+            let model = doxa_fleet::judge::Model::parse(model)?;
+            let report = doxa_fleet::message_eval::evaluate_file(Path::new(path), &model)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+    }
     if let [command, path] = args {
         if command == "calibrate" {
             let report = doxa_fleet::calibration::evaluate_file(Path::new(path))?;
