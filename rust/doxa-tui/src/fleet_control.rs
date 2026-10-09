@@ -1101,7 +1101,11 @@ fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io:
         if missing_git_evidence&&context.review.supervisor.is_some()&&context.review.supervisor_mode==doxa_fleet::Mode::Enforce{
             state.paused=true;state.reason="host Git evidence unavailable; human review required".into();state.supervisor_status="uncertain".into();
         }
-        Ok(json!({"charter":context.charter,"assignments":context.assignments,"artifacts":artifacts.iter().map(|(id,artifact)|json!({"id":id,"evidence":artifact})).collect::<Vec<_>>(),"guard_observations":state.observations.iter().rev().take(16).collect::<Vec<_>>(),"budget":{"review_reserved_usd":state.reserved_usd,"review_budget_usd":context.review.budget_usd,"run_budget_usd":context.charter.run_budget_usd},"elapsed_deadline":context.charter.deadline,"phase":value["phase"]}))
+        let mut handoff_traces=state.traces.iter().filter(|(_,row)|matches!(row.kind,doxa_fleet::Kind::Handoff|doxa_fleet::Kind::Ack|doxa_fleet::Kind::Confirm))
+            .collect::<Vec<_>>();
+        handoff_traces.sort_by_key(|(_,row)|row.seq);
+        let recent_handoff_evidence=handoff_traces.into_iter().rev().take(6).map(|(id,row)|json!({"message_id":id,"trace":row})).collect::<Vec<_>>();
+        Ok(json!({"charter":context.charter,"assignments":context.assignments,"artifacts":artifacts.iter().map(|(id,artifact)|json!({"id":id,"evidence":artifact})).collect::<Vec<_>>(),"guard_observations":state.observations.iter().rev().take(16).collect::<Vec<_>>(),"recent_handoff_evidence":recent_handoff_evidence,"budget":{"review_reserved_usd":state.reserved_usd,"review_budget_usd":context.review.budget_usd,"run_budget_usd":context.charter.run_budget_usd},"elapsed_deadline":context.charter.deadline,"phase":value["phase"]}))
     })?;
     if context.review.supervisor.is_some()&&!out_of_scope&&!(missing_git_evidence&&context.review.supervisor_mode==doxa_fleet::Mode::Enforce) {
         let clean=rpc(&mut slots[0].client,"fleet_scrub",json!({"snapshot":snapshot}));
