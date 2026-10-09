@@ -19,8 +19,8 @@ the stable 2.0 release has not been cut.
 
 **Native plugins**
 
-- Stage **`runner_sandbox`** with private Linux namespaces, cleared environment and cgroup resource limits, plus bounded child input.
-- Keep executable plugins unwired while delegated-cgroup containment and child-process acceptance remain unverified.
+- Stage **`doxa-plugin-worker`** with an independent frame decoder and an FD-bound Linux sandbox launch with private namespaces and cgroup limits.
+- Bound child input and status receipts. Executable plugins remain unwired pending delegated-cgroup containment proof.
 
 ## 2.0.0-beta.19 — 2026-10-09
 
