@@ -277,6 +277,7 @@ impl Store {
     pub(crate) fn ready(&self, app: &App) -> bool {
         self.initial.sessions.iter().all(|row| app.sessions.iter().any(|session| session.id == row.id))
     }
+    #[cfg(test)]
     pub(crate) fn restore_if_ready(&mut self, app: &mut App) -> bool {
         self.restore_if_ready_with_local(app, true)
     }
@@ -286,6 +287,7 @@ impl Store {
         self.restored = true;
         self.layout.as_ref().is_some_and(|layout| layout.project(app, &self.initial))
     }
+    #[cfg(test)]
     pub(crate) fn save_checked(&mut self, app: &App, fresh: Inventory) -> io::Result<()> {
         self.save_checked_with_local(app, fresh, true)
     }
