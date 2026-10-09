@@ -3,7 +3,7 @@
 use crate::{discovery, fleet_plan, fleet_view, launch, transport::DaemonClient};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, io::{self, Read, Write}, path::{Path, PathBuf}, sync::{Arc, Barrier}, time::{Duration, Instant}};
+use std::{collections::BTreeMap, fs, io::{self, Read, Write}, path::{Path, PathBuf}, sync::{Arc, Barrier, Mutex}, time::{Duration, Instant}};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -869,14 +869,31 @@ pub fn run_host_test(root:&Path,id:&str,worker:usize)->io::Result<Value>{
     run_host_test_bound(root,id,worker,None,None)
 }
 
-fn auto_test_cancelled(cancel:Option<&AtomicBool>)->io::Result<()> {
-    if cancel.is_some_and(|flag|flag.load(Ordering::Acquire)) {
+struct AutoTestControl {
+    cancelled:AtomicBool,
+    publication:Mutex<()>,
+}
+impl AutoTestControl {
+    fn new()->Self{Self{cancelled:AtomicBool::new(false),publication:Mutex::new(())}}
+    fn cancel(&self){
+        let _guard=self.publication.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.cancelled.store(true,Ordering::Release);
+    }
+}
+fn auto_test_cancelled(cancel:Option<&AutoTestControl>)->io::Result<()> {
+    if cancel.is_some_and(|control|control.cancelled.load(Ordering::Acquire)) {
         return Err(io::Error::new(io::ErrorKind::Interrupted,"fleet host test cancelled"));
     }
     Ok(())
 }
 
-fn run_host_test_bound(root:&Path,id:&str,worker:usize,auto_serial:Option<u64>,cancel:Option<&AtomicBool>)->io::Result<Value>{
+fn publish_if_active<T>(control:Option<&AutoTestControl>,publish:impl FnOnce()->io::Result<T>)->io::Result<T>{
+    let _guard=control.map(|control|control.publication.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    auto_test_cancelled(control)?;
+    publish()
+}
+
+fn run_host_test_bound(root:&Path,id:&str,worker:usize,auto_serial:Option<u64>,cancel:Option<&AutoTestControl>)->io::Result<Value>{
     auto_test_cancelled(cancel)?;
     let before=snapshot(root,id)?;
     if before["phase"]!="monitoring"||before["live"]!=true||before["supervision"].is_null()
@@ -922,7 +939,7 @@ fn run_host_test_bound(root:&Path,id:&str,worker:usize,auto_serial:Option<u64>,c
     if doxa_isolation::test_runner::capture(cwd,None)?.sha256!=captured.sha256{return Err(invalid("fleet source changed while copying test snapshot"));}
     auto_test_cancelled(cancel)?;
     let result=if let Some(cancel)=cancel {
-        doxa_isolation::test_runner::run_offline_cancel(&manifest,&source,&recipe.argv,&recipe.cwd_relative,recipe.timeout_s,cancel)?
+        doxa_isolation::test_runner::run_offline_cancel(&manifest,&source,&recipe.argv,&recipe.cwd_relative,recipe.timeout_s,&cancel.cancelled)?
     } else {
         doxa_isolation::test_runner::run_offline(&manifest,&source,&recipe.argv,&recipe.cwd_relative,recipe.timeout_s)?
     };
@@ -942,24 +959,26 @@ fn run_host_test_bound(root:&Path,id:&str,worker:usize,auto_serial:Option<u64>,c
     }
     let live=rpc(&mut client,"get_state",json!({}))?;
     if live["running"]==true||live["queued"].as_u64()!=Some(0){return Err(invalid("worker became active during host test"));}
-    let binding=doxa_fleet::evidence::Binding{fleet_id:context.charter.fleet_id.clone(),charter_sha256:context.charter_sha256.clone(),assignment_id:assignment.id.clone(),session_id:assignment.session_id.clone(),base_commit:baseline.into(),snapshot_sha256:captured.sha256.clone()};
-    let (diff_id,diff)=doxa_fleet::evidence::issue(&context,"git_diff",serde_json::to_value(doxa_fleet::evidence::DiffEvidence{binding:binding.clone(),changed_paths:changed})?)?;
-    let (test_id,test)=doxa_fleet::evidence::issue(&context,"test_result",serde_json::to_value(doxa_fleet::evidence::TestEvidence{
-        binding,recipe_sha256:doxa_fleet::hash(recipe)?,runner_image:manifest.policy.as_ref().unwrap().image.clone(),
-        exit_code:result.exit_code,passed:result.passed,duration_ms:result.duration_ms,
-        output_sha256:result.output_sha256,output_bytes:result.output_bytes})?)?;
-    doxa_fleet::transaction(&context,|state|{
-        if state.paused||state.artifacts.len()>510{return Err(invalid("fleet evidence journal cannot accept test result"));}
-        state.artifacts.insert(diff_id.clone(),diff);
-        state.artifacts.insert(test_id.clone(),test);
-        Ok(())
-    })?;
-    Ok(json!({"diff_id":diff_id,"test_id":test_id,"passed":result.passed,"exit_code":result.exit_code,
-        "snapshot_sha256":captured.sha256,"source_files":captured.files,"source_bytes":captured.bytes,
-        "output_bytes":result.output_bytes,"duration_ms":result.duration_ms}))
+    publish_if_active(cancel,||{
+        let binding=doxa_fleet::evidence::Binding{fleet_id:context.charter.fleet_id.clone(),charter_sha256:context.charter_sha256.clone(),assignment_id:assignment.id.clone(),session_id:assignment.session_id.clone(),base_commit:baseline.into(),snapshot_sha256:captured.sha256.clone()};
+        let (diff_id,diff)=doxa_fleet::evidence::issue(&context,"git_diff",serde_json::to_value(doxa_fleet::evidence::DiffEvidence{binding:binding.clone(),changed_paths:changed})?)?;
+        let (test_id,test)=doxa_fleet::evidence::issue(&context,"test_result",serde_json::to_value(doxa_fleet::evidence::TestEvidence{
+            binding,recipe_sha256:doxa_fleet::hash(recipe)?,runner_image:manifest.policy.as_ref().unwrap().image.clone(),
+            exit_code:result.exit_code,passed:result.passed,duration_ms:result.duration_ms,
+            output_sha256:result.output_sha256,output_bytes:result.output_bytes})?)?;
+        doxa_fleet::transaction(&context,|state|{
+            if state.paused||state.artifacts.len()>510{return Err(invalid("fleet evidence journal cannot accept test result"));}
+            state.artifacts.insert(diff_id.clone(),diff);
+            state.artifacts.insert(test_id.clone(),test);
+            Ok(())
+        })?;
+        Ok(json!({"diff_id":diff_id,"test_id":test_id,"passed":result.passed,"exit_code":result.exit_code,
+            "snapshot_sha256":captured.sha256,"source_files":captured.files,"source_bytes":captured.bytes,
+            "output_bytes":result.output_bytes,"duration_ms":result.duration_ms}))
+    })
 }
 
-fn run_auto_host_test(root:&Path,id:&str,worker:usize,serial:u64,cancel:&AtomicBool)->io::Result<Value>{
+fn run_auto_host_test(root:&Path,id:&str,worker:usize,serial:u64,cancel:&AutoTestControl)->io::Result<Value>{
     run_host_test_bound(root,id,worker,Some(serial),Some(cancel))
 }
 
@@ -1071,7 +1090,7 @@ const AUTO_TEST_MAX_PER_SLOT:u64=4;
 struct AutoTestTask {
     worker:usize,
     turn_serial:u64,
-    cancel:Arc<AtomicBool>,
+    cancel:Arc<AutoTestControl>,
     handle:std::thread::JoinHandle<io::Result<Value>>,
 }
 
@@ -1113,7 +1132,7 @@ fn finish_auto_test(value:&mut Value,task:AutoTestTask)->bool {
 }
 
 fn advance_auto_test(store:&Store,value:&mut Value,busy:&[bool],task:&mut Option<AutoTestTask>,
-    runner:fn(&Path,&str,usize,u64,&AtomicBool)->io::Result<Value>)->io::Result<()> {
+    runner:fn(&Path,&str,usize,u64,&AutoTestControl)->io::Result<Value>)->io::Result<()> {
     if task.as_ref().is_some_and(|running|running.handle.is_finished()) {
         if finish_auto_test(value,task.take().unwrap()){store.save(value)?;}
     }
@@ -1135,7 +1154,7 @@ fn advance_auto_test(store:&Store,value:&mut Value,busy:&[bool],task:&mut Option
     store.save(value)?;
     let root=store.run.parent().ok_or_else(||invalid("fleet root unavailable"))?.to_path_buf();
     let id=store.run.file_name().and_then(|name|name.to_str()).ok_or_else(||invalid("fleet run ID unavailable"))?.to_owned();
-    let cancel=Arc::new(AtomicBool::new(false));
+    let cancel=Arc::new(AutoTestControl::new());
     let thread_cancel=Arc::clone(&cancel);
     let handle=match std::thread::Builder::new().name("doxa-fleet-host-test".into())
         .spawn(move ||runner(&root,&id,worker,serial,&thread_cancel)) {
@@ -1172,14 +1191,18 @@ fn drain_auto_test(store:&Store,value:&mut Value,task:&mut Option<AutoTestTask>)
         if finish_auto_test(value,task){store.save(value)?;}
         return Ok(());
     }
-    task.cancel.store(true,Ordering::Release);
+    task.cancel.cancel();
     let worker=task.worker;
     let serial=task.turn_serial;
     let result=task.handle.join();
     if value["slots"][worker]["auto_test"]["state"]=="running"
         &&value["slots"][worker]["auto_test"]["turn_serial"].as_u64()==Some(serial) {
-        value["slots"][worker]["auto_test"]=json!({"state":"interrupted","turn_serial":serial,
-            "reason":"controller stopped before the automatic host test completed; manual review required"});
+        value["slots"][worker]["auto_test"]=if let Ok(Ok(receipt))=&result {
+            json!({"state":if receipt["passed"]==true{"passed"}else{"failed"},"turn_serial":serial,"result":receipt})
+        } else {
+            json!({"state":"interrupted","turn_serial":serial,
+                "reason":"controller stopped before the automatic host test completed; manual review required"})
+        };
     }
     let cleanup_failed=match result {
         Ok(Err(error))=>doxa_isolation::test_runner::cleanup_unconfirmed(&error),
@@ -1306,6 +1329,30 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
 mod tests {
     use super::*;
     #[test]
+    fn cancellation_and_receipt_publication_have_one_order() {
+        let control=AutoTestControl::new();
+        control.cancel();
+        let called=AtomicBool::new(false);
+        assert_eq!(publish_if_active(Some(&control),||{called.store(true,Ordering::Release);Ok(())}).unwrap_err().kind(),io::ErrorKind::Interrupted);
+        assert!(!called.load(Ordering::Acquire),"cancellation first must suppress receipt issuance");
+
+        let control=Arc::new(AutoTestControl::new());
+        let publisher=Arc::clone(&control);
+        let (entered_tx,entered_rx)=std::sync::mpsc::channel();
+        let (release_tx,release_rx)=std::sync::mpsc::channel();
+        let publication=std::thread::spawn(move ||publish_if_active(Some(&publisher),||{
+            entered_tx.send(()).unwrap();release_rx.recv().unwrap();Ok("signed")
+        }));
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let canceller=Arc::clone(&control);
+        let cancel_thread=std::thread::spawn(move ||canceller.cancel());
+        assert!(!control.cancelled.load(Ordering::Acquire),"cancellation cannot overtake publication inside its lock");
+        release_tx.send(()).unwrap();
+        assert_eq!(publication.join().unwrap().unwrap(),"signed");
+        cancel_thread.join().unwrap();
+        assert!(control.cancelled.load(Ordering::Acquire));
+    }
+    #[test]
     fn automatic_tests_require_a_frozen_offline_recipe_and_show_in_launch_review() {
         let dir=tempfile::tempdir().unwrap();
         let recipe=dir.path().join("test.json");
@@ -1332,10 +1379,10 @@ mod tests {
         queue_auto_test(&mut value,1).unwrap();
         assert_eq!(value["slots"][1]["auto_test"],json!({"state":"pending","turn_serial":2}));
         value["slots"][1]["auto_test"]["state"]=json!("running");
-        let stale=AutoTestTask{worker:1,turn_serial:1,cancel:Arc::new(AtomicBool::new(false)),handle:std::thread::spawn(||Ok(json!({"passed":true})))};
+        let stale=AutoTestTask{worker:1,turn_serial:1,cancel:Arc::new(AutoTestControl::new()),handle:std::thread::spawn(||Ok(json!({"passed":true})))};
         assert!(!finish_auto_test(&mut value,stale));
         assert_eq!(value["slots"][1]["auto_test"]["state"],"running");
-        let stale_cleanup=AutoTestTask{worker:1,turn_serial:1,cancel:Arc::new(AtomicBool::new(false)),
+        let stale_cleanup=AutoTestTask{worker:1,turn_serial:1,cancel:Arc::new(AutoTestControl::new()),
             handle:std::thread::spawn(||Err(io::Error::other(doxa_isolation::test_runner::CleanupUnconfirmed("fixture Docker rm failed".into()))))};
         assert!(finish_auto_test(&mut value,stale_cleanup),"stale failure still changes fleet teardown state");
         assert_eq!(value["auto_test_cleanup_failed"],true);
@@ -1344,13 +1391,13 @@ mod tests {
         assert_eq!(value["slots"][1]["auto_test"]["state"],"interrupted");
         assert!(!interrupt_uncertain_auto_tests(&mut value));
         value["slots"][1]["auto_test"]=json!({"state":"running","turn_serial":2});
-        let failed=AutoTestTask{worker:1,turn_serial:2,cancel:Arc::new(AtomicBool::new(false)),handle:std::thread::spawn(||Ok(json!({"passed":false,"diff_id":"d","test_id":"t"})))};
+        let failed=AutoTestTask{worker:1,turn_serial:2,cancel:Arc::new(AutoTestControl::new()),handle:std::thread::spawn(||Ok(json!({"passed":false,"diff_id":"d","test_id":"t"})))};
         assert!(finish_auto_test(&mut value,failed));
         assert_eq!(value["slots"][1]["auto_test"]["state"],"failed");
         assert_eq!(value["slots"][1]["auto_test"]["result"]["test_id"],"t");
         value["auto_test_cleanup_failed"]=json!(false);
         value["slots"][1]["auto_test"]=json!({"state":"running","turn_serial":3});
-        let panic_task=AutoTestTask{worker:1,turn_serial:3,cancel:Arc::new(AtomicBool::new(false)),
+        let panic_task=AutoTestTask{worker:1,turn_serial:3,cancel:Arc::new(AutoTestControl::new()),
             handle:std::thread::spawn(||->io::Result<Value>{panic!("fixture runner panic")})};
         assert!(finish_auto_test(&mut value,panic_task));
         assert_eq!(value["auto_test_cleanup_failed"],true,"panic cannot confirm Docker cleanup");
@@ -1360,7 +1407,7 @@ mod tests {
     }
     #[test]
     fn automatic_test_scheduler_persists_admission_serializes_and_caps_runs() {
-        fn fixture_runner(root:&Path,id:&str,worker:usize,serial:u64,_cancel:&AtomicBool)->io::Result<Value> {
+        fn fixture_runner(root:&Path,id:&str,worker:usize,serial:u64,_cancel:&AutoTestControl)->io::Result<Value> {
             let admitted=snapshot(root,id)?;
             assert_eq!(admitted["slots"][worker]["auto_test"]["state"],"running");
             assert_eq!(admitted["slots"][worker]["auto_test"]["turn_serial"],serial);
@@ -1393,10 +1440,10 @@ mod tests {
     }
     #[test]
     fn controller_drain_cancels_and_joins_host_test_before_teardown() {
-        fn cancellable_runner(root:&Path,id:&str,worker:usize,serial:u64,cancel:&AtomicBool)->io::Result<Value> {
+        fn cancellable_runner(root:&Path,id:&str,worker:usize,serial:u64,cancel:&AutoTestControl)->io::Result<Value> {
             assert_eq!(snapshot(root,id)?["slots"][worker]["auto_test"]["turn_serial"],serial);
             fs::write(root.join(id).join("runner-started"),b"started")?;
-            while !cancel.load(Ordering::Acquire){std::thread::sleep(Duration::from_millis(2));}
+            while !cancel.cancelled.load(Ordering::Acquire){std::thread::sleep(Duration::from_millis(2));}
             fs::write(root.join(id).join("runner-cleaned"),b"cleaned")?;
             Err(io::Error::new(io::ErrorKind::Interrupted,"fixture cleanup confirmed"))
         }
