@@ -31,6 +31,12 @@ pub struct ReadOnlyQueryCache { entry: Option<Entry> }
 impl ReadOnlyQueryCache {
     pub fn query(&mut self, root: &Path, request: Query) -> Result<(Answer, Origin), String> {
         let root = worktree_root(root)?;
+        // Module resolution also probes ignored and unlisted candidate paths.
+        // A listed-source fingerprint cannot invalidate those observations.
+        if matches!(request, Query::Modules(_)) {
+            self.entry = None;
+            return query(&root, request).map(|answer| (answer, Origin::Fresh));
+        }
         if let Some(entry) = &self.entry {
             if entry.root == root && entry.request == request
                 && fingerprint(&root).ok().as_ref() == Some(&entry.fingerprint) {
@@ -194,5 +200,22 @@ mod tests {
             fs::write(root.join("lib.rs"), "fn late() {}\n").unwrap();
         }).err().unwrap();
         assert!(error.contains("source changed during recheck: lib.rs"), "{error}");
+    }
+
+    #[test]
+    fn modules_requery_when_an_ignored_candidate_appears() {
+        let root = worktree();
+        fs::write(root.path().join("service.py"), "import plain\n").unwrap();
+        fs::write(root.path().join(".gitignore"), "plain/\n").unwrap();
+        let mut cache = ReadOnlyQueryCache::default();
+        let (before, origin) = cache.query(root.path(), Query::Modules("service.py".into())).unwrap();
+        assert_eq!(origin, Origin::Fresh);
+        fs::create_dir(root.path().join("plain")).unwrap();
+        fs::write(root.path().join("plain/__init__.py"), "# ignored candidate\n").unwrap();
+        assert_eq!(listed_files(root.path()).unwrap().len(), 3);
+        let (after, origin) = cache.query(root.path(), Query::Modules("service.py".into())).unwrap();
+        assert_eq!(origin, Origin::Fresh);
+        assert_ne!(before.module_edges[0].reason, after.module_edges[0].reason);
+        assert_eq!(after.module_edges[0].reason, "python_unlisted_or_uncheckable_candidate");
     }
 }

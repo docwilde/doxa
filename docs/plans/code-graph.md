@@ -137,8 +137,10 @@ that read.
 
 ## Repeated explicit TUI queries
 
-The TUI keeps at most one prior syntax answer in process memory for an identical
-`/codegraph` query in the same canonical worktree. Before reuse, it re-enumerates
+The TUI keeps at most one prior `file`, `symbol`, `imports`, or `calls` syntax
+answer in process memory for an identical `/codegraph` query in the same
+canonical worktree. Module queries always scan afresh: their structural
+candidate checks also probe ignored and unlisted paths. Before reuse, it re-enumerates
 the complete Git path list and reads every listed Rust and Python source three
 times: one inventory pass and two hash rechecks. The check is capped at 64 MiB
 per language per pass and ten seconds overall, with the same no-symlink reader
