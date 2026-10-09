@@ -166,7 +166,16 @@ is read-only and creates no second memory authority.
   at spelling matches. An optional rust-analyzer evidence overlay needs a
   quota-limited, no-egress container, disabled build scripts and proc macros,
   pinned toolchain/configuration, and source/target hash rechecks before it can
-  claim analyzer-resolved definitions. It is not shipped yet.
+  claim analyzer-resolved definitions. The development-only
+  `doxa-codegraph --semantic-probe --root WORKTREE --image NAME@sha256:DIGEST
+  --docker-host unix:///run/user/UID/docker.sock` checks the opt-in plan and
+  reports `unknown` with `docker_launch: not_attempted`. Its bounded LSP
+  session driver is covered by fake-server tests for initialization,
+  [rust-analyzer's server status](https://github.com/rust-lang/rust-analyzer/blob/master/docs/book/src/contributing/lsp-extensions.md#server-status)
+  quiescence, definition, deadlines, output caps, rehashes, and kill/reap.
+  It has no production runtime attester or launcher. Effective rootless
+  Docker quotas, no egress, mount restrictions, and analyzer configuration
+  still need independent verification before any binding can be promoted.
 - Decide whether a reviewed agent tool or persistent TUI tree is useful. The
   current viewer offers explicit fresh and stored queries only.
 - Decide whether other languages justify a parser dependency and coverage bar.

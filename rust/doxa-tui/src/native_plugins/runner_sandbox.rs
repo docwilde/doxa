@@ -1,9 +1,8 @@
-//! Unwired Linux sandbox admission for the future grantless plugin child.
+//! Linux sandbox admission for the explicit grantless plugin CLI prototype.
 //! A command is constructed only after a private cgroup v2 budget is installed.
-//! No TUI or CLI path calls this module yet: cgroup-backed containment
-//! acceptance on a delegated host is still required before activation.
+//! The TUI does not call this module. Cgroup-backed containment acceptance
+//! on a delegated host remains required before broader activation.
 #![cfg(target_os = "linux")]
-#![allow(dead_code)] // staged admission API has no production caller
 
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -287,10 +286,10 @@ fn classify(capture: &super::runner_process::Capture, status: WrapperStatus) -> 
     }
 }
 
-/// Unwired containment seam. It rechecks exact owner approval before spawn,
+/// CLI containment seam. It rechecks exact owner approval before spawn,
 /// sends the verified bytes through one bounded pipe, and kills the entire
-/// cgroup after every process outcome. It remains without an app caller until
-/// aggregate cgroup containment is tested on a delegated host.
+/// cgroup after every process outcome. Aggregate containment still needs an
+/// end-to-end test on a delegated host.
 pub(crate) fn supervise_reviewed(
     home: &Path,
     review: &super::packages::Review,

@@ -1,5 +1,6 @@
 //! Grantless WebAssembly worker contract and dedicated child entrypoint.
-//! No TUI or plugin command launches it; end-to-end cgroup proof remains open.
+//! Only the explicit Linux CLI prototype launches it through the sandbox;
+//! TUI activation and delegated-host cgroup proof remain open.
 use super::packages::{self, RecheckedPackage, MAX_MODULE};
 use sha2::{Digest, Sha256};
 use std::io::{self, IsTerminal, Read, Write};
@@ -20,8 +21,8 @@ fn invalid(message: &str) -> io::Error {
 }
 
 /// Encodes only fresh owner-approved bytes with zero requested grants.
-/// A future parent must call recheck_approved immediately before spawning a
-/// sandboxed worker; it must never reopen a package path.
+/// The parent calls recheck_approved immediately before spawning a sandboxed
+/// worker; it never reopens a package path after encoding this frame.
 pub(crate) fn encode_request(package: &RecheckedPackage) -> io::Result<Vec<u8>> {
     if !package.review().owner_approved || !package.review().requested_grants.is_empty() {
         return Err(invalid("worker contract requires exact approval and zero grants"));
@@ -137,9 +138,9 @@ pub(crate) fn decode_response(mut input: impl Read) -> io::Result<Result<i32, Wo
     }
 }
 
-/// Interpreter core intended only for a future sandbox child. This function
-/// is deliberately unwired: fuel and store limits do not bound compilation
-/// memory or protect host resources if called in the DOXA process.
+/// Interpreter core used only by the sandbox child in production. Unit tests
+/// also call it directly; fuel and store limits cannot protect the DOXA
+/// process if this function is called there.
 pub(crate) fn execute_worker(bytes: &[u8]) -> Result<i32, WorkerFailure> {
     packages::validate_module(bytes).map_err(|_| WorkerFailure::InvalidModule)?;
     validate_entry(bytes).map_err(|_| WorkerFailure::InvalidModule)?;

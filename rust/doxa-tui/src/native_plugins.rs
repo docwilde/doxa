@@ -1,4 +1,5 @@
-//! Owner-approved, data-only TUI contributions. The TUI never loads code.
+//! Owner-approved TUI content and an explicit, grantless CLI prototype.
+//! The TUI never loads or runs plugin code.
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::ffi::CString;
@@ -13,10 +14,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub const API_VERSION: u32 = 1;
 pub mod packages;
-// Staged worker contract has no TUI or plugin-command caller.
+// The worker contract is only called through the Linux CLI sandbox boundary.
 #[allow(dead_code)]
 pub(crate) mod runner;
-// Child lifecycle component is staged without any package execution route.
+// The process component is only used by the cgroup-backed sandbox boundary.
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 pub(crate) mod runner_process;
@@ -26,6 +27,180 @@ pub(crate) mod runner_sandbox;
 /// Entry used only by the separate `doxa-plugin-worker` binary. Native TUI
 /// commands never invoke it in-process.
 pub fn plugin_worker_stdio() -> io::Result<()> { runner::serve_stdio() }
+
+/// An explicit CLI prototype. No TUI startup, slash command, plugin discovery,
+/// or grantful package can reach the worker through this function.
+#[cfg(target_os = "linux")]
+pub fn run_grantless_package(home: &Path, name: &str, cancel: &std::sync::atomic::AtomicBool)
+    -> io::Result<i32>
+{
+    let worker = std::env::current_exe()?.with_file_name("doxa-plugin-worker");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let result = activate_with(home, name, &worker, cancel, deadline,
+        |home, review, worker, cancel, deadline| {
+            runner_sandbox::supervise_reviewed(home, review, worker, cancel, deadline)
+                .map_err(|error| io::Error::new(error.kind(),
+                    format!("sandbox-or-transport-failure: {error}")))
+        })?;
+    match result {
+        runner_sandbox::IsolatedOutcome::Return(value) => Ok(value),
+        other => Err(io::Error::other(format!("isolated plugin result: {}", outcome_class(other)))),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn run_grantless_package(_home: &Path, _name: &str, _cancel: &std::sync::atomic::AtomicBool)
+    -> io::Result<i32>
+{
+    Err(io::Error::new(io::ErrorKind::Unsupported, "isolated plugin runner requires Linux"))
+}
+
+#[cfg(target_os = "linux")]
+fn activate_with<F>(
+    home: &Path, name: &str, worker: &Path,
+    cancel: &std::sync::atomic::AtomicBool, deadline: Instant, supervise: F,
+) -> io::Result<runner_sandbox::IsolatedOutcome>
+where F: FnOnce(&Path, &packages::Review, &Path, &std::sync::atomic::AtomicBool, Instant)
+    -> io::Result<runner_sandbox::IsolatedOutcome>
+{
+    let review = packages::preflight(home, name)?;
+    if !review.owner_approved {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "plugin package requires exact owner approval"));
+    }
+    if !review.requested_grants.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "grantless runner refuses every requested grant"));
+    }
+    if cancel.load(std::sync::atomic::Ordering::Acquire) || Instant::now() >= deadline {
+        return Err(io::Error::new(io::ErrorKind::Interrupted,
+            "plugin run cancelled before sandbox admission"));
+    }
+    supervise(home, &review, worker, cancel, deadline)
+}
+
+#[cfg(target_os = "linux")]
+fn outcome_class(outcome: runner_sandbox::IsolatedOutcome) -> &'static str {
+    use runner_sandbox::IsolatedOutcome;
+    match outcome {
+        IsolatedOutcome::Return(_) => "return",
+        IsolatedOutcome::ModuleFailure(runner::WorkerFailure::InvalidModule) => "invalid-module",
+        IsolatedOutcome::ModuleFailure(runner::WorkerFailure::InvalidSignature) => "invalid-signature",
+        IsolatedOutcome::ModuleFailure(runner::WorkerFailure::FuelExhausted) => "fuel-exhausted",
+        IsolatedOutcome::ModuleFailure(runner::WorkerFailure::Trap) => "module-trap",
+        IsolatedOutcome::Timeout => "deadline-exceeded",
+        IsolatedOutcome::Cancelled => "cancelled",
+        IsolatedOutcome::OutputLimit => "output-limit",
+        IsolatedOutcome::WorkerAbnormalExit(_) => "worker-abnormal-exit",
+        IsolatedOutcome::SandboxOrPreEntryFailure(_) => "sandbox-or-pre-entry-failure",
+        IsolatedOutcome::WrapperCrash(_) => "sandbox-wrapper-crash",
+        IsolatedOutcome::ProtocolFailure => "protocol-failure",
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod activation_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::AtomicBool;
+
+    fn private(path: &Path, bytes: impl AsRef<[u8]>) {
+        fs::write(path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn package(grants: &[&str], approved: bool) -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        let parent = home.path().join("native-plugin-packages");
+        let child = parent.join("demo");
+        fs::create_dir_all(&child).unwrap();
+        for path in [home.path(), parent.as_path(), child.as_path()] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let module = wat::parse_str("(module (func (export \"doxa_main\") (result i32) i32.const 7))").unwrap();
+        let grants_toml = grants.iter().map(|grant| format!("'{grant}'"))
+            .collect::<Vec<_>>().join(", ");
+        let manifest = format!("package_api_version = 1\nname = 'demo'\nversion = '1.0'\nartifact_format = 'wasm-core-v1'\nrequested_grants = [{grants_toml}]\n");
+        private(&child.join("manifest.toml"), manifest.as_bytes());
+        private(&child.join("module.wasm"), &module);
+        if approved {
+            let manifest_hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+            let module_hash = format!("{:x}", Sha256::digest(&module));
+            let config = format!("[[native_plugin_packages]]\nname = 'demo'\nmanifest_sha256 = '{manifest_hash}'\nmodule_sha256 = '{module_hash}'\ngrants = [{grants_toml}]\n");
+            private(&home.path().join("config.toml"), config.as_bytes());
+        }
+        home
+    }
+
+    fn activate<F>(home: &Path, cancel: &AtomicBool, supervise: F)
+        -> io::Result<runner_sandbox::IsolatedOutcome>
+    where F: FnOnce(&Path, &packages::Review, &Path, &AtomicBool, Instant)
+        -> io::Result<runner_sandbox::IsolatedOutcome>
+    {
+        activate_with(home, "demo", Path::new("/usr/bin/false"), cancel,
+            Instant::now() + Duration::from_secs(5), supervise)
+    }
+
+    #[test]
+    fn only_exact_approved_zero_grant_package_reaches_supervisor() {
+        let cancel = AtomicBool::new(false);
+        let called = Cell::new(0);
+        for (grants, approved) in [(&[][..], false), (&["render-local-panel-v1"][..], true)] {
+            let home = package(grants, approved);
+            let result = activate(home.path(), &cancel, |_, _, _, _, _| {
+                called.set(called.get() + 1);
+                Ok(runner_sandbox::IsolatedOutcome::Return(7))
+            });
+            assert!(result.is_err());
+        }
+        assert_eq!(called.get(), 0);
+
+        let home = package(&[], true);
+        let result = activate(home.path(), &cancel, |_, review, _, _, _| {
+            called.set(called.get() + 1);
+            assert!(review.owner_approved && review.requested_grants.is_empty());
+            Ok(runner_sandbox::IsolatedOutcome::Return(7))
+        });
+        assert!(matches!(result, Ok(runner_sandbox::IsolatedOutcome::Return(7))));
+        assert_eq!(called.get(), 1);
+    }
+
+    #[test]
+    fn cancellation_and_deadline_refuse_dispatch() {
+        let home = package(&[], true);
+        let cancel = AtomicBool::new(true);
+        assert!(activate(home.path(), &cancel, |_, _, _, _, _| panic!("must not dispatch")).is_err());
+        let cancel = AtomicBool::new(false);
+        assert!(activate_with(home.path(), "demo", Path::new("/usr/bin/false"), &cancel,
+            Instant::now() - Duration::from_millis(1),
+            |_, _, _, _, _| panic!("must not dispatch")).is_err());
+    }
+
+    #[test]
+    fn changed_bytes_after_first_review_fail_before_cgroup_admission() {
+        let home = package(&[], true);
+        let cancel = AtomicBool::new(false);
+        let result = activate(home.path(), &cancel, |home, review, worker, cancel, deadline| {
+            private(&home.join("native-plugin-packages/demo/module.wasm"), b"\0asm\x01\0\0\0");
+            runner_sandbox::supervise_reviewed(home, review, worker, cancel, deadline)
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn failure_classes_never_report_a_return() {
+        use runner_sandbox::IsolatedOutcome::*;
+        for outcome in [
+            ModuleFailure(runner::WorkerFailure::Trap), Timeout, Cancelled,
+            OutputLimit, WorkerAbnormalExit(137), SandboxOrPreEntryFailure(1),
+            WrapperCrash(9), ProtocolFailure,
+        ] {
+            assert_ne!(outcome_class(outcome), "return");
+        }
+    }
+}
 const MAX_CONFIG: u64 = 1024 * 1024;
 const MAX_MANIFEST: u64 = 16 * 1024;
 const MAX_PLUGINS: usize = 16;

@@ -70,15 +70,17 @@ build() {
   mkdir -p "$target_dir"
   : > "$target_dir/.doxa-task-build"
   if [ "$mode" = release ]; then
-    info 'building release frontend, daemon and native LORE'
+    info 'building release frontend, plugin worker, daemon and native LORE'
     cargo build --release --locked --manifest-path "$tui_manifest" --bin doxa-rs
+    cargo build --release --locked --manifest-path "$tui_manifest" --bin doxa-plugin-worker
     cargo build --release --locked --manifest-path "$daemon_manifest" --bin doxa-daemon
     cargo build --release --locked --manifest-path "$remote_manifest" --bin doxa-remote
     cargo build --release --locked --manifest-path "$isolation_manifest" --bin doxa-isolation-worker
     cargo build --release --locked --manifest-path "$tui_manifest" --package lore-core --bin lore-rs
   else
-    info 'building debug frontend, daemon and native LORE'
+    info 'building debug frontend, plugin worker, daemon and native LORE'
     cargo build --locked --manifest-path "$tui_manifest" --bin doxa-rs
+    cargo build --locked --manifest-path "$tui_manifest" --bin doxa-plugin-worker
     cargo build --locked --manifest-path "$daemon_manifest" --bin doxa-daemon
     cargo build --locked --manifest-path "$remote_manifest" --bin doxa-remote
     cargo build --locked --manifest-path "$isolation_manifest" --bin doxa-isolation-worker
@@ -92,8 +94,9 @@ launch() {
   build "$profile"
   binary=$target_dir/$profile/doxa-rs
   daemon=$target_dir/$profile/doxa-daemon
+  plugin_worker=$target_dir/$profile/doxa-plugin-worker
   lore=$target_dir/$profile/lore-rs
-  [ -x "$binary" ] && [ -x "$daemon" ] && [ -x "$lore" ] || fail 'Cargo produced no runnable frontend, daemon or native LORE'
+  [ -x "$binary" ] && [ -x "$plugin_worker" ] && [ -x "$daemon" ] && [ -x "$lore" ] || fail 'Cargo produced no runnable frontend, plugin worker, daemon or native LORE'
   export DOXA_LORE_RS=$lore
   export DOXA_DAEMON_BIN=$daemon
   export DOXA_REMOTE_BIN=$target_dir/$profile/doxa-remote

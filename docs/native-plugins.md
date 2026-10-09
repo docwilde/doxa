@@ -73,9 +73,9 @@ declare static commands.
 
 ## Executable package identity review
 
-Executable plugins are **not available yet**. The separate `native-plugin`
-preflight command lets the owner inspect a proposed WebAssembly package without
-loading or running it. It does not change the data-only `native_plugins` list.
+The `native-plugin` commands let the owner inspect a proposed WebAssembly
+package and, on Linux, explicitly run a zero-grant prototype. They do not
+change the data-only `native_plugins` list or activate anything in the TUI.
 The command reads only the name you provide; it never searches a repository or
 enumerates packages.
 
@@ -113,18 +113,30 @@ grants = ["render-local-panel-v1"]
 ```
 
 Preflight then reports an exact approval match. Changed bytes or grants fail
-closed; an unapproved package remains review-only. Approval is not an execution
-switch. The digests pin local bytes; they do not authenticate a publisher. A
+closed; an unapproved package remains review-only. Approval alone is not an
+execution switch. The digests pin local bytes; they do not authenticate a publisher. A
 fresh `recheck_approved` call re-opens both files, checks their digests, opened
 inodes and current owner approval against the earlier review, and returns the
-validated module bytes. A future runner must use those bytes without re-opening
-a path, enforce each grant and isolate crashes and resource use.
+validated module bytes. The grantless runner uses those bytes without re-opening
+a path and isolates crashes and resource use; nonempty grants remain unavailable.
 
-Wasmi 2.0.0 supplies a grantless interpreter and bounded, digest-checked
-request and response frames. A separate `doxa-plugin-worker` binary decodes
-the frame itself. The unwired Linux supervisor stages a private namespace,
-cgroup resource limits, a wall deadline and bounded output; tests exercise
-the worker and namespace fixtures. No public run command or TUI activation
-exists until the complete cgroup path passes containment tests on a delegated
-host. Native shared libraries, scripts, provider backends, hooks and automatic
-startup remain unsupported.
+For an approved package whose `requested_grants` and config `grants` are both
+empty (`[]` in both files), run
+`doxa native-plugin run demo --grantless-prototype`. This explicit
+CLI path rechecks the exact approved bytes, then calls only the dedicated
+`doxa-plugin-worker` through the cgroup-gated Bubblewrap sandbox. It has no
+home or repository mount, network, host functions or credentials; IPC and
+output are bounded, the wall deadline is five seconds, and Ctrl-C, termination
+or hangup requests cgroup cleanup. It prints a single integer on success or a
+conservative failure class on error. Without a delegated cgroup v2 subtree
+with memory, CPU and PID controllers, it fails closed before spawning the
+worker. The current host lacks that delegation, so end-to-end aggregate cgroup
+containment still needs proof on a delegated host. TUI execution, nonempty
+grants, native shared libraries, scripts, provider backends, hooks and
+automatic startup remain unsupported.
+
+Before broader activation, a delegated-host acceptance run must verify the
+installed memory, swap, CPU and PID limits; worker membership before exec;
+aggregate limits under fork and process-group escape attempts; no host file or
+network access; and removal of all descendants after return, timeout and
+cancellation. The current host cannot exercise those cgroup checks.

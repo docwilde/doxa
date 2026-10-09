@@ -76,9 +76,10 @@ project ID to each private session tree, set a hard block limit, and verify
 that writes through every bind source hit that limit. For XFS, that means a
 `prjquota` mount and project setup/limit with `xfs_quota`; owner-only rootless
 Docker cannot silently provision this. Hard quotas remain an open stage.
-The [hard-quota fixture guide](hard-quota-preflight.md) covers the read-only
-project-inheritance preflight and a bounded, opt-in rootless container write
-probe for an administrator-prepared fixture. A successful fixture `EDQUOT`
+The [hard-quota fixture guide](hard-quota-preflight.md) covers read-only
+descriptor-bound XFS checks for project identity, inheritance and the exact
+enforced block limit, plus a bounded, opt-in rootless container write probe
+for an administrator-prepared fixture. A successful fixture `EDQUOT`
 receipt is never production admission; per-session quota provisioning,
 restart/remount verification and a reviewed runtime admission path remain open.
 `docker-hardened` requests fail with that explicit gate; there is no fallback.

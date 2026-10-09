@@ -48,7 +48,7 @@ main() {
     trap - EXIT HUP INT TERM
     if [ "$installing" -eq 1 ]; then
       restore_failed=0
-      for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
+      for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker doxa-plugin-worker lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
         rm -f "$bin_dir/$name" || { restore_failed=1; continue; }
         if [ -e "$stage/backup/$name" ] || [ -L "$stage/backup/$name" ]; then
           mv "$stage/backup/$name" "$bin_dir/$name" || restore_failed=1
@@ -89,18 +89,20 @@ main() {
   chmod 700 "$build_dir"
   printf 'doxa-install: building Rust frontend and daemon\n'
   CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --bin doxa-rs || exit 1
+  CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --bin doxa-plugin-worker || exit 1
   CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$daemon_manifest" || exit 1
   CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$remote_manifest" --bin doxa-remote || exit 1
   CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$isolation_manifest" --bin doxa-isolation-worker || exit 1
   CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --package lore-core --bin lore-rs || exit 1
   lore_bin="$build_dir/$host_target/release/lore-rs"
   tui_bin="$build_dir/$host_target/release/doxa-rs"
+  plugin_worker_bin="$build_dir/$host_target/release/doxa-plugin-worker"
   daemon_bin="$build_dir/$host_target/release/doxa-daemon-rs"
   [ -f "$daemon_bin" ] || daemon_bin="$build_dir/$host_target/release/doxa-daemon"
   remote_bin="$build_dir/$host_target/release/doxa-remote"
   isolation_bin="$build_dir/$host_target/release/doxa-isolation-worker"
-  [ -f "$tui_bin" ] && [ -f "$daemon_bin" ] && [ -f "$remote_bin" ] && [ -f "$isolation_bin" ] && [ -f "$lore_bin" ] || {
-    printf 'doxa-install: Rust build produced no frontend, daemon, remote adapter, isolation worker or native LORE carrier\n' >&2; exit 1;
+  [ -f "$tui_bin" ] && [ -f "$plugin_worker_bin" ] && [ -f "$daemon_bin" ] && [ -f "$remote_bin" ] && [ -f "$isolation_bin" ] && [ -f "$lore_bin" ] || {
+    printf 'doxa-install: Rust build produced no frontend, plugin worker, daemon, remote adapter, isolation worker or native LORE carrier\n' >&2; exit 1;
   }
 
   # Protected Codex uses a private provider build. Keep the official CLI for
@@ -118,16 +120,17 @@ main() {
   fi
 
   mkdir -p "$bin_dir" || exit 1
-  for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
+  for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker doxa-plugin-worker lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
     [ ! -d "$bin_dir/$name" ] || [ -L "$bin_dir/$name" ] || { printf 'doxa-install: %s is a directory\n' "$bin_dir/$name" >&2; exit 1; }
   done
   stage=$(mktemp -d "$bin_dir/.doxa-install.XXXXXXXX") || exit 1
   cp "$tui_bin" "$stage/doxa-rs" || exit 1
+  cp "$plugin_worker_bin" "$stage/doxa-plugin-worker" || exit 1
   cp "$daemon_bin" "$stage/doxa-daemon-rs" || exit 1
   cp "$remote_bin" "$stage/doxa-remote" || exit 1
   cp "$isolation_bin" "$stage/doxa-isolation-worker" || exit 1
   cp "$lore_bin" "$stage/lore-rs" || exit 1
-  chmod 755 "$stage/doxa-rs" "$stage/doxa-daemon-rs" "$stage/doxa-remote" "$stage/doxa-isolation-worker" "$stage/lore-rs" || exit 1
+  chmod 755 "$stage/doxa-rs" "$stage/doxa-plugin-worker" "$stage/doxa-daemon-rs" "$stage/doxa-remote" "$stage/doxa-isolation-worker" "$stage/lore-rs" || exit 1
   cat > "$stage/doxa" <<'SH'
 #!/bin/sh
 bin_dir=$(CDPATH= cd "$(dirname "$0")" && pwd) || exit 1
@@ -140,14 +143,14 @@ SH
   chmod 755 "$stage/doxa" || exit 1
   printf '%s\n' "$sha" > "$stage/.doxa-install-sha" || exit 1
   mkdir "$stage/backup" || exit 1
-  for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
+  for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker doxa-plugin-worker lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
     if [ -e "$bin_dir/$name" ] || [ -L "$bin_dir/$name" ]; then
       cp -Pp "$bin_dir/$name" "$stage/backup/$name" || exit 1
     fi
   done
 
   installing=1
-  for name in doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker lore-rs .doxa-install-sha doxa; do
+  for name in doxa-rs doxa-plugin-worker doxa-daemon-rs doxa-remote doxa-isolation-worker lore-rs .doxa-install-sha doxa; do
     # mv can treat a symlink to a directory as the destination directory,
     # leaving the old launcher pointer in place and writing inside its target.
     if [ -L "$bin_dir/$name" ]; then
