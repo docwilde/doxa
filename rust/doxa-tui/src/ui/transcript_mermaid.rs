@@ -4,7 +4,7 @@ use std::{
     collections::{HashSet, VecDeque},
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::{fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt}, process::CommandExt},
+    os::unix::{ffi::OsStrExt, fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt}, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}, Arc, Mutex},
@@ -20,6 +20,10 @@ use crate::theme;
 const MAX_CACHED: usize = 8;
 const MAX_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_PNG_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PACKAGE_ENTRIES: usize = 100_000;
+const MAX_PACKAGE_PATH_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PACKAGE_DEPTH: usize = 32;
+const PACKAGE_SCAN_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_ACTIVE: usize = 2;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const BWRAP: &str = "/usr/bin/bwrap";
@@ -255,6 +259,59 @@ fn renderer_identity(renderer: &str, root: &str) -> Option<String> {
     Some(format!("{:x}", hash.finalize()))
 }
 
+/// Fingerprint every package entry before a disk hit. This runs only on a
+/// preview worker. If the package is too large, changes during traversal, or
+/// is unreadable, rendering still works but its PNG is not cached.
+fn cache_identity(renderer: &str, root: &Path, cancel: &AtomicBool) -> Option<String> {
+    let fast = renderer_identity(renderer, root.to_str()?)?;
+    let root_meta = fs::symlink_metadata(root).ok()?;
+    let device = root_meta.dev();
+    let deadline = Instant::now() + PACKAGE_SCAN_TIMEOUT;
+    let mut hash = Sha256::new();
+    hash.update(b"doxa-mermaid-package-tree-v1\0");
+    hash.update(fast.as_bytes());
+    let mut stack = vec![(PathBuf::new(), 0usize)];
+    let mut entries = 0usize;
+    let mut path_bytes = 0usize;
+    while let Some((relative, depth)) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) || Instant::now() >= deadline { return None; }
+        entries += 1;
+        path_bytes = path_bytes.checked_add(relative.as_os_str().as_bytes().len())?;
+        if entries > MAX_PACKAGE_ENTRIES || path_bytes > MAX_PACKAGE_PATH_BYTES || depth > MAX_PACKAGE_DEPTH { return None; }
+        let path = root.join(&relative);
+        let meta = fs::symlink_metadata(&path).ok()?;
+        if meta.dev() != device { return None; }
+        hash.update(relative.as_os_str().as_bytes());
+        hash.update([u8::from(meta.is_dir()), u8::from(meta.is_file()), u8::from(meta.file_type().is_symlink())]);
+        for value in [meta.dev(), meta.ino(), meta.mode() as u64, meta.len(), meta.mtime() as u64,
+            meta.mtime_nsec() as u64, meta.ctime() as u64, meta.ctime_nsec() as u64] {
+            hash.update(value.to_be_bytes());
+        }
+        if meta.file_type().is_symlink() {
+            let target = fs::read_link(&path).ok()?;
+            path_bytes = path_bytes.checked_add(target.as_os_str().as_bytes().len())?;
+            if path_bytes > MAX_PACKAGE_PATH_BYTES { return None; }
+            hash.update(target.as_os_str().as_bytes());
+        } else if meta.is_dir() {
+            let mut children = Vec::new();
+            for child in fs::read_dir(&path).ok()? {
+                let child = child.ok()?;
+                if children.len() + stack.len() + entries >= MAX_PACKAGE_ENTRIES { return None; }
+                children.push(child);
+            }
+            children.sort_by_key(|entry| entry.file_name());
+            for child in children.into_iter().rev() {
+                stack.push((relative.join(child.file_name()), depth + 1));
+                if stack.len() + entries > MAX_PACKAGE_ENTRIES { return None; }
+            }
+        } else if !meta.is_file() {
+            return None;
+        }
+    }
+    if Instant::now() >= deadline { return None; }
+    Some(format!("{:x}", hash.finalize()))
+}
+
 fn private_temp_root() -> Option<PathBuf> {
     let base = std::env::var_os("TMPDIR").map(PathBuf::from).or_else(||
         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/doxa/mermaid")))?;
@@ -444,11 +501,13 @@ fn render_source_cached(source: &str, width: u16, renderer: &str, root: &str,
     cache: Option<&Arc<Mutex<PngCache>>>) -> Option<Protocol> {
     if source.len() > transcript_tools::MAX_MERMAID_SOURCE || cancel.load(Ordering::Relaxed) { return None; }
     let (_, root, relative) = reviewed_paths(renderer, root, workspaces)?;
-    let identity = renderer_identity(renderer, root.to_str()?)?;
-    let key = transcript_tools::mermaid_cache_key(&transcript_tools::mermaid_key(source), &identity, width);
-    if let Some(cache) = cache {
+    let package_identity = cache.and_then(|_| cache_identity(renderer, &root, cancel));
+    let key = package_identity.as_ref()
+        .map(|identity| transcript_tools::mermaid_cache_key(
+            &transcript_tools::mermaid_key(source), &identity, width));
+    if let (Some(cache), Some(key)) = (cache, &key) {
         if let Ok(mut cache) = cache.lock() {
-            if let Some(protocol) = cache.load(&key, width, picker) { return Some(protocol); }
+            if let Some(protocol) = cache.load(key, width, picker) { return Some(protocol); }
         }
     }
     if cancel.load(Ordering::Relaxed) { return None; }
@@ -461,9 +520,11 @@ fn render_source_cached(source: &str, width: u16, renderer: &str, root: &str,
     if run_sandbox(sandbox_command(&root, &relative, work.path()), cancel) != RunResult::Success { return None; }
     let file = open_png(&work.path().join("output.png"))?;
     let protocol = transcript_images::decode_file(file.try_clone().ok()?, width, picker)?;
-    if !cancel.load(Ordering::Relaxed) {
-        if let Some(cache) = cache {
-            if let Ok(mut cache) = cache.lock() { cache.insert(&key, file); }
+    if !cancel.load(Ordering::Relaxed)
+        && package_identity.as_ref().is_some_and(|before|
+            cache_identity(renderer, &root, cancel).as_ref() == Some(before)) {
+        if let (Some(cache), Some(key)) = (cache, &key) {
+            if let Ok(mut cache) = cache.lock() { cache.insert(key, file); }
         }
     }
     Some(protocol)
@@ -694,6 +755,33 @@ mod tests {
         let after_manifest = renderer_identity(&renderer, root).unwrap();
         fs::write(package.path().join("package.json"), "{\"version\":\"2\"}").unwrap();
         assert_ne!(renderer_identity(&renderer, root).unwrap(), after_manifest);
+    }
+
+    #[test]
+    fn nested_package_mutation_changes_cache_key_without_following_symlinks() {
+        let (package, renderer) = fixture("exit 7");
+        let nested = package.path().join("node_modules/dependency");
+        fs::create_dir_all(&nested).unwrap();
+        let module = nested.join("index.js");
+        fs::write(&module, "alpha").unwrap();
+        let cancel = AtomicBool::new(false);
+        let source_hash = transcript_tools::mermaid_key("graph TD");
+        let identity = cache_identity(&renderer, package.path(), &cancel).unwrap();
+        let original = transcript_tools::mermaid_cache_key(&source_hash, &identity, 24);
+        fs::write(&module, "beta!").unwrap();
+        let changed = cache_identity(&renderer, package.path(), &cancel).unwrap();
+        assert_ne!(original, transcript_tools::mermaid_cache_key(&source_hash, &changed, 24));
+
+        let outside = tempfile::tempdir_in(private_temp_root().unwrap()).unwrap();
+        let outside_file = outside.path().join("private.txt");
+        fs::write(&outside_file, "secret one").unwrap();
+        symlink(&outside_file, nested.join("link")).unwrap();
+        let with_link = cache_identity(&renderer, package.path(), &cancel).unwrap();
+        fs::write(&outside_file, "secret two").unwrap();
+        assert_eq!(cache_identity(&renderer, package.path(), &cancel).unwrap(), with_link);
+        fs::remove_file(nested.join("link")).unwrap();
+        symlink("different-target", nested.join("link")).unwrap();
+        assert_ne!(cache_identity(&renderer, package.path(), &cancel).unwrap(), with_link);
     }
 
     #[test]
