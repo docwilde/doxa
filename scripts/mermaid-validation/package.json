@@ -1,0 +1,10 @@
+{
+  "name": "doxa-mermaid-validation",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Opt-in local renderer validation; never part of the DOXA installer",
+  "dependencies": {
+    "@mermaid-js/mermaid-cli": "12.0.0",
+    "puppeteer": "25.13.0"
+  }
+}

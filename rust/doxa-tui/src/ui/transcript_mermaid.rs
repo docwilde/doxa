@@ -521,4 +521,30 @@ mod tests {
         assert!(store.revision() > 0);
         store.clear();
     }
+
+    /// Run only through scripts/mermaid-validation/validate.sh after explicitly
+    /// provisioning its pinned CLI and browser inside a reviewed package root.
+    #[test]
+    #[ignore = "requires an owner-provisioned Mermaid CLI and browser"]
+    fn real_cli_fixture_suite() {
+        let renderer = std::env::var("DOXA_MERMAID_VALIDATION_RENDERER")
+            .expect("validation script must set the renderer");
+        let root = std::env::var("DOXA_MERMAID_VALIDATION_PACKAGE_ROOT")
+            .expect("validation script must set the package root");
+        assert_eq!(diagnose(&renderer, &root, &[]), DoctorResult::Available,
+            "the fixed-diagram sandbox doctor must pass before fixture rendering");
+        let fixtures = [
+            ("flowchart", "flowchart TD\n A[Start] --> B{Ready?}\n B -->|yes| C[Done]\n"),
+            ("sequence", "sequenceDiagram\n participant A as Alice\n participant B as Bob\n A->>B: Hello\n B-->>A: Ack\n"),
+            ("class", "classDiagram\n class Animal {\n  +name: string\n  +speak()\n }\n Animal <|-- Dog\n"),
+            ("gantt", "gantt\n title Delivery\n dateFormat YYYY-MM-DD\n section Work\n Design :done, d1, 2026-01-01, 3d\n Build :active, d2, after d1, 4d\n"),
+        ];
+        for (name, source) in fixtures {
+            let image = render_source(source, 60, &renderer, &root, &[],
+                &picker(), &AtomicBool::new(false))
+                .unwrap_or_else(|| panic!("{name}: sandboxed renderer failed or PNG was invalid"));
+            assert!(image.area().height > 0, "{name}: no decoded image rows");
+            println!("{name}: bounded sandbox render and halfblock decode passed");
+        }
+    }
 }
