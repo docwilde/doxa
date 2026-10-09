@@ -7,11 +7,34 @@ must be an `https://*.ts.net/` origin reachable from a user-owned Tailscale
 device. The app supplies no Tailscale identity header: Serve authenticates the
 device and forwards its attested login to the hub.
 
-![DOXA Remote disconnected setup screen on an offline Android emulator](../assets/shots/android-remote-beta17-offline.png)
+<img src="../assets/shots/android-remote-beta30-home-offline.png" alt="DOXA Remote connection screen on an offline Android emulator" width="320">
 
-This capture uses an unconfigured debug APK on an offline Android 36 emulator;
-no Tailscale account, hub, or shared key was entered. A connected session view
-requires a user-owned device and private hub.
+The normal connection screen above comes from a clean, unconfigured debug APK
+on an offline Android 36 emulator. The hub URL is empty, and no Tailscale
+account or shared key was entered. The [recovery-fence screen](../assets/shots/android-remote-beta28-recovery-fence-offline.png)
+uses a synthetic `owner.tailnet.ts.net` URL and shows how an uncertain write
+blocks acknowledgment until the app loads a fresh snapshot. A connected session
+view requires a user-owned device and private hub.
+
+<img src="../assets/shots/android-remote-beta28-recovery-fence-offline.png" alt="Synthetic uncertain-write recovery fence with acknowledgment disabled" width="320">
+
+To reproduce the home capture, install the Android 36 default x86_64 system
+image and build the unconfigured APK. The capture script creates its own fresh
+Pixel 6 AVD under `TMPDIR`, refuses an occupied emulator port, and checks the
+booted AVD identity and empty third-party app inventory before touching it. It
+then turns on airplane mode, disables Wi-Fi and mobile data, verifies the exact
+connection screen and empty URL, decodes the entire PNG, and deletes the AVD.
+Python Pillow is required for image validation. Set `DOXA_CAPTURE_PORT` to a
+free even emulator port if 5580 is occupied. If the SDK installs command-line
+tools under a versioned directory, set `ANDROID_AVDMANAGER_BIN` to its
+`avdmanager` executable.
+
+```bash
+export TMPDIR="$HOME/t" ANDROID_HOME=/path/to/android-sdk
+mkdir -p "$TMPDIR"
+./gradlew :app:assembleDebug
+../scripts/capture_android_home.sh
+```
 
 ## Build and connect
 
@@ -129,8 +152,8 @@ endpoint in this client. Protocol and hub tests cover registration scope,
 rotation, expiry, and generic payloads. An unconfigured debug APK was assembled
 locally on 2026-10-09 with Temurin JDK 21.0.12.1, Android SDK 37.0, and Gradle
 9.3.1; `:protocol:test` and `:app:lintDebug` passed in the same run. The
-disconnected screen was captured and inspected in an offline Android 36
-emulator, including system-bar clearance. It has not been installed on a
+connection and recovery screens were captured and inspected in offline Android
+36 emulators, including system-bar clearance. It has not been installed on a
 Firebase-enabled device or exercised against a provisioned FCM project and
 two-host tailnet. A separate offline Android 36 emulator smoke installed this
 debug APK, injected a synthetic body-free marker, force-stopped and relaunched

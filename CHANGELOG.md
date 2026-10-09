@@ -5,6 +5,19 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.32 — 2026-10-09
+
+**Review and rendering**
+
+- Add a read-only fleet debrief from host records: signed test receipts, handoff and release evidence, and retained judge events. Unknown run time and billed cost stay unknown.
+- Preview bounded local Markdown images inline in the Ratatui transcript, preserving alt text and surrounding links. Nested and remote images remain text-only.
+- Capture the Android connection screen on a clean offline emulator with a reproducible script; document the synthetic recovery-fence view separately.
+
+**Verification**
+
+- Rehash every Rust and Python source during scan readback, failing closed on persistent edits with a stable Git listing. This does not create an atomic snapshot or prove semantic binding.
+- Limit the egress gateway's first TLS ClientHello to 16 records and 64 KiB; a seventeenth record is rejected before upstream dial. Hardened production egress remains closed.
+
 ## 2.0.0-beta.31 — 2026-10-09
 
 **Isolation proof**

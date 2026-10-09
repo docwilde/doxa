@@ -142,13 +142,42 @@ fn verify(context: &Context, id: &str, value: &Value) -> io::Result<Receipt> {
     Ok(receipt)
 }
 
+/// Read a recorded host test receipt for audit/reporting. This verifies the
+/// host MAC and immutable assignment binding, but does not claim that the
+/// source tree still matches the tested snapshot.
+pub fn recorded_test(context: &Context, id: &str, value: &Value) -> io::Result<Option<TestEvidence>> {
+    if value["kind"] != "test_result" { return Ok(None); }
+    let receipt = verify(context, id, value)?;
+    let test: TestEvidence = serde_json::from_value(receipt.payload)
+        .map_err(|_| invalid("invalid recorded host test receipt"))?;
+    let assignment = context.assignments.iter().find(|row| row.id == test.binding.assignment_id)
+        .ok_or_else(|| invalid("recorded test assignment is outside the fleet"))?;
+    if !binding_matches(&test.binding, context, assignment)
+        || context.charter.test_recipe.as_ref().is_none_or(|recipe| hash(recipe).ok().as_deref() != Some(test.recipe_sha256.as_str()))
+        || test.duration_ms > 300_000 || test.output_bytes > MAX_OUTPUT
+        || !valid_digest(&test.output_sha256) || !test.runner_image.contains("@sha256:") {
+        return Err(invalid("recorded host test receipt has wrong scope or bounds"));
+    }
+    Ok(Some(test))
+}
+
 /// Exact sender, charter, baseline, and tree must agree across both receipts.
 /// The current tree is checked by the daemon before calling this function.
 fn validate_receipts(context: &Context, state: &State, envelope: &Envelope) -> io::Result<(String, String)> {
-    let assignment = context.assignment(&envelope.from_session)?;
+    receipt_pair(context, state, &envelope.from_session, &envelope.artifact_refs)
+}
+
+/// Recheck the persisted receipt pair without touching the current checkout.
+/// This proves only what admission recorded at that time, not current source.
+pub fn recorded_completion_receipts(context: &Context, state: &State, from_session: &str, artifact_refs: &[String]) -> io::Result<()> {
+    receipt_pair(context, state, from_session, artifact_refs).map(|_| ())
+}
+
+fn receipt_pair(context: &Context, state: &State, from_session: &str, artifact_refs: &[String]) -> io::Result<(String, String)> {
+    let assignment = context.assignment(from_session)?;
     let mut diff: Option<DiffEvidence> = None;
     let mut test: Option<TestEvidence> = None;
-    for id in &envelope.artifact_refs {
+    for id in artifact_refs {
         let Some(value) = state.artifacts.get(id) else { continue; };
         let receipt = verify(context, id, value)?;
         match receipt.kind.as_str() {

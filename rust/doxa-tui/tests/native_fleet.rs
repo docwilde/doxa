@@ -85,6 +85,12 @@ fn reviewed_native_fleet_freezes_guard_context_budget_and_host_evidence_without_
     assert_eq!(manifest["supervision"]["calls"],0);assert_eq!(manifest["supervision"]["review_reserved_usd"],0.0);assert_eq!(manifest["phase"],"finished");
     let state:doxa_fleet::State=doxa_fleet::read_private(&context.state_path,doxa_fleet::MAX_STATE).unwrap();assert!(!state.artifacts.is_empty());assert_eq!(state.charter_sha256,context.charter_sha256);assert_eq!(state.calls,0);
     assert!(context.assignments.iter().all(|row|row.pid>0&&row.role=="worker"));assert!(sockets_gone(&manifest));
+    let before=fs::read(&context.state_path).unwrap();
+    let report=fixture.command().args(["fleet","debrief","run","--root",fixture.root.to_str().unwrap()]).output().unwrap();
+    assert!(report.status.success(),"{}",String::from_utf8_lossy(&report.stderr));
+    let text=String::from_utf8_lossy(&report.stdout);
+    assert!(text.contains("Assignment counts: completion admitted")&&text.contains("Host test receipts: 0"));
+    assert_eq!(fs::read(&context.state_path).unwrap(),before,"debrief must not rewrite the guard journal");
 }
 
 #[test]

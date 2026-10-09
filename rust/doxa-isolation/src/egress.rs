@@ -23,6 +23,9 @@ const MAX_CLIENTS: usize = 32;
 const IO_TIMEOUT: Duration = Duration::from_millis(200);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CLIENT_HELLO: usize = 64 * 1024;
+// A payload-only limit still allows one-byte TLS records to multiply framing
+// work and buffered bytes. Genuine fragmented ClientHellos need few records.
+const MAX_CLIENT_HELLO_RECORDS: usize = 16;
 
 #[cfg(target_os = "linux")]
 use std::os::{fd::{FromRawFd, OwnedFd}, unix::ffi::OsStrExt};
@@ -210,8 +213,13 @@ fn verified_client_hello(client: &mut UnixStream, host: &str) -> io::Result<Vec<
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     let mut records = Vec::new();
     let mut handshake = Vec::new();
+    let mut record_count = 0;
     loop {
+        if record_count == MAX_CLIENT_HELLO_RECORDS {
+            return Err(error("TLS ClientHello record count exceeds bound"));
+        }
         let mut header = [0; 5]; read_exact_until(client, &mut header, deadline)?;
+        record_count += 1;
         let size = u16::from_be_bytes([header[3], header[4]]) as usize;
         if header[0] != 22 || header[1] != 3 || !(1..=4).contains(&header[2]) || size == 0 || size > 16 * 1024 {
             return Err(error("expected bounded TLS handshake record"));
@@ -613,6 +621,20 @@ mod tests {
         record
     }
 
+    fn fragment_client_hello(record: &[u8], one_byte_records: usize) -> Vec<u8> {
+        let handshake = &record[5..];
+        assert!(one_byte_records < handshake.len());
+        let mut fragmented = Vec::new();
+        for byte in &handshake[..one_byte_records] {
+            fragmented.extend_from_slice(&[22, 3, 3, 0, 1, *byte]);
+        }
+        let rest = &handshake[one_byte_records..];
+        fragmented.extend_from_slice(&[22, 3, 3]);
+        fragmented.extend_from_slice(&(rest.len() as u16).to_be_bytes());
+        fragmented.extend_from_slice(rest);
+        fragmented
+    }
+
     #[test]
     fn exact_connect_and_binary_tls_bytes_relay_via_loopback_fixture() {
         let root = fixture_dir(); let (upstream_addr, upstream_thread) = upstream();
@@ -697,6 +719,43 @@ mod tests {
         bytes.extend_from_slice(&fragmented);
         assert!(request(gateway.socket(), &bytes).starts_with(b"HTTP/1.1 200"));
         assert_eq!(upstream_thread.join().unwrap(), fragmented);
+    }
+
+    #[test]
+    fn client_hello_fragment_count_is_bounded_before_upstream_dial() {
+        let hello = client_hello("api.example.test");
+        let connect = b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n";
+
+        // Fifteen one-byte records plus a final record remain within the
+        // limit and preserve the exact TLS bytes sent to the fixture upstream.
+        let accepted = fragment_client_hello(&hello, MAX_CLIENT_HELLO_RECORDS - 1);
+        let root = fixture_dir(); let (upstream_addr, upstream_thread) = upstream();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let accepted_gateway = gateway(root.path(), vec!["1.1.1.1:443".parse().unwrap()], upstream_addr, calls.clone());
+        let mut request_bytes = connect.to_vec(); request_bytes.extend_from_slice(&accepted);
+        assert!(request(accepted_gateway.socket(), &request_bytes).starts_with(b"HTTP/1.1 200"));
+        assert_eq!(upstream_thread.join().unwrap(), accepted);
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        drop(accepted_gateway);
+
+        // A seventeenth record used to reach the connector despite the
+        // 64-KiB handshake payload bound. It must close before any dial.
+        let refused = fragment_client_hello(&hello, MAX_CLIENT_HELLO_RECORDS);
+        let root = fixture_dir(); let calls = Arc::new(AtomicUsize::new(0));
+        let gateway = gateway(root.path(), vec!["1.1.1.1:443".parse().unwrap()],
+            "127.0.0.1:1".parse().unwrap(), calls.clone());
+        let mut request_bytes = connect.to_vec(); request_bytes.extend_from_slice(&refused);
+        let mut client = UnixStream::connect(gateway.socket()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        client.write_all(&request_bytes).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        assert_eq!(read_response_header(&mut client), "HTTP/1.1 200 Connection Established\r\n\r\n");
+        // Closing with an unread seventeenth record can cause an expected
+        // ECONNRESET, so wait for closure without requiring an orderly FIN.
+        let mut tail = Vec::new();
+        let closed = client.read_to_end(&mut tail);
+        assert!(closed.is_ok() || closed.is_err_and(|e| e.kind() == io::ErrorKind::ConnectionReset));
+        assert_eq!(calls.load(Ordering::Acquire), 0);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! The transcript locates each section; live scrubbed tool cards supply its
 //! expanded details. Expansion changes only rendering.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::Range, path::Path};
 
 use ratatui::{style::{Modifier, Style}, text::Line};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
@@ -28,6 +28,8 @@ pub(super) struct Section {
 }
 
 pub(super) const IMAGE_ROWS: u16 = 4;
+const MAX_IMAGE_PLACEMENTS: usize = 32;
+const MAX_IMAGE_RESERVED_ROWS: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ImagePlacement {
@@ -131,29 +133,66 @@ enum Block<'a> {
     Reasoning { text: String, tokens: u64, streaming: bool, exact: bool },
 }
 
-/// A local file attachment must be the whole Markdown paragraph. Ordinary
-/// prose, remote URLs and fenced examples keep the existing Markdown path.
-fn standalone_local_image(paragraph: &str) -> Option<(String, String)> {
-    let mut events = Parser::new(paragraph);
-    if !matches!(events.next()?, Event::Start(Tag::Paragraph)) { return None; }
-    let Event::Start(Tag::Image { dest_url, .. }) = events.next()? else { return None; };
-    let source = dest_url.to_string();
-    if source.len() > 4096 || source.chars().any(char::is_control)
-        || !std::path::Path::new(&source).is_absolute() { return None; }
-    let mut alt = String::new();
-    loop {
-        match events.next()? {
-            Event::Text(text) | Event::Code(text) => alt.push_str(&text),
-            Event::End(TagEnd::Image) => break,
-            _ => return None,
+struct InlineImage {
+    range: Range<usize>,
+    source: String,
+    alt: String,
+}
+
+/// Pull exact source ranges from the Markdown parser. Only images directly in
+/// an ordinary paragraph become previews. A linked image, list item, quote,
+/// code fence or remote URL keeps the normal text/link renderer path, so
+/// splitting the prose cannot reinterpret surrounding Markdown syntax.
+fn inline_local_images(paragraph: &str, limit: usize) -> Vec<InlineImage> {
+    let mut found = Vec::new();
+    let mut depth: usize = 0;
+    let mut in_paragraph = false;
+    let mut image: Option<(usize, String, String)> = None;
+    for (event, range) in Parser::new(paragraph).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Paragraph) if depth == 0 => {
+                in_paragraph = true;
+                depth += 1;
+            }
+            Event::Start(Tag::Image { dest_url, .. }) if depth == 1 && in_paragraph => {
+                let source = dest_url.to_string();
+                if source.len() <= 4096 && !source.starts_with("//")
+                    && !source.chars().any(char::is_control)
+                    && Path::new(&source).is_absolute() {
+                    image = Some((range.start, source, String::new()));
+                }
+                depth += 1;
+            }
+            Event::Start(_) => depth += 1,
+            Event::End(TagEnd::Image) if depth == 2 && image.is_some() => {
+                let (start, source, alt) = image.take().unwrap();
+                if alt.len() <= 512 {
+                    let alt = markdown::sanitize(&alt);
+                    found.push(InlineImage {
+                        range: start..range.end,
+                        source,
+                        alt: if alt.trim().is_empty() { "image".into() } else { alt },
+                    });
+                    if found.len() == limit { break; }
+                }
+                depth -= 1;
+            }
+            Event::End(TagEnd::Paragraph) if depth == 1 => {
+                in_paragraph = false;
+                depth -= 1;
+            }
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Text(text) | Event::Code(text) if image.is_some() => {
+                let alt = &mut image.as_mut().unwrap().2;
+                if alt.len() <= 512 { alt.push_str(&text); }
+            }
+            Event::SoftBreak | Event::HardBreak if image.is_some() => {
+                image.as_mut().unwrap().2.push(' ');
+            }
+            _ => {}
         }
-        if alt.len() > 512 { return None; }
     }
-    if !matches!(events.next()?, Event::End(TagEnd::Paragraph)) || events.next().is_some() {
-        return None;
-    }
-    let alt = markdown::sanitize(&alt);
-    Some((source, if alt.trim().is_empty() { "image".into() } else { alt }))
+    found
 }
 
 fn reasoning_block(paragraph: &str) -> Option<Block<'_>> {
@@ -472,6 +511,10 @@ pub(super) fn render_with_media(
     let mut images = Vec::new();
     let mut mermaids = Vec::new();
     let mut blocks = Vec::new();
+    let preview_limit = if image_rows == 0 { 0 } else {
+        MAX_IMAGE_PLACEMENTS.min(MAX_IMAGE_RESERVED_ROWS / usize::from(image_rows))
+    };
+    let mut preview_count = 0;
     let mut tool_index: Option<usize> = None;
     let mut fence: Option<(u8, usize)> = None;
     let paragraphs: Vec<_> = source.split("\n\n").collect();
@@ -511,9 +554,22 @@ pub(super) fn render_with_media(
                 blocks.push(Block::Tools(vec![paragraph]));
             }
         } else {
-            if fence.is_none() {
-                if let Some((source, alt)) = standalone_local_image(paragraph) {
-                    blocks.push(Block::Image { source, alt });
+            if fence.is_none() && preview_count < preview_limit
+                && !paragraph.lines().any(|line| fence_marker(line).is_some()) {
+                let mut from = 0;
+                let inline = inline_local_images(paragraph, preview_limit - preview_count);
+                if !inline.is_empty() {
+                    for image in inline {
+                        if from < image.range.start {
+                            blocks.push(Block::Prose(&paragraph[from..image.range.start]));
+                        }
+                        blocks.push(Block::Image { source: image.source, alt: image.alt });
+                        preview_count += 1;
+                        from = image.range.end;
+                    }
+                    if from < paragraph.len() {
+                        blocks.push(Block::Prose(&paragraph[from..]));
+                    }
                     continue;
                 }
             }
@@ -618,6 +674,97 @@ mod tests {
             render_with_images(source, 34, None, None, &[], 0, 0);
         assert!(text_images.is_empty());
         assert_eq!(text_lines.len() + usize::from(IMAGE_ROWS) - 1, lines.len());
+    }
+
+    #[test]
+    fn inline_local_images_preserve_order_alt_and_clickable_link_rows() {
+        let source = "**Assistant:**\n\nRead [the guide](https://one.example) before ![graph](/home/user/graph.png) and [the result](https://two.example) after ![status](/home/user/status.png).\n\nEnd.";
+        let (lines, _, links, images) =
+            render_with_images(source, 48, None, None, &[], IMAGE_ROWS, 0);
+        assert_eq!(images.iter().map(|image| (image.source.as_str(), image.alt.as_str()))
+            .collect::<Vec<_>>(), [
+                ("/home/user/graph.png", "graph"),
+                ("/home/user/status.png", "status"),
+            ]);
+        assert!(images[0].row < images[1].row);
+        assert!(lines[images[0].row - 1].to_string().contains("Image: graph"));
+        assert!(lines[images[1].row - 1].to_string().contains("Image: status"));
+        for image in &images {
+            assert!(lines[image.row..image.row + usize::from(IMAGE_ROWS)]
+                .iter().all(|line| line.spans.is_empty()));
+        }
+        assert_eq!(links.iter().map(|link| link.url.as_ref()).collect::<Vec<_>>(),
+            ["https://one.example", "https://two.example"]);
+        assert!(lines[links[0].row].to_string().contains("the guide"));
+        assert!(lines[links[1].row].to_string().contains("the result"));
+        assert!(links[0].row < images[0].row && images[0].row < links[1].row
+            && links[1].row < images[1].row);
+        assert!(shown(&lines).contains("End."));
+        let (text, _, text_links, no_images) =
+            render_with_images(source, 48, None, None, &[], 0, 0);
+        assert!(no_images.is_empty());
+        let text_display = shown(&text).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(text_display.contains("before graph and the result after status."), "{text_display}");
+        assert_eq!(text_links.len(), 4);
+    }
+
+    #[test]
+    fn nested_and_remote_images_remain_text_only() {
+        let source = "**Assistant:**\n\n[![linked](/home/user/linked.png)](https://example.com) and ![remote](https://example.com/a.png).\n\n- ![listed](/home/user/list.png)\n\n> ![quoted](/home/user/quote.png)\n\n**![bold](/home/user/bold.png)**\n\n`![code](/home/user/code.png)`\n\n```md\n![fenced](/home/user/fenced.png)\n```";
+        let (lines, _, links, images) =
+            render_with_images(source, 60, None, None, &[], IMAGE_ROWS, 0);
+        assert!(images.is_empty());
+        let display = shown(&lines);
+        for alt in ["linked", "remote", "listed", "quoted", "bold", "code", "fenced"] {
+            assert!(display.contains(alt), "missing {alt}");
+        }
+        assert!(links.iter().any(|link| link.url.as_ref() == "https://example.com"));
+    }
+
+    #[test]
+    fn image_followed_by_outer_fence_does_not_preview_fenced_source() {
+        let source = "**Assistant:**\n\nBefore ![local](/home/user/local.png)\n```md\n![fenced](/home/user/fenced.png)\n\n![still fenced](/home/user/other.png)\n```\n\nAfter ![shown](/home/user/shown.png)";
+        let (_, _, _, images) =
+            render_with_images(source, 48, None, None, &[], IMAGE_ROWS, 0);
+        assert_eq!(images.iter().map(|image| image.alt.as_str()).collect::<Vec<_>>(),
+            ["shown"]);
+    }
+
+    #[test]
+    fn image_placement_and_row_budget_falls_back_to_markdown_across_turns() {
+        let first = (0..20).map(|index| format!("![first-{index}](/image/{index}.png)"))
+            .collect::<Vec<_>>().join(" ");
+        let second = (0..180).map(|index| format!("![second-{index}](/more/{index}.png)"))
+            .collect::<Vec<_>>().join(" ");
+        let source = format!("**Assistant:**\n\n{first}\n\n**You:**\n\n{second} [tail](https://example.com/end)");
+        let (lines, _, links, images) =
+            render_with_images(&source, 80, None, None, &[], IMAGE_ROWS, 0);
+        assert_eq!(images.len(), MAX_IMAGE_PLACEMENTS);
+        assert_eq!(images.iter().filter(|image| image.alt.starts_with("first-")).count(), 20);
+        assert_eq!(images.iter().filter(|image| image.alt.starts_with("second-")).count(), 12);
+        assert_eq!(images.len() * usize::from(IMAGE_ROWS), MAX_IMAGE_RESERVED_ROWS);
+        assert!(images.iter().all(|image| lines[image.row..image.row + usize::from(IMAGE_ROWS)]
+            .iter().all(|line| line.spans.is_empty())));
+        assert!(lines.len() < 350, "{} rows from bounded transcript", lines.len());
+        let display = shown(&lines);
+        assert!(display.contains("second-179"), "last image must retain alt-text fallback");
+        let tail = links.iter().find(|link| link.url.as_ref() == "https://example.com/end")
+            .expect("ordinary link after fallback stays clickable");
+        assert!(lines[tail.row].to_string().contains("tail"));
+
+        let (_, _, _, tall_images) =
+            render_with_images(&source, 80, None, None, &[], 16, 0);
+        assert_eq!(tall_images.len(), MAX_IMAGE_RESERVED_ROWS / 16);
+    }
+
+    #[test]
+    fn protocol_relative_url_remains_text_only_beside_local_preview() {
+        let source = "**Assistant:**\n\n![cdn](//example.com/a.png) then ![local](/home/user/local.png)";
+        let (lines, _, _, images) =
+            render_with_images(source, 60, None, None, &[], IMAGE_ROWS, 0);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].alt, "local");
+        assert!(shown(&lines).contains("cdn"));
     }
 
     #[test]

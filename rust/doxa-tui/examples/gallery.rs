@@ -125,9 +125,9 @@ fn scene(name: &str) -> App {
             let image = repo.join("assets/logo.png")
                 .canonicalize().expect("checked-in image fixture");
             event(&mut app, "demo-codex-01", "text_delta", json!({"text":format!(
-                "## Image preview\n\nA local image appears inside the transcript with its alt text.\n\n![DOXA logo](<{}>)\n\nThe Markdown and clickable links below keep their layout. [Guide](https://ratatui.rs/)",
+                "## Image preview\n\nA [local image guide](https://ratatui.rs/) introduces ![DOXA logo](<{}>) inside the same paragraph.\n\nThe alt text, preview, and [following link](https://github.com/ratatui/ratatui) keep their transcript positions.",
                 image.display())}));
-            app.notice = "Fixture · local image · halfblock backend".into();
+            app.notice = "Fixture · inline local image · halfblock backend".into();
         }
         "isolation" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];

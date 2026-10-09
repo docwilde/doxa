@@ -196,7 +196,9 @@ binds `egress.sock` beside the private session broker and accepts HTTP/1.1
 name on the host, rejects any private/reserved answer (including mixed public
 and private answers), and requires a bounded TLS ClientHello with SNI matching
 the `CONNECT` hostname before dialing the checked IP or forwarding worker
-bytes. Missing, duplicate, mismatched and known encrypted ClientHello names,
+bytes. The first ClientHello is limited to 64 KiB of handshake bytes and 16
+TLS records, so one-byte record fragmentation cannot amplify gateway buffering
+or parsing work. Missing, duplicate, mismatched and known encrypted ClientHello names,
 early data and extra handshake bytes are refused. TLS remains end-to-end. The
 offline gateway fixture now changes an allowed DNS answer to a private address
 between tunnels: it verifies that the first dial uses its checked address
