@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.40 — 2026-10-09
+
+**Code graph transport proof**
+
+- Add disabled **`open_disabled_inspected_attach_transport`**: one Unix FD carries exact-ID inspect, attach and one bounded LSP request/reply.
+- A same-UID fake daemon still passes. Engine identity, the full LSP session and cleanup remain unproved; semantic **`binding=unknown`**.
+
+**Guarded egress origin**
+
+- Check kernel writer pidfds and credentials on every guarded **`CONNECT`** and ClientHello read, refusing inherited-socket writers before DNS or dial.
+- Later relay bytes, process movement, exact Engine/container origin and real provider flows remain unproved. Hardened admission stays closed.
+
 ## 2.0.0-beta.39 — 2026-10-09
 
 **Quota helper staging**

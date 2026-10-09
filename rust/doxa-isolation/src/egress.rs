@@ -6,7 +6,9 @@
 //! exact owner allowlist entry and connects to that resolved address itself.
 use crate::{error, inspect_network, preflight, private_directory, read_manifest, Profile};
 #[cfg(target_os = "linux")]
-use crate::{broker_origin::ContainerOriginPin, inspect};
+use crate::{broker_origin::ContainerOriginPin, broker_sender::{self, ConnectorSenderPin}, inspect};
+#[cfg(not(target_os = "linux"))]
+type ConnectorSenderPin = ();
 use std::{
     collections::HashSet,
     ffi::OsString,
@@ -129,14 +131,22 @@ fn parse_connect(bytes: &[u8]) -> io::Result<String> {
     Ok(host)
 }
 
-fn read_header(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
+fn guarded_read(stream: &mut UnixStream, bytes: &mut [u8], pin: Option<&ConnectorSenderPin>) -> io::Result<usize> {
+    #[cfg(target_os = "linux")]
+    if let Some(pin) = pin { return broker_sender::read_pinned_sender(stream, bytes, pin); }
+    #[cfg(not(target_os = "linux"))]
+    let _ = pin;
+    stream.read(bytes)
+}
+
+fn read_header(stream: &mut UnixStream, pin: Option<&ConnectorSenderPin>) -> io::Result<Vec<u8>> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     let mut bytes = Vec::with_capacity(256);
     while bytes.len() < MAX_HEADER {
         if Instant::now() >= deadline { return Err(error("CONNECT header deadline exceeded")); }
         let mut one = [0];
-        match stream.read(&mut one) {
+        match guarded_read(stream, &mut one, pin) {
             Ok(1) => bytes.push(one[0]),
             Ok(0) => return Err(error("incomplete CONNECT header")),
             Ok(_) => unreachable!(),
@@ -153,11 +163,12 @@ fn read_header(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
 // worker bytes upstream. Absent SNI, known ECH framing and unrecognised TLS
 // records fail closed. Encrypted HTTP authority remains invisible to this
 // gateway, so provider compatibility needs separate production proof.
-fn read_exact_until(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant) -> io::Result<()> {
+fn read_exact_until(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant,
+    pin: Option<&ConnectorSenderPin>) -> io::Result<()> {
     let mut position = 0;
     while position < bytes.len() {
         if Instant::now() >= deadline { return Err(error("TLS ClientHello deadline exceeded")); }
-        match stream.read(&mut bytes[position..]) {
+        match guarded_read(stream, &mut bytes[position..], pin) {
             Ok(0) => return Err(error("incomplete TLS ClientHello")),
             Ok(size) => position += size,
             Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => continue,
@@ -212,7 +223,8 @@ fn client_hello_sni(mut hello: &[u8]) -> io::Result<String> {
     found.ok_or_else(|| error("TLS SNI is required"))
 }
 
-fn verified_client_hello(client: &mut UnixStream, host: &str) -> io::Result<Vec<u8>> {
+fn verified_client_hello(client: &mut UnixStream, host: &str,
+    pin: Option<&ConnectorSenderPin>) -> io::Result<Vec<u8>> {
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     let mut records = Vec::new();
     let mut handshake = Vec::new();
@@ -221,13 +233,13 @@ fn verified_client_hello(client: &mut UnixStream, host: &str) -> io::Result<Vec<
         if record_count == MAX_CLIENT_HELLO_RECORDS {
             return Err(error("TLS ClientHello record count exceeds bound"));
         }
-        let mut header = [0; 5]; read_exact_until(client, &mut header, deadline)?;
+        let mut header = [0; 5]; read_exact_until(client, &mut header, deadline, pin)?;
         record_count += 1;
         let size = u16::from_be_bytes([header[3], header[4]]) as usize;
         if header[0] != 22 || header[1] != 3 || !(1..=4).contains(&header[2]) || size == 0 || size > 16 * 1024 {
             return Err(error("expected bounded TLS handshake record"));
         }
-        let mut body = vec![0; size]; read_exact_until(client, &mut body, deadline)?;
+        let mut body = vec![0; size]; read_exact_until(client, &mut body, deadline, pin)?;
         records.extend_from_slice(&header); records.extend_from_slice(&body);
         handshake.extend_from_slice(&body);
         if handshake.len() > MAX_CLIENT_HELLO { return Err(error("TLS ClientHello exceeds bound")); }
@@ -340,16 +352,25 @@ fn gateway_lock(broker_dir: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn serve(mut client: UnixStream, hosts: &AllowedHosts, resolver: &Resolver, connector: &Connector, stop: &AtomicBool) -> io::Result<()> {
-    let request = match read_header(&mut client) {
+fn serve(mut client: UnixStream, hosts: &AllowedHosts, resolver: &Resolver, connector: &Connector,
+    stop: &AtomicBool, origin: Option<&Arc<OriginGuard>>, pin: Option<&ConnectorSenderPin>) -> io::Result<()> {
+    let request = match read_header(&mut client, pin) {
         Ok(request) => request,
-        Err(e) => { let _ = client.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"); return Err(e); }
+        Err(e) => {
+            // A guarded stream may have been handed to a different writer.
+            // Close it without returning any gateway bytes to that holder.
+            if pin.is_none() { let _ = client.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"); }
+            return Err(e);
+        }
     };
     let host = match parse_connect(&request) {
         Ok(host) if hosts.contains(&host) => host,
         Ok(_) => { let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"); return Err(error("CONNECT host not allowlisted")); }
         Err(e) => { let _ = client.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"); return Err(e); }
     };
+    // A connector can move cgroups while it writes. Recheck its pinned init
+    // scope after the bounded request and before any host DNS query.
+    if let Some(guard) = origin { guard(&client)?; }
     // Resolve the absolute name once; connect to the checked SocketAddr,
     // never hand the hostname to a connector that could re-resolve it.
     let addresses = match resolver(&host) {
@@ -362,7 +383,9 @@ fn serve(mut client: UnixStream, hosts: &AllowedHosts, resolver: &Resolver, conn
     }
     if stop.load(Ordering::Acquire) { return Err(error("gateway stopped")); }
     client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
-    let hello = verified_client_hello(&mut client, &host)?;
+    let hello = verified_client_hello(&mut client, &host, pin)?;
+    // This remains a sequential observation, not an atomic cgroup lock.
+    if let Some(guard) = origin { guard(&client)?; }
     if stop.load(Ordering::Acquire) { return Err(error("gateway stopped")); }
     // Never open even an outbound TCP connection until the worker has sent a
     // bounded hello with the same exact SNI. The 200 response precedes the
@@ -457,6 +480,13 @@ impl EgressGateway {
             fs::remove_file(&socket)?;
         }
         let listener = UnixListener::bind(&socket)?;
+        #[cfg(target_os = "linux")]
+        if origin.is_some() {
+            if let Err(err) = broker_sender::prepare_listener(&listener) {
+                let _ = fs::remove_file(&socket);
+                return Err(err);
+            }
+        }
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
         let meta = fs::metadata(&socket)?;
@@ -479,18 +509,28 @@ impl EgressGateway {
                     Err(_) => break,
                 };
                 // No CONNECT response, DNS query or upstream dial precedes
-                // the guarded connector check. A passed Unix FD still needs
-                // per-message writer attestation before hardened admission.
+                // the guarded connector check. Linux guarded reads also bind
+                // pre-dial bytes to this connector's kernel sender pidfd.
                 if origin.as_ref().is_some_and(|guard| guard(&stream).is_err()) {
                     continue;
                 }
+                #[cfg(target_os = "linux")]
+                let pin = if origin.is_some() {
+                    match broker_sender::pin_connector_sender(&stream) {
+                        Ok(pin) => Some(pin), Err(_) => continue,
+                    }
+                } else { None };
+                #[cfg(not(target_os = "linux"))]
+                let pin: Option<ConnectorSenderPin> = None;
                 if active.load(Ordering::Acquire) >= MAX_CLIENTS {
                     let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"); continue;
                 }
                 active.fetch_add(1, Ordering::AcqRel);
-                let (hosts, resolver, connector, stopping, active) = (hosts.clone(), resolver.clone(), connector.clone(), stopping.clone(), active.clone());
+                let (hosts, resolver, connector, stopping, active, origin) =
+                    (hosts.clone(), resolver.clone(), connector.clone(), stopping.clone(), active.clone(), origin.clone());
                 clients.push(thread::spawn(move || {
-                    let _ = serve(stream, &hosts, resolver.as_ref(), connector.as_ref(), &stopping);
+                    let _ = serve(stream, &hosts, resolver.as_ref(), connector.as_ref(), &stopping,
+                        origin.as_ref(), pin.as_ref());
                     active.fetch_sub(1, Ordering::AcqRel);
                 }));
                 let mut index = 0;
@@ -609,6 +649,14 @@ mod tests {
             Arc::new(move |_| Ok(addresses.clone())),
             Arc::new(move |_| { calls.fetch_add(1, Ordering::AcqRel); TcpStream::connect(upstream) })).unwrap()
     }
+    fn assert_closed_without_response(read: io::Result<usize>) {
+        match read {
+            Ok(0) => {},
+            Err(err) if matches!(err.kind(), io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe) => {},
+            other => panic!("guarded gateway did not close without a response: {other:?}"),
+        }
+    }
     #[test]
     fn guarded_gateway_rejects_connector_before_response_dns_or_dial() {
         let root = fixture_dir();
@@ -662,8 +710,125 @@ mod tests {
         client.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n").unwrap();
         assert_eq!(read_response_header(&mut client), "HTTP/1.1 200 Connection Established\r\n\r\n");
         drop(client);
-        assert_eq!(guard_calls.load(Ordering::Acquire), 1);
+        assert_eq!(guard_calls.load(Ordering::Acquire), 2);
         assert_eq!(dns_calls.load(Ordering::Acquire), 1);
+        assert_eq!(dial_calls.load(Ordering::Acquire), 0);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guarded_gateway_refuses_inherited_fd_writer_before_dns() {
+        let root = fixture_dir();
+        let dns_calls = Arc::new(AtomicUsize::new(0));
+        let dial_calls = Arc::new(AtomicUsize::new(0));
+        let gateway = EgressGateway::start_with_after_lock_and_origin(
+            root.path(), hosts(),
+            { let calls = dns_calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Ok(vec!["1.1.1.1:443".parse().unwrap()])
+            }) },
+            { let calls = dial_calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Err(error("unexpected upstream dial"))
+            }) },
+            Some(Arc::new(|_| Ok(()))), || {},
+        ).unwrap();
+        let mut client = UnixStream::connect(gateway.socket()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let request = b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n";
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            // No Rust operations after fork in the threaded test process.
+            let sent = unsafe { libc::write(client.as_raw_fd(), request.as_ptr().cast(), request.len()) };
+            unsafe { libc::_exit(if sent == request.len() as isize { 0 } else { 1 }); }
+        }
+        let mut response = [0u8; 1];
+        assert_closed_without_response(client.read(&mut response));
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert_eq!(status, 0);
+        assert_eq!(dns_calls.load(Ordering::Acquire), 0);
+        assert_eq!(dial_calls.load(Ordering::Acquire), 0);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guarded_gateway_refuses_inherited_fd_client_hello_before_dial() {
+        let root = fixture_dir();
+        let dial_calls = Arc::new(AtomicUsize::new(0));
+        let gateway = EgressGateway::start_with_after_lock_and_origin(
+            root.path(), hosts(),
+            Arc::new(|_| Ok(vec!["1.1.1.1:443".parse().unwrap()])),
+            { let calls = dial_calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Err(error("unexpected upstream dial"))
+            }) },
+            Some(Arc::new(|_| Ok(()))), || {},
+        ).unwrap();
+        let mut client = UnixStream::connect(gateway.socket()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        client.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n").unwrap();
+        assert_eq!(read_response_header(&mut client), "HTTP/1.1 200 Connection Established\r\n\r\n");
+        let hello = client_hello("api.example.test");
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            let sent = unsafe { libc::write(client.as_raw_fd(), hello.as_ptr().cast(), hello.len()) };
+            unsafe { libc::_exit(if sent == hello.len() as isize { 0 } else { 1 }); }
+        }
+        let mut response = [0u8; 1];
+        assert_closed_without_response(client.read(&mut response));
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert_eq!(status, 0);
+        assert_eq!(dial_calls.load(Ordering::Acquire), 0);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guarded_gateway_rechecks_connector_scope_before_dns() {
+        let root = fixture_dir();
+        let guard_calls = Arc::new(AtomicUsize::new(0));
+        let dns_calls = Arc::new(AtomicUsize::new(0));
+        let gateway = EgressGateway::start_with_after_lock_and_origin(
+            root.path(), hosts(),
+            { let calls = dns_calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Ok(vec!["1.1.1.1:443".parse().unwrap()])
+            }) },
+            Arc::new(|_| Err(error("unexpected upstream dial"))),
+            Some({ let calls = guard_calls.clone(); Arc::new(move |_| {
+                if calls.fetch_add(1, Ordering::AcqRel) == 0 { Ok(()) }
+                else { Err(error("connector scope changed")) }
+            }) }), || {},
+        ).unwrap();
+        let mut client = UnixStream::connect(gateway.socket()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        client.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n").unwrap();
+        let mut response = [0u8; 1];
+        assert_eq!(client.read(&mut response).unwrap(), 0);
+        assert_eq!(guard_calls.load(Ordering::Acquire), 2);
+        assert_eq!(dns_calls.load(Ordering::Acquire), 0);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guarded_gateway_rechecks_connector_scope_before_upstream_dial() {
+        let root = fixture_dir();
+        let guard_calls = Arc::new(AtomicUsize::new(0));
+        let dial_calls = Arc::new(AtomicUsize::new(0));
+        let gateway = EgressGateway::start_with_after_lock_and_origin(
+            root.path(), hosts(),
+            Arc::new(|_| Ok(vec!["1.1.1.1:443".parse().unwrap()])),
+            { let calls = dial_calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Err(error("unexpected upstream dial"))
+            }) },
+            Some({ let calls = guard_calls.clone(); Arc::new(move |_| {
+                if calls.fetch_add(1, Ordering::AcqRel) < 2 { Ok(()) }
+                else { Err(error("connector scope changed")) }
+            }) }), || {},
+        ).unwrap();
+        let mut client = UnixStream::connect(gateway.socket()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        client.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n").unwrap();
+        assert_eq!(read_response_header(&mut client), "HTTP/1.1 200 Connection Established\r\n\r\n");
+        client.write_all(&client_hello("api.example.test")).unwrap();
+        let mut response = [0u8; 1];
+        assert_closed_without_response(client.read(&mut response));
+        assert_eq!(guard_calls.load(Ordering::Acquire), 3);
         assert_eq!(dial_calls.load(Ordering::Acquire), 0);
     }
     fn request(socket: &Path, bytes: &[u8]) -> Vec<u8> {

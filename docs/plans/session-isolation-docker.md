@@ -218,7 +218,14 @@ pins the Engine-reported container-init pidfd and refuses each gateway
 connector unless its live pidfd, owner UID, PID namespace and cgroup belong
 to that container scope. Replacing or restarting the init closes admission
 for subsequent connectors. A refusal occurs before CONNECT parsing, DNS or
-upstream dialing.
+upstream dialing. Linux guarded gateways now require kernel sender pidfds and
+credentials on every CONNECT and ClientHello read, matching the pinned
+connector; an inherited socket writer is refused before DNS or dial. The
+connector's pinned container scope is rechecked after CONNECT and after the
+ClientHello. These are sequential observations. The relay after the first
+ClientHello does not bind every later writer, and an authenticated exact
+Engine/container observation, process-movement proof and real provider flow
+tests remain necessary before hardened admission.
 
 No production profile starts the gateway or injects proxy variables yet.
 The reserved hardened gateway entry point requires a ready offline manifest

@@ -14,11 +14,16 @@ const MAX_FRAME_TIME: Duration = Duration::from_secs(5);
 const RECV_TIMEOUT: Duration = Duration::from_millis(200);
 // Linux include/linux/socket.h. SCM_PIDFD is a kernel-generated, read-only cmsg.
 const SCM_PIDFD: libc::c_int = 4;
+const SO_PEERPIDFD: libc::c_int = 77;
 
 #[derive(Debug, PartialEq, Eq)]
 struct Scope { pid_namespace: PathBuf, cgroup: String }
 #[derive(Debug)]
 struct Sender { pid: libc::pid_t, uid: libc::uid_t, scope: Scope }
+
+/// The connector identity for a guarded stream. A Unix descriptor may be
+/// inherited or passed after connect, so each read must also name this writer.
+pub(crate) struct ConnectorSenderPin { pidfd: File, cred: libc::ucred }
 
 fn enable_sender_pidfds(fd: libc::c_int) -> io::Result<()> {
     let on: libc::c_int = 1;
@@ -77,6 +82,50 @@ fn live_pidfd(fd: &File) -> io::Result<()> {
         -1 => Err(io::Error::last_os_error()),
         _ => Err(error("sender exited before origin inspection")),
     }
+}
+
+pub(crate) fn pin_connector_sender(stream: &UnixStream) -> io::Result<ConnectorSenderPin> {
+    let mut cred: libc::ucred = unsafe { mem::zeroed() };
+    let mut len = mem::size_of_val(&cred) as libc::socklen_t;
+    if unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
+        (&mut cred as *mut libc::ucred).cast(), &mut len) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len as usize != mem::size_of_val(&cred) || cred.pid <= 0
+        || cred.uid != unsafe { libc::geteuid() } {
+        return Err(error("guarded connector credentials are unavailable"));
+    }
+    let mut descriptor: libc::c_int = -1;
+    len = mem::size_of_val(&descriptor) as libc::socklen_t;
+    if unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, SO_PEERPIDFD,
+        (&mut descriptor as *mut libc::c_int).cast(), &mut len) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len as usize != mem::size_of_val(&descriptor) || descriptor < 0 {
+        if descriptor >= 0 { unsafe { libc::close(descriptor); } }
+        return Err(error("guarded connector pidfd is unavailable"));
+    }
+    let pidfd = unsafe { File::from_raw_fd(descriptor) };
+    live_pidfd(&pidfd)?;
+    if pidfd_pid(&pidfd)? != cred.pid
+        || !same_pidfd(&pidfd, &open_pidfd(cred.pid)?)? {
+        return Err(error("guarded connector PID and pidfd disagree"));
+    }
+    Ok(ConnectorSenderPin { pidfd, cred })
+}
+
+/// Read one bounded stream chunk with kernel-generated pidfd and credentials.
+/// No bytes from a transferred descriptor are returned to the caller.
+pub(crate) fn read_pinned_sender(stream: &UnixStream, bytes: &mut [u8],
+    connector: &ConnectorSenderPin) -> io::Result<usize> {
+    let (count, sender, cred) = recv_sender_chunk(stream, bytes)?;
+    if !same_pidfd(&connector.pidfd, &sender)?
+        || (connector.cred.pid, connector.cred.uid, connector.cred.gid)
+            != (cred.pid, cred.uid, cred.gid) {
+        return Err(error("guarded stream writer differs from connector"));
+    }
+    live_pidfd(&connector.pidfd)?;
+    Ok(count)
 }
 
 fn scope(pid: libc::pid_t) -> io::Result<Scope> {
