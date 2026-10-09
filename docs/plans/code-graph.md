@@ -87,7 +87,10 @@ When **every listed Rust file parses**, the answer also contains a deterministic
 unparseable Rust file leaves it null. Python issues do not alter this Rust-only
 digest. This inventory covers listed Rust inputs, not ignored files, Python,
 macro expansion, or compiler semantics. Coverage counts parsed Python files and
-names Python parse or read issues in the bounded issue lists.
+names Python parse or read issues in the bounded issue lists. Rust-only skipped
+and unparseable counters let LORE verify the Rust digest even when Python input
+has errors. Older stored answers without these counters retain the conservative
+aggregate coverage check.
 File-scoped answers also carry the requested source's hash and read time, even
 when that parsed file produces no rows.
 The answer names its worktree and reports parsed files, unsupported languages,

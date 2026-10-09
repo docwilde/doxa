@@ -102,6 +102,8 @@ pub struct Coverage {
     pub enumerated_files: usize,
     pub parsed_rust_files: usize,
     pub parsed_python_files: usize,
+    pub rust_skipped_files: usize,
+    pub rust_unparseable_files: usize,
     pub unsupported_languages: BTreeMap<String, usize>,
     pub other_files: usize,
     pub unparseable: Issues,
@@ -821,14 +823,14 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
             Some("rust") => {
                 let (content, sha, read_unix_ms) = match file_bytes(&root, &path) {
                     Ok(result) => result,
-                    Err(reason) => { answer.coverage.skipped.add(&path, reason); source_facts.insert(path.clone(), SourceFact::Skipped); rust_scan_complete = false; if path == &value { answer.status = "skipped".into(); } continue; }
+                    Err(reason) => { answer.coverage.skipped.add(&path, reason); answer.coverage.rust_skipped_files += 1; source_facts.insert(path.clone(), SourceFact::Skipped); rust_scan_complete = false; if path == &value { answer.status = "skipped".into(); } continue; }
                 };
                 total = total.saturating_add(content.len() as u64);
                 if total > MAX_TOTAL_SOURCE_BYTES { return Err("Rust source scan exceeded 64 MiB; no partial answer".into()); }
                 let parsed = match parse_rust(&content, &path, &sha, read_unix_ms,
                     kind == "calls" && path == &value) {
                     Ok(result) => result,
-                    Err(reason) => { answer.coverage.unparseable.add(&path, reason); source_facts.insert(path.clone(), SourceFact::Unparseable); rust_scan_complete = false; if path == &value { answer.status = "unparseable".into(); } continue; }
+                    Err(reason) => { answer.coverage.unparseable.add(&path, reason); answer.coverage.rust_unparseable_files += 1; source_facts.insert(path.clone(), SourceFact::Unparseable); rust_scan_complete = false; if path == &value { answer.status = "unparseable".into(); } continue; }
                 };
                 source_facts.insert(path.clone(), SourceFact::Parsed { sha256: sha.clone(), read_unix_ms });
                 if path == &value && kind != "symbol" {
