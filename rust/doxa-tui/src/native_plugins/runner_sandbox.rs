@@ -117,6 +117,10 @@ impl Drop for CgroupBudget {
     fn drop(&mut self) { let _ = self.stop(); }
 }
 
+#[cfg(test)]
+#[path = "runner_sandbox_acceptance.rs"]
+mod acceptance;
+
 fn open_trusted_executable(path: &Path) -> io::Result<File> {
     if !path.is_absolute() { return Err(unavailable("plugin worker path must be absolute")); }
     let file = OpenOptions::new().read(true)

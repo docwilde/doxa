@@ -135,6 +135,9 @@ environment are unavailable; resource fixtures show memory and CPU exhaustion
 stopped by kernel limits. This host has no user-delegated cgroup subtree, so
 the aggregate limits and cgroup cleanup **cannot be exercised here**; admission
 refuses to spawn in that condition.
+An [ignored delegated-host acceptance fixture](../native-plugins.md#delegated-host-acceptance-fixture)
+now measures the actual aggregate limits, namespace boundary and cgroup
+cleanup in one bounded run. It has not yet run on a delegated host.
 
 The sandbox opens the trusted worker executable with `O_NOFOLLOW` and
 binds that descriptor into the private mount; replacing its pathname after
