@@ -23,6 +23,9 @@ const IO_TIMEOUT: Duration = Duration::from_millis(200);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CLIENT_HELLO: usize = 64 * 1024;
 
+#[cfg(target_os = "linux")]
+use std::os::{fd::{AsRawFd, FromRawFd, OwnedFd}, unix::ffi::OsStrExt};
+
 type Resolver = dyn Fn(&str) -> io::Result<Vec<SocketAddr>> + Send + Sync;
 type Connector = dyn Fn(SocketAddr) -> io::Result<TcpStream> + Send + Sync;
 
@@ -258,6 +261,33 @@ fn tunnel(mut client: UnixStream, mut upstream: TcpStream, stop: &AtomicBool) ->
     })
 }
 
+// A blocking connect can wait forever behind a full Unix listener backlog.
+// Only ECONNREFUSED proves that an owned socket inode has no listener; EAGAIN
+// and every other failure must leave the existing path untouched.
+#[cfg(target_os = "linux")]
+fn stale_socket(socket: &Path) -> io::Result<bool> {
+    let bytes = socket.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.is_empty() || bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return Err(error("invalid egress socket path"));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (target, byte) in address.sun_path.iter_mut().zip(bytes) { *target = *byte as libc::c_char; }
+    let descriptor = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
+    if descriptor < 0 { return Err(io::Error::last_os_error()); }
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    if unsafe { libc::connect(descriptor.as_raw_fd(), (&raw const address).cast(), std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t) } == 0 {
+        return Ok(false);
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ECONNREFUSED) { Ok(true) } else { Err(err) }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn stale_socket(_socket: &Path) -> io::Result<bool> {
+    Err(error("stale egress socket reclamation requires Linux"))
+}
+
 fn serve(mut client: UnixStream, hosts: &AllowedHosts, resolver: &Resolver, connector: &Connector, stop: &AtomicBool) -> io::Result<()> {
     let request = match read_header(&mut client) {
         Ok(request) => request,
@@ -334,7 +364,11 @@ impl EgressGateway {
         let socket = broker_dir.join("egress.sock");
         if let Ok(meta) = fs::symlink_metadata(&socket) {
             if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() } { return Err(error("unsafe stale egress socket")); }
-            if UnixStream::connect(&socket).is_ok() { return Err(error("egress gateway already live")); }
+            if !stale_socket(&socket)? { return Err(error("egress gateway already live")); }
+            let current = fs::symlink_metadata(&socket)?;
+            if (current.dev(), current.ino()) != (meta.dev(), meta.ino()) || !current.file_type().is_socket() {
+                return Err(error("egress socket changed during stale check"));
+            }
             fs::remove_file(&socket)?;
         }
         let listener = UnixListener::bind(&socket)?;
@@ -646,6 +680,42 @@ mod tests {
         bridge.join().unwrap();
         std::os::unix::fs::symlink("/etc/passwd", root.path().join("egress.sock")).unwrap();
         assert!(EgressGateway::start(root.path(), hosts()).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn full_live_socket_backlog_is_not_reclaimed() {
+        use std::os::fd::AsRawFd;
+        let root = fixture_dir();
+        let socket = root.path().join("egress.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let queued = UnixStream::connect(&socket).unwrap();
+        let identity = fs::metadata(&socket).unwrap();
+        let path = root.path().to_owned();
+        let (done, result) = std::sync::mpsc::channel();
+        let attempt = thread::spawn(move || { let _ = done.send(EgressGateway::start(&path, hosts()).is_err()); });
+        let bounded_result = result.recv_timeout(Duration::from_secs(2));
+        let after = fs::metadata(&socket).unwrap();
+        drop(queued);
+        drop(listener);
+        if bounded_result.is_ok() { attempt.join().unwrap(); }
+        assert_eq!(bounded_result.unwrap(), true, "live-socket check blocked behind its backlog");
+        assert_eq!((after.dev(), after.ino()), (identity.dev(), identity.ino()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refused_owned_socket_is_reclaimed() {
+        let root = fixture_dir();
+        let socket = root.path().join("egress.sock");
+        let stale = UnixListener::bind(&socket).unwrap();
+        drop(stale);
+        assert!(stale_socket(&socket).unwrap());
+        let gateway = EgressGateway::start(root.path(), hosts()).unwrap();
+        assert!(!stale_socket(gateway.socket()).unwrap());
+        drop(gateway);
+        assert!(!socket.exists());
     }
 
     #[test]
