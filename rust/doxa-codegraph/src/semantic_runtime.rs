@@ -46,7 +46,7 @@ struct AttachTransport {
 
 /// Connect with a wall-clock bound; UnixStream::connect alone has no timeout.
 #[cfg(target_os = "linux")]
-fn bounded_unix_connect(path: &Path, deadline: Instant) -> Result<UnixStream, String> {
+pub(crate) fn bounded_unix_connect(path: &Path, deadline: Instant) -> Result<UnixStream, String> {
     let bytes = path.as_os_str().as_bytes();
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     if bytes.is_empty() || bytes.len() >= address.sun_path.len() {

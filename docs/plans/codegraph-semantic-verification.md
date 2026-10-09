@@ -102,6 +102,29 @@ should the CLI gain an activatable semantic binding path. A same-UID helper,
 private directory, socket inode check, or process-PID check alone cannot
 provide this proof.
 
+An initial private broker identity protocol is now implemented in
+`semantic_broker`. It requires an unprivileged DOXA client, a root-owned
+unsymlinked Unix socket under root-owned, nonwritable parents, and kernel
+`SO_PEERCRED` UID 0 on the connected peer. Over that connection it sends a
+fresh 256-bit nonce and a SHA-256 digest of the exact producer plan, call edge,
+and displayed candidate in a 4 KiB length-bounded message. An `identity_only`
+reply must echo the protocol, nonce, and query digest exactly; extra fields,
+including a claimed binding, are rejected. Connect and exchange share a
+two-second wall-clock deadline, and the socket inode is rechecked after the
+exchange. A same-UID fake socket is rejected before the challenge. This
+authenticates only the host-managed endpoint under a root-trusted host model;
+it does not attest that a broker has launched rust-analyzer, carried LSP bytes,
+or enforced containment. The CLI never calls this seam and still reports
+`binding: unknown`. The current workstation user's Docker/sudo group access
+also prevents treating this workstation as an adversarial same-UID proof host;
+use a disposable guest with a restricted client account for positive testing.
+The [offline guest fixture](../../scripts/semantic-broker-proof/README.md)
+does exactly that: the kernel peer is root, the client is UID 1000, the root
+socket cannot be removed by that client, and the identity-only exchange
+passes. The fixture has no network device, Docker, or analyzer. It proves the
+cross-UID handshake only; the exact producer launch, stream, policy, and
+cleanup gates remain open.
+
 The library-only LSP driver exercises a bounded initialize, quiescence,
 definition, and shutdown exchange against a fixture server. It caps messages
 and output, enforces a 20-second maximum deadline, and kills the process group

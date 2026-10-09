@@ -18,6 +18,8 @@ use syn::visit::{self, Visit};
 pub mod semantic_evidence;
 pub mod semantic_producer;
 pub mod semantic_runtime;
+#[cfg(target_os = "linux")]
+mod semantic_broker;
 
 const MAX_FILES: usize = 20_000;
 const MAX_PATH_BYTES: usize = 4_096;
