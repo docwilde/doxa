@@ -177,14 +177,17 @@ with a matching host incarnation receipt, matching inventory before and after
 the read, complete pending inputs, and explicit user acknowledgment permits new
 writes. Answers carry the exact reviewed pending input; the host rejects a
 same-ID changed question or options before acting.
-A changed hub boot or unreadable marker remains blocked; neither can prove the
-earlier delivery outcome from the volatile hub state.
+A process restart or unreadable marker remains blocked because the earlier
+delivery outcome cannot be proven from the volatile hub state.
 An inventory read may issue a new boot nonce once the bounded Hub ledger is
 three-quarters full and at least one-quarter can be safely reclaimed. It
 discards only terminal or proven-undelivered records. Strict POST and fence
 handling do not rotate the nonce. Late POSTs carrying an older nonce are
-rejected. A marker whose old record was discarded receives an unsafe old-boot
-result and still requires out-of-app review.
+rejected. The Hub remembers up to 16 retired nonces in the same process. An
+absent record under a remembered nonce has a safe fence because every unsettled
+delivery was retained; compact terminal ID entries keep completed writes from
+being mistaken for absence after their scope is discarded. Older nonces and
+nonces from a previous process remain unsafe and require out-of-app review.
 The host lease never leaves the connector.
 
 Keep session IDs, cursors, unsent drafts, the body-free uncertain-write marker,
