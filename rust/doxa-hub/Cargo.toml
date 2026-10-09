@@ -8,6 +8,7 @@ license = "AGPL-3.0-only"
 [dependencies]
 doxa-peers = { path = "../doxa-peers" }
 serde_json = "1"
+sha2 = "0.10"
 libc = "0.2"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

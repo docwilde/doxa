@@ -1,5 +1,8 @@
 //! Owner-scoped, volatile command broker. Uncertain commands are never replayed.
+//! Android fences linearize with enqueue/take under the Hub mutex. A boot change
+//! cannot prove an old delivered command finished, so old-boot fences stay unsafe.
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{collections::{HashMap, VecDeque}, time::{Duration, Instant}};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
@@ -10,6 +13,9 @@ const COMMAND_TTL: Duration = Duration::from_secs(60);
 const MAX_SESSIONS: usize = 64;
 const MAX_COMMANDS: usize = 8;
 const MAX_RETAINED_COMMANDS: usize = 512;
+// Never evict a fenced request during one Hub boot. Exhaustion refuses new
+// Android writes/fences rather than silently losing the delivery barrier.
+const MAX_ANDROID_RECORDS: usize = 8192;
 const MAX_EVENTS: usize = 512;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_EVENT_BYTES: usize = 32 * 1024 * 1024;
@@ -37,9 +43,16 @@ fn same_secret(actual:&str, supplied:&str)->bool {
 struct Host { lease:String, expires:Instant, sessions:Vec<Value>, pending:VecDeque<String> }
 struct AndroidSubscription { token:String, host:String, session:String, incarnation:String, tag:String, expires:Instant }
 struct Command { owner:String, host:String, session:String, op:String, payload:Value,
-    state:&'static str, result:Option<Value>, created:Instant }
+    state:&'static str, result:Option<Value>, created:Instant, android_request:Option<String> }
+struct AndroidRecord {
+    host:String, session:String, op:String, incarnation:String,
+    digest:Option<[u8;32]>, command_id:Option<String>, state:AndroidState, fenced:bool,
+}
+#[derive(Clone,Copy,PartialEq,Eq)]
+enum AndroidState { Absent, Queued, Cancelled, Delivered, ExpiredUndelivered, Accepted, Refused, OldBoot }
 pub struct Hub { hosts:HashMap<(String,String),Host>, commands:HashMap<String,Command>,
     requests:HashMap<(String,String),String>,
+    boot:String, android_records:HashMap<(String,String),AndroidRecord>,
     events:HashMap<(String,String,String),VecDeque<Value>>,
     event_order:VecDeque<((String,String,String),u64,usize)>,event_bytes:usize,
     subscriptions:HashMap<String,Vec<Subscription>>,
@@ -48,7 +61,8 @@ pub struct Hub { hosts:HashMap<(String,String),Host>, commands:HashMap<String,Co
     pending_android:VecDeque<(String,String,String,String,PushKind)>,
     last_push:HashMap<(String,String,String,PushKind),Instant> }
 impl Hub {
-    pub fn new()->Self{Self{hosts:HashMap::new(),commands:HashMap::new(),requests:HashMap::new(),events:HashMap::new(),event_order:VecDeque::new(),event_bytes:0,
+    pub fn new()->Self{Self{hosts:HashMap::new(),commands:HashMap::new(),requests:HashMap::new(),
+        boot:Uuid::new_v4().simple().to_string(),android_records:HashMap::new(),events:HashMap::new(),event_order:VecDeque::new(),event_bytes:0,
         subscriptions:HashMap::new(),pending_push:VecDeque::new(),android:HashMap::new(),pending_android:VecDeque::new(),last_push:HashMap::new()}}
     fn reap(&mut self){
         let now=Instant::now();
@@ -56,10 +70,19 @@ impl Hub {
         self.hosts.retain(|_,host|host.expires>now);
         for command in self.commands.values_mut(){
             if now.duration_since(command.created)>=COMMAND_TTL && !matches!(command.state,"accepted"|"refused") {
+                if command.state=="delivered" && command.android_request.is_some(){continue;}
+                if command.state=="queued" {
+                    if let Some(request)=command.android_request.as_ref() {
+                        if let Some(record)=self.android_records.get_mut(&(command.owner.clone(),request.clone())) {
+                            record.state=AndroidState::ExpiredUndelivered;
+                        }
+                    }
+                }
                 command.state="expired";
             }
         }
-        self.commands.retain(|_,command|now.duration_since(command.created)<COMMAND_TTL*2);
+        self.commands.retain(|_,command|now.duration_since(command.created)<COMMAND_TTL*2
+            || (command.state=="delivered" && command.android_request.is_some()));
         self.requests.retain(|_,id|self.commands.contains_key(id));
         for entries in self.android.values_mut() { entries.retain(|entry| entry.expires > now); }
         self.last_push.retain(|_,sent|now.duration_since(*sent)<Duration::from_secs(3600));
@@ -155,7 +178,17 @@ impl Hub {
             self.event_bytes=self.event_order.iter().map(|(_,_,bytes)|bytes).sum();
             for command in self.commands.values_mut(){
                 if command.owner==owner&&command.host==id&&changed.contains(&command.session)
-                    && matches!(command.state,"queued"|"delivered"){command.state="expired";}
+                    && matches!(command.state,"queued"|"delivered"){
+                    if command.state=="delivered" && command.android_request.is_some(){continue;}
+                    if command.state=="queued" {
+                        if let Some(request)=command.android_request.as_ref() {
+                            if let Some(record)=self.android_records.get_mut(&(owner.to_owned(),request.clone())) {
+                                record.state=AndroidState::ExpiredUndelivered;
+                            }
+                        }
+                    }
+                    command.state="expired";
+                }
             }
             return Ok(json!({"host_id":id,"lease":secret,"expires_in":LEASE.as_secs()}));
         }
@@ -171,7 +204,7 @@ impl Hub {
     }
     pub fn list(&mut self,owner:&str)->Value{
         self.reap();
-        json!({"owner":owner,"sessions":self.hosts.iter().filter(|((login,_),_)|login==owner).flat_map(|((_,host_id),host)|{
+        json!({"owner":owner,"hub_boot":self.boot,"sessions":self.hosts.iter().filter(|((login,_),_)|login==owner).flat_map(|((_,host_id),host)|{
             host.sessions.iter().map(move |session|json!({"id":format!("{}~{}",host_id,session["id"].as_str().unwrap_or("")),
                 "host_id":host_id,"session_id":session["id"],"title":session["title"],
                 "engine":session["engine"],"model":session["model"],
@@ -179,10 +212,20 @@ impl Hub {
         }).collect::<Vec<_>>()})
     }
     pub fn enqueue(&mut self,owner:&str,host_id:&str,session_id:&str,op:&str,payload:Value)->Result<Value,&'static str>{
+        self.enqueue_inner(owner,host_id,session_id,op,payload,false)
+    }
+    fn enqueue_inner(&mut self,owner:&str,host_id:&str,session_id:&str,op:&str,payload:Value,android:bool)->Result<Value,&'static str>{
         self.reap();
         if !matches!(op,"prompt"|"answer"|"transcript"){return Err("unsupported command");}
         let request_id=payload["request_id"].as_str().filter(|id|valid_id(id)).map(str::to_owned);
         if payload.get("request_id").is_some()&&request_id.is_none(){return Err("invalid request id");}
+        if !android && (payload.get("android_fence_v1").is_some()
+            || request_id.as_deref().and_then(Self::android_boot).is_some()) {
+            return Err("Android request id requires Android route");
+        }
+        if request_id.as_ref().is_some_and(|id|self.android_records.get(&(owner.to_owned(),id.clone())).is_some_and(|record|record.fenced)) {
+            return Err("request id fenced");
+        }
         if let Some(id)=request_id.as_ref().and_then(|id|self.requests.get(&(owner.to_owned(),id.clone()))){
             let command=self.commands.get(id).ok_or("request result expired")?;
             if command.host!=host_id||command.session!=session_id||command.op!=op||command.payload!=payload{
@@ -200,9 +243,89 @@ impl Hub {
         let id=Uuid::new_v4().to_string();
         host.pending.push_back(id.clone());
         self.commands.insert(id.clone(),Command{owner:owner.into(),host:host_id.into(),session:session_id.into(),
-            op:op.into(),payload,state:"queued",result:None,created:Instant::now()});
+            op:op.into(),payload,state:"queued",result:None,created:Instant::now(),android_request:None});
         if let Some(request_id)=request_id{self.requests.insert((owner.to_owned(),request_id),id.clone());}
         Ok(json!({"command_id":id,"status":"queued"}))
+    }
+    fn android_boot(request_id:&str)->Option<&str>{
+        let (boot,suffix)=request_id.split_once('-')?;
+        if boot.len()!=32 || !boot.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()) {return None;}
+        let uuid=Uuid::parse_str(suffix).ok()?;
+        (uuid.to_string()==suffix).then_some(boot)
+    }
+    pub fn enqueue_android(&mut self,owner:&str,host_id:&str,session_id:&str,op:&str,payload:Value)->Result<Value,&'static str>{
+        self.reap();
+        if !matches!(op,"prompt"|"answer"){return Err("unsupported Android command");}
+        let request_id=payload["request_id"].as_str().ok_or("Android request id required")?.to_owned();
+        let boot=payload["hub_boot"].as_str().ok_or("Android hub boot required")?;
+        let incarnation=payload["incarnation"].as_str().filter(|s|!s.is_empty()&&s.len()<=64)
+            .ok_or("Android session incarnation required")?.to_owned();
+        if Self::android_boot(&request_id)!=Some(boot) || boot!=self.boot {return Err("Android hub boot changed");}
+        if !valid_id(&request_id){return Err("invalid Android request id");}
+        let host=self.hosts.get(&(owner.to_owned(),host_id.to_owned())).ok_or("host offline")?;
+        if !host.sessions.iter().any(|session|session["id"]==session_id && session["incarnation"]==incarnation){
+            return Err("session incarnation changed");
+        }
+        let digest:[u8;32]=Sha256::digest(serde_json::to_vec(&payload).map_err(|_|"invalid Android payload")?).into();
+        let key=(owner.to_owned(),request_id.clone());
+        if let Some(record)=self.android_records.get(&key) {
+            if record.fenced {return Err("request id fenced");}
+            if record.host!=host_id||record.session!=session_id||record.op!=op||record.incarnation!=incarnation||record.digest!=Some(digest) {
+                return Err("request id was used for different content");
+            }
+            return Ok(json!({"command_id":record.command_id,"status":match record.state {
+                AndroidState::Queued=>"queued",AndroidState::Delivered=>"delivered",
+                AndroidState::Accepted=>"accepted",AndroidState::Refused=>"refused",
+                AndroidState::ExpiredUndelivered|AndroidState::Cancelled=>"expired",_=>"expired"}}));
+        }
+        if self.android_records.len()>=MAX_ANDROID_RECORDS{return Err("Android request ledger full");}
+        let mut payload=payload;
+        payload["android_fence_v1"]=json!(true);
+        let result=self.enqueue_inner(owner,host_id,session_id,op,payload,true)?;
+        let id=result["command_id"].as_str().ok_or("command id missing")?.to_owned();
+        self.commands.get_mut(&id).ok_or("command missing")?.android_request=Some(request_id.clone());
+        self.android_records.insert(key,AndroidRecord{host:host_id.into(),session:session_id.into(),op:op.into(),incarnation,
+            digest:Some(digest),command_id:Some(id),state:AndroidState::Queued,fenced:false});
+        Ok(result)
+    }
+    pub fn fence_android(&mut self,owner:&str,request_id:&str,target:&str,op:&str,incarnation:&str)->Result<Value,&'static str>{
+        self.reap();
+        if !matches!(op,"prompt"|"answer") || incarnation.is_empty()||incarnation.len()>64 {return Err("invalid Android fence scope");}
+        let (host,session)=target.split_once('~').filter(|(h,s)|valid_id(h)&&valid_id(s)).ok_or("invalid session target")?;
+        let boot=Self::android_boot(request_id).ok_or("invalid Android request id")?;
+        if !valid_id(request_id){return Err("invalid Android request id");}
+        let key=(owner.to_owned(),request_id.to_owned());
+        if let Some(record)=self.android_records.get(&key) {
+            if record.host!=host||record.session!=session||record.op!=op||record.incarnation!=incarnation {
+                return Err("Android fence scope differs");
+            }
+        } else {
+            if self.android_records.len()>=MAX_ANDROID_RECORDS{return Err("Android request ledger full");}
+            self.android_records.insert(key.clone(),AndroidRecord{host:host.into(),session:session.into(),op:op.into(),incarnation:incarnation.into(),
+                digest:None,command_id:None,state:if boot==self.boot{AndroidState::Absent}else{AndroidState::OldBoot},fenced:true});
+        }
+        let record=self.android_records.get_mut(&key).expect("inserted");
+        record.fenced=true;
+        if record.state==AndroidState::Queued {
+            let id=record.command_id.as_ref().ok_or("Android command missing")?;
+            let command=self.commands.get_mut(id).ok_or("Android command missing")?;
+            if command.state!="queued" {return Err("Android command delivery uncertain");}
+            command.state="expired";
+            record.state=AndroidState::Cancelled;
+        }
+        let (status,safe,terminal)=match record.state {
+            AndroidState::Absent=>("absent_fenced",true,None),
+            AndroidState::Cancelled=>("queued_cancelled",true,None),
+            AndroidState::ExpiredUndelivered=>("expired_undelivered",true,None),
+            AndroidState::Delivered=>("delivered_unsettled",false,None),
+            AndroidState::Accepted=>("terminal",true,Some("accepted")),
+            AndroidState::Refused=>("terminal",true,Some("refused")),
+            AndroidState::OldBoot=>("unknown_old_boot",false,None),
+            AndroidState::Queued=>unreachable!(),
+        };
+        let mut response=json!({"status":status,"safe_to_clear":safe});
+        if let Some(terminal)=terminal {response["command_status"]=json!(terminal);}
+        Ok(response)
     }
     pub fn take(&mut self,owner:&str,host_id:&str,lease:&str)->Result<Value,&'static str>{
         self.reap(); self.host(owner,host_id,lease)?;
@@ -212,7 +335,13 @@ impl Hub {
             if let Some(command)=self.commands.get_mut(&id){
                 if command.state!="queued"{continue;}
                 command.state="delivered";
+                if let Some(request)=command.android_request.as_ref() {
+                    if let Some(record)=self.android_records.get_mut(&(owner.to_owned(),request.clone())) {
+                        record.state=AndroidState::Delivered;
+                    }
+                }
                 result.push(json!({"command_id":id,"session_id":command.session,"op":command.op,"payload":command.payload}));
+                if command.android_request.is_some(){command.payload=Value::Null;}
             }
         }
         Ok(json!({"commands":result}))
@@ -222,6 +351,11 @@ impl Hub {
         let command=self.commands.get_mut(id).ok_or("command expired")?;
         if command.owner!=owner||command.host!=host_id||command.state!="delivered"{return Err("command not pending on this host");}
         command.state=if result["ok"]==true{"accepted"}else{"refused"};command.result=Some(result);
+        if let Some(request)=command.android_request.as_ref() {
+            if let Some(record)=self.android_records.get_mut(&(owner.to_owned(),request.clone())) {
+                record.state=if command.state=="accepted"{AndroidState::Accepted}else{AndroidState::Refused};
+            }
+        }
         Ok(json!({"status":command.state}))
     }
     pub fn result(&mut self,owner:&str,id:&str)->Result<Value,&'static str>{
@@ -443,5 +577,87 @@ impl Hub {
         assert_eq!(first["command_id"],again["command_id"]);
         assert!(hub.enqueue("user","host","session","prompt",json!({"text":"different","request_id":"client-1"})).is_err());
         assert_eq!(hub.take("user","host",&lease).unwrap()["commands"].as_array().unwrap().len(),1);
+    }
+    fn android_id(hub:&Hub)->String {format!("{}-{}",hub.boot,Uuid::new_v4())}
+    fn android_payload(hub:&Hub,id:&str)->Value {
+        json!({"text":"once","request_id":id,"hub_boot":hub.boot,"incarnation":"v1","issued_at":1})
+    }
+    fn android_host(hub:&mut Hub,encrypted:bool)->String {
+        hub.register("user","host",bounded_sessions(&json!([{"id":"session","incarnation":"v1","encrypted":encrypted}])).unwrap(),None)
+            .unwrap()["lease"].as_str().unwrap().to_owned()
+    }
+    #[test]fn android_fence_linearizes_absent_queued_and_take_for_plain_and_sealed(){
+        for encrypted in [false,true] {
+            let mut hub=Hub::new();let lease=android_host(&mut hub,encrypted);
+            let absent=android_id(&hub);
+            assert!(hub.enqueue("user","host","session","prompt",json!({"request_id":absent,"text":"legacy before fence"})).is_err());
+            let reply=hub.fence_android("user",&absent,"host~session","prompt","v1").unwrap();
+            assert_eq!(reply,json!({"status":"absent_fenced","safe_to_clear":true}));
+            assert_eq!(hub.fence_android("user",&absent,"host~session","prompt","v1").unwrap(),reply);
+            assert!(hub.enqueue_android("user","host","session","prompt",android_payload(&hub,&absent)).is_err());
+            assert!(hub.enqueue("user","host","session","prompt",json!({"request_id":absent,"text":"legacy"})).is_err());
+            let id=android_id(&hub);
+            let mut payload=android_payload(&hub,&id);
+            if encrypted {payload.as_object_mut().unwrap().remove("text");payload["sealed"]=json!({"nonce":"opaque"});}
+            let first=hub.enqueue_android("user","host","session","prompt",payload.clone()).unwrap();
+            assert_eq!(hub.enqueue_android("user","host","session","prompt",payload.clone()).unwrap(),first);
+            assert!(hub.enqueue_android("user","host","session","prompt",json!({"request_id":id,"hub_boot":hub.boot,"incarnation":"v1","text":"changed"})).is_err());
+            let reply=hub.fence_android("user",&id,"host~session","prompt","v1").unwrap();
+            assert_eq!(reply,json!({"status":"queued_cancelled","safe_to_clear":true}));
+            assert_eq!(hub.fence_android("user",&id,"host~session","prompt","v1").unwrap(),reply);
+            assert!(hub.enqueue_android("user","host","session","prompt",payload).is_err());
+            assert!(hub.enqueue("user","host","session","prompt",json!({"request_id":id,"text":"legacy"})).is_err());
+            assert!(hub.take("user","host",&lease).unwrap()["commands"].as_array().unwrap().is_empty());
+        }
+    }
+    #[test]fn delivered_android_command_stays_unsettled_through_ttl_incarnation_and_lease_expiry(){
+        let mut hub=Hub::new();let lease=android_host(&mut hub,false);let id=android_id(&hub);
+        let payload=android_payload(&hub,&id);
+        let command=hub.enqueue_android("user","host","session","prompt",payload).unwrap();
+        let command_id=command["command_id"].as_str().unwrap().to_owned();
+        assert_eq!(hub.take("user","host",&lease).unwrap()["commands"][0]["command_id"],command_id);
+        hub.commands.get_mut(&command_id).unwrap().created=Instant::now()-COMMAND_TTL*3;
+        hub.reap();
+        assert_eq!(hub.commands[&command_id].state,"delivered");
+        let next=bounded_sessions(&json!([{"id":"session","incarnation":"v2"}])).unwrap();
+        hub.register("user","host",next,Some(&lease)).unwrap();
+        assert_eq!(hub.commands[&command_id].state,"delivered");
+        let reply=hub.fence_android("user",&id,"host~session","prompt","v1").unwrap();
+        assert_eq!(reply,json!({"status":"delivered_unsettled","safe_to_clear":false}));
+        hub.hosts.get_mut(&("user".into(),"host".into())).unwrap().expires=Instant::now()-Duration::from_secs(1);
+        hub.reap();
+        assert_eq!(hub.fence_android("user",&id,"host~session","prompt","v1").unwrap(),reply);
+        assert!(hub.commands.contains_key(&command_id));
+        let new_lease=hub.register("user","host",bounded_sessions(&json!([{"id":"session","incarnation":"v2"}])).unwrap(),None)
+            .unwrap()["lease"].as_str().unwrap().to_owned();
+        hub.complete("user","host",&new_lease,&command_id,json!({"ok":true})).unwrap();
+        assert_eq!(hub.fence_android("user",&id,"host~session","prompt","v1").unwrap(),
+            json!({"status":"terminal","safe_to_clear":true,"command_status":"accepted"}));
+    }
+    #[test]fn queued_expiry_and_old_boot_never_masquerade_as_absence(){
+        let mut hub=Hub::new();android_host(&mut hub,false);let id=android_id(&hub);
+        let payload=android_payload(&hub,&id);
+        let command=hub.enqueue_android("user","host","session","prompt",payload.clone()).unwrap();
+        let command_id=command["command_id"].as_str().unwrap();
+        hub.commands.get_mut(command_id).unwrap().created=Instant::now()-COMMAND_TTL-Duration::from_secs(1);
+        assert_eq!(hub.fence_android("user",&id,"host~session","prompt","v1").unwrap(),
+            json!({"status":"expired_undelivered","safe_to_clear":true}));
+        assert!(hub.enqueue_android("user","host","session","prompt",payload.clone()).is_err());
+        let mut restarted=Hub::new();android_host(&mut restarted,false);
+        assert_ne!(hub.boot,restarted.boot);
+        assert_eq!(restarted.fence_android("user",&id,"host~session","prompt","v1").unwrap(),
+            json!({"status":"unknown_old_boot","safe_to_clear":false}));
+        assert!(restarted.enqueue_android("user","host","session","prompt",payload).is_err());
+        assert!(restarted.enqueue("user","host","session","prompt",json!({"request_id":id,"text":"legacy"})).is_err());
+    }
+    #[test]fn android_write_requires_current_boot_and_exact_incarnation(){
+        let mut hub=Hub::new();android_host(&mut hub,true);let id=android_id(&hub);
+        let mut payload=android_payload(&hub,&id);payload.as_object_mut().unwrap().remove("text");payload["sealed"]=json!({"opaque":true});
+        assert!(hub.enqueue_android("user","host","session","prompt",payload.clone()).is_ok());
+        let mut stale=payload.clone();stale["incarnation"]=json!("v2");
+        assert!(hub.enqueue_android("user","host","session","prompt",stale).is_err());
+        let mut wrong_boot=payload;wrong_boot["hub_boot"]=json!(Uuid::new_v4().simple().to_string());
+        assert!(hub.enqueue_android("user","host","session","prompt",wrong_boot).is_err());
+        assert!(hub.fence_android("user",&id,"host~session","answer","v1").is_err());
     }
 }
