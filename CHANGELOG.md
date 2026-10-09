@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.27 — 2026-10-09
+
+**Code graph**
+
+- Add **`python_scan_input_sha256`** for complete Git-listed Python scans. Reviewed LORE snapshots recheck the inventory and flag edits, additions, removals, and unreadable inputs.
+- Show hashed local Python module layout candidates when unambiguous. Runtime import targets and bindings remain unknown.
+- Add a disabled Docker observation seam for rust-analyzer image, container, and cgroup checks. The CLI still reports unknown; no analyzer launch or binding promotion is enabled.
+
+**Plugin isolation**
+
+- Add an ignored delegated-cgroup acceptance fixture for aggregate limits, namespace isolation, and cleanup. It has not run on a delegated host; TUI activation remains closed.
+
 ## 2.0.0-beta.26 — 2026-10-09
 
 **Runtime verification**
