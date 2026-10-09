@@ -68,19 +68,30 @@ export TMPDIR=/path/on/real/disk
 python3 scripts/probe_docker_hard_quota.py "$fixture" \
   --docker-host "unix:///run/user/$(id -u)/doxa-test-docker.sock" \
   --image "sha256:PINNED_CONTENT_ID" \
-  --max-write-mib 128 --acknowledge-fixture-writes
+  --max-write-mib 128 --aggregate-restart --acknowledge-fixture-writes
 ```
 
 The probe checks the read-only prerequisites again, refuses nonempty bind
 sources, uses an empty Docker CLI config, and starts a credential-free,
-network-none container with only the three fixture binds. It writes and
-`fsync`s at most 128 MiB per bind, deleting each probe file before the next.
-Only positive bounded writes ending in `EDQUOT` on **all three** binds produce a
-fixture proof. `ENOSPC`, no error before the cap, an unexpected receipt, a
-non-rootless Engine, and low host free space all refuse the proof. It removes
-only its random test container. The JSON still sets
-`admissible_as_hard_quota` to `false`: it is evidence for this fixture at this
-moment, not runtime admission or proof across restart/remount. No quota is
+network-none container with only the three fixture binds. Each solo write
+attempt writes and `fsync`s at most 128 MiB, deleting its probe file before
+the next bind is tested.
+Only positive bounded writes ending in `EDQUOT` on **all three** binds produce
+the initial fixture proof. With `--aggregate-restart`, the probe then creates
+one inspected `network=none` container, keeps positive writes in checkout and
+home, and fills cache until `EDQUOT`. Cache must hit its limit earlier than its
+solo baseline by approximately the two retained writes. The probe stops and
+restarts that same container, checks all three file sizes, and requires another
+bounded `EDQUOT` when appending to cache. It removes its random container and
+marker files after a successful stop; if removal is uncertain, it leaves the
+markers for operator review. It does **not** restart the Docker Engine or
+remount the filesystem.
+
+`ENOSPC`, no error before the cap, an unexpected receipt, a changed mount,
+a non-rootless Engine, or low host free space refuses the proof. The JSON
+reports `aggregate_restart_verified_for_fixture` separately and always sets
+`admissible_as_hard_quota` to `false`. These are observations for this disposable
+fixture, not runtime admission or a broker-path/remount proof. No quota is
 configured or changed by the probe. The host's ordinary Docker context and
 credential helpers are not used.
 

@@ -216,7 +216,10 @@ authorize it; even a changed receipt flag is refused until a live kernel
 limit/restart verifier exists. A Linux XFS read-only verifier checks the four
 exact session directories, bounded existing descendants in the three data
 binds, and the effective project hard limit through open descriptors. A live
-broker-path audit, EDQUOT and restart/remount proof remain open.
+broker-path audit and production EDQUOT/restart/remount proof remain open. The
+opt-in disposable quota fixture can compare aggregate writes through all three
+binds and recheck EDQUOT after restarting the same container; it does not
+restart the Engine, remount the source or produce a production admission token.
 `docker-hardened` is explicitly refused at
 profile parsing, with no fallback. A credential-free rootless smoke can test
 Python `HTTPS_PROXY` streaming, denied second-host access and failed direct
