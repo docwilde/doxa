@@ -27,6 +27,7 @@ const MAX_TOTAL_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PYTHON_NODES: usize = 200_000;
 const MAX_PYTHON_SCOPE_DEPTH: usize = 128;
 const MAX_PYTHON_PARSE_TIME: Duration = Duration::from_secs(2);
+const MAX_PYTHON_SCAN_TIME: Duration = Duration::from_secs(10);
 const MAX_ROWS: usize = 100;
 const MAX_ISSUE_EXAMPLES: usize = 20;
 const MAX_REPLY_BYTES: usize = 64 * 1024;
@@ -600,17 +601,18 @@ fn python_imports(node: tree_sitter::Node<'_>, source: &str, file: &str, sha: &s
     Ok(())
 }
 
-fn parse_python(content: &str, file: &str, sha: &str, read_unix_ms: u128)
+fn parse_python(content: &str, file: &str, sha: &str, read_unix_ms: u128, budget: Duration)
     -> Result<(Vec<Row>, Vec<Row>), String> {
+    if budget.is_zero() { return Err("Python parse deadline exceeded".into()); }
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_python::LANGUAGE.into())
         .map_err(|e| format!("Python parser setup: {e}"))?;
     let started = Instant::now();
     let mut read = |offset, _: tree_sitter::Point| content.as_bytes().get(offset..).unwrap_or_default();
-    let mut out_of_time = |_: &tree_sitter::ParseState| started.elapsed() >= MAX_PYTHON_PARSE_TIME;
+    let mut out_of_time = |_: &tree_sitter::ParseState| started.elapsed() >= budget.min(MAX_PYTHON_PARSE_TIME);
     let tree = parser.parse_with_options(&mut read, None,
         Some(tree_sitter::ParseOptions::new().progress_callback(&mut out_of_time)))
-        .ok_or("Python parse exceeded two-second limit")?;
+        .ok_or("Python parse deadline exceeded")?;
     if tree.root_node().has_error() {
         return Err("Python syntax error".into());
     }
@@ -620,6 +622,9 @@ fn parse_python(content: &str, file: &str, sha: &str, read_unix_ms: u128)
     let mut visited = 0usize;
     while let Some((node, scope, in_class, depth)) = stack.pop() {
         visited += 1;
+        if visited % 256 == 0 && started.elapsed() >= budget {
+            return Err("Python parse deadline exceeded".into());
+        }
         if visited > MAX_PYTHON_NODES {
             return Err("Python syntax tree exceeds 200,000 nodes".into());
         }
@@ -805,6 +810,7 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
     answer.coverage.enumerated_files = paths.len();
     let mut total = 0u64;
     let mut python_total = 0u64;
+    let mut python_scan_started = None;
     let mut rust_scan_complete = true;
     let mut candidates: BTreeMap<String, Vec<Row>> = BTreeMap::new();
     let mut candidate_count = 0usize;
@@ -866,6 +872,9 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                 }
             }
             Some("python") => {
+                let started = *python_scan_started.get_or_insert_with(Instant::now);
+                let remaining = MAX_PYTHON_SCAN_TIME.saturating_sub(started.elapsed());
+                if remaining.is_zero() { return Err("Python source scan exceeded ten-second limit; no partial answer".into()); }
                 let (content, sha, read_unix_ms) = match file_bytes(&root, path) {
                     Ok(result) => result,
                     Err(reason) => {
@@ -878,9 +887,12 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                 if python_total > MAX_TOTAL_SOURCE_BYTES {
                     return Err("Python source scan exceeded 64 MiB; no partial answer".into());
                 }
-                let (symbols, imports) = match parse_python(&content, path, &sha, read_unix_ms) {
+                let (symbols, imports) = match parse_python(&content, path, &sha, read_unix_ms, remaining) {
                     Ok(result) => result,
                     Err(reason) => {
+                        if started.elapsed() >= MAX_PYTHON_SCAN_TIME {
+                            return Err("Python source scan exceeded ten-second limit; no partial answer".into());
+                        }
                         answer.coverage.unparseable.add(path, reason);
                         if path == &value { answer.status = "unparseable".into(); }
                         continue;

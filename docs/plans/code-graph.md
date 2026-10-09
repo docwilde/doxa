@@ -95,8 +95,9 @@ syntax errors, skipped files, and unsupported syntax. Same-name definitions
 remain separate candidates. A no-hit answer names a live-search fallback.
 
 Work is bounded: at most 20,000 files, 1 MiB per Rust or Python file, 64 MiB
-total source per language, and two seconds of parsing, 200,000 syntax nodes,
-and 128 nested definition levels per Python file. Results hold at most 100 rows,
+total source per language, ten seconds for the Python scan, and two seconds of
+parsing, 200,000 syntax nodes, and 128 nested definition levels per Python file.
+Results hold at most 100 rows,
 call edges, or module declarations, 10,000 call sites in the requested Rust file,
 100,000 candidate declarations, and a 64 KiB reply. The answer counts omitted
 rows, edges, and per-edge candidates.
