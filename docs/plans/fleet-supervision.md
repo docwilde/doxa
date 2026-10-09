@@ -10,7 +10,8 @@ labeled-message holdout scorer are available. A consented, human-labeled
 real-message corpus and measured real-judge gate remain open. Automatic trusted
 test-evidence collection remains open. A narrow operator-triggered offline
 Docker test receipt is available when the charter freezes a recipe; it never
-releases a dependency.
+releases a dependency. Beta.16 adds an opt-in real-rootless transport smoke
+for that offline receipt path; full live fleet coordination remains unverified.
 The native TUI now reviews a predecessor's host evidence and
 releases its dependent workers after full read-through and two explicit keys;
 see the [operator procedure](../fleet-supervision.md).

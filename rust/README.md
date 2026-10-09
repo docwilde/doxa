@@ -74,23 +74,29 @@ completed-unseen (`new`). Incomplete or stale LORE summaries add no rank.
 waits for activity to settle, and pauses while the pointer or keyboard is in
 the rail. Session rows within each group never move.
 
+Project headings get stable palette hues only after the background probe
+verifies a unique project root; `[project_colours]` can override an exact root.
+The active row of a multi-tab pane shows its tab count and strongest urgency,
+including the number and short title of a hidden tab that needs attention.
+Unknown roots and conflicting labels keep the neutral style.
+
 ## Review and permissions
 
 Codex's permission chip offers `on-request`, `auto`, and `full-access`. `on-request` reviews protected commands, file changes, and profile requests inline. `auto` keeps the Codex sandbox; `full-access` disables it. The choice applies to the idle session's next turn and restores with that session. DOXA peer and LORE tools retain separate review in every mode. DeepSeek and GLM have no provider permission mode; their peer and LORE calls require individual approval. [Engine capabilities](../docs/engine-capabilities.md#review-and-accounting).
 
 Permission answers bind to an exact pending request. Complete summaries must be read before full approval; changed or stale requests cannot inherit an answer. Secret-input requests wait for a private masked-input interface. Ctrl+Delete asks before stopping a daemon and removing its verified DOXA transcript; provider archives remain separate. Diff hunk rejection checks the current patch and staged state again before applying it.
 
-Links, Markdown, reasoning, and individual tool calls render in the transcript. Standalone local images inside the session workspace have bounded previews. Mermaid fences can render through an explicitly configured local sandboxed renderer; source remains visible otherwise. `doxa doctor` checks its path policy and runs a bounded PNG smoke render, but does not certify Mermaid CLI fidelity. [Image and diagram limits](../docs/terminal-images.md) explain both paths. Ctrl+click opens HTTP(S) links. Review panes and tool output have bounded sizes. Search uses scrubbed indexed excerpts and bounded fallback scans. Unverified external entries cannot become resumable sessions.
+Links, Markdown, reasoning, and individual tool calls render in the transcript. Standalone local images inside the session workspace have bounded previews. Mermaid fences can render through an explicitly configured local sandboxed renderer; source remains visible otherwise. `doxa doctor` and **Settings → Mermaid** check its path policy and run a bounded PNG smoke render, but do not certify Mermaid CLI fidelity. [Image and diagram limits](../docs/terminal-images.md) explain both paths. Ctrl+click opens HTTP(S) links. Review panes and tool output have bounded sizes. Search uses scrubbed indexed excerpts and bounded fallback scans. Unverified external entries cannot become resumable sessions.
 
 ## Memory and context
 
 The memory chip browses user and project facts; the belief browser supports evidence review, notes, accept, and reject. `/pending` opens proposals for the current project and global store. Mutations require a current snapshot and full review. DOXA calls canonical LORE and fails explicitly if its native carrier is unavailable; it keeps no separate memory store.
 
-`/context` shows reported provider telemetry and snapshot details. `/usage` uses reported accounting and labels estimates. Missing or stale component counts and quota stay unknown. DeepSeek and GLM costs are estimates based on reported tokens and dated rates. Saved API keys are redacted before transcripts or memory boundaries. [LORE](https://github.com/docwilde/LORE) · [Engine accounting](../docs/engine-capabilities.md#review-and-accounting).
+`/context` shows reported provider telemetry and snapshot details. `/usage` uses reported accounting and labels estimates. Missing or stale component counts and quota stay unknown. DeepSeek and GLM costs are estimates based on reported tokens and dated rates. Model facts in the picker are exact and sourced; unknown context or thinking support stays unknown. Fleet budget admission uses conservative documented price bounds and refuses an unknown priced bound. Saved API keys are redacted before transcripts or memory boundaries. [LORE](https://github.com/docwilde/LORE) · [Engine accounting](../docs/engine-capabilities.md#review-and-accounting).
 
-`doxa codegraph file PATH`, `symbol NAME`, `imports PATH`, and `calls PATH` return bounded, fresh Rust syntax queries from the current Git worktree. Call targets are lexical candidates, not resolved bindings; other languages are unsupported and nothing is written to LORE. [Query limits](../docs/plans/code-graph.md).
+`doxa codegraph file PATH`, `symbol NAME`, `imports PATH`, `calls PATH`, and `modules PATH` return bounded, fresh Rust syntax queries from the current Git worktree. Literal module paths can be traced; conditional candidates stay unknown. `doxa codegraph --lore-map ...` overlays the same project's read-only LORE file map. Call targets are lexical candidates, not resolved bindings; other languages are unsupported and nothing is written to LORE. [Query limits](../docs/plans/code-graph.md).
 
-`/setup` handles provider credentials and defaults. `/plugins` and `/reload-plugins` control sanitized Claude plugin adoption for future sessions. Separately, owner-approved [native text plugins](../docs/native-plugins.md) add read-only local slash commands from private TOML manifests; executable native plugins remain open work. `/settings` edits validated preferences; environment overrides remain read-only.
+`/setup` handles provider credentials and defaults. `/plugins` and `/reload-plugins` control sanitized Claude plugin adoption for future sessions. Separately, owner-approved [native text plugins](../docs/native-plugins.md) add read-only local slash commands and owner-produced status values from private files. DOXA bounds refresh and reports failures; it does not start producers or run plugin code. `/settings` edits validated preferences; environment overrides remain read-only.
 
 ## Fleets and peers
 
@@ -100,13 +106,19 @@ Use `--worker-after INDEX:PREDECESSOR` to hold a worker until its predecessor fi
 
 Select an independent supervisor with `--alignment-supervisor PROVIDER:MODEL`. Choose a separate fast message judge with `--message-judge llm:PROVIDER:MODEL` or `jev:MODEL`, and choose `--message-review off|shadow|enforce`. `/settings` → **Fleet** stores defaults. The acting `--supervisor` is a worker; the independent reviewer reads evidence and cannot grant its own approvals. Host gates bind peer traffic to the approved charter and assignments. [Supervisor contract](../docs/fleet-supervision.md).
 
+`doxa fleet evaluate-messages` scores a private, consented labeled verdict file
+for recall, false pauses and latency by development and holdout split. It does
+not call a judge or change enforcement. No real-message corpus ships. An opt-in
+rootless Docker fixture checks offline test receipt transport; a full live fleet
+run remains to be verified.
+
 `/peers` or Ctrl+M opens the peer map; `/msg PEER TEXT` sends a scrubbed same-project message. The optional private mesh shows fleet relationships in a browser. Remote peer routes use authenticated private sockets and verified rosters. [Transport contract](../docs/native-peernet.md).
 
 ## Remote access
 
 Remote access is off by default. For a private browser view on the session host, set `DOXA_REMOTE_ENABLED=1` and `DOXA_REMOTE_ALLOWED_LOGINS=you@example.com`, run `doxa remote serve`, and point Tailscale Serve at the printed owner-private socket. The view reads recent turns, follows events, sends prompts, and answers pending requests.
 
-For cross-machine control, run `doxa-hub` behind Tailscale Serve on a private server, then `doxa remote connect HUB_URL HOST_ID` on the session host. The hub browser, `doxa remote list/send/answer`, and `doxa remote tui HUB_URL` can control registered sessions. Remote TUI tabs use the normal keys; Ctrl+R opens history and PageUp fetches older records. `/remote-connect HUB_URL HOST_ID` shares sessions while the local window stays open; `/remote-control HUB_URL` adds remote tabs marked `◎` beside local ones. The hub is volatile, so inspect an uncertain command before retrying it. [Remote hub design](../docs/plans/remote-hub.md).
+For cross-machine control, run `doxa-hub` behind Tailscale Serve on a private server, then `doxa remote connect HUB_URL HOST_ID` on the session host. The hub browser, `doxa remote list/send/answer`, and `doxa remote tui HUB_URL` can control registered sessions. Remote TUI tabs use the normal keys; Ctrl+R opens history and PageUp fetches older records. `doxa remote tui HUB_URL --save-layout` persists remote-only tabs for the same owner and session incarnation; mixed local/remote layouts stay unsaved. `/remote-connect HUB_URL HOST_ID` shares sessions while the local window stays open; `/remote-control HUB_URL` adds remote tabs marked `◎` beside local ones. The hub is volatile, so inspect an uncertain command before retrying it. [Remote hub design](../docs/plans/remote-hub.md).
 
 For native end-to-end encryption, generate a shared key with `doxa remote keygen /absolute/private/remote.key`. Keep it owner-only and set `DOXA_REMOTE_E2EE_KEY_FILE` to its path on both host and client. Transcript and control content stays opaque to the hub; session presence and event metadata remain visible. Encrypted sessions work in the native TUI, CLI, and separately installed [Chrome extension](../browser-extension/README.md), but not the hub-served browser. The hub can also deliver generic Web Push completion and input alerts when configured with a private VAPID key. The [Android source client](../android-client/README.md) can control private hub sessions and show generic local alerts while connected; device and two-host tailnet QA remain open, and native background push is not implemented.
 

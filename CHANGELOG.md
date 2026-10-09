@@ -5,6 +5,28 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.16 — 2026-10-09
+
+**Models and budgets**
+
+- Add sourced exact OpenAI context and thinking facts to **`ModelFacts`**. The picker keeps unverified fields unknown.
+- Bound **`BudgetHost`** with the highest documented token rates; GPT-5.3-Codex uses 3.85/30.8 USD per million tokens with FedRAMP uplift. Unknown bounds refuse priced admission.
+
+**Code graph and workspace**
+
+- Trace literal and conditional Rust module candidates; `doxa codegraph --lore-map` exports a source-hashed, read-only file-map overlay. Bindings remain unknown; nothing is persisted to LORE.
+- Colour verified project headings and show hidden-tab urgency in pane badges. Unresolved project roots keep the neutral heading style.
+
+**Extensions and remote layout**
+
+- Read owner-produced native plugin status files with bounded refresh and a visible failure ledger. DOXA does not start producers or run plugin code.
+- Add a Mermaid renderer Settings preflight; pinned real CLI and terminal validation remain open. Save remote-only native tab layouts for the same owner and session incarnation; mixed layouts remain unsaved.
+
+**Fleet and isolation**
+
+- Score private, human-labeled message-judge verdicts by development and holdout split with recall, false pauses and latency. No consented real-message corpus ships.
+- Add opt-in real-rootless fixture tests for the offline fleet runner and restricted-egress failure path. Production hardened egress and hard disk quotas remain open.
+
 ## 2.0.0-beta.15 — 2026-10-09
 
 **Memory and navigation**

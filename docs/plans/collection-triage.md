@@ -2,8 +2,8 @@
 
 Status: **The Python 1.x implementation shipped Parts 0, 1 and 1b.** The
 Rust rail added derived collection names and settled, opt-in group ordering in
-beta.12. Beta.15 adds a verified local-session pending signal from LORE 0.62.19,
-plus a bounded project-hue and pane-tab aggregation pass.
+beta.12. Beta.15 adds a verified local-session pending signal from LORE 0.62.19;
+beta.16 adds bounded project-hue and pane-tab aggregation.
 
 Native Rust behavior: `/collection new` derives a name from configured
 customer, project and active session title when no name is supplied.

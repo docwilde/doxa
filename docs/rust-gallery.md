@@ -1,6 +1,6 @@
 # Rust gallery
 
-The current terminal images show the **DOXA 2.0.0-beta.15** production Ratatui `App` fed deterministic example events through its `TestBackend`. A fixed DejaVu Sans Mono font rasterizes the styled cell buffer at **3068 × 1734**. No provider, daemon, Docker Engine, LORE store, network request, or private user session is opened during these captures. The examples include a checked-in image, synthetic turns, memory, fleet status, and isolation status passed through the same policy validator used for host reports. They demonstrate rendering and review layout; they do not verify a live provider, container, or fleet run.
+The current terminal images show the **DOXA 2.0.0-beta.16** production Ratatui `App` fed deterministic example events through its `TestBackend`. A fixed DejaVu Sans Mono font rasterizes the styled cell buffer at **3068 × 1734**. The capture script gives each run isolated DOXA, LORE and home directories. No provider, daemon, Docker Engine, network request, or private user session is opened. The examples include a checked-in image, synthetic turns, memory, fleet status, project triage, and isolation status passed through the same policy validator used for host reports. They demonstrate rendering and review layout; they do not verify a live provider, container, or fleet run.
 
 ## Contents
 
@@ -13,19 +13,20 @@ The current terminal images show the **DOXA 2.0.0-beta.15** production Ratatui `
 
 | Scene | Image | What the fixture exercises |
 | --- | --- | --- |
-| Workspace | [hero](../assets/shots/rust-2.0.0-beta.15-hero.png) | Tabs, project rail, Markdown answer, and version line |
-| Image preview | [image-preview](../assets/shots/rust-2.0.0-beta.15-image-preview.png) | A checked-in local image rendered inside the transcript using the halfblock fallback |
-| Isolation | [isolation](../assets/shots/rust-2.0.0-beta.15-isolation.png) | The Docker policy chip and details from a synthetic rootless worker status |
-| Fleet review | [fleet-review](../assets/shots/rust-2.0.0-beta.15-fleet-review.png) | A supervised plan with spending limits, independent reviewer, and message judge; launch is disabled |
-| Dependency plan | [fleet-dependency](../assets/shots/rust-2.0.0-beta.15-fleet-dependency.png) | Frozen tasks, predecessor edge, and explicit human-release warning in a disabled plan |
-| Dependency release | [fleet-release-review](../assets/shots/rust-2.0.0-beta.15-fleet-release-review.png) | Synthetic host checkpoint and accepted handoff in the real review modal; release is disabled |
-| Code graph | [codegraph](../assets/shots/rust-2.0.0-beta.15-codegraph.png) | A synthetic, read-only module query in the production modal, with source hashes and an explicitly unknown conditional edge |
-| Fleet status | [fleet-view](../assets/shots/rust-2.0.0-beta.15-fleet-view.png) | A synthetic worker waiting for its predecessor; no controller starts |
-| Beliefs | [beliefs](../assets/shots/rust-2.0.0-beta.15-beliefs.png) | Belief selection and review actions; writes are disabled |
-| Tool details | [tool-entries](../assets/shots/rust-2.0.0-beta.15-tool-entries.png) | Expanded normalized tool event with synthetic input and output |
-| Memory | [memory-management](../assets/shots/rust-2.0.0-beta.15-memory-management.png) | Curated project memory controls; writes are disabled |
-| Commands | [commands](../assets/shots/rust-2.0.0-beta.15-commands.png) | Slash-command completion |
-| Help | [help](../assets/shots/rust-2.0.0-beta.15-help.png) | Built-in command help |
+| Workspace | [hero](../assets/shots/rust-2.0.0-beta.16-hero.png) | Tabs, project rail, Markdown answer, and version line |
+| Project triage | [triage](../assets/shots/rust-2.0.0-beta.16-triage.png) | Verified-root hue and a pane badge pointing to a hidden tab that needs input |
+| Image preview | [image-preview](../assets/shots/rust-2.0.0-beta.16-image-preview.png) | A checked-in local image rendered inside the transcript using the halfblock fallback |
+| Isolation | [isolation](../assets/shots/rust-2.0.0-beta.16-isolation.png) | The Docker policy chip and details from a synthetic rootless worker status |
+| Fleet review | [fleet-review](../assets/shots/rust-2.0.0-beta.16-fleet-review.png) | A supervised plan with spending limits, independent reviewer, and message judge; launch is disabled |
+| Dependency plan | [fleet-dependency](../assets/shots/rust-2.0.0-beta.16-fleet-dependency.png) | Frozen tasks, predecessor edge, and explicit human-release warning in a disabled plan |
+| Dependency release | [fleet-release-review](../assets/shots/rust-2.0.0-beta.16-fleet-release-review.png) | Synthetic host checkpoint and accepted handoff in the real review modal; release is disabled |
+| Code graph | [codegraph](../assets/shots/rust-2.0.0-beta.16-codegraph.png) | A synthetic, read-only module query in the production modal, with source hashes and an explicitly unknown conditional edge |
+| Fleet status | [fleet-view](../assets/shots/rust-2.0.0-beta.16-fleet-view.png) | A synthetic worker waiting for its predecessor; no controller starts |
+| Beliefs | [beliefs](../assets/shots/rust-2.0.0-beta.16-beliefs.png) | Belief selection and review actions; writes are disabled |
+| Tool details | [tool-entries](../assets/shots/rust-2.0.0-beta.16-tool-entries.png) | Expanded normalized tool event with synthetic input and output |
+| Memory | [memory-management](../assets/shots/rust-2.0.0-beta.16-memory-management.png) | Curated project memory controls; writes are disabled |
+| Commands | [commands](../assets/shots/rust-2.0.0-beta.16-commands.png) | Slash-command completion |
+| Help | [help](../assets/shots/rust-2.0.0-beta.16-help.png) | Built-in command help |
 
 The `image-preview` scene exercises the portable halfblock path. A terminal with Kitty or Sixel graphics may use another backend; this capture is not evidence of either terminal protocol. Fleet and isolation values are synthetic and labeled as fixtures in the UI. The dependency-release fixture cannot release a worker. Paths under `/demo` are example data.
 
@@ -39,7 +40,7 @@ cargo build --locked -j 2 -p doxa-tui --example gallery
 python3 scripts/render_rust_gallery.py --binary target/debug/examples/gallery
 ```
 
-The script checks that the hero frame visibly reports the version from `rust/doxa-tui/Cargo.toml`, writes `rust-2.0.0-beta.15-*.png` under `assets/shots`, and verifies every image is 3068 × 1734. Pass scene names after the options to render a subset. The Rust example uses the production `App` reducer and widgets; the Python step only paints Ratatui cells. The captures are deterministic fixture views, not screenshots of a terminal emulator or authenticated account.
+The script requires `TMPDIR` on real disk, checks that the hero frame visibly reports the version from `rust/doxa-tui/Cargo.toml`, writes `rust-2.0.0-beta.16-*.png` under `assets/shots`, and verifies every image is 3068 × 1734. Pass scene names after the options to render a subset. The Rust example uses the production `App` reducer and widgets; the Python step only paints Ratatui cells. The captures are deterministic fixture views, not screenshots of a terminal emulator or authenticated account.
 
 ## Earlier live terminal captures
 
@@ -57,7 +58,7 @@ These unprefixed files remain historical **2.0.0-alpha.68** live captures from 2
 | `rust-help.png` | Command help |
 | `rust-settings.png` | Key settings |
 
-They were captured in a real GTK3/VTE terminal on private Xvfb with FFmpeg. That run used authenticated Codex CLI 0.156.1 through DOXA's protected app server and isolated LORE 0.62.11 data. The provider read only synthetic Harbour notes files. These files document the older live build; they do not show beta.15 features. The original recorder remains at `scripts/live_rust_gallery.py` for an operator who explicitly chooses an authenticated capture.
+They were captured in a real GTK3/VTE terminal on private Xvfb with FFmpeg. That run used authenticated Codex CLI 0.156.1 through DOXA's protected app server and isolated LORE 0.62.11 data. The provider read only synthetic Harbour notes files. These files document the older live build; they do not show beta.16 features. The original recorder remains at `scripts/live_rust_gallery.py` for an operator who explicitly chooses an authenticated capture.
 
 ## Remote browser captures
 

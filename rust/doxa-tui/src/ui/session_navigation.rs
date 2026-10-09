@@ -970,6 +970,12 @@ impl App {
             .insert(id.to_owned(), (Some(status), Instant::now()));
     }
 
+    /// Inject a verified project root for deterministic gallery fixtures.
+    /// Live sessions receive this only from the background repository probe.
+    pub fn set_project_root_fixture(&mut self, id: &str, root: PathBuf) {
+        self.project_roots.insert(id.to_owned(), root);
+    }
+
     /// Deterministic gallery state for the read-only memory menu. Live menus
     /// always use the LORE sidecar through `open_memory_menu`.
 
