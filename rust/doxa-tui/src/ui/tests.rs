@@ -3046,13 +3046,13 @@ for line in sys.stdin:
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
         app.handle(Event::Resize(100, 30));
-        assert_eq!(COMMANDS.len(), 48);
+        assert_eq!(COMMANDS.len(), 49);
         let mut names = std::collections::HashSet::new();
         for row in COMMANDS { assert!(names.insert(row.name)); }
         app.open_help();
         let info = app.chip_info.as_ref().unwrap();
         assert_eq!(info.kind, "help");
-        for form in ["/collection [action] [name]", "/usage", "/context", "/compact",
+        for form in ["/collection [action] [name]", "/codegraph file|symbol|imports|calls|modules VALUE", "/usage", "/context", "/compact",
             "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|dependency-review [RUN] SLOT|mesh [RUN]|start OPTIONS|resume RUN]", "/help"] {
             assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
         }
@@ -3941,6 +3941,122 @@ for line in sys.stdin:
         assert!(matches!(&rows[2], RailRow::ProjectHeading(name) if name == "alpha"));
         assert!(matches!(&rows[3], RailRow::Session(0)));
         assert!(matches!(&rows[4], RailRow::Session(2)));
+    }
+
+    #[test]
+    fn lore_pending_urgency_includes_collapsed_members_but_excludes_stale_and_remote() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"local".into(), title:"Local".into(),
+            collection:"Work".into(), transcript:String::new(), status:"Ready".into() }));
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"host~remote".into(), title:"Remote".into(),
+            collection:"Elsewhere".into(), transcript:String::new(), status:"Ready".into() }));
+        app.session_cwds.insert("local".into(), PathBuf::from("/fixture/own"));
+        app.session_cwds.insert("host~remote".into(), PathBuf::from("/fixture/elsewhere"));
+        app.collections = vec![
+            crate::collections::Collection { name:"Work".into(), sessions:vec!["local".into()], collapsed:true },
+            crate::collections::Collection { name:"Elsewhere".into(), sessions:vec!["host~remote".into()], collapsed:true },
+        ];
+        let now = Instant::now();
+        app.lore_pending_cache.insert("local".into(), LorePendingSignal {
+            cwd:PathBuf::from("/fixture/own"), pending:Some(true), checked:now });
+        app.lore_pending_cache.insert("host~remote".into(), LorePendingSignal {
+            cwd:PathBuf::from("/fixture/elsewhere"), pending:Some(true), checked:now });
+        let groups = app.rail_groups();
+        assert_eq!(groups[0].2, 2);
+        assert_eq!(groups[1].2, 0);
+        assert_eq!(groups[0].1.len(), 1); // Collapsed child is still counted.
+        app.lore_pending_cache.get_mut("local").unwrap().checked = now - Duration::from_secs(91);
+        assert_eq!(app.rail_groups()[0].2, 0);
+        app.lore_pending_cache.get_mut("local").unwrap().checked = now;
+        app.session_cwds.insert("local".into(), PathBuf::from("/fixture/changed"));
+        assert_eq!(app.rail_groups()[0].2, 0);
+        app.remote_mode = true;
+        assert!(app.poll_lore_pending());
+        assert!(app.lore_pending_cache.is_empty());
+    }
+
+    #[test]
+    fn lore_incomplete_empty_response_stays_unknown_and_positive_row_is_visible() {
+        let mut app = App::default();
+        let cwd = PathBuf::from("/fixture/source");
+        for id in ["empty", "positive"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:id.into(), transcript:String::new(), status:"Ready".into() }));
+            app.session_cwds.insert(id.into(), cwd.clone());
+        }
+        let (tx, receiver) = mpsc::sync_channel(1);
+        app.lore_pending_request = Some(LorePendingRequest {
+            sessions: vec![("empty".into(), cwd.clone()), ("positive".into(), cwd.clone())], receiver,
+        });
+        tx.send(LorePendingBatch { sessions: vec![("empty".into(), cwd.clone()), ("positive".into(), cwd.clone())],
+            response: Ok(doxa_lore::PendingSessions {
+            source_project_slug: "fixture".into(), snapshot: "a".repeat(64), complete: false,
+            sessions: vec![
+                doxa_lore::PendingSession { session_id:"empty".into(), pending_pids:vec![], complete:false },
+                doxa_lore::PendingSession { session_id:"positive".into(), pending_pids:vec!["p".into()], complete:false },
+            ],
+        }) }).unwrap();
+        assert!(app.poll_lore_pending());
+        assert_eq!(app.lore_pending_cache["empty"].pending, None);
+        assert_eq!(app.lore_pending_cache["positive"].pending, Some(true));
+        assert_eq!(app.rail_urgency(0), 0);
+        assert_eq!(app.rail_urgency(1), 2);
+    }
+
+    #[test]
+    fn lore_pending_worker_only_updates_its_selected_scope() {
+        let mut app = App::default();
+        let own = PathBuf::from("/fixture/own");
+        let other = PathBuf::from("/fixture/other");
+        for (id, cwd) in [("own", &own), ("other", &other)] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:id.into(), transcript:String::new(), status:"Ready".into() }));
+            app.session_cwds.insert(id.into(), cwd.clone());
+        }
+        let (tx, receiver) = mpsc::sync_channel(1);
+        app.lore_pending_request = Some(LorePendingRequest {
+            sessions: vec![("own".into(), own.clone()), ("other".into(), other.clone())], receiver,
+        });
+        tx.send(LorePendingBatch {
+            sessions: vec![("own".into(), own.clone())],
+            response: Ok(doxa_lore::PendingSessions {
+                source_project_slug:"fixture".into(), snapshot:"a".repeat(64), complete:true,
+                sessions:vec![doxa_lore::PendingSession {
+                    session_id:"own".into(), pending_pids:vec!["p".into()], complete:true,
+                }],
+            }),
+        }).unwrap();
+        assert!(app.poll_lore_pending());
+        assert_eq!(app.lore_pending_cache["own"].pending, Some(true));
+        assert!(!app.lore_pending_cache.contains_key("other"));
+    }
+
+    #[test]
+    fn lore_scope_lookup_does_not_block_terminal_poll() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "DOXA_TEST_SLOW_LORE_GIT";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let git = dir.path().join("git");
+            std::fs::write(&git, b"#!/bin/sh\n/bin/sleep 2\nexit 1\n").unwrap();
+            std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "ui::tests::lore_scope_lookup_does_not_block_terminal_poll"])
+                .env(CHILD, "1").env("PATH", dir.path()).env("DOXA_TEST_LORE_CWD", dir.path())
+                .output().unwrap();
+            assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let mut app = App::default();
+        let cwd = PathBuf::from(std::env::var_os("DOXA_TEST_LORE_CWD").unwrap());
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"local".into(), title:"Local".into(),
+            collection:"Local".into(), transcript:String::new(), status:"Ready".into() }));
+        app.session_cwds.insert("local".into(), cwd);
+        let started = Instant::now();
+        app.poll_lore_pending();
+        assert!(started.elapsed() < Duration::from_millis(750),
+            "Git scope discovery blocked the terminal event loop");
     }
 
     #[test]

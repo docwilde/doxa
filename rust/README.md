@@ -62,7 +62,17 @@ Tab reaches the project rail when visible. `/split`, `/vsplit`, `/pane`, and `/m
 
 Typing `/` shows completion; unsupported DOXA commands stay in the draft with an error. `/model`, `/effort`, `/mode`, and `/engine` show supported choices. Live model and mode changes require an idle session and empty queue; selecting another engine starts a new session. `/queue` previews or cancels waiting prompts. `/cd PATH` opens a tab in a verified directory without moving an existing daemon.
 
-The session rail groups uncollected sessions by project and keeps named collections in saved order. `/collection new` suggests a name from the active task and known project; add an explicit customer in `[project_customers]` in `~/.doxa/config.toml`, keyed by the session's absolute workspace path. Missing context is omitted, and `/collection new NAME` and `/collection rename` keep your chosen labels. `/collection sort urgency` orders whole groups by needs-input (`!`), reported context at least 50% (`ctx`), then completed-unseen (`new`); `/collection sort manual` restores the saved order. Sorting is off by default and waits until activity settles and the pointer and keyboard leave the rail. Session rows within each group never move. LORE proposal counts are not a per-session current state, so they do not affect this order.
+The session rail groups uncollected sessions by project and keeps named
+collections in saved order. `/collection new` suggests a name from the active
+task and known project; `[project_customers]` in `~/.doxa/config.toml` adds an
+explicit customer by absolute workspace path. An explicit name remains yours.
+
+`/collection sort urgency` orders whole groups by needs-input (`!`), reported
+context at least 50% (`ctx`), verified local LORE pending proposals, then
+completed-unseen (`new`). Incomplete or stale LORE summaries add no rank.
+`/collection sort manual` restores saved order. Sorting is off by default,
+waits for activity to settle, and pauses while the pointer or keyboard is in
+the rail. Session rows within each group never move.
 
 ## Review and permissions
 

@@ -270,6 +270,31 @@ pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
             Err(error) => return Err(io::Error::new(error.kind(), format!("peer write: {error}"))),
         }
     }
+    #[cfg(target_os = "macos")]
+    {
+        // LOCAL_PEERPID can become unavailable once the sender closes. Keep
+        // this socket alive until the one-frame receiver drops its end after
+        // sampling credentials. The write half-close also lets older peers
+        // that read to EOF finish without a new wire protocol.
+        stream.shutdown(std::net::Shutdown::Write)?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "peer receipt timed out"));
+            }
+            stream.set_read_timeout(Some(remaining))?;
+            let mut response = [0u8; 1];
+            match stream.read(&mut response) {
+                Ok(0) => break,
+                Ok(_) => return Err(invalid("unexpected peer response")),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "peer receipt timed out"));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
     Ok(())
 }
 

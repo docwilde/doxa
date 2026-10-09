@@ -128,7 +128,10 @@ transport causes the image-owned worker to end its provider process, avoiding
 an orphan provider writer when the supervisor crashes.
 
 Implementation limits: this is a Linux rootless Docker boundary, not a VM.
-There is no hardened egress gateway, hard disk quota or CLI credential secrecy.
+The restricted-egress gateway has an exact hostname/443 `CONNECT` allowlist and
+checks TLS SNI in a network-none fixture, but is not wired into a production
+profile. Provider streaming, login, refresh and bypass tests in a rootless
+container remain the gate. There is no hard disk quota or CLI credential secrecy.
 macOS Docker Desktop, remote Engines and nested privileged Docker are refused.
 
 ## Integration smoke

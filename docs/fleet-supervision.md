@@ -67,8 +67,33 @@ checks each session's ready Docker manifest and refuses a fleet root inside a
 container mount. Docker workers see their private checkout, home, cache and
 restricted broker, while the owner fleet root and CLI stay on the host.
 
-The release is explicitly human-owned because the host does not yet run
-trusted project tests. After the predecessor finishes a turn, the host records
+The release is explicitly human-owned. A narrow, opt-in host test runner is
+available for supervised `docker-offline` fleets. Put a reviewed recipe in an
+owner-controlled JSON file and pass `--test-recipe /absolute/path/recipe.json`
+at launch. Its exact command is frozen in the charter:
+
+```json
+{"argv":["/usr/bin/python3","-m","unittest","discover"],"cwd_relative":"","timeout_s":120}
+```
+
+After a worker finishes, the operator runs `doxa fleet test RUN SLOT`. The
+host copies bounded checkout source, including ignored regular files, into a
+private snapshot, then invokes the approved argv without a shell in a separate
+rootless Docker container.
+That container has no network, provider home, broker, host credentials or
+Docker socket. It has a read-only source mount, bounded scratch, memory, PIDs,
+CPU, output and a deadline. The command returns signed `git_diff` and
+`test_result` artifact IDs; a passing test only describes that exact source
+snapshot. Completion messages must cite both IDs. Changed source, a different
+worker or image, an altered receipt, and a failed test are refused. Test
+execution never releases a dependent worker or grants scope. The first slice
+limits source to 4,096 files, 128 MiB total and 8 MiB per file; symlinks and
+special files fail closed. Ignored files outside the approved assignment scope
+block receipts; a checkout that exceeds the capture bounds also fails closed.
+Rootless Docker end-to-end execution still needs a
+capable host and an owner-approved project recipe.
+
+After the predecessor finishes a turn, the host records
 a checkpoint. The operator can inspect its ID and changed paths with
 `doxa fleet dependency-evidence RUN SLOT`, give that ID to the predecessor in
 a subsequent turn, and ask it to send a typed `handoff` to the acting
@@ -80,7 +105,9 @@ the command uses this window's current fleet controller; name RUN explicitly
 for a detached or saved fleet (and pass `--root ABSOLUTE_PATH` if needed).
 The TUI modal shows the host-returned
 checkpoint and accepted handoff IDs, artifact references, changed paths,
-assignment and turn hashes, dependent slots, and `tests_verified: false`.
+assignment and turn hashes, dependent slots, and the checkpoint's
+`tests_verified: false` (the separate signed test receipt does not rewrite a
+past checkpoint).
 Scroll through every row, press Shift+A to arm, then Shift+Y to release;
 Escape or a terminal resize disarms it. The TUI sends the stored host review
 token through the same `release_dependency` call and refreshes fleet status.
@@ -181,7 +208,7 @@ threshold; a high score on the same examples used to choose it is not a
 real-fleet safety result. The command reads at most 2 MiB and prints no message
 content. Apply a reviewed choice with `--review-threshold` on a new fleet.
 
-Open coordination work includes automatic trusted project test evidence and
+Open coordination work includes automatic invocation of trusted project tests and
 calibration against real fleet messages. The host checks the typed handoff chain and checkpoint provenance;
 the operator decides whether that evidence is sufficient to release a worker.
 

@@ -852,12 +852,26 @@ impl App {
                     return true;
                 }
             }
+            let codegraph_area = self.active_chooser_rect();
             if let Some(info) = self.chip_info.as_mut().filter(|info| {
                 matches!(
                     info.kind,
-                    "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "native_plugin"
+                    "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "native_plugin" | "codegraph"
                 )
             }) {
+                if info.kind == "codegraph" {
+                    let width = codegraph_area.map_or(1, |area| usize::from(area.width.saturating_sub(3)).max(1));
+                    let count = super::codegraph_viewer::wrapped_lines(&info.lines, width).len();
+                    let page = codegraph_area.map_or(1, |area| usize::from(area.height.saturating_sub(2)).max(1));
+                    match key.code {
+                        KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
+                        KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(count.saturating_sub(page)),
+                        KeyCode::PageUp => info.scroll = info.scroll.saturating_sub(page),
+                        KeyCode::PageDown => info.scroll = info.scroll.saturating_add(page).min(count.saturating_sub(page)),
+                        _ => return false,
+                    }
+                    return true;
+                }
                 if info.kind=="remote_history" && key.code==KeyCode::PageUp && info.scroll==0 {
                     let id=info.owner.as_ref().map(|owner|owner.0.clone());
                     if let Some(id)=id {

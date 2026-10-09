@@ -1,6 +1,7 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 mod actions;
 mod commands;
+mod codegraph_viewer;
 mod diff_controller;
 mod fleet_dependency_review;
 pub(crate) mod fleet_menu;
@@ -1303,6 +1304,25 @@ enum RailGroupKey {
 }
 
 #[derive(Debug)]
+struct LorePendingSignal {
+    cwd: PathBuf,
+    pending: Option<bool>,
+    checked: Instant,
+}
+
+#[derive(Debug)]
+struct LorePendingRequest {
+    sessions: Vec<(String, PathBuf)>,
+    receiver: Receiver<LorePendingBatch>,
+}
+
+#[derive(Debug)]
+struct LorePendingBatch {
+    sessions: Vec<(String, PathBuf)>,
+    response: Result<doxa_lore::PendingSessions, doxa_lore::LoreError>,
+}
+
+#[derive(Debug)]
 enum RemoteHandoff {
     Hub(String),
     Local,
@@ -1384,6 +1404,11 @@ pub struct App {
         Receiver<Option<(doxa_lore::MemoryUsage, bool)>>,
     )>,
     memory_repo: HashMap<String, bool>,
+    // Source-session proposal signal. None is unknown, including incomplete,
+    // expired and unavailable LORE responses. A worker queries one project at
+    // a time so store I/O never runs in the draw path.
+    lore_pending_cache: HashMap<String, LorePendingSignal>,
+    lore_pending_request: Option<LorePendingRequest>,
     memory_manager: Option<crate::memory_menu::Manager>,
     memory_list: Option<crate::memory_menu::List>,
     operations_menu: Option<operations_menu::Menu>,
@@ -1433,6 +1458,7 @@ pub struct App {
     visible_links: RefCell<Vec<(Rect, String)>>,
     pending_open_urls: Vec<String>,
     chip_info: Option<ChipInfo>,
+    codegraph_pending: Option<(String, PathBuf, Receiver<Result<doxa_codegraph::Answer, String>>)>,
     // Mouse coordinates must come from the last painted frame, which may
     // differ from the terminal size reported by an earlier resize event.
     rendered_chip_hits: RefCell<Option<Vec<ChipHit>>>,
@@ -1666,6 +1692,8 @@ impl Default for App {
             memory_cache: HashMap::new(),
             memory_pending: None,
             memory_repo: HashMap::new(),
+            lore_pending_cache: HashMap::new(),
+            lore_pending_request: None,
             memory_menu_pending: None,
             memory_manager: None,
             memory_list: None,
@@ -1709,6 +1737,7 @@ impl Default for App {
             visible_links: RefCell::new(Vec::new()),
             pending_open_urls: Vec::new(),
             chip_info: None,
+            codegraph_pending: None,
             rendered_chip_hits: RefCell::new(None),
             blink_on: true,
             blink_at: Instant::now(),

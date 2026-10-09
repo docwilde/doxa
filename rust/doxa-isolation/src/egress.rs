@@ -1,9 +1,10 @@
-//! Fixture-only, host-owned CONNECT gateway for a network-none session.
+//! Host-owned CONNECT gateway for a network-none session. Production wiring
+//! remains gated on rootless and provider-flow integration smokes.
 //!
 //! This is deliberately not selected by any production isolation profile.
 //! The worker can reach only its mounted Unix socket; the host resolves an
 //! exact owner allowlist entry and connects to that resolved address itself.
-use crate::{error, private_directory};
+use crate::{error, inspect_network, preflight, private_directory, read_manifest, Profile};
 use std::{
     collections::HashSet,
     fs,
@@ -20,6 +21,7 @@ const MAX_HEADER: usize = 8192;
 const MAX_CLIENTS: usize = 32;
 const IO_TIMEOUT: Duration = Duration::from_millis(200);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CLIENT_HELLO: usize = 64 * 1024;
 
 type Resolver = dyn Fn(&str) -> io::Result<Vec<SocketAddr>> + Send + Sync;
 type Connector = dyn Fn(SocketAddr) -> io::Result<TcpStream> + Send + Sync;
@@ -136,6 +138,90 @@ fn read_header(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
     Err(error("CONNECT header exceeds bound"))
 }
 
+// A CONNECT authority alone is insufficient: a TLS client can ask an allowed
+// IP to serve a different SNI. Buffer the first handshake before sending any
+// worker bytes upstream. Absent SNI, known ECH framing and unrecognised TLS
+// records fail closed. Encrypted HTTP authority remains invisible to this
+// gateway, so provider compatibility needs separate production proof.
+fn read_exact_until(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant) -> io::Result<()> {
+    let mut position = 0;
+    while position < bytes.len() {
+        if Instant::now() >= deadline { return Err(error("TLS ClientHello deadline exceeded")); }
+        match stream.read(&mut bytes[position..]) {
+            Ok(0) => return Err(error("incomplete TLS ClientHello")),
+            Ok(size) => position += size,
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+fn take<'a>(bytes: &mut &'a [u8], count: usize) -> io::Result<&'a [u8]> {
+    if bytes.len() < count { return Err(error("malformed TLS ClientHello")); }
+    let (value, rest) = bytes.split_at(count); *bytes = rest; Ok(value)
+}
+fn take_u8(bytes: &mut &[u8]) -> io::Result<usize> { Ok(take(bytes, 1)?[0] as usize) }
+fn take_u16(bytes: &mut &[u8]) -> io::Result<usize> {
+    let value = take(bytes, 2)?; Ok(u16::from_be_bytes([value[0], value[1]]) as usize)
+}
+
+fn client_hello_sni(mut hello: &[u8]) -> io::Result<String> {
+    take(&mut hello, 2 + 32)?; // legacy version and random
+    let session = take_u8(&mut hello)?; take(&mut hello, session)?;
+    let ciphers = take_u16(&mut hello)?;
+    if ciphers < 2 || ciphers % 2 != 0 { return Err(error("malformed TLS cipher list")); }
+    take(&mut hello, ciphers)?;
+    let compression = take_u8(&mut hello)?;
+    if compression == 0 { return Err(error("malformed TLS compression list")); }
+    take(&mut hello, compression)?;
+    let extensions = take_u16(&mut hello)?;
+    if extensions != hello.len() { return Err(error("malformed TLS extensions")); }
+    let mut found = None;
+    while !hello.is_empty() {
+        let kind = take_u16(&mut hello)?;
+        let size = take_u16(&mut hello)?;
+        let mut body = take(&mut hello, size)?;
+        if kind == 0xfe0d { return Err(error("encrypted TLS ClientHello is unsupported")); }
+        if kind != 0 { continue; }
+        if found.is_some() { return Err(error("duplicate TLS SNI extension")); }
+        let names = take_u16(&mut body)?;
+        if names != body.len() || names < 3 || take_u8(&mut body)? != 0 {
+            return Err(error("invalid TLS SNI list"));
+        }
+        let size = take_u16(&mut body)?;
+        let name = take(&mut body, size)?;
+        if !body.is_empty() { return Err(error("multiple TLS SNI names")); }
+        let name = std::str::from_utf8(name).map_err(|_| error("invalid TLS SNI name"))?;
+        found = Some(hostname(name)?);
+    }
+    found.ok_or_else(|| error("TLS SNI is required"))
+}
+
+fn verified_client_hello(client: &mut UnixStream, host: &str) -> io::Result<Vec<u8>> {
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    let mut records = Vec::new();
+    let mut handshake = Vec::new();
+    loop {
+        let mut header = [0; 5]; read_exact_until(client, &mut header, deadline)?;
+        let size = u16::from_be_bytes([header[3], header[4]]) as usize;
+        if header[0] != 22 || header[1] != 3 || !(1..=4).contains(&header[2]) || size == 0 || size > 16 * 1024 {
+            return Err(error("expected bounded TLS handshake record"));
+        }
+        let mut body = vec![0; size]; read_exact_until(client, &mut body, deadline)?;
+        records.extend_from_slice(&header); records.extend_from_slice(&body);
+        handshake.extend_from_slice(&body);
+        if handshake.len() > MAX_CLIENT_HELLO { return Err(error("TLS ClientHello exceeds bound")); }
+        if handshake.len() < 4 { continue; }
+        if handshake[0] != 1 { return Err(error("expected TLS ClientHello")); }
+        let size = (usize::from(handshake[1]) << 16) | (usize::from(handshake[2]) << 8) | usize::from(handshake[3]);
+        if size > MAX_CLIENT_HELLO - 4 { return Err(error("TLS ClientHello exceeds bound")); }
+        if handshake.len() < size + 4 { continue; }
+        if client_hello_sni(&handshake[4..size + 4])? != host { return Err(error("TLS SNI differs from CONNECT authority")); }
+        return Ok(records);
+    }
+}
+
 fn copy_until_end<R: Read, W: Write>(input: &mut R, output: &mut W, stop: &AtomicBool, peer_closed: Option<&AtomicBool>) -> io::Result<()> {
     let mut buffer = [0; 8192];
     while !stop.load(Ordering::Acquire) && !peer_closed.is_some_and(|closed| closed.load(Ordering::Acquire)) {
@@ -193,6 +279,11 @@ fn serve(mut client: UnixStream, hosts: &AllowedHosts, resolver: &Resolver, conn
     };
     if stop.load(Ordering::Acquire) { return Err(error("gateway stopped")); }
     client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
+    let hello = verified_client_hello(&mut client, &host)?;
+    if stop.load(Ordering::Acquire) { return Err(error("gateway stopped")); }
+    // The checked IP is held in this socket; no second DNS lookup occurs.
+    let mut upstream = upstream;
+    upstream.write_all(&hello)?;
     tunnel(client, upstream, stop)
 }
 
@@ -202,6 +293,22 @@ pub struct EgressGateway {
     socket: PathBuf, identity: (u64, u64), stop: Arc<AtomicBool>, worker: Option<JoinHandle<()>>,
 }
 impl EgressGateway {
+    /// Guarded host preparation path. It refuses a saved profile with any
+    /// worker network, an unverified rootless Engine, or an altered container.
+    /// The caller must retain this handle for the complete session lifetime.
+    pub fn start_for_session(manifest_path: &Path, hosts: AllowedHosts) -> io::Result<Self> {
+        let manifest = read_manifest(manifest_path)?;
+        if manifest.profile != Profile::DockerOffline || manifest.state != "ready" {
+            return Err(error("restricted egress requires a ready network-none Docker session"));
+        }
+        preflight(manifest.policy.as_ref().ok_or_else(|| error("Docker policy missing"))?)?;
+        inspect_network(&manifest)?;
+        let gateway = Self::start(&manifest.broker, hosts)?;
+        // A failed post-bind check drops the new socket instead of advertising
+        // a gateway for a container whose network changed meanwhile.
+        inspect_network(&manifest)?;
+        Ok(gateway)
+    }
     pub fn start(broker_dir: &Path, hosts: AllowedHosts) -> io::Result<Self> {
         let resolver = Arc::new(|host: &str| format!("{host}.:443").to_socket_addrs().map(|rows| rows.collect()));
         let connector = Arc::new(|address| TcpStream::connect_timeout(&address, CONNECT_TIMEOUT));
@@ -316,7 +423,9 @@ mod tests {
     use std::{os::unix::fs::PermissionsExt, sync::atomic::AtomicUsize};
 
     fn fixture_dir() -> tempfile::TempDir {
-        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        // The checkout may exceed AF_UNIX's path budget in an agent worktree.
+        // Callers choose a short real-disk TMPDIR for these socket fixtures.
+        let root = tempfile::tempdir().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         root
     }
@@ -353,6 +462,27 @@ mod tests {
         }
         String::from_utf8(bytes).unwrap()
     }
+    fn client_hello(name: &str) -> Vec<u8> {
+        let mut server_name = vec![0];
+        server_name.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        server_name.extend_from_slice(name.as_bytes());
+        let mut sni = Vec::new();
+        sni.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
+        sni.extend_from_slice(&server_name);
+        let mut body = vec![3, 3]; body.extend_from_slice(&[0; 32]);
+        body.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0]);
+        body.extend_from_slice(&((sni.len() + 4) as u16).to_be_bytes());
+        body.extend_from_slice(&[0, 0]);
+        body.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+        body.extend_from_slice(&sni);
+        let len = body.len();
+        let mut handshake = vec![1, (len >> 16) as u8, (len >> 8) as u8, len as u8];
+        handshake.extend_from_slice(&body);
+        let mut record = vec![22, 3, 3];
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
+    }
 
     #[test]
     fn exact_connect_and_binary_tls_bytes_relay_via_loopback_fixture() {
@@ -368,12 +498,44 @@ mod tests {
         client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         client.write_all(b"CONNECT API.EXAMPLE.TEST:443 HTTP/1.1\r\nHost: API.EXAMPLE.TEST:443\r\n\r\n").unwrap();
         assert_eq!(read_response_header(&mut client), "HTTP/1.1 200 Connection Established\r\n\r\n");
-        let tls_like = [0x16,0x03,0x03,0x00,0x05,0,0xff,0x80,0x13];
+        let mut tls_like = client_hello("API.EXAMPLE.TEST");
+        tls_like.extend_from_slice(&[0, 0xff, 0x80, 0x13]);
         client.write_all(&tls_like).unwrap(); client.shutdown(Shutdown::Write).unwrap();
         let mut echoed = Vec::new(); client.read_to_end(&mut echoed).unwrap();
         assert_eq!(echoed, tls_like); assert_eq!(upstream_thread.join().unwrap(), tls_like);
         bridge.join().unwrap(); assert_eq!(calls.load(Ordering::Acquire), 1);
         drop(gateway); assert!(!root.path().join("egress.sock").exists());
+    }
+
+    #[test]
+    fn mismatched_or_missing_sni_never_sends_worker_bytes_upstream() {
+        for hello in [client_hello("other.example.test"), vec![22, 3, 3, 0, 4, 1, 0, 0, 0]] {
+            let root = fixture_dir(); let (upstream_addr, upstream_thread) = upstream();
+            let gateway = gateway(root.path(), vec!["1.1.1.1:443".parse().unwrap()],
+                upstream_addr, Arc::new(AtomicUsize::new(0)));
+            let mut bytes = b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n".to_vec();
+            bytes.extend_from_slice(&hello);
+            assert!(request(gateway.socket(), &bytes).starts_with(b"HTTP/1.1 200"));
+            assert!(upstream_thread.join().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn fragmented_client_hello_is_relayed_after_matching_sni() {
+        let hello = client_hello("api.example.test");
+        let mut fragmented = hello[..8].to_vec();
+        fragmented[3..5].copy_from_slice(&3u16.to_be_bytes());
+        fragmented.extend_from_slice(&hello[..3]);
+        fragmented.extend_from_slice(&((hello.len() - 8) as u16).to_be_bytes());
+        fragmented.extend_from_slice(&hello[8..]);
+        assert_eq!(client_hello_sni(&hello[9..]).unwrap(), "api.example.test");
+        let root = fixture_dir(); let (upstream_addr, upstream_thread) = upstream();
+        let gateway = gateway(root.path(), vec!["1.1.1.1:443".parse().unwrap()],
+            upstream_addr, Arc::new(AtomicUsize::new(0)));
+        let mut bytes = b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n".to_vec();
+        bytes.extend_from_slice(&fragmented);
+        assert!(request(gateway.socket(), &bytes).starts_with(b"HTTP/1.1 200"));
+        assert_eq!(upstream_thread.join().unwrap(), fragmented);
     }
 
     #[test]
@@ -444,20 +606,27 @@ mod tests {
         let root = fixture_dir();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
+        let hello = client_hello("api.example.test");
+        let hello_len = hello.len();
+        let (received, ready) = std::sync::mpsc::channel();
         let upstream_thread = thread::spawn(move || {
             let (mut upstream, _) = listener.accept().unwrap();
             upstream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-            let mut bytes = Vec::new(); upstream.read_to_end(&mut bytes).unwrap(); bytes
+            let mut bytes = vec![0; hello_len]; upstream.read_exact(&mut bytes).unwrap();
+            received.send(()).unwrap();
+            upstream.read_to_end(&mut bytes).unwrap(); bytes
         });
         let gateway = gateway(root.path(), vec!["1.1.1.1:443".parse().unwrap()], address, Arc::new(AtomicUsize::new(0)));
         let mut client = UnixStream::connect(gateway.socket()).unwrap();
         client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         client.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n").unwrap();
         assert!(read_response_header(&mut client).starts_with("HTTP/1.1 200"));
+        client.write_all(&hello).unwrap();
+        ready.recv_timeout(Duration::from_secs(3)).unwrap();
         drop(gateway);
         let mut remaining = Vec::new(); client.read_to_end(&mut remaining).unwrap();
         assert!(remaining.is_empty());
-        assert!(upstream_thread.join().unwrap().is_empty());
+        assert_eq!(upstream_thread.join().unwrap(), hello);
     }
 
     #[test]
@@ -466,5 +635,46 @@ mod tests {
             assert!(AllowedHosts::new(&[host.to_owned()]).is_err(), "{host}");
         }
         assert!(AllowedHosts::new(&["EXAMPLE.COM".into(), "example.com".into()]).is_err());
+    }
+
+    #[test]
+    fn ambiguous_tls_name_extensions_are_refused() {
+        let original = client_hello("api.example.test");
+        let extension = original[52..].to_vec();
+        for extra in [extension, vec![0xfe, 0x0d, 0, 0]] {
+            let mut record = original.clone();
+            record.extend_from_slice(&extra);
+            let record_size = (record.len() - 5) as u16;
+            let handshake_size = record.len() - 9;
+            let extensions_size = (record.len() - 52) as u16;
+            record[3..5].copy_from_slice(&record_size.to_be_bytes());
+            record[6..9].copy_from_slice(&[(handshake_size >> 16) as u8, (handshake_size >> 8) as u8, handshake_size as u8]);
+            record[50..52].copy_from_slice(&extensions_size.to_be_bytes());
+            assert!(client_hello_sni(&record[9..]).is_err());
+        }
+    }
+
+    #[test]
+    fn guarded_gateway_refuses_non_docker_manifest_before_socket_binding() {
+        let root = fixture_dir();
+        let session = root.path().join("session");
+        fs::create_dir(&session).unwrap();
+        fs::set_permissions(&session, fs::Permissions::from_mode(0o700)).unwrap();
+        let manifest = crate::Manifest {
+            version: 1, session_id: "session".into(), profile: Profile::Native,
+            policy: None, policy_hash: String::new(), creation_policy_hash: String::new(),
+            source: root.path().to_owned(), checkout: root.path().to_owned(),
+            context_cwd: None, provider_rollout: None, checkout_device: 0,
+            checkout_inode: 0, base_sha: String::new(), branch: String::new(),
+            private_home: root.path().to_owned(), cache: root.path().to_owned(),
+            broker: session.clone(), container_id: None, nonce: String::new(),
+            state: "ready".into(),
+        };
+        let path = session.join("manifest.json");
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let error = EgressGateway::start_for_session(&path, hosts()).err().unwrap();
+        assert!(error.to_string().contains("network-none Docker session"));
+        assert!(!session.join("egress.sock").exists());
     }
 }

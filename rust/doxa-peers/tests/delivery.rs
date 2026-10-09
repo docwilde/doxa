@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use doxa_peers::{delivery::*, now, PeerRecord, Registry};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -88,6 +88,74 @@ fn blocking_receive_still_waits_after_a_poll() -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn sender_stays_connected_until_inbox_samples_kernel_pid() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let runtime = temp.path().join("runtime");
+    let _registry = Registry::open(&runtime)?;
+    let inbox = Inbox::bind(&runtime, "recipient")?;
+    let path = inbox.path().to_owned();
+    let frame = PeerFrame { authenticated_pid: None, from_id: "sender".into(), from_title: "test".into(),
+        sent_at: now(), body: "hello".into(), from_repo: None, kind: None };
+    let sender = thread::spawn(move || send(&path, &frame));
+    // A sender that closes immediately after write loses LOCAL_PEERPID if the
+    // daemon has not accepted the connection yet.
+    thread::sleep(Duration::from_millis(50));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let received = loop {
+        if let Some(frame) = inbox.poll_receive(&|s: &str| s.to_owned())? { break frame; }
+        assert!(Instant::now() < deadline, "peer frame never arrived");
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(received.authenticated_pid, Some(std::process::id() as i32));
+    assert_eq!(received.body, "hello");
+    sender.join().unwrap()?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sender_accepts_legacy_eof_after_a_complete_frame() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("legacy.sock");
+    let listener = UnixListener::bind(&path)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    let frame = PeerFrame { authenticated_pid: None, from_id: "sender".into(), from_title: "test".into(),
+        sent_at: now(), body: "hello".into(), from_repo: None, kind: None };
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || { let _ = tx.send(send(&path, &frame)); });
+    let (mut accepted, _) = listener.accept()?;
+    let mut bytes = Vec::new();
+    accepted.read_to_end(&mut bytes)?;
+    assert!(bytes.ends_with(b"\n"));
+    assert!(rx.recv_timeout(Duration::from_millis(50)).is_err(), "sender closed before receiver did");
+    drop(accepted);
+    rx.recv_timeout(Duration::from_secs(1)).expect("sender did not observe legacy EOF")?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sender_bounds_a_receiver_that_keeps_the_socket_open() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("stalled.sock");
+    let listener = UnixListener::bind(&path)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    let frame = PeerFrame { authenticated_pid: None, from_id: "sender".into(), from_title: "test".into(),
+        sent_at: now(), body: "hello".into(), from_repo: None, kind: None };
+    let started = Instant::now();
+    let sender = thread::spawn(move || send(&path, &frame));
+    let (mut accepted, _) = listener.accept()?;
+    let mut bytes = Vec::new();
+    accepted.read_to_end(&mut bytes)?;
+    assert!(bytes.ends_with(b"\n"));
+    let error = sender.join().unwrap().expect_err("stalled receiver must time out");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(3));
+    Ok(())
+}
+
 #[test]
 fn full_peer_connect_queue_does_not_stall_delivery() -> io::Result<()> {
     let temp = tempfile::tempdir()?;
@@ -128,18 +196,33 @@ fn full_peer_connect_queue_does_not_stall_delivery() -> io::Result<()> {
     assert!(started.elapsed() < Duration::from_secs(4));
 
     // A short backlog must recover without losing the next message.
+    drop(queued);
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || { let _ = tx.send(send(&path, &frame)); });
     listener.set_nonblocking(true)?;
     let deadline = Instant::now() + Duration::from_secs(3);
-    let mut accepted = Vec::new();
+    let mut accepted: Vec<(UnixStream, Vec<u8>)> = Vec::new();
     let recovered = loop {
         if let Ok(result) = rx.try_recv() { break result; }
         match listener.accept() {
-            Ok((stream, _)) => accepted.push(stream),
+            Ok((stream, _)) => { stream.set_nonblocking(true)?; accepted.push((stream, Vec::new())); },
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
             Err(error) => return Err(error),
         }
+        let mut still_open = Vec::new();
+        for (mut stream, mut bytes) in accepted.drain(..) {
+            let mut buf = [0u8; 4096];
+            match stream.read(&mut buf) {
+                Ok(0) => {},
+                Ok(n) => {
+                    bytes.extend_from_slice(&buf[..n]);
+                    if !bytes.contains(&b'\n') { still_open.push((stream, bytes)); }
+                },
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => still_open.push((stream, bytes)),
+                Err(error) => return Err(error),
+            }
+        }
+        accepted = still_open;
         assert!(Instant::now() < deadline, "peer delivery did not recover after accepting queued peers");
         thread::sleep(Duration::from_millis(10));
     };

@@ -16,12 +16,18 @@ use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
 impl App {
-    fn rail_urgency(&self, index: usize) -> u8 {
+    pub(super) fn rail_urgency(&self, index: usize) -> u8 {
         let id = &self.sessions[index].id;
-        if self.waiting_for_input(id) { return 3; }
+        if self.waiting_for_input(id) { return 4; }
         // An unreported or invalid limit is unknown, never zero percent.
         if self.session_telemetry.get(id).and_then(|t| t.context_percent)
-            .is_some_and(|percent| percent >= 50.0) { return 2; }
+            .is_some_and(|percent| percent >= 50.0) { return 3; }
+        if !self.remote_mode && !crate::remote_client::valid_target(id)
+            && self.lore_pending_cache.get(id).is_some_and(|signal| {
+                signal.pending == Some(true)
+                    && self.session_cwds.get(id) == Some(&signal.cwd)
+                    && Instant::now().saturating_duration_since(signal.checked) < Duration::from_secs(90)
+            }) { return 2; }
         if self.unread_sessions.contains(id) { return 1; }
         0
     }

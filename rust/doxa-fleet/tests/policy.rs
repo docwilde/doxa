@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 
 fn fixture()->(tempfile::TempDir,Context){
     let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
-    let charter=Charter{version:1,fleet_id:"run".into(),task:"Implement scoped feature".into(),repo:"/repo".into(),allowed_paths:vec!["src".into()],required_evidence:vec!["host tests".into()],worker_limit:2,run_budget_usd:Some(10.0),deadline:unix_now()+3600,human_actions:vec!["authority changes".into()]};
+    let charter=Charter{version:1,fleet_id:"run".into(),task:"Implement scoped feature".into(),repo:"/repo".into(),allowed_paths:vec!["src".into()],required_evidence:vec!["host tests".into()],worker_limit:2,run_budget_usd:Some(10.0),deadline:unix_now()+3600,human_actions:vec!["authority changes".into()],test_recipe:None};
     let context=Context{charter_sha256:hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"assignment-a".into(),session_id:"a".into(),pid:101,role:"worker".into(),task:"Scoped task".into(),cwd:"/repo-a".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]},Assignment{id:"assignment-b".into(),session_id:"b".into(),pid:102,role:"worker".into(),task:"Scoped task".into(),cwd:"/repo-b".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}],review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(judge::Model::parse("jev:jev-1.13.0").unwrap()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("state.json")};
     (dir,context)
 }
@@ -53,10 +53,24 @@ fn outage_marks_ordinary_status_but_holds_actionable_messages_and_strict_profile
 #[test]
 fn replay_rate_deadline_and_completion_evidence_are_host_enforced(){
     let (_dir,mut context)=fixture();context.review.message_mode=Mode::Off;
+    context.assignments[0].base_commit=Some("a".repeat(40));
+    context.charter.test_recipe=Some(evidence::TestRecipe{argv:vec!["/usr/bin/true".into()],cwd_relative:String::new(),timeout_s:5});
+    context.charter_sha256=hash(&context.charter).unwrap();
+    evidence::create_key(&context).unwrap();
     let message=envelope(&context,Kind::Status);assert!(admit(&context,&message,"b",101,None).unwrap().delivered);assert!(!admit(&context,&message,"b",101,None).unwrap().delivered);
     assert!(!admit(&context,&envelope(&context,Kind::Completion),"b",101,None).unwrap().delivered);
     transaction(&context,|state|{state.artifacts.insert("host-test".into(),json!({"kind":"test_result","host_verified":true,"passed":true}));state.artifacts.insert("host-diff".into(),json!({"kind":"git_diff","host_verified":true}));Ok(())}).unwrap();
-    let mut completion=envelope(&context,Kind::Completion);completion.artifact_refs.push("host-test".into());completion.artifact_refs.push("host-diff".into());assert!(admit(&context,&completion,"b",101,None).unwrap().delivered);
+    let mut completion=envelope(&context,Kind::Completion);completion.artifact_refs.push("host-test".into());completion.artifact_refs.push("host-diff".into());
+    assert!(!admit(&context,&completion,"b",101,None).unwrap().delivered,"fabricated host_verified flags cannot prove completion");
+    let binding=evidence::Binding{fleet_id:context.charter.fleet_id.clone(),charter_sha256:context.charter_sha256.clone(),assignment_id:context.assignments[0].id.clone(),session_id:"a".into(),base_commit:"a".repeat(40),snapshot_sha256:"b".repeat(64)};
+    let (diff_id,diff)=evidence::issue(&context,"git_diff",serde_json::to_value(evidence::DiffEvidence{binding:binding.clone(),changed_paths:vec!["src/lib.rs".into()]}).unwrap()).unwrap();
+    let (test_id,test)=evidence::issue(&context,"test_result",serde_json::to_value(evidence::TestEvidence{binding,recipe_sha256:hash(context.charter.test_recipe.as_ref().unwrap()).unwrap(),runner_image:format!("test@sha256:{}","d".repeat(64)),exit_code:0,passed:true,duration_ms:1,output_sha256:"e".repeat(64),output_bytes:0}).unwrap()).unwrap();
+    transaction(&context,|state|{state.artifacts.insert(diff_id.clone(),diff);state.artifacts.insert(test_id.clone(),test);Ok(())}).unwrap();
+    let mut completion=envelope(&context,Kind::Completion);completion.artifact_refs=vec![test_id.clone(),diff_id.clone()];
+    assert!(!admit(&context,&completion,"b",101,None).unwrap().delivered,"native workspace cannot claim verified Docker test completion");
+    let mut tampered=envelope(&context,Kind::Completion);tampered.artifact_refs=vec![test_id,diff_id];
+    transaction(&context,|state|{state.artifacts.get_mut(&tampered.artifact_refs[0]).unwrap()["payload"]["passed"]=json!(false);Ok(())}).unwrap();
+    assert!(!admit(&context,&tampered,"b",101,None).unwrap().delivered,"receipt mutation invalidates the content ID and MAC");
     transaction(&context,|state|{state.message_count=60;state.minute=unix_now()/60;Ok(())}).unwrap();assert!(!admit(&context,&envelope(&context,Kind::Status),"b",101,None).unwrap().delivered);
     context.charter.deadline=unix_now()-1;context.charter_sha256=hash(&context.charter).unwrap();assert!(admit(&context,&envelope(&context,Kind::Status),"b",101,None).is_err());
 }

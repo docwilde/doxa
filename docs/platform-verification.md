@@ -20,14 +20,12 @@ failure rather than expecting a Linux build-version check. The three remaining
 macOS cases remain visibly ignored under
 [issue #197](https://github.com/docwilde/doxa/issues/197): two fake peer socket
 receivers saw `EINVAL` during full-stream reads, and native vendor finalization
-indexed zero messages where four were expected. The fleet process fixture now
-holds its sender socket open long enough to verify kernel PID admission, then
-asserts the expected protected Codex startup refusal on macOS. Production peer
-delivery still closes after writing, so live macOS fleet delivery remains
-unverified. The SQLite probe reports query errors instead of treating all
-errors as zero. A green macOS job covers the portable process path, but not
-those three ignored interactions, live fleet delivery or authenticated provider
-sessions.
+indexed zero messages where four were expected. Beta.15 keeps production peer
+senders connected until the receiver reads the frame and samples its PID;
+the fleet process fixture now uses that sender and passes macOS CI. The SQLite
+probe reports query errors instead of treating all errors as zero. A green
+macOS job covers this portable process path, but not the three ignored
+interactions, an authenticated live fleet or authenticated provider sessions.
 
 Bounded authenticated Claude, DeepSeek and GLM start, turn, stop/resume and
 usage checks passed on Linux with alpha.68; see

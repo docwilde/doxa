@@ -509,6 +509,7 @@ fn run_loop(
         changed |= app.poll_session_delete();
         changed |= app.poll_fleet();
         changed |= app.poll_diff();
+        changed |= app.poll_codegraph();
         changed |= app.poll_auto_diff();
         changed |= app.poll_history();
         changed |= app.poll_resume();
@@ -516,6 +517,7 @@ fn run_loop(
         changed |= app.poll_lore();
         changed |= app.poll_belief_graph();
         changed |= app.poll_memory();
+        changed |= app.poll_lore_pending();
         changed |= app.poll_repo();
         changed |= app.poll_memory_menu();
         changed |= app.poll_shell();

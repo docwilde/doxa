@@ -3,6 +3,35 @@ use doxa_lore::LoreClient;
 use std::time::Duration;
 
 #[test]
+fn native_source_session_pending_summary_respects_project_and_session() {
+    let owned = tempfile::tempdir().unwrap();
+    let config = lore_core::config::Config::for_root(owned.path().join("store"));
+    let source = owned.path().join("source");
+    let other = owned.path().join("other");
+    let mut client = LoreClient::open_config(config.clone(), Duration::from_secs(2)).unwrap();
+    if !client.can_pending_for_sessions() {
+        // This committed pin is intentionally still 0.62.17. The test becomes
+        // active when release integration advances the LORE dependency.
+        return;
+    }
+    let source_slug = lore_core::config::project_slug(&source);
+    let target_slug = lore_core::config::project_slug(&other);
+    let authority = lore_core::gate::Authority::HumanReview {
+        agent: "fixture".into(), engine: "human".into(),
+    };
+    let pid = lore_core::gate::stage(&config, &serde_json::json!({
+        "kind":"memory", "scope":"user", "project":target_slug,
+        "source_project":source_slug, "session_id":"one", "text":"fixture"
+    }), &authority).unwrap();
+    let summary = client.pending_for_sessions(source.to_str().unwrap(),
+        &["one".into(), "two".into()]).unwrap();
+    assert!(summary.complete);
+    assert_eq!(summary.sessions[0].pending_pids, [pid]);
+    assert!(summary.sessions[1].pending_pids.is_empty());
+    assert!(summary.sessions[1].complete);
+}
+
+#[test]
 fn native_scrub_is_lazy_and_never_creates_memory_store() {
     let owned = tempfile::tempdir().unwrap();
     let root = owned.path().join("memory-off-store");

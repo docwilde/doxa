@@ -846,6 +846,17 @@ impl App {
             draw_menu_scrollbar(frame, area, info.lines.len(), visible, start);
             return;
         }
+        if info.kind == "codegraph" {
+            let lines = super::codegraph_viewer::wrapped_lines(&info.lines, usize::from(area.width.saturating_sub(3)).max(1));
+            let visible = usize::from(area.height.saturating_sub(2)).max(1);
+            let start = info.scroll.min(lines.len().saturating_sub(visible));
+            let body = lines.iter().skip(start).take(visible).cloned().collect::<Vec<_>>().join("\n");
+            frame.render_widget(Paragraph::new(body)
+                .block(Block::default().title(" Code graph · ↑↓/PgUp/PgDn scroll · Esc close ").borders(Borders::ALL))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
+            draw_menu_scrollbar(frame, area, lines.len(), visible, start);
+            return;
+        }
         if info.kind == "memory" {
             if let Some(list) = &self.memory_list {
                 let current = self.groups[self.active_group].active_id().and_then(|id| {
@@ -2026,8 +2037,9 @@ impl App {
         let rows = self.rail_rows();
         let ranks = self.rail_groups().into_iter().map(|(key, _, rank)| (key, rank)).collect::<Vec<_>>();
         let badge = |key: &RailGroupKey| match ranks.iter().find(|(candidate, _)| candidate == key).map(|(_, rank)| *rank).unwrap_or(0) {
-            3 => "!",        // stopped for a human
-            2 => "ctx",      // provider-reported context use >= 50%
+            4 => "!",        // stopped for a human
+            3 => "ctx",      // provider-reported context use >= 50%
+            2 => "lore",     // source-session proposals await review
             1 => "new",      // completed but unseen
             _ => "",
         };

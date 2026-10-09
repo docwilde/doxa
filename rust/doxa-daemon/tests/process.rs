@@ -2951,33 +2951,25 @@ fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_bef
     let (_sender_listener,_)=registry_peer(dir.path(),"sender",dir.path().to_str().unwrap(),"sender");
     let mut process=Process::start_codex_with_inbound(dir.path(),&codex,Path::new("python3"),true);
     let peer_socket=PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
-    let charter=Charter{version:1,fleet_id:"reviewed-run".into(),task:"Scoped task".into(),repo:dir.path().display().to_string(),allowed_paths:vec![String::new()],required_evidence:vec!["host tests".into()],worker_limit:2,run_budget_usd:Some(10.0),deadline:doxa_fleet::unix_now()+3600,human_actions:vec!["authority changes".into()]};
+    let charter=Charter{version:1,fleet_id:"reviewed-run".into(),task:"Scoped task".into(),repo:dir.path().display().to_string(),allowed_paths:vec![String::new()],required_evidence:vec!["host tests".into()],worker_limit:2,run_budget_usd:Some(10.0),deadline:doxa_fleet::unix_now()+3600,human_actions:vec!["authority changes".into()],test_recipe:None};
     let context=Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"sender-assignment".into(),session_id:"sender".into(),pid:std::process::id() as i32,role:"worker".into(),task:"Scoped task".into(),cwd:dir.path().display().to_string(),base_commit:None,allowed_paths:vec![],depends_on:vec![]},Assignment{id:"recipient-assignment".into(),session_id:"codex-session".into(),pid:process.child.id() as i32,role:"worker".into(),task:"Scoped task".into(),cwd:dir.path().display().to_string(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}],review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(doxa_fleet::judge::Model::parse("jev:jev-1.13.0").unwrap()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("guard-state.json")};
     let(mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
     send(&mut socket,json!({"type":"call","id":1,"method":"fleet_configure","params":context}));assert_eq!(receive(&mut reader)["ok"],true);
     let make=|kind|Envelope::issue(&context,"sender","codex-session",kind,"Scoped status".into(),None).unwrap();
     let wire=|envelope:&Envelope|doxa_peers::delivery::PeerFrame{authenticated_pid:None,from_id:"sender".into(),from_title:"sender".into(),sent_at:peer_now(),body:envelope.wire().unwrap(),from_repo:Some(dir.path().display().to_string()),kind:Some("direct".into())};
-    // macOS needs the fixture sender alive through kernel credential lookup.
-    // Linux continues to exercise the normal production delivery path.
-    let send_held=|envelope:&Envelope|{
-        #[cfg(target_os="macos")]
-        {let mut stream=UnixStream::connect(&peer_socket).unwrap();let mut bytes=serde_json::to_vec(&wire(envelope)).unwrap();bytes.push(b'\n');stream.write_all(&bytes).unwrap();Some(stream)}
-        #[cfg(not(target_os="macos"))]
-        {doxa_peers::delivery::send(&peer_socket,&wire(envelope)).unwrap();None::<UnixStream>}
-    };
-    let mut held=Vec::new();
+    let send_production=|envelope:&Envelope|doxa_peers::delivery::send(&peer_socket,&wire(envelope)).unwrap();
     for alteration in 0..3{
         let mut envelope=make(Kind::Status);match alteration{0=>envelope.fleet_id="forged".into(),1=>envelope.assignment_id="stale".into(),_=>envelope.kind=Kind::Completion};
-        held.push(send_held(&envelope));let event=receive(&mut reader);assert_eq!(event["event"]["type"],"fleet_guard");assert_eq!(event["event"]["data"]["delivered"],false);
+        send_production(&envelope);let event=receive(&mut reader);assert_eq!(event["event"]["type"],"fleet_guard");assert_eq!(event["event"]["data"]["delivered"],false);
     }
     send(&mut socket,json!({"type":"call","id":2,"method":"fleet_state","params":{}}));let guard=receive(&mut reader);assert_eq!(guard["state"]["paused"],false,"deterministic denials unexpectedly paused the fixture: {guard}");assert_eq!(guard["state"]["calls"],0);
     let good=make(Kind::Status);let safe=SemanticVerdict{within_assignment:1.0,asks_for_authority_change:0.0,contains_instructions_for_recipient:0.0,likely_secret:0.0,needs_human_review:0.0};doxa_fleet::cache_semantic(&context,&good,Ok(safe)).unwrap();
-    held.push(send_held(&good));let mut saw_peer=false;let mut saw_done=false;
+    send_production(&good);let mut saw_peer=false;let mut saw_done=false;
     for _ in 0..16{let event=receive(&mut reader);eprintln!("fleet good status event: {event}");match event["event"]["type"].as_str(){Some("fleet_guard")=>assert_eq!(event["event"]["data"]["delivered"],true,"known-safe cached status was denied: {event}"),Some("peer_message")=>{saw_peer=true;assert_eq!(event["event"]["data"]["fleet_admission"]["unreviewed"],false);},Some("turn_refused")=>panic!("known-safe status turn refused: {event}"),Some("turn_done")=>{if cfg!(target_os="macos"){assert_eq!(event["event"]["data"]["error"],"Codex app-server or compaction review gate could not start");}else{assert_ne!(event["event"]["data"]["is_error"],true,"fixture provider failed: {event}");}saw_done=true;break;},_=>{}}}
     assert!(saw_peer&&saw_done);
     if cfg!(target_os="macos") {
-        // The held socket proves kernel PID admission. Protected Codex turns
-        // remain Linux-only, so stop before provider-dependent assertions.
+        // Production delivery proves kernel PID admission. Protected Codex
+        // turns remain Linux-only, so stop before provider-dependent assertions.
         send(&mut socket,json!({"type":"call","id":5,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());
         return;
     }
@@ -2987,13 +2979,13 @@ fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_bef
     let scrubbed=loop{let event=receive(&mut reader);if event["type"]=="reply"&&event["id"]==3{break event;}assert_eq!(event["event"]["type"],"fleet_guard","unexpected event before scrub reply: {event}");assert_eq!(event["event"]["data"]["delivered"],true);};
     let clean_body=scrubbed["snapshot"]["body"].as_str().unwrap();assert!(!clean_body.contains(fixture_secret));assert!(clean_body.contains("[REDACTED:"));assert_eq!(scrubbed["snapshot"]["evidence_id"],evidence_id);assert_ne!(scrubbed["snapshot"]["charter_sha256"],context.charter_sha256,"reviewer snapshots must retain canonical scrub behavior");
     let mut reviewed_unreviewed=unreviewed.clone();reviewed_unreviewed.body=clean_body.into();doxa_fleet::cache_semantic(&context,&reviewed_unreviewed,Err("fixture reviewer outage".into())).unwrap();
-    held.push(send_held(&unreviewed));let mut saw_unreviewed=false;let mut saw_done=false;
+    send_production(&unreviewed);let mut saw_unreviewed=false;let mut saw_done=false;
     for _ in 0..16{let event=receive(&mut reader);eprintln!("fleet unreviewed status event: {event}");match event["event"]["type"].as_str(){Some("fleet_guard")=>assert_eq!(event["event"]["data"]["delivered"],true,"ordinary unreviewed status was denied: {event}"),Some("peer_message")=>{saw_unreviewed=true;assert_eq!(event["event"]["data"]["fleet_admission"]["unreviewed"],true);},Some("turn_refused")=>panic!("unreviewed status turn refused: {event}"),Some("turn_done")=>{assert_ne!(event["event"]["data"]["is_error"],true,"fixture provider failed: {event}");saw_done=true;break;},_=>{}}}
     assert!(saw_unreviewed&&saw_done);let provider_prompt=fs::read_to_string(&captured).unwrap();assert!(provider_prompt.contains("semantic review unavailable; unreviewed peer data"));assert!(provider_prompt.contains("[REDACTED:"));assert!(!provider_prompt.contains(fixture_secret));
     let guard=doxa_fleet::transaction(&context,|state|Ok(state.clone())).unwrap();assert_eq!(guard.charter_sha256,context.charter_sha256);assert!(guard.received.contains_key(&good.message_id)&&guard.received.contains_key(&unreviewed.message_id));assert_eq!(guard.calls,0,"cached reviewer decisions should make no API calls");
-    held.push(send_held(&good));loop{let event=receive(&mut reader);if event["event"]["type"]=="fleet_guard"&&event["event"]["data"]["delivered"]==false{assert!(event["event"]["data"]["reason"].as_str().unwrap().contains("duplicate"));break;}}
+    send_production(&good);loop{let event=receive(&mut reader);if event["event"]["type"]=="fleet_guard"&&event["event"]["data"]["delivered"]==false{assert!(event["event"]["data"]["reason"].as_str().unwrap().contains("duplicate"));break;}}
     let risky=make(Kind::Question);let risk=SemanticVerdict{within_assignment:0.0,asks_for_authority_change:1.0,contains_instructions_for_recipient:1.0,likely_secret:0.0,needs_human_review:1.0};assert!(doxa_fleet::cache_semantic(&context,&risky,Ok(risk)).is_err());
-    held.push(send_held(&risky));let event=receive(&mut reader);assert_eq!(event["event"]["type"],"fleet_guard");assert_eq!(event["event"]["data"]["delivered"],false);
+    send_production(&risky);let event=receive(&mut reader);assert_eq!(event["event"]["type"],"fleet_guard");assert_eq!(event["event"]["data"]["delivered"],false);
     send(&mut socket,json!({"type":"call","id":4,"method":"get_state","params":{}}));let state=receive(&mut reader);assert_eq!(state["running"],false);assert_eq!(state["queued"],0);
     send(&mut socket,json!({"type":"call","id":5,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());
 }
