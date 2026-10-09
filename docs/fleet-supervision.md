@@ -39,6 +39,8 @@ No account check was run here. A listing does not establish that a Responses
 request will succeed, its billed tier, effective latency, or review quality;
 those require an owner-run live evaluation. Selecting Astra as the message
 judge does not establish that it meets the fast judge's latency needs.
+Run `doxa model-facts codex gpt-6-astra --check-catalog` to opt into that
+read-only listing check with `OPENAI_API_KEY` before selecting it.
 
 Reviewer providers `claude`, `codex`, `deepseek`, and `glm` use stateless API
 calls and their API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,

@@ -99,6 +99,17 @@ operator to inspect the exact provider source and change the registry in a
 reviewed code commit. The command cannot grant a model, effort level, or
 priced-budget admission.
 
+`doxa model-facts codex gpt-6-astra --check-catalog` explicitly reads OpenAI's
+Models API with `OPENAI_API_KEY`. The fixed `GET /v1/models` request has no
+generation payload, follows no redirects or environment proxy, and has a five
+second total deadline and a 1 MiB response limit. It prints only `listed`,
+`unlisted`, or `unknown`; missing credentials, refused requests, malformed or
+oversized responses, and timeouts are `unknown`. An unlisted result means the
+exact ID was absent from that successful catalog response. A listed result
+does not prove a Responses call will succeed, its billed tier, latency, or
+review quality. The flag is accepted only for the `codex` engine and never runs
+implicitly during fact review or model selection.
+
 ## Token-budget bounds
 
 OpenAI's [pricing table](https://developers.openai.com/api/docs/pricing)
