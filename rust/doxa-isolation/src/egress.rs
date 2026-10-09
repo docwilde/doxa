@@ -267,7 +267,32 @@ fn copy_until_end<R: Read, W: Write>(input: &mut R, output: &mut W, stop: &Atomi
     Ok(())
 }
 
-fn tunnel(mut client: UnixStream, mut upstream: TcpStream, stop: &AtomicBool) -> io::Result<()> {
+fn copy_client_upload(client: &mut UnixStream, upstream: &mut TcpStream, stop: &AtomicBool,
+    peer_closed: &AtomicBool, origin: Option<&Arc<OriginGuard>>,
+    pin: Option<&ConnectorSenderPin>) -> io::Result<()> {
+    if origin.is_some() && pin.is_none() {
+        return Err(error("guarded tunnel has no pinned connector"));
+    }
+    let mut buffer = [0; 8192];
+    while !stop.load(Ordering::Acquire) && !peer_closed.load(Ordering::Acquire) {
+        match guarded_read(client, &mut buffer, pin) {
+            Ok(0) => return Ok(()),
+            Ok(size) => {
+                // The sender cmsg is checked by guarded_read. Observe the
+                // pinned connector's scope again before these bytes leave
+                // the gateway; this is sequential, not an atomic scope lock.
+                if let Some(guard) = origin { guard(client)?; }
+                upstream.write_all(&buffer[..size])?;
+            }
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+fn tunnel(mut client: UnixStream, mut upstream: TcpStream, stop: &AtomicBool,
+    origin: Option<&Arc<OriginGuard>>, pin: Option<&ConnectorSenderPin>) -> io::Result<()> {
     client.set_read_timeout(Some(IO_TIMEOUT))?;
     client.set_write_timeout(Some(CONNECT_TIMEOUT))?;
     upstream.set_read_timeout(Some(IO_TIMEOUT))?;
@@ -275,9 +300,20 @@ fn tunnel(mut client: UnixStream, mut upstream: TcpStream, stop: &AtomicBool) ->
     let mut client_read = client.try_clone()?;
     let mut upstream_read = upstream.try_clone()?;
     let cancel_upload = AtomicBool::new(false);
+    let cancel_download = AtomicBool::new(false);
     thread::scope(|scope| {
-        let upload = scope.spawn(|| { let result = copy_until_end(&mut client_read, &mut upstream, stop, Some(&cancel_upload)); let _ = upstream.shutdown(Shutdown::Write); result });
-        let download = copy_until_end(&mut upstream_read, &mut client, stop, None);
+        let upload = scope.spawn(|| {
+            let result = copy_client_upload(&mut client_read, &mut upstream, stop, &cancel_upload, origin, pin);
+            if result.is_err() {
+                // A rejected writer must not keep receiving a live upstream
+                // response while the download half waits for remote EOF.
+                cancel_download.store(true, Ordering::Release);
+                let _ = client_read.shutdown(Shutdown::Both);
+                let _ = upstream.shutdown(Shutdown::Both);
+            } else { let _ = upstream.shutdown(Shutdown::Write); }
+            result
+        });
+        let download = copy_until_end(&mut upstream_read, &mut client, stop, Some(&cancel_download));
         cancel_upload.store(true, Ordering::Release);
         let _ = client.shutdown(Shutdown::Write);
         upload.join().map_err(|_| io::Error::other("gateway upload panicked"))??;
@@ -396,7 +432,7 @@ fn serve(mut client: UnixStream, hosts: &AllowedHosts, resolver: &Resolver, conn
     if stop.load(Ordering::Acquire) { return Err(error("gateway stopped")); }
     // The checked IP is held in this socket; no second DNS lookup occurs.
     upstream.write_all(&hello)?;
-    tunnel(client, upstream, stop)
+    tunnel(client, upstream, stop, origin, pin)
 }
 
 /// Bound to a private session broker directory. Dropping it closes active
@@ -778,6 +814,134 @@ mod tests {
         assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
         assert_eq!(status, 0);
         assert_eq!(dial_calls.load(Ordering::Acquire), 0);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guarded_relay_accepts_pinned_writer_and_clean_eof() {
+        let root = fixture_dir();
+        let (upstream_addr, upstream_thread) = upstream();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gateway = EgressGateway::start_with_after_lock_and_origin(
+            root.path(), hosts(),
+            Arc::new(|_| Ok(vec!["1.1.1.1:443".parse().unwrap()])),
+            Arc::new(move |_| TcpStream::connect(upstream_addr)),
+            Some({ let calls = calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Ok(())
+            }) }), || {},
+        ).unwrap();
+        let mut client = UnixStream::connect(gateway.socket()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        client.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n").unwrap();
+        assert_eq!(read_response_header(&mut client), "HTTP/1.1 200 Connection Established\r\n\r\n");
+        let payload = [client_hello("api.example.test"), b"approved".to_vec()].concat();
+        client.write_all(&payload).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut echo = Vec::new();
+        client.read_to_end(&mut echo).unwrap();
+        assert_eq!(echo, payload);
+        assert_eq!(upstream_thread.join().unwrap(), payload);
+        assert!(calls.load(Ordering::Acquire) >= 4);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guarded_relay_forwards_connector_chunks_but_refuses_later_inherited_writer() {
+        let root = fixture_dir();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_addr = listener.local_addr().unwrap();
+        let hello = client_hello("api.example.test");
+        let expected = [hello.as_slice(), b"approved"].concat();
+        let expected_len = expected.len();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (received_tx, received_rx) = std::sync::mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (mut upstream, _) = listener.accept().unwrap();
+            upstream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut bytes = vec![0; expected_len];
+            upstream.read_exact(&mut bytes).unwrap();
+            ready_tx.send(()).unwrap();
+            upstream.read_to_end(&mut bytes).unwrap();
+            received_tx.send(bytes).unwrap();
+        });
+        let guard_calls = Arc::new(AtomicUsize::new(0));
+        let gateway = EgressGateway::start_with_after_lock_and_origin(
+            root.path(), hosts(),
+            Arc::new(|_| Ok(vec!["1.1.1.1:443".parse().unwrap()])),
+            Arc::new(move |_| TcpStream::connect(upstream_addr)),
+            Some({ let calls = guard_calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Ok(())
+            }) }), || {},
+        ).unwrap();
+        let mut client = UnixStream::connect(gateway.socket()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        client.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n").unwrap();
+        assert_eq!(read_response_header(&mut client), "HTTP/1.1 200 Connection Established\r\n\r\n");
+        client.write_all(&hello).unwrap();
+        client.write_all(b"approved").unwrap();
+        ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        // Keep the child alive until the gateway rejects its inherited FD.
+        // A dead child would also fail pidfd liveness and miss this case.
+        let mut release = [0; 2];
+        assert_eq!(unsafe { libc::pipe2(release.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            unsafe { libc::close(release[1]); }
+            let forged = b"unapproved";
+            let sent = unsafe { libc::write(client.as_raw_fd(), forged.as_ptr().cast(), forged.len()) };
+            let mut signal = [0];
+            let ack = unsafe { libc::read(release[0], signal.as_mut_ptr().cast(), 1) };
+            unsafe { libc::_exit(if sent == forged.len() as isize && ack == 1 { 0 } else { 1 }); }
+        }
+        unsafe { libc::close(release[0]); }
+        let received = received_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(received, expected);
+        assert!(guard_calls.load(Ordering::Acquire) >= 4);
+        assert_eq!(unsafe { libc::write(release[1], b"x".as_ptr().cast(), 1) }, 1);
+        unsafe { libc::close(release[1]); }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert_eq!(status, 0);
+        upstream_thread.join().unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guarded_relay_rechecks_scope_before_forwarding_later_chunk() {
+        let root = fixture_dir();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_addr = listener.local_addr().unwrap();
+        let hello = client_hello("api.example.test");
+        let hello_len = hello.len();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (received_tx, received_rx) = std::sync::mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (mut upstream, _) = listener.accept().unwrap();
+            upstream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut bytes = vec![0; hello_len];
+            upstream.read_exact(&mut bytes).unwrap();
+            ready_tx.send(()).unwrap();
+            upstream.read_to_end(&mut bytes).unwrap();
+            received_tx.send(bytes).unwrap();
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gateway = EgressGateway::start_with_after_lock_and_origin(
+            root.path(), hosts(),
+            Arc::new(|_| Ok(vec!["1.1.1.1:443".parse().unwrap()])),
+            Arc::new(move |_| TcpStream::connect(upstream_addr)),
+            Some({ let calls = calls.clone(); Arc::new(move |_| {
+                if calls.fetch_add(1, Ordering::AcqRel) < 3 { Ok(()) }
+                else { Err(error("connector moved out of scope")) }
+            }) }), || {},
+        ).unwrap();
+        let mut client = UnixStream::connect(gateway.socket()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        client.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n").unwrap();
+        assert_eq!(read_response_header(&mut client), "HTTP/1.1 200 Connection Established\r\n\r\n");
+        client.write_all(&hello).unwrap();
+        ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        client.write_all(b"refused").unwrap();
+        assert_eq!(received_rx.recv_timeout(Duration::from_secs(3)).unwrap(), hello);
+        assert_eq!(calls.load(Ordering::Acquire), 4);
+        upstream_thread.join().unwrap();
     }
     #[cfg(target_os = "linux")]
     #[test]
