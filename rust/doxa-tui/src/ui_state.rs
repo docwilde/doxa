@@ -161,6 +161,7 @@ impl UiStateStore {
     pub fn path(&self) -> &Path {
         &self.path
     }
+    pub(crate) fn scope_key(&self) -> &str { &self.scope_key }
 
     /// A partial daemon roster must never prune saved tabs or collections.
     /// The bridge permanently revokes this capability on any attach failure.

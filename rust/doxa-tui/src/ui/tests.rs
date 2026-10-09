@@ -3158,9 +3158,16 @@ for line in sys.stdin:
 
         app.input = "/remote-control https://owner.tail.ts.net".into();
         assert!(app.submit_local_command());
-        assert!(matches!(app.remote_handoff, Some(RemoteHandoff::Hub(_))));
+        assert!(matches!(app.remote_handoff, Some(RemoteHandoff::Hub { save_layout: false, .. })));
         assert!(app.should_quit);
         assert!(app.pending_prompts.is_empty());
+        app.input = "/remote-control https://owner.tail.ts.net --save-layout".into();
+        assert!(app.submit_local_command());
+        assert!(matches!(app.remote_handoff, Some(RemoteHandoff::Hub { save_layout: true, .. })));
+        assert_eq!(super::terminal_loop::remote_handoff_args("https://owner.tail.ts.net", true),
+            ["remote", "tui", "https://owner.tail.ts.net", "--save-layout"]);
+        assert_eq!(super::terminal_loop::remote_handoff_args("https://owner.tail.ts.net", false),
+            ["remote", "tui", "https://owner.tail.ts.net"]);
 
         let mut remote = App { remote_mode: true, ..Default::default() };
         remote.input = "/remote-connect https://owner.tail.ts.net workstation".into();
