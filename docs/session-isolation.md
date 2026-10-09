@@ -85,8 +85,9 @@ receipt is never production admission; per-session quota provisioning,
 restart/remount verification and a reviewed runtime admission path remain open.
 An opt-in privileged helper can read the exact administrator-pinned project
 limit and five directory identities for a separate trusted caller UID. It
-always returns `admissible_as_hard_quota=false` and is not installed or called
-by the session launcher. The current same-UID controller and worker layout
+always returns `admissible_as_hard_quota=false`. A bounded read-only host client
+can verify its root-owned endpoint and exact saved session identity; the helper
+is not installed or called by the session launcher. The current same-UID controller and worker layout
 cannot use that trust split without further work.
 `docker-hardened` requests fail with that explicit gate; there is no fallback.
 See [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/),
