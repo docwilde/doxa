@@ -75,7 +75,7 @@ impl PngCache {
             let meta = file.metadata().ok()?;
             if !meta.is_file() || meta.len() != expected.bytes || meta.len() > MAX_PNG_BYTES { return None; }
             let mut bytes = Vec::with_capacity(meta.len() as usize);
-            file.read_to_end(&mut bytes).ok()?;
+            (&mut file).take(MAX_PNG_BYTES + 1).read_to_end(&mut bytes).ok()?;
             if bytes.len() as u64 != expected.bytes || Sha256::digest(&bytes).as_slice() != expected.digest {
                 return None;
             }
