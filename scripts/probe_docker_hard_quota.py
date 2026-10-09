@@ -209,7 +209,7 @@ def _aggregate_restart_probe(root: Path, endpoint: str, image: str, name: str,
         raise ValueError("third bind EDQUOT did not demonstrate aggregate project accounting")
     sizes = {"checkout": prefix, "home": prefix, "cache": third}
     _checked_marker_sizes(root, token, sizes)
-    _docker(endpoint, ["stop", "--time", "2", name], docker_config, timeout=15)
+    _docker(endpoint, ["stop", "--timeout", "2", name], docker_config, timeout=15)
     _docker(endpoint, ["start", name], docker_config)
     _inspect_fixture_container(endpoint, name, root, image, token, created, docker_config)
     after = worker("check", "cache", 0)

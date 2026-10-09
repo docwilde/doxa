@@ -124,6 +124,8 @@ class HardQuotaProbeTests(unittest.TestCase):
                 self.assertIn("none", args)
                 return "b" * 64
             if args[0] in {"start", "stop"}:
+                if args[0] == "stop":
+                    self.assertEqual(args[1:3], ["--timeout", "2"])
                 return ""
             self.assertEqual(args[0], "exec")
             mode, source, _cap, worker_token = args[-4:]
