@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
+use std::time::Duration;
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
@@ -58,6 +59,8 @@ Commands:
                        Discover plugins or change sanitized adoption for new sessions
   codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH
                        Query current Rust syntax and structural module files with source hashes
+  codegraph --lore-map [--root WORKTREE] file|imports|calls|modules PATH
+                       Export one syntax snapshot with read-only LORE purpose candidates
   fleet ...            Inspect or start native fleet runs
   mesh serve           Serve the private peer graph until Ctrl-C
   remote serve         Serve live sessions to an allowed Tailscale browser
@@ -161,8 +164,22 @@ fn run(args: &[String]) -> io::Result<()> {
                 return update();
             }
             "codegraph" => {
-                let answer = doxa_codegraph::query_cli(&args[1..]).map_err(invalid)?;
-                println!("{}", serde_json::to_string(&answer).map_err(io::Error::other)?);
+                let with_lore_map = args.get(1).is_some_and(|arg| arg == "--lore-map");
+                let query_args = if with_lore_map { &args[2..] } else { &args[1..] };
+                let answer = doxa_codegraph::query_cli(query_args).map_err(invalid)?;
+                if with_lore_map {
+                    if !matches!(answer.query, "file" | "imports" | "calls" | "modules") {
+                        return Err(invalid("--lore-map requires a file-scoped query"));
+                    }
+                    let scope = answer.scope.clone();
+                    let mut lore = doxa_lore::LoreClient::open(Duration::from_secs(3))
+                        .map_err(io::Error::other)?;
+                    let map = lore.file_map(&scope).map_err(io::Error::other)?;
+                    let snapshot = doxa_tui::codegraph_snapshot::export(answer, map).map_err(invalid)?;
+                    println!("{}", serde_json::to_string(&snapshot).map_err(io::Error::other)?);
+                } else {
+                    println!("{}", serde_json::to_string(&answer).map_err(io::Error::other)?);
+                }
                 return Ok(());
             }
             "setup" => {

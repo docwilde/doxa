@@ -51,6 +51,10 @@ pub struct Answer {
     pub query: &'static str,
     pub value: String,
     pub observed_unix_ms: u128,
+    /// Parsed bytes of the specifically requested Rust file, including an
+    /// empty file with no rows or module declarations.
+    pub requested_source_sha256: Option<String>,
+    pub requested_source_read_unix_ms: Option<u128>,
     pub status: String,
     pub coverage: Coverage,
     pub rows: Vec<Row>,
@@ -619,6 +623,7 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
     if kind != "symbol" && !paths.contains(&value) { return Err("file is not present in the worktree listing".into()); }
     let mut answer = Answer { scope: root.to_string_lossy().into_owned(), query: kind, value: value.clone(),
         observed_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
+        requested_source_sha256: None, requested_source_read_unix_ms: None,
         status: "ok".into(), coverage: Coverage::default(), rows: Vec::new(), omitted_rows: 0,
         edges: Vec::new(), omitted_edges: 0,
         module_edges: Vec::new(), omitted_module_edges: 0, skipped_nested_modules: 0,
@@ -644,6 +649,10 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                     Err(reason) => { answer.coverage.unparseable.add(&path, reason); source_facts.insert(path.clone(), SourceFact::Unparseable); if path == &value { answer.status = "unparseable".into(); } continue; }
                 };
                 source_facts.insert(path.clone(), SourceFact::Parsed { sha256: sha.clone(), read_unix_ms });
+                if path == &value && kind != "symbol" {
+                    answer.requested_source_sha256 = Some(sha.clone());
+                    answer.requested_source_read_unix_ms = Some(read_unix_ms);
+                }
                 answer.coverage.parsed_rust_files += 1;
                 answer.coverage.macro_items += parsed.macro_items;
                 answer.coverage.unsupported_syntax += parsed.unsupported_syntax;
@@ -772,6 +781,20 @@ mod tests {
         assert_ne!(first.rows[0].sha256, fresh.rows[0].sha256);
         let broken = query(root.path(), Query::File("broken.rs".into())).unwrap();
         assert_eq!(broken.status, "unparseable");
+    }
+
+    #[test]
+    fn empty_requested_file_keeps_its_source_hash_for_snapshot_export() {
+        let root = worktree();
+        let source = root.path().join("empty.rs");
+        fs::write(&source, "").unwrap();
+        let empty = query(root.path(), Query::File("empty.rs".into())).unwrap();
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.requested_source_sha256.as_deref(), Some(format!("{:x}", Sha256::digest(b"")).as_str()));
+        assert!(empty.requested_source_read_unix_ms.is_some());
+        fs::write(&source, "fn later() {}\n").unwrap();
+        let changed = query(root.path(), Query::File("empty.rs".into())).unwrap();
+        assert_ne!(empty.requested_source_sha256, changed.requested_source_sha256);
     }
 
     #[test]

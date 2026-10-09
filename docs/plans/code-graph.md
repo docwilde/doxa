@@ -1,14 +1,16 @@
 # Code graph: native syntax-query slice
 
-Status: **read-only syntax queries implemented**. DOXA can query current Rust
-source for definitions, imports, conservative call-site candidates, and bounded
-top-level module-file layout. It does
-not build a resolved dependency graph or write anything to LORE.
+Status: **read-only syntax queries and explicit LORE file-map overlay
+implemented**. DOXA can query current Rust source for definitions, imports,
+conservative call-site candidates, and bounded top-level module-file layout,
+including literal paths and unverified conditional candidates.
+It does not build a resolved dependency graph or persist a code graph in LORE.
 
 ## Contents
 
 - [Shipped surface](#shipped-surface)
 - [Freshness and coverage](#freshness-and-coverage)
+- [Explicit snapshot export](#explicit-snapshot-export)
 - [Architecture boundary](#architecture-boundary)
 - [Still open](#still-open)
 
@@ -66,6 +68,8 @@ Every query enumerates the current tracked **and untracked, nonignored** Git
 files and reads Rust bytes afresh. There is no index that can lag an edit.
 Each row and call edge carries its file, line, SHA-256 of the parsed bytes, and
 read time. Candidate declarations carry their own source hashes and read times.
+File-scoped answers also carry the requested source's hash and read time, even
+when that parsed file produces no rows.
 The answer names its worktree and reports parsed files, unsupported languages,
 syntax errors, skipped files, and unsupported syntax. Same-name definitions
 remain separate candidates. A no-hit answer names a live-search fallback.
@@ -80,19 +84,41 @@ unparseable files are named in bounded issue summaries. A file hash is evidence
 for the bytes parsed, not a promise that the worktree has stayed unchanged since
 that read.
 
+## Explicit snapshot export
+
+`doxa codegraph --lore-map [--root WORKTREE] file|imports|calls|modules PATH`
+reads the same project's existing LORE file map and prints a bounded JSON
+snapshot to stdout. It is an explicit command, never a TUI background write.
+The LORE response is validated for shape, size, and project scope before use.
+The original syntax answer, including source hashes, coverage, and ambiguous
+module or call candidates, is preserved. `query_sha256` identifies the exact
+serialized answer; `storage` says `export_only_not_persisted`.
+
+The overlay matches only an exact file path. It retains all competing curated
+purpose entries and labels them `ambiguous`; a single entry is
+`curated_unverified`, and no entry is `unknown`. All graph bindings remain
+`unknown`. The file map has no source hash or revision, so its purpose's
+freshness is explicitly unverified and it cannot prove a binding to the
+current source. A missing capability, malformed response, project mismatch,
+unparseable source, or oversized export fails closed.
+
 ## Architecture boundary
 
 The older proposal described Python `ast`, `doxa/operators.py`, and tables in a
 LORE SQLite store. DOXA now uses native Rust hosts and a pinned external
 `lore-core` crate. Its agent tool catalog is explicitly validated in
 `rust/doxa-lore/src/lib.rs`; DOXA cannot silently add a LORE operator or table.
-This slice lives in `rust/doxa-codegraph` and is callable through the installed
-`doxa` launcher. It is read-only and creates no second memory authority.
+The pinned LORE release offers a read-only `filemap` operator, but no codegraph
+snapshot storage or retrieval operator. This slice lives in
+`rust/doxa-codegraph`, `rust/doxa-lore`, and the installed `doxa` launcher. It
+is read-only and creates no second memory authority.
 
 ## Still open
 
-- Coordinate a LORE-owned persisted graph and curated `purpose` file-map field
-  with LORE's write gate, including worktree lifecycle and freshness checks.
+- Define a LORE-owned graph snapshot schema, read operator, and reviewed write
+  gate. Persist only through that gate, with source-hash validation, revision
+  and worktree lifecycle rules. The current file map has curated `purpose` but
+  no revision or source hash; the export does not persist it.
 - Resolve imports and actual Rust call bindings with crate, trait, type, and
   conditional-compilation context. Module edges remain top-level and structural;
   `cfg_attr` and conditional reachability are unresolved. Call candidates stop
