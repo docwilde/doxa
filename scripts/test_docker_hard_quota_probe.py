@@ -244,6 +244,31 @@ class HardQuotaProbeTests(unittest.TestCase):
                 quota._checked_engine("unix:///run/user/1000/fixture.sock", "python:latest", self.root)
             docker.assert_not_called()
 
+    def test_engine_queries_only_bounded_security_options_and_requires_exact_rootless(self) -> None:
+        image = "sha256:" + "a" * 64
+        commands = []
+
+        def fake_docker(_endpoint, args, _config, **kwargs):
+            commands.append((args, kwargs))
+            if args[0] == "info":
+                return json.dumps(["name=seccomp,profile=builtin", "name=rootless"])
+            return json.dumps([{"Id": image}])
+
+        with mock.patch.object(quota, "_docker", side_effect=fake_docker):
+            quota._checked_engine("unix:///run/user/1000/fixture.sock", image, self.root)
+        self.assertEqual(commands[0],
+                         (["info", "--format", "{{json .SecurityOptions}}"],
+                          {"max_output": 2048}))
+        self.assertEqual(commands[1][0], ["image", "inspect", image])
+
+        for options in (["name=rootlesskit"], {"SecurityOptions": ["name=rootless"]},
+                        ["name=rootless", 1]):
+            with (self.subTest(options=options),
+                  mock.patch.object(quota, "_docker", return_value=json.dumps(options)) as docker,
+                  self.assertRaisesRegex(ValueError, "rootless mode")):
+                quota._checked_engine("unix:///run/user/1000/fixture.sock", image, self.root)
+            docker.assert_called_once()
+
     def test_explicit_acknowledgment_is_required_before_any_write(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
             quota.main([str(self.root), "--docker-host", "unix:///run/user/1000/fixture.sock",

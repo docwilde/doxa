@@ -292,8 +292,12 @@ def _docker(endpoint: str, args: list[str], docker_config: Path, timeout: int = 
 def _checked_engine(endpoint: str, image: str, docker_config: Path) -> None:
     if not IMAGE.fullmatch(image):
         raise ValueError("fixture image must be pinned by sha256 digest")
-    info = json.loads(_docker(endpoint, ["info", "--format", "{{json .}}"], docker_config))
-    if not any("name=rootless" in option for option in info.get("SecurityOptions", [])):
+    # Full Docker info can exceed the bounded CLI output on recent Engines.
+    # Request only the security options needed for this rootless gate.
+    options = json.loads(_docker(endpoint, ["info", "--format", "{{json .SecurityOptions}}"],
+                                 docker_config, max_output=2048))
+    if not isinstance(options, list) or not all(isinstance(option, str) for option in options) \
+            or "name=rootless" not in options:
         raise ValueError("fixture Engine must report rootless mode")
     image_info = json.loads(_docker(endpoint, ["image", "inspect", image], docker_config))
     row = image_info[0]
