@@ -270,7 +270,7 @@ fn bounded_git_output(program: &Path, root: &Path, args: &[&str], max_stdout: us
         });
     }
     let mut child = command.spawn().map_err(|e| format!("could not start: {e}"))?;
-    let mut leader_reaped = false;
+    let mut group_id_reserved = true;
     let result = (|| {
         let mut stdout = child.stdout.take().ok_or("missing stdout")?;
         let mut stderr = child.stderr.take().ok_or("missing stderr")?;
@@ -327,23 +327,47 @@ fn bounded_git_output(program: &Path, root: &Path, args: &[&str], max_stdout: us
         // Closed pipes do not imply the child exited: it may have closed its
         // descriptors and continued running. Keep the same wall-clock bound.
         loop {
-            if let Some(status) = child.try_wait().map_err(|e| format!("wait failed: {e}"))? {
-                leader_reaped = true;
-                if !status.success() { return Err("failed".into()); }
+            let exited = match git_child_exited_without_reaping(child.id()) {
+                Ok(exited) => exited,
+                Err(error) => {
+                    // Another process waiter could have reaped this child.
+                    // In that case its numeric process-group ID is no longer
+                    // reserved and must not be signaled.
+                    if error.raw_os_error() == Some(libc::ECHILD) { group_id_reserved = false; }
+                    return Err(format!("nonreaping wait failed: {error}"));
+                }
+            };
+            if let Some(success) = exited {
+                if !success { return Err("failed".into()); }
                 return Ok(output);
             }
             if Instant::now() >= deadline { return Err("exceeded deadline".into()); }
             std::thread::sleep(Duration::from_millis(10));
         }
     })();
-    if result.is_err() && !leader_reaped {
-        // The unreaped leader keeps its process-group ID reserved; kill all
-        // descendants that inherited Git's pipes before waiting for it.
+    if group_id_reserved {
+        // `waitid(WNOWAIT)` leaves the leader unreaped, reserving its numeric
+        // process-group ID until this signal is sent. This also cleans up a
+        // descendant that closed its pipes before the leader exited.
         unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
         let _ = child.kill();
     }
     let _ = child.wait();
     result
+}
+
+fn git_child_exited_without_reaping(pid: u32) -> std::io::Result<Option<bool>> {
+    let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+    let waited = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info,
+        libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+    if waited < 0 { return Err(std::io::Error::last_os_error()); }
+    let observed = unsafe { info.si_pid() };
+    if observed == 0 { return Ok(None); }
+    if observed != pid as libc::pid_t {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+            "nonreaping wait returned a different child"));
+    }
+    Ok(Some(info.si_code == libc::CLD_EXITED && unsafe { info.si_status() } == 0))
 }
 
 fn require_stable_listing(root: &Path, initial: &BTreeSet<String>) -> Result<(), String> {
@@ -1429,6 +1453,22 @@ mod tests {
         let error = bounded_git_output(&failed, root.path(), &["ls-files"], 1024,
             Duration::from_secs(1)).unwrap_err();
         assert!(error.contains("failed"), "{error}");
+    }
+
+    #[test]
+    fn failed_git_kills_descendant_after_leader_exits_and_closes_pipes() {
+        let root = tempfile::tempdir().unwrap();
+        let program = fake_git(root.path(), concat!(
+            "sh -c 'printf started > \"$1\"; sleep 0.2; printf leaked > \"$2\"' ",
+            "sh \"$2/started\" \"$2/leaked\" >/dev/null 2>&1 &\n",
+            "while [ ! -f \"$2/started\" ]; do sleep 0.01; done\n",
+            "exit 7"));
+        let error = bounded_git_output(&program, root.path(), &["ls-files"], 1024,
+            Duration::from_secs(2)).unwrap_err();
+        assert!(error.contains("failed"), "{error}");
+        assert!(root.path().join("started").exists());
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(!root.path().join("leaked").exists(), "failed Git left its descendant running");
     }
 
     #[test]
