@@ -47,6 +47,54 @@ pub struct PendingSessions {
     pub sessions: Vec<PendingSession>,
 }
 
+/// LORE's curated project file map. It is read-only, has no source hash, and
+/// cannot establish that a current codegraph file has this purpose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileMapEntry {
+    pub path: String,
+    pub purpose: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileMap {
+    pub key: String,
+    pub cap_chars: u64,
+    pub entries: Vec<FileMapEntry>,
+}
+
+impl FileMap {
+    fn parse(value: Value, cwd: &str) -> Result<Self, LoreError> {
+        if serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > 32 * 1024) {
+            return Err(LoreError::InvalidFrame);
+        }
+        let object = value.as_object().filter(|object| object.len() == 3)
+            .ok_or(LoreError::InvalidFrame)?;
+        let key = object.get("key").and_then(Value::as_str)
+            .filter(|key| *key == lore_core::config::project_slug(Path::new(cwd)))
+            .ok_or(LoreError::InvalidFrame)?.to_owned();
+        let cap_chars = object.get("cap_chars").and_then(Value::as_u64)
+            .filter(|cap| *cap > 0 && *cap <= 1_000_000)
+            .ok_or(LoreError::InvalidFrame)?;
+        let rows = object.get("entries").and_then(Value::as_array)
+            .filter(|rows| rows.len() <= 256)
+            .ok_or(LoreError::InvalidFrame)?;
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            let row = row.as_object().filter(|row| row.len() == 2)
+                .ok_or(LoreError::InvalidFrame)?;
+            let path = row.get("path").and_then(Value::as_str)
+                .filter(|path| !path.is_empty() && path.len() <= 4096
+                    && !path.chars().any(char::is_control))
+                .ok_or(LoreError::InvalidFrame)?.to_owned();
+            let purpose = row.get("purpose").and_then(Value::as_str)
+                .filter(|purpose| purpose.len() <= 4096 && !purpose.chars().any(char::is_control))
+                .ok_or(LoreError::InvalidFrame)?.to_owned();
+            entries.push(FileMapEntry { path, purpose });
+        }
+        Ok(Self { key, cap_chars, entries })
+    }
+}
+
 impl PendingSessions {
     fn parse(value: Value, cwd: &str, requested: &[String]) -> Result<Self, LoreError> {
         let object = value.as_object().filter(|object| object.len() == 4)
@@ -353,6 +401,8 @@ impl LoreClient {
         self.capabilities.contains("pending_for_sessions_v1")
     }
 
+    pub fn can_read_file_map(&self) -> bool { self.capabilities.contains("filemap") }
+
     pub fn can_act_on_beliefs(&self) -> bool {
         self.capabilities.contains("belief_review_v1")
             && self.capabilities.contains("belief_action_v1")
@@ -501,6 +551,15 @@ impl LoreClient {
             return Err(LoreError::InvalidFrame);
         }
         self.request_text(json!({"op":"snapshot","cwd":cwd,"scope":scope}))
+    }
+
+    /// Query LORE's existing curated file map without a mutation request.
+    /// The result's key must agree with LORE's project mapping for `cwd`.
+    pub fn file_map(&mut self, cwd: &str) -> Result<FileMap, LoreError> {
+        if !Path::new(cwd).is_absolute() || cwd.len() > 4096 || cwd.contains('\0') {
+            return Err(LoreError::InvalidFrame);
+        }
+        FileMap::parse(self.request_value("filemap", json!({"cwd":cwd}))?, cwd)
     }
 
     /// Read curated memory sizes using LORE's own project mapping and entry
@@ -1320,5 +1379,34 @@ mod pending_sessions_tests {
         let mut wrong = valid;
         wrong["sessions"][1]["pending_pids"] = json!(["proposal-1"]);
         assert!(PendingSessions::parse(wrong, cwd, &ids).is_err());
+    }
+}
+
+#[cfg(test)]
+mod file_map_tests {
+    use super::*;
+
+    #[test]
+    fn matching_project_and_same_path_alternatives_are_preserved() {
+        let owned = tempfile::tempdir().unwrap();
+        let cwd = owned.path().to_str().unwrap();
+        let key = lore_core::config::project_slug(owned.path());
+        let valid = json!({"key":key,"cap_chars":4400,"entries":[
+            {"path":"src/lib.rs","purpose":"public entry"},
+            {"path":"src/lib.rs","purpose":"reviewed alternate"}
+        ]});
+        let parsed = FileMap::parse(valid.clone(), cwd).unwrap();
+        assert_eq!(parsed.entries.len(), 2);
+        assert_eq!(parsed.entries[0].path, parsed.entries[1].path);
+        assert_ne!(parsed.entries[0].purpose, parsed.entries[1].purpose);
+        let mut wrong = valid.clone();
+        wrong["key"] = json!("other-project");
+        assert!(FileMap::parse(wrong, cwd).is_err());
+        let mut wrong = valid.clone();
+        wrong["entries"][0]["purpose"] = json!("unsafe\nline");
+        assert!(FileMap::parse(wrong, cwd).is_err());
+        let mut wrong = valid;
+        wrong["entries"][1]["sha256"] = json!("invented");
+        assert!(FileMap::parse(wrong, cwd).is_err());
     }
 }

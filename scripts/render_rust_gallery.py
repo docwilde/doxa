@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
+import tempfile
 import tomllib
 
 from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
@@ -22,15 +24,15 @@ GRID = (126, 31)
 CELL = (24, 54)
 ORIGIN = ((SIZE[0] - GRID[0] * CELL[0]) // 2, (SIZE[1] - GRID[1] * CELL[1]) // 2)
 SCENES = (
-    "hero", "image-preview", "isolation", "fleet-review", "fleet-dependency", "fleet-release-review", "fleet-view",
+    "hero", "triage", "image-preview", "isolation", "fleet-review", "fleet-dependency", "fleet-release-review", "fleet-view",
     "beliefs", "tool-entries", "memory-management", "commands", "help", "codegraph",
 )
 FONT = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
 FONT_BOLD = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf")
 
 
-def capture(binary: Path, scene: str, destination: Path, version: str) -> None:
-    raw = subprocess.check_output([str(binary), scene], cwd=ROOT, timeout=30)
+def capture(binary: Path, scene: str, destination: Path, version: str, env: dict[str, str]) -> None:
+    raw = subprocess.check_output([str(binary), scene], cwd=ROOT, env=env, timeout=30)
     frame = json.loads(raw)
     if (frame["width"], frame["height"]) != GRID or len(frame["cells"]) != GRID[0] * GRID[1]:
         raise ValueError(f"{scene}: unexpected terminal grid")
@@ -80,8 +82,19 @@ def main() -> None:
     if not binary.is_file():
         parser.error(f"gallery executable missing: {binary}")
     version = tomllib.loads((ROOT / "rust/doxa-tui/Cargo.toml").read_text())["package"]["version"]
-    for scene in args.scenes:
-        capture(binary, scene, args.output_dir / f"rust-{version}-{scene}.png", version)
+    scratch = os.environ.get("TMPDIR")
+    if not scratch or not Path(scratch).is_dir():
+        parser.error("set TMPDIR to an existing real-disk scratch directory")
+    with tempfile.TemporaryDirectory(prefix="doxa-gallery-", dir=scratch) as private:
+        home = Path(private) / "home"
+        doxa_home = Path(private) / "doxa"
+        lore_root = Path(private) / "lore"
+        for directory in (home, doxa_home, lore_root):
+            directory.mkdir(mode=0o700)
+        env = os.environ.copy()
+        env.update({"HOME": str(home), "DOXA_HOME": str(doxa_home), "LORE_ROOT": str(lore_root)})
+        for scene in args.scenes:
+            capture(binary, scene, args.output_dir / f"rust-{version}-{scene}.png", version, env)
 
 
 if __name__ == "__main__":

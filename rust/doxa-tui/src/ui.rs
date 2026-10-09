@@ -19,6 +19,7 @@ mod render;
 mod session_controls;
 mod isolation_controls;
 mod session_navigation;
+mod triage;
 mod terminal_loop;
 use render::context_detail_lines;
 #[cfg(test)]
@@ -30,6 +31,7 @@ pub use terminal_loop::{
     run_with_frames, run_with_worker_channels, run_with_worker_channels_state_guarded,
     run_remote_with_worker_channels,
 };
+pub(crate) use terminal_loop::run_remote_with_worker_channels_layout;
 mod session_events;
 mod session_telemetry;
 mod transcript_events;
@@ -395,6 +397,25 @@ struct SettingsMenu {
     engine: String,
 }
 impl SettingsMenu {
+    fn effective_value(&self, key: &str) -> String {
+        let Some(row) = self.rows.iter().find(|row| row.setting.key == key) else {
+            return String::new();
+        };
+        if row.shadowed { return row.value.clone(); }
+        if let Some((_, value)) = self.draft.as_ref().filter(|(draft_key, _)| draft_key == key) {
+            return value.clone();
+        }
+        match self.edits.get(key) {
+            Some(Some(value)) => value.clone(),
+            Some(None) => row.setting.default.into(),
+            None => row.value.clone(),
+        }
+    }
+
+    fn mermaid_paths(&self) -> (String, String) {
+        (self.effective_value("mermaid_renderer"), self.effective_value("mermaid_renderer_root"))
+    }
+
     fn indices(&self) -> Vec<usize> {
         self.rows
             .iter()
@@ -420,6 +441,33 @@ impl SettingsMenu {
     fn finish_draft(&mut self) {
         if let Some((key, value)) = self.draft.take() {
             self.edits.insert(key, Some(value));
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MermaidPreflight {
+    paths: (String, String),
+    state: MermaidPreflightState,
+}
+
+#[derive(Debug)]
+enum MermaidPreflightState {
+    Running(Receiver<transcript_mermaid::DoctorResult>),
+    Complete(transcript_mermaid::DoctorResult),
+}
+
+impl MermaidPreflight {
+    fn message(&self, paths: &(String, String)) -> String {
+        if &self.paths != paths { return "Configuration changed · press P to check these values".into(); }
+        match &self.state {
+            MermaidPreflightState::Running(_) => "Checking the sandbox with a fixed sample…".into(),
+            MermaidPreflightState::Complete(transcript_mermaid::DoctorResult::Disabled) =>
+                "Preview disabled · configure both renderer fields".into(),
+            MermaidPreflightState::Complete(transcript_mermaid::DoctorResult::Available) =>
+                "Sandbox ready · fixed PNG decoded; Mermaid CLI fidelity unverified".into(),
+            MermaidPreflightState::Complete(transcript_mermaid::DoctorResult::Unavailable(reason)) =>
+                format!("Unavailable · {reason}"),
         }
     }
 }
@@ -457,6 +505,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "beliefs" => "LORE beliefs · click to browse",
         "cost" => "Provider billing and quota information",
         "balance" => "Current DeepSeek API account balance",
+        "native_status" => "Owner-approved native status · click for refresh cost and failure ledger",
         "more" => "More chips · click to reveal hidden chips",
         _ => "",
     }
@@ -1423,6 +1472,7 @@ pub struct App {
     plugin_commands: Vec<crate::operations::PluginCommand>,
     native_plugin_commands: Vec<crate::native_plugins::Command>,
     native_plugin_failures: Vec<String>,
+    native_status: crate::native_plugins::StatusRuntime,
     plugin_refresh: Option<crate::operations::PluginRefresh>,
     plugin_refresh_dirty: bool,
     fleet_menu: Option<fleet_menu::Menu>,
@@ -1436,11 +1486,13 @@ pub struct App {
         Receiver<Result<Vec<crate::memory_menu::Fact>, &'static str>>,
     )>,
     repo_cache: HashMap<String, (Option<doxa_worktrees::RepoStatus>, Instant)>,
+    project_roots: HashMap<String, PathBuf>,
+    project_colours: Option<HashMap<PathBuf, String>>,
     repo_pending: Option<(
         String,
         PathBuf,
         u64,
-        Receiver<Option<doxa_worktrees::RepoStatus>>,
+        Receiver<(Option<doxa_worktrees::RepoStatus>, Option<PathBuf>)>,
     )>,
     repo_epoch: HashMap<String, u64>,
     chip_offsets: Vec<usize>,
@@ -1570,6 +1622,7 @@ pub struct App {
     offline_ids: HashSet<String>,
     queue_picker: Option<QueuePicker>,
     settings_menu: Option<SettingsMenu>,
+    mermaid_preflight: Option<MermaidPreflight>,
     pending_queue_commands: Vec<crate::bridge::WorkerCommand>,
     diff_modal: bool,
     diff_pane: bool,
@@ -1712,6 +1765,7 @@ impl Default for App {
             plugin_commands: Vec::new(),
             native_plugin_commands: Vec::new(),
             native_plugin_failures: Vec::new(),
+            native_status: crate::native_plugins::StatusRuntime::default(),
             plugin_refresh: None,
             plugin_refresh_dirty: false,
             fleet_menu: None,
@@ -1720,6 +1774,8 @@ impl Default for App {
             fleet_dependency_review: None,
             fleet_controller: None,
             repo_cache: HashMap::new(),
+            project_roots: HashMap::new(),
+            project_colours: triage::configured_colours(),
             repo_pending: None,
             repo_epoch: HashMap::new(),
             chip_offsets: vec![0; panes::MAX_PANES],
@@ -1840,6 +1896,7 @@ impl Default for App {
             offline_ids: HashSet::new(),
             queue_picker: None,
             settings_menu: None,
+            mermaid_preflight: None,
             pending_queue_commands: Vec::new(),
             diff_modal: false,
             diff_pane: false,

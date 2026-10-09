@@ -46,6 +46,7 @@ impl App {
 
     pub(super) fn invalidate_repo(&mut self, id: &str) {
         self.repo_cache.remove(id);
+        self.project_roots.remove(id);
         let epoch = self.repo_epoch.entry(id.to_owned()).or_default();
         *epoch = epoch.wrapping_add(1);
     }
@@ -1290,6 +1291,7 @@ impl App {
                     self.memory_cache.remove(id);
                     self.memory_repo.remove(id);
                     self.repo_cache.remove(id);
+                    self.project_roots.remove(id);
                     self.repo_epoch.remove(id);
                     self.session_capabilities.remove(id);
                     self.session_catalogs.remove(id);

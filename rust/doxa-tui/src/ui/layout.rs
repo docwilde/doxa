@@ -53,14 +53,7 @@ impl App {
         for index in 0..self.sessions.len() {
             if seen.insert(index) && self.rail_session_visible(index)
                 && !self.offline_ids.contains(&self.sessions[index].id) {
-                let session = &self.sessions[index];
-                let project = session.collection.trim();
-                let fallback = if project.is_empty() { "Other sessions" } else { project };
-                let label = match self.repo_cache.get(&session.id).and_then(|(status, _)| status.as_ref()) {
-                    Some(doxa_worktrees::RepoStatus::Repository { repo, .. }) => repo.as_str(),
-                    Some(doxa_worktrees::RepoStatus::Directory { name }) => name.as_str(),
-                    None => fallback,
-                };
+                let label = self.rail_project_label(index);
                 projects.entry(label.to_owned()).or_default().push(index);
             }
         }
@@ -512,6 +505,7 @@ impl App {
                         | "fleet_dependency_review"
                         | "isolation"
                         | "native_plugin"
+                        | "native_status"
                 ) {
                     (info.lines.len() + 2).clamp(7, 19) as u16
                 } else {
@@ -590,6 +584,9 @@ impl App {
                 .is_some_and(|capabilities| capabilities.permission_modes)
         }) {
             chips.push(("permission", "?".to_owned()));
+        }
+        if let Some(label) = self.native_status.chip_label() {
+            chips.push(("native_status", label));
         }
         if let Some(engine) = identity.and_then(|pair| pair.0.as_deref()) {
             chips.push(("engine", engine.to_owned()));
@@ -1069,6 +1066,7 @@ impl App {
             .find(|(candidate, _)| *candidate == kind)
             .map(|(_, label)| label)
             .unwrap_or_default();
+        let lines = if kind == "native_status" { self.native_status.ledger_lines() } else { Vec::new() };
         if kind == "repo" {
             if let Some(detail) = self.repo_detail(group) {
                 label.push_str(" · ");
@@ -1079,7 +1077,7 @@ impl App {
         self.chip_info = Some(ChipInfo {
             kind,
             label,
-            lines: Vec::new(),
+            lines,
             scroll: 0,
             owner: None,
         });

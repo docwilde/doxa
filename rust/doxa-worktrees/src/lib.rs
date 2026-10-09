@@ -198,6 +198,22 @@ fn main_root(cwd: &Path) -> Option<PathBuf> {
     if common.file_name()? != ".git" { return None; }
     common.parent()?.canonicalize().ok()
 }
+/// The stable project identity for display grouping. Resolve managed Docker
+/// checkouts to their host source; otherwise use Git's common root. A plain
+/// directory has its own identity. Failure remains unknown to the caller.
+pub fn project_root(cwd: &Path) -> Option<PathBuf> {
+    let cwd = cwd.canonicalize().ok()?;
+    if !cwd.is_dir() { return None; }
+    if let Some(manifest) = doxa_isolation::workspace::manifest_for(&cwd).ok()? {
+        if manifest.profile.docker() { return manifest.source.canonicalize().ok(); }
+    }
+    if let Some(root) = main_root(&cwd) { return Some(root); }
+    // A Git checkout whose common root could not be verified is not a plain
+    // directory; assigning its checkout path would split one project into
+    // misleading identities.
+    if git_text(&cwd, &["rev-parse", "--show-toplevel"]).is_some() { return None; }
+    Some(cwd)
+}
 pub fn is_supported_checkout(cwd: &Path) -> bool { main_root(cwd).is_some() }
 fn base_ref(cwd: &Path) -> Option<String> {
     git_text(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
@@ -820,6 +836,18 @@ mod tests {
     fn run_git(cwd: &Path, args: &[&str]) {
         let result = Command::new("git").args(args).current_dir(cwd).output().unwrap();
         assert!(result.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&result.stderr));
+    }
+    #[test]
+    fn project_identity_uses_git_root_and_plain_directory_without_guessing_missing_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "-q"]);
+        let nested = repo.join("nested"); fs::create_dir(&nested).unwrap();
+        assert_eq!(project_root(&nested), Some(repo.canonicalize().unwrap()));
+        let plain = dir.path().join("plain"); fs::create_dir(&plain).unwrap();
+        assert_eq!(project_root(&plain), Some(plain.canonicalize().unwrap()));
+        assert_eq!(project_root(&dir.path().join("missing")), None);
     }
     #[test]
     fn worktree_config_uses_bounded_nonblocking_canonical_reader() {

@@ -246,6 +246,14 @@ pub fn run_remote_with_worker_channels(
     run_loop(FrameSource::Remote(frames), Some(prompts), None)
 }
 
+pub(crate) fn run_remote_with_worker_channels_layout(
+    frames: Receiver<crate::worker_frames::WorkerFrame>,
+    prompts: SyncSender<crate::bridge::WorkerCommand>,
+    store: crate::remote_layout::Store,
+) -> io::Result<()> {
+    run_loop_with_remote(FrameSource::Remote(frames), Some(prompts), None, Some(store))
+}
+
 pub fn run_with_worker_channels_state_guarded(
     frames: Receiver<crate::worker_frames::WorkerFrame>,
     prompts: SyncSender<crate::bridge::WorkerCommand>,
@@ -262,8 +270,17 @@ pub fn run_with_worker_channels_state_guarded(
 
 fn run_loop(
     receiver: FrameSource,
+    prompt_sender: Option<SyncSender<crate::bridge::WorkerCommand>>,
+    state: Option<(crate::ui_state::UiStateStore, Vec<String>, Arc<Mutex<bool>>)>,
+) -> io::Result<()> {
+    run_loop_with_remote(receiver, prompt_sender, state, None)
+}
+
+fn run_loop_with_remote(
+    receiver: FrameSource,
     mut prompt_sender: Option<SyncSender<crate::bridge::WorkerCommand>>,
     mut state: Option<(crate::ui_state::UiStateStore, Vec<String>, Arc<Mutex<bool>>)>,
+    mut remote_layout: Option<crate::remote_layout::Store>,
 ) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::new(
@@ -293,6 +310,7 @@ fn run_loop(
         Ok(inventory) => {
             app.native_plugin_commands = inventory.commands;
             app.native_plugin_failures = inventory.failures;
+            app.native_status = crate::native_plugins::StatusRuntime::new(inventory.statuses);
             if !app.native_plugin_failures.is_empty() {
                 app.notice = format!("Native plugin rejected: {}", app.native_plugin_failures.join(" · "));
             }
@@ -370,6 +388,9 @@ fn run_loop(
                 Ok(reduced) => changed |= reduced,
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
+        }
+        if let Some(store) = remote_layout.as_mut() {
+            changed |= store.restore_if_ready(&mut app);
         }
         if let Some(router)=command_router.as_ref(){
             for _ in 0..32 {match router.errors.try_recv(){
@@ -533,6 +554,17 @@ fn run_loop(
             changed = true;
         }
         changed |= app.poll_plugin_commands();
+        changed |= app.poll_mermaid_preflight();
+        if !app.remote_mode {
+            let status = app.native_status.poll(Instant::now());
+            if let Some(plugin) = status.newly_disabled {
+                app.notice = format!("Native plugin status {plugin} disabled after repeated refresh failures");
+            }
+            if status.changed && app.chip_info.as_ref().is_some_and(|info| info.kind == "native_status") {
+                if let Some(info) = app.chip_info.as_mut() { info.lines = app.native_status.ledger_lines(); }
+            }
+            changed |= status.changed;
+        }
         changed |= app.poll_vendor_catalog();
         changed |= app.poll_model_catalog(Instant::now());
         changed |= app.tick_blink(Instant::now());
@@ -657,6 +689,10 @@ fn run_loop(
     if let Some(router)=command_router{router.shutdown();}
     drop(terminal);
     drop(guard);
+    if let Some(mut store) = remote_layout {
+        let inventory = crate::remote_client::fresh_inventory(store.hub())?;
+        store.save_checked(&app, crate::remote_layout::Inventory::parse(&inventory)?)?;
+    }
     if app.restart_after_update {
         if let Some(executable) = app.restart_executable.take() {
             // Capture before update replaces the binary. Owned idle daemons

@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
+use std::time::Duration;
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
@@ -58,13 +59,15 @@ Commands:
                        Discover plugins or change sanitized adoption for new sessions
   codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH
                        Query current Rust syntax and structural module files with source hashes
+  codegraph --lore-map [--root WORKTREE] file|imports|calls|modules PATH
+                       Export one syntax snapshot with read-only LORE purpose candidates
   fleet ...            Inspect or start native fleet runs
   mesh serve           Serve the private peer graph until Ctrl-C
   remote serve         Serve live sessions to an allowed Tailscale browser
   remote connect URL HOST_ID
                        Register this machine's sessions with a private hub
   remote list URL        List sessions registered with a private hub
-  remote tui URL         Open live hub sessions as native DOXA tabs
+  remote tui URL [--save-layout]  Open live hub sessions as native DOXA tabs
   remote keygen ABS_PATH Create an owner-only shared key for encrypted remote tabs
   remote send URL SESSION TEXT
                        Send a prompt through the private hub
@@ -161,8 +164,22 @@ fn run(args: &[String]) -> io::Result<()> {
                 return update();
             }
             "codegraph" => {
-                let answer = doxa_codegraph::query_cli(&args[1..]).map_err(invalid)?;
-                println!("{}", serde_json::to_string(&answer).map_err(io::Error::other)?);
+                let with_lore_map = args.get(1).is_some_and(|arg| arg == "--lore-map");
+                let query_args = if with_lore_map { &args[2..] } else { &args[1..] };
+                let answer = doxa_codegraph::query_cli(query_args).map_err(invalid)?;
+                if with_lore_map {
+                    if !matches!(answer.query, "file" | "imports" | "calls" | "modules") {
+                        return Err(invalid("--lore-map requires a file-scoped query"));
+                    }
+                    let scope = answer.scope.clone();
+                    let mut lore = doxa_lore::LoreClient::open(Duration::from_secs(3))
+                        .map_err(io::Error::other)?;
+                    let map = lore.file_map(&scope).map_err(io::Error::other)?;
+                    let snapshot = doxa_tui::codegraph_snapshot::export(answer, map).map_err(invalid)?;
+                    println!("{}", serde_json::to_string(&snapshot).map_err(io::Error::other)?);
+                } else {
+                    println!("{}", serde_json::to_string(&answer).map_err(io::Error::other)?);
+                }
                 return Ok(());
             }
             "setup" => {
@@ -211,10 +228,11 @@ fn run(args: &[String]) -> io::Result<()> {
                         return Ok(());
                     }
                 }
-                if let [first, second, url] = args {
-                    if first == "remote" && second == "tui" {
+                if let [first, second, url, rest @ ..] = args {
+                    if first == "remote" && second == "tui"
+                        && (rest.is_empty() || matches!(rest, [flag] if flag == "--save-layout")) {
                         startup_message("Connecting to DOXA hub");
-                        return remote_client::run(url);
+                        return remote_client::run(url, !rest.is_empty());
                     }
                 }
                 if !matches!(args, [first, second] if first == "remote" && second == "serve")
@@ -222,7 +240,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     && !matches!(args, [first, second, _, _, _] if first == "remote" && second == "send")
                     && !matches!(args, [first, second, _] if first == "remote" && second == "list")
                     && !matches!(args, [first, second, _, _, _, _] if first == "remote" && second == "answer") {
-                    return Err(invalid("usage: doxa remote serve | connect URL HOST_ID | tui URL | keygen ABS_PATH | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny"));
+                    return Err(invalid("usage: doxa remote serve | connect URL HOST_ID | tui URL [--save-layout] | keygen ABS_PATH | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny"));
                 }
                 let executable = std::env::var_os("DOXA_REMOTE_BIN").map(PathBuf::from)
                     .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name("doxa-remote"));
@@ -579,6 +597,14 @@ fn worktrees(args: &[String]) -> io::Result<()> {
 
 fn fleet(args: &[String]) -> io::Result<()> {
     if args.iter().any(|arg|matches!(arg.as_str(),"--help"|"-h")) {print!("{}",fleet_control::HELP);return Ok(());}
+    if let [command, path, flag, model] = args {
+        if command == "evaluate-messages" && flag == "--message-judge" {
+            let model = doxa_fleet::judge::Model::parse(model)?;
+            let report = doxa_fleet::message_eval::evaluate_file(Path::new(path), &model)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+    }
     if let [command, path] = args {
         if command == "calibrate" {
             let report = doxa_fleet::calibration::evaluate_file(Path::new(path))?;

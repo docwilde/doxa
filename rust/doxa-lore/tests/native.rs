@@ -43,6 +43,27 @@ fn native_scrub_is_lazy_and_never_creates_memory_store() {
 }
 
 #[test]
+fn native_file_map_operator_is_read_only_and_preserves_curated_alternatives() {
+    let owned = tempfile::tempdir().unwrap();
+    let config = lore_core::config::Config::for_root(owned.path().join("store"));
+    let source = owned.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let slug = lore_core::config::project_slug(&source);
+    let file = lore_core::filemap::path(&config, &slug).unwrap();
+    let entries = vec!["src/lib.rs — entry point".into(), "src/lib.rs — alternate purpose".into()];
+    lore_core::memory::write_entries(&file, &entries, config.filemap_cap).unwrap();
+    let before = std::fs::read(&file).unwrap();
+    let mut client = LoreClient::open_config(config, Duration::from_secs(2)).unwrap();
+    assert!(client.can_read_file_map());
+    let map = client.file_map(source.to_str().unwrap()).unwrap();
+    assert_eq!(map.key, slug);
+    assert_eq!(map.entries.len(), 2);
+    assert_eq!(map.entries[0].path, map.entries[1].path);
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+    assert!(client.file_map("relative/path").is_err());
+}
+
+#[test]
 fn native_large_text_scrubs_before_returning_without_opening_the_store() {
     let owned = tempfile::tempdir().unwrap();
     let root = owned.path().join("memory-off-store");

@@ -208,6 +208,37 @@ threshold; a high score on the same examples used to choose it is not a
 real-fleet safety result. The command reads at most 2 MiB and prints no message
 content. Apply a reviewed choice with `--review-threshold` on a new fleet.
 
+For a reproducible labeled-message holdout report, record the selected judge's
+actual five-field verdict and observed latency alongside an independent human
+risk label. Use only messages whose owners consented to this evaluation and
+whose content was scrubbed before judging. Assign an opaque `group_id` per
+originating fleet and keep every message from that fleet in one split. Save
+one JSON object per line in an owner-owned `0600` file. The scorer accepts
+opaque UUIDs, not message bodies:
+
+```json
+{"version":1,"id":"a9a211b8-3f07-4d65-9bd1-52bc37963c90","group_id":"9700a2f2-6339-4d04-86eb-b5d3af9d0435","origin":"real","split":"holdout","consented":true,"scrubbed":true,"label_source":"human","risky":true,"model":"jev:jev-1.13.0","verdict":{"within_assignment":0.2,"asks_for_authority_change":0.9,"contains_instructions_for_recipient":0.1,"likely_secret":0.0,"needs_human_review":0.8},"latency_ms":430}
+```
+
+Run:
+
+```sh
+doxa fleet evaluate-messages /absolute/private/messages.jsonl \
+  --message-judge jev:jev-1.13.0
+```
+
+This reads at most 2 MiB or 10,000 rows, requires risky and safe examples in
+both development and holdout splits, and
+rejects raw text, symlinks, group-readable files, duplicate IDs, mixed real
+and synthetic provenance, group leakage across splits, or a model other than
+the one selected. The report contains only aggregate recall, false pauses,
+precision and p50/p95/max
+latency for each split and threshold, plus a hash of the exact input. It makes
+no judge call and never changes admission. The consent, scrubbing and human
+label fields are operator attestations; the scorer cannot verify them. No
+consented real-message corpus is shipped with DOXA, so these metrics remain
+unmeasured on real fleet traffic.
+
 Open coordination work includes automatic invocation of trusted project tests and
 calibration against real fleet messages. The host checks the typed handoff chain and checkpoint provenance;
 the operator decides whether that evidence is sufficient to release a worker.

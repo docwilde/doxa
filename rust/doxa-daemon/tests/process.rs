@@ -952,7 +952,9 @@ fn rejects_budgeted_codex_without_selected_price_basis() {
     let codex = dir.path().join("codex-fixture");
     executable(&codex, "#!/bin/sh\nexit 0\n");
     for (model, expected) in [(None, "budgeted Codex session requires a priced model"),
-        (Some("gpt-reserve"), "no native budget price for selected Codex model")] {
+        (Some("gpt-reserve"), "no complete native budget rate bound for selected Codex model"),
+        (Some("gpt-5.6-sol"), "no complete native budget rate bound for selected Codex model"),
+        (Some("gpt-5.5"), "no complete native budget rate bound for selected Codex model")] {
         let mut command = daemon_command();
         command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
             "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),

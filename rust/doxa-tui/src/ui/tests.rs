@@ -292,9 +292,51 @@ use super::*;
         app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.settings_menu.as_ref().unwrap().draft.as_ref().map(|(_,v)|v.as_str()), Some("120"));
         app.settings_menu_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(app.mermaid_preflight.is_none());
+        assert!(app.settings_menu.as_ref().unwrap().draft.is_some());
         app.settings_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.settings_menu.as_ref().unwrap().draft.is_none());
         assert_eq!(app.settings_menu.as_ref().unwrap().rows[0].value, "120");
+    }
+
+    #[test]
+    fn mermaid_settings_preflight_checks_draft_without_saving_or_exposing_source() {
+        let mut app = App::default();
+        let rows = ["mermaid_renderer", "mermaid_renderer_root"].into_iter().map(|key| {
+            let setting = crate::settings::find(key).unwrap();
+            crate::settings::Row { setting, value: String::new(), stored: String::new(),
+                source: "default".into(), shadowed: false }
+        }).collect();
+        app.settings_menu = Some(SettingsMenu { rows, selected: 0, category: 3,
+            draft: Some(("mermaid_renderer".into(), "/missing/SECRET_RENDERER_PATH".into())),
+            edits: HashMap::from([("mermaid_renderer_root".into(), Some("/missing/package".into()))]),
+            engine: "claude".into() });
+        app.input = "private transcript diagram source".into();
+        assert!(app.settings_menu_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+        assert!(app.settings_menu.as_ref().unwrap().draft.is_none());
+        assert!(app.settings_menu.as_ref().unwrap().edits.contains_key("mermaid_renderer"));
+        assert!(app.notice.contains("fixed sample"));
+        assert!(!app.notice.contains("private transcript"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.poll_mermaid_preflight() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let preflight = app.mermaid_preflight.as_ref().unwrap();
+        assert!(matches!(preflight.state, MermaidPreflightState::Complete(
+            transcript_mermaid::DoctorResult::Unavailable("renderer package root is unavailable"))));
+        assert!(!app.notice.contains("SECRET_RENDERER_PATH"));
+        assert!(!app.notice.contains("private transcript"));
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 25)).unwrap();
+        terminal.draw(|frame| app.draw_settings_menu(frame, Rect::new(0, 0, 100, 25))).unwrap();
+        let rendered: String = terminal.backend().buffer().content().iter()
+            .map(|cell| cell.symbol()).collect();
+        assert!(rendered.contains("Preflight: Unavailable"));
+        assert!(rendered.contains("renderer package root is unavailable"));
+        assert!(!rendered.contains("private transcript diagram source"));
+        let menu = app.settings_menu.as_mut().unwrap();
+        menu.edits.insert("mermaid_renderer_root".into(), Some("/another/package".into()));
+        assert!(preflight.message(&menu.mermaid_paths()).contains("Configuration changed"));
     }
 
     #[cfg(unix)]
@@ -1890,7 +1932,7 @@ for line in sys.stdin:
         let old_epoch = app.repo_epoch.get("b").copied().unwrap_or_default();
         app.repo_pending = Some(("b".into(), PathBuf::from("/tmp/new"), old_epoch, rx));
         app.invalidate_repo("b");
-        tx.send(Some(RepoStatus::Directory { name: "stale".into() })).unwrap();
+        tx.send((Some(RepoStatus::Directory { name: "stale".into() }), Some(PathBuf::from("/tmp/new")))).unwrap();
         app.poll_repo();
         assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "directory"));
     }
@@ -2978,6 +3020,33 @@ for line in sys.stdin:
         app.input = "/demo:status\nforward this".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.notice.contains("single line"));
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn owner_status_chip_opens_local_refresh_ledger_without_provider_dispatch() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let plugin_dir = dir.path().join("native-plugins");
+        std::fs::create_dir(&plugin_dir).unwrap();
+        std::fs::set_permissions(&plugin_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for (path, body) in [
+            (dir.path().join("config.toml"), "native_plugins = ['demo']\n"),
+            (plugin_dir.join("demo.toml"), "api_version = 1\nname = 'demo'\nversion = '1.0'\n[status]\nproducer = 'owner-file-v1'\nlabel = 'Queue'\nrefresh_seconds = 5\n"),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let inventory = crate::native_plugins::load(dir.path(), &[]).unwrap();
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("s".into());
+        app.native_status = crate::native_plugins::StatusRuntime::new(inventory.statuses);
+        assert!(app.chips(0).iter().any(|(kind, label)| *kind == "native_status" && label == "Queue: ?"));
+        app.open_chip_info("native_status", 0);
+        assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some("native_status"));
+        assert!(app.chip_info.as_ref().unwrap().lines.iter().any(|line| line.contains("failure ledger") || line.contains("ledger:")));
         assert!(app.pending_prompts.is_empty());
     }
 
@@ -4074,6 +4143,68 @@ for line in sys.stdin:
         assert_ne!(app.collections[0].name, app.collections[1].name);
         app.local_collection("new Chosen name");
         assert_eq!(app.collections[2].name, "Chosen name");
+    }
+
+    #[test]
+    fn pane_badge_aggregates_hidden_tabs_without_inventing_context() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 24));
+        app.rail_visible = true; app.rail_width = 30;
+        for (id, title) in [("a", "Active"), ("b", "Beta")] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:title.into(),
+                collection:"project".into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.groups[0].tabs = vec!["a".into(), "b".into()];
+        app.groups[0].active = 0;
+        assert_eq!(app.pane_signal("a").unwrap().badge(), " [2 tabs]");
+        app.session_telemetry.entry("b".into()).or_default().context_percent = Some(51.0);
+        assert_eq!(app.pane_signal("a").unwrap().badge(), " [2 ctx#2:Beta]");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"b",
+            "event":{"type":"needs_input", "data":{"id":"question", "kind":"ask_user",
+                "title":"Choose", "questions":[{"question":"Choose", "options":[]}]}}}));
+        let signal = app.pane_signal("a").unwrap();
+        assert_eq!(signal.rank, 4);
+        assert_eq!(signal.hidden_source.as_ref().map(|(tab, title)| (*tab, title.as_str())), Some((2, "Beta")));
+        assert!(painted_at(&app, 100, 24).contains("[2 !#2:Beta]"));
+    }
+
+    #[test]
+    fn project_hue_requires_one_known_root_even_when_labels_match() {
+        let mut app = App::default();
+        app.project_colours = Some(HashMap::new());
+        for id in ["a", "b"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:"same".into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        assert_eq!(app.rail_project_colour("same"), None);
+        let root = PathBuf::from("/verified/project");
+        app.project_roots.insert("a".into(), root.clone());
+        assert_eq!(app.rail_project_colour("same"), None);
+        app.project_roots.insert("b".into(), PathBuf::from("/verified/other"));
+        assert_eq!(app.rail_project_colour("same"), None);
+        app.project_roots.insert("b".into(), root.clone());
+        app.project_colours.as_mut().unwrap().insert(root, "blue".into());
+        assert_eq!(app.rail_project_colour("same"), Some(Color::Rgb(0x8A, 0xBF, 0xF2)));
+        let colours = app.project_colours.take();
+        assert_eq!(app.rail_project_colour("same"), None);
+        app.project_colours = colours;
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|frame| app.draw_rail(frame, Rect::new(0, 0, 40, 8))).unwrap();
+        assert_eq!(terminal.backend().buffer()[(2, 1)].fg, Color::Rgb(0x8A, 0xBF, 0xF2));
+    }
+
+    #[test]
+    fn hidden_tab_gets_one_background_project_probe() {
+        let mut app = App::default();
+        for id in ["active", "hidden"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:"project".into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.groups[0].tabs = vec!["active".into(), "hidden".into()];
+        app.repo_cache.insert("active".into(), (None, Instant::now()));
+        app.session_cwds.insert("hidden".into(), PathBuf::from("/nonexistent/doxa-triage-hidden"));
+        app.poll_repo();
+        assert_eq!(app.repo_pending.as_ref().map(|(id, _, _, _)| id.as_str()), Some("hidden"));
     }
 
     #[test]

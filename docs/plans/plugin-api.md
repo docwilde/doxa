@@ -1,6 +1,6 @@
 # Native DOXA plugin API
 
-Status: **data-only v1 command slice implemented; executable plugins remain open**.
+Status: **data-only v1 command and status slices implemented; executable plugins remain open**.
 This plan supersedes the Python/Textual `Plugin` and `PANE_COMMANDS` draft. The
 Rust frontend uses its own command registry, palette and help panel. Claude Code
 plugin adoption through `/plugins` is a separate provider feature.
@@ -23,6 +23,15 @@ completion, `/help` and the action palette; executing it opens a local,
 read-only panel. Arguments are refused. Its content never reaches the model,
 daemon or shell. The panel identifies the loaded file, SHA-256 digest and
 opened inode/device so the displayed contribution has inspectable provenance.
+Alternatively, an allowlisted manifest can declare one `owner-file-v1` status
+with a 5–300 second refresh interval. A background worker reads only that
+plugin's fixed, private `<name>.status.toml` file (at most 1 KiB). The TUI
+shows the validated value and a ledger of attempts, bytes, elapsed time and
+failures. The owner is responsible for supervising a producer that atomically
+rewrites the file at least every three refresh intervals; DOXA does not launch
+it. Stale or future-dated files and expired cached values show unknown. Each
+read has a 250 ms budget; after three consecutive failures the
+status visibly disables until TUI restart. No plugin code is invoked.
 See [Native text plugins](../native-plugins.md) for a working example.
 
 This is intentionally **not** an in-process code plugin API. No `.py`, shared
@@ -44,21 +53,20 @@ provider passthrough and cannot override a native command name.
   A native command cannot replace a built-in DOXA command.
 - Loading happens once during TUI startup. Failures are shown in the notice
   and `/help`; a malformed plugin does not prevent the TUI from starting.
-  Editing a manifest requires restarting the TUI to load a new snapshot.
+  Editing a manifest requires restarting the TUI to load a new snapshot. Only
+  an accepted status's owner file refreshes during a session.
 - A repository cannot provide executable native plugin code because the v1
   protocol contains no executable capability. Never add a repository-relative
   discovery path to a later executable API.
 
 ## Open extension work
 
-The Python draft proposed status chips, transcript renderers, lifecycle hooks,
-LORE access, settings rows and provider backends. None is a Rust-native plugin
-contract yet. The next useful extension is a bounded, read-only status value
-whose producer and refresh cost are explicit. Dynamic in-process callbacks
-need an owner-reviewed package identity, crash isolation and a user-visible
-failure ledger before loading can be considered. A WASM or out-of-process
-protocol should be evaluated against those requirements; a native shared
-library would give full process privileges.
+The Python draft also proposed transcript renderers, lifecycle hooks, LORE
+access, settings rows and provider backends. None is a Rust-native plugin
+contract yet. Dynamic callbacks still need owner-reviewed package identity
+and crash isolation; the data-only status ledger does not grant execution.
+A WASM or out-of-process protocol should be evaluated against those
+requirements; a native shared library would give full process privileges.
 
 Provider backends are a separate architecture decision. Their lifecycle,
 credentials, transport and budget controls cannot be inferred from a text
@@ -74,6 +82,6 @@ for new Claude sessions, not native TUI extensions.
   executable-looking manifests are rejected without running code.
 - An accepted command is visible in completion, help and palette, opens a
   nonempty local panel, and never queues a provider prompt.
-- A later callback or status API needs an explicit failure budget, a visible
-  disabled state and tests for slow/failing contributors before it is called
-  implemented.
+- A status-only manifest stays owner-allowlisted; malformed, linked, oversized
+  stale or loose-permission owner files never display a value. Slow or failing reads
+  consume a visible bounded ledger and disable after three failures.

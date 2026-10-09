@@ -10,8 +10,9 @@ free-space floor. The chip reports usage as monitoring, not a hard quota.
 Hard quotas still require administrator-managed filesystem project quotas and
 verified enforcement across bind mounts. New Docker sessions request a private
 cgroup namespace, and the worker checks actual cgroup v2 memory, swap, CPU and
-PID ceilings before admission and each CLI provider turn; live rootless enforcement
-still needs the explicit integration smoke. Hardened egress, macOS Docker Desktop,
+PID ceilings before admission and each CLI provider turn. Beta.16 adds an opt-in
+rootless restricted-egress transport smoke; it does not verify production cgroup
+or hard-quota enforcement. Hardened egress, macOS Docker Desktop,
 remote Engines and a containerized controller remain open.
 
 Target: Linux first. This
@@ -211,8 +212,10 @@ gateway death/restart and resume across container lifecycle transitions.
 Because TLS is not intercepted, the gateway cannot check the encrypted HTTP
 authority or detect every form of domain fronting. Known ECH extensions are
 refused, but provider-specific destination behavior and future TLS extensions
-must be reviewed before claiming a hardened boundary. Live rootless proof
-remains open.
+must be reviewed before claiming a hardened boundary. An opt-in, credential-free
+rootless fixture now checks the network-none worker's loopback adapter, a
+disallowed CONNECT, direct-IP failure and gateway-loss behavior. Permitted
+upstream traffic and provider flows still need live rootless proof.
 
 API vendor keys stay in the host supervisor; it performs provider HTTP calls
 or grants a narrowly scoped per-session provider proxy. Claude and Codex may

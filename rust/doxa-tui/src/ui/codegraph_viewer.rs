@@ -73,10 +73,17 @@ fn answer_lines(answer: &Answer) -> Vec<String> {
             display(&edge.module)));
         lines.push(format!("  {} · {}", edge.resolution, edge.reason));
         lines.push(format!("  target: {}", edge.target.as_deref().map(display).unwrap_or_else(|| "unknown".into())));
+        if let Some(candidate) = &edge.conditional_candidate {
+            lines.push(format!("  conditional candidate only: {}", display(candidate)));
+        }
         hash(&mut lines, "source", &edge.source_sha256);
         lines.push(format!("  source read: {} Unix ms", edge.source_read_unix_ms));
         if let Some(value) = &edge.target_sha256 { hash(&mut lines, "target", value); }
         if let Some(value) = edge.target_read_unix_ms { lines.push(format!("  target read: {value} Unix ms")); }
+        if let Some(value) = &edge.conditional_candidate_sha256 { hash(&mut lines, "conditional candidate", value); }
+        if let Some(value) = edge.conditional_candidate_read_unix_ms {
+            lines.push(format!("  conditional candidate read: {value} Unix ms"));
+        }
     }
     for (label, count) in [("rows", answer.omitted_rows), ("calls", answer.omitted_edges),
         ("modules", answer.omitted_module_edges), ("nested modules skipped", answer.skipped_nested_modules)] {
@@ -175,9 +182,10 @@ mod tests {
     fn viewer_retains_ambiguity_unknown_and_exact_hashes() {
         let root = tempfile::tempdir().unwrap();
         assert!(Command::new("git").args(["init", "-q"]).arg(root.path()).status().unwrap().success());
-        fs::write(root.path().join("lib.rs"), "fn work() { target(); }\nmod missing;\n").unwrap();
+        fs::write(root.path().join("lib.rs"), "fn work() { target(); }\nmod missing;\n#[cfg(unix)] mod optional;\n").unwrap();
         fs::write(root.path().join("other.rs"), "fn target() {}\nmod missing;\n").unwrap();
         fs::write(root.path().join("another.rs"), "fn target() {}\n").unwrap();
+        fs::write(root.path().join("optional.rs"), "pub fn optional() {}\n").unwrap();
         let calls = doxa_codegraph::query(root.path(), Query::Calls("lib.rs".into())).unwrap();
         let lines = answer_lines(&calls).join("\n");
         assert!(lines.contains("ambiguous · multiple_observed_name_matches"));
@@ -187,6 +195,9 @@ mod tests {
         let lines = answer_lines(&modules).join("\n");
         assert!(lines.contains("unknown"));
         assert!(lines.contains(&modules.module_edges[0].source_sha256));
+        assert!(lines.contains("conditional candidate only: optional.rs"));
+        assert!(modules.module_edges[1].target.is_none());
+        assert!(lines.contains(modules.module_edges[1].conditional_candidate_sha256.as_deref().unwrap()));
         assert!(request("module lib.rs").is_err());
         assert!(request("file ../lib.rs\nattack").is_err());
     }

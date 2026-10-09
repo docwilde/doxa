@@ -40,7 +40,8 @@ fn model_fact_lines(engine: &str, model: &str) -> [String; 2] {
     let prices = match facts.priced_pair() {
         Some((input, output, _, _)) => {
             let source = fact_source(facts.input_usd_per_million.provenance);
-            format!("in ${input}/M · out ${output}/M [{source}]")
+            let label = if engine == "codex" { "API std " } else { "" };
+            format!("{label}in ${input}/M · out ${output}/M [{source}]")
         }
         None => {
             let one = |name: &str, fact: Fact<f64>| match fact {
@@ -61,13 +62,19 @@ mod model_fact_tests {
     #[test]
     fn picker_shows_field_level_unknowns_and_dated_price_source() {
         let known = model_fact_lines("codex", "gpt-5.6-sol");
-        assert!(known[0].contains("ctx ? (unknown) · thinking ? (unknown)"));
-        assert!(known[1].contains("in $8/M · out $40/M"));
-        assert!(known[1].contains("developers.openai.com 2026-09-30"));
+        assert!(known[0].contains("ctx 1050000 [developers.openai.com 2026-10-09]"));
+        assert!(known[0].contains("thinking optional [developers.openai.com 2026-10-09]"));
+        assert!(known[1].contains("API std in $4/M · out $20/M"));
+        assert!(known[1].contains("developers.openai.com 2026-10-09"));
 
         let unknown = model_fact_lines("claude", "gpt-5.6-sol");
         assert!(unknown[1].contains("in ? (unknown) · out ? (unknown)"));
         assert!(!unknown[1].contains("developers.openai.com"));
+        let astra = model_fact_lines("codex", "gpt-6-astra");
+        assert!(astra[0].contains("thinking mandatory [developers.openai.com 2026-10-09]"));
+        let old_codex = model_fact_lines("codex", "gpt-5.3-codex");
+        assert!(old_codex[0].contains("ctx 400000 [developers.openai.com 2026-10-09]"));
+        assert!(old_codex[0].contains("thinking ? (unknown)"));
 
         let deepseek = model_fact_lines("deepseek", "deepseek-flash");
         assert!(deepseek[0].contains("ctx 1048576 [api-docs.deepseek.com 2026-10-08]"));
@@ -709,10 +716,24 @@ impl App {
                 }
             }
         }
-        // Keep the action hint visible even when a setting has a long caveat.
-        lines.truncate(usize::from(area.height.saturating_sub(3)));
+        let mermaid_selected = menu.rows.get(menu.selected).is_some_and(|row|
+            matches!(row.setting.key, "mermaid_renderer" | "mermaid_renderer_root"));
+        let preflight_lines = if mermaid_selected {
+            let status = self.mermaid_preflight.as_ref()
+                .map(|preflight| preflight.message(&menu.mermaid_paths()))
+                .unwrap_or_else(|| "Not checked".into());
+            let width = usize::from(area.width.saturating_sub(3)).max(1);
+            let mut footer = vec![Line::styled(" Ctrl+P: check proposed values with a fixed sample (no transcript source)",
+                Style::default().fg(theme::ACCENT))];
+            footer.extend(crate::memory_menu::wrap_review(&format!(" Preflight: {status}"), width)
+                .into_iter().take(3).map(Line::from));
+            footer
+        } else { Vec::new() };
+        // Keep the action hint and preflight result visible even when a note is long.
+        lines.truncate(usize::from(area.height.saturating_sub(3)).saturating_sub(preflight_lines.len()));
+        lines.extend(preflight_lines);
         lines.push(Line::from(if menu.draft.is_some() {
-            " Enter/Ctrl+S save · Esc cancel edit"
+            " Enter/Ctrl+S save · Ctrl+P preflight · Esc cancel edit"
         } else {
             " Enter edit/toggle · U unset · Ctrl+S save · Esc discard/close"
         }));
@@ -926,7 +947,7 @@ impl App {
         }
         if matches!(
             info.kind,
-            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "isolation" | "native_plugin"
+            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "isolation" | "native_plugin" | "native_status"
         ) {
             let current = self.groups[self.active_group].active_id().and_then(|id| {
                 self.session_cwds
@@ -2036,13 +2057,8 @@ impl App {
     pub(super) fn draw_rail(&self, frame: &mut Frame, area: Rect) {
         let rows = self.rail_rows();
         let ranks = self.rail_groups().into_iter().map(|(key, _, rank)| (key, rank)).collect::<Vec<_>>();
-        let badge = |key: &RailGroupKey| match ranks.iter().find(|(candidate, _)| candidate == key).map(|(_, rank)| *rank).unwrap_or(0) {
-            4 => "!",        // stopped for a human
-            3 => "ctx",      // provider-reported context use >= 50%
-            2 => "lore",     // source-session proposals await review
-            1 => "new",      // completed but unseen
-            _ => "",
-        };
+        let badge = |key: &RailGroupKey| super::triage::urgency_label(
+            ranks.iter().find(|(candidate, _)| candidate == key).map(|(_, rank)| *rank).unwrap_or(0));
         let start = self.rail_view_start(area, &rows);
         let visible = usize::from(area.height.saturating_sub(2));
         let selected = self.rail_order().get(self.rail_selected).copied();
@@ -2069,7 +2085,7 @@ impl App {
                     lines.push(Line::styled(
                         format!("{}{}", prefix, clipped_title(project,
                             usize::from(area.width).saturating_sub(prefix.len() + 2)).0),
-                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                        Style::default().fg(self.rail_project_colour(project).unwrap_or(theme::ACCENT)).add_modifier(Modifier::BOLD),
                     ));
                 },
                 RailRow::PastHeading => lines.push(Line::styled(
@@ -2100,7 +2116,9 @@ impl App {
                     };
                     let queued = self.session_activity.get(&session.id).map(|activity| activity.1).unwrap_or(0)
                         + self.pending_prompts.iter().filter(|(id, _)| id == &session.id).count();
-                    let badge = if queued > 0 { format!(" [q{queued}]") } else { String::new() };
+                    let pane = self.pane_signal(&session.id).map(|signal| signal.badge()).unwrap_or_default();
+                    let queue = if queued > 0 { format!(" [q{queued}]") } else { String::new() };
+                    let badge = format!("{pane}{queue}");
                     let title_width = usize::from(area.width.saturating_sub(5))
                         .saturating_sub(badge.width());
                     let title = clipped_title(&session.title, title_width).0;

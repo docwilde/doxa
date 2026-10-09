@@ -519,7 +519,7 @@ fn run() -> io::Result<()> {
             if !value.is_finite() || value <= 0.0 { return Err(invalid("invalid session budget")); }
             if options.engine == Engine::Codex {
                 let model = options.model.as_deref().ok_or_else(|| invalid("budgeted Codex session requires a priced model"))?;
-                if !budget_host::priced_vendor_model("codex", model) { return Err(invalid("no native budget price for selected Codex model")); }
+                if !budget_host::priced_vendor_model("codex", model) { return Err(invalid("no complete native budget rate bound for selected Codex model")); }
             }
             if let Some(vendor) = options.engine.vendor() {
                 let model = options.model.as_deref().ok_or_else(|| invalid("budgeted vendor session requires a model"))?;

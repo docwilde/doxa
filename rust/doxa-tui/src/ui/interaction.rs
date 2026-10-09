@@ -856,7 +856,7 @@ impl App {
             if let Some(info) = self.chip_info.as_mut().filter(|info| {
                 matches!(
                     info.kind,
-                    "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "native_plugin" | "codegraph"
+                    "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "native_plugin" | "native_status" | "codegraph"
                 )
             }) {
                 if info.kind == "codegraph" {

@@ -86,6 +86,25 @@ fn scene(name: &str) -> App {
                 worktree: Some("feat".into()),
             });
         }
+        "triage" => {
+            app.rail_visible = true;
+            app.groups[0].tabs = vec!["demo-codex-01".into(), "demo-claude-02".into(), "demo-deepseek-03".into()];
+            for id in ["demo-codex-01", "demo-claude-02", "demo-deepseek-03"] {
+                app.set_repo_status(id, RepoStatus::Repository {
+                    repo: "project".into(), base: Some("main".into()),
+                    checked_out: Some("feat".into()), sha: Some("a1b2c3d".into()),
+                    worktree: Some("feat".into()),
+                });
+                app.set_project_root_fixture(id, "/demo/project".into());
+            }
+            event(&mut app, "demo-deepseek-03", "needs_input", json!({
+                "id":"triage-question", "kind":"ask_user", "title":"Approve release notes",
+                "questions":[{"question":"Are these notes ready?", "header":"Review",
+                    "options":[{"label":"Approve", "description":"Continue the fixture"},
+                               {"label":"Revise", "description":"Keep reviewing"}]}]
+            }));
+            app.notice = format!("Rust {} · hidden tab #3 needs input · fixture", env!("CARGO_PKG_VERSION"));
+        }
         "image-preview" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];
             if let Some(session) = app.sessions.iter_mut().find(|session| session.id == "demo-codex-01") {
@@ -403,7 +422,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
+        "hero" | "triage" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
