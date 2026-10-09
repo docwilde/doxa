@@ -97,6 +97,10 @@ When **every listed Rust file parses**, the answer contains deterministic
 `scan_input_sha256` over Rust paths and source hashes. The corresponding
 `python_scan_input_sha256` covers every parsed, Git-listed Python path and hash.
 Each digest is absent if an input in that language was skipped or unparseable.
+The fresh query also re-enumerates Git files after parsing and fails without
+an answer if the listing changed during the scan. This catches added or removed
+inputs before a complete digest is reported; it cannot make concurrent byte
+edits into an atomic repository snapshot.
 The inventories exclude ignored files and do not prove compiler or Python
 runtime semantics. Separate skipped and unparseable counters let LORE recheck
 each language independently. Older stored answers without Python inventory

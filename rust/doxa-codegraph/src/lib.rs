@@ -248,6 +248,13 @@ fn listed_files(root: &Path) -> Result<BTreeSet<String>, String> {
     Ok(paths)
 }
 
+fn require_stable_listing(root: &Path, initial: &BTreeSet<String>) -> Result<(), String> {
+    if initial != &listed_files(root)? {
+        return Err("Git worktree listing changed during codegraph scan; no partial answer".into());
+    }
+    Ok(())
+}
+
 fn file_bytes(root: &Path, relative: &str) -> Result<(String, String, u128), String> {
     // Anchor each component to an opened worktree descriptor. A repository
     // writer may replace a symlink between path validation and File::open;
@@ -327,10 +334,7 @@ pub fn current_scan_input_sha256(root: &Path) -> Result<(String, usize), String>
         }
         entries.push((path.as_str(), sha));
     }
-    let after = listed_files(&root)?;
-    if paths != after {
-        return Err("Git worktree listing changed during scan verification".into());
-    }
+    require_stable_listing(&root, &paths)?;
     let count = entries.len();
     Ok((scan_digest(b"doxa-rust-scan-input-v1\0", entries.iter().map(|(path, sha)| (*path, sha.as_str()))), count))
 }
@@ -357,9 +361,7 @@ pub fn current_python_scan_input_sha256(root: &Path) -> Result<(String, usize), 
     if started.elapsed() >= MAX_PYTHON_SCAN_TIME {
         return Err("Python source scan exceeded ten-second limit; no partial verification".into());
     }
-    if paths != listed_files(&root)? {
-        return Err("Git worktree listing changed during Python scan verification".into());
-    }
+    require_stable_listing(&root, &paths)?;
     let count = entries.len();
     Ok((scan_digest(b"doxa-python-scan-input-v1\0", entries.iter().map(|(path, sha)| (*path, sha.as_str()))), count))
 }
@@ -1182,6 +1184,10 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
     if serde_json::to_vec(&answer).map_err(|e| e.to_string())?.len() > MAX_REPLY_BYTES {
         return Err("query reply exceeds 64 KiB; narrow the query".into());
     }
+    // Check the complete Git inventory immediately before returning. A file
+    // added or removed during parsing or candidate processing must not leave
+    // a purportedly complete digest or candidate set in a successful answer.
+    require_stable_listing(&root, &paths)?;
     Ok(answer)
 }
 
@@ -1196,6 +1202,22 @@ mod tests {
         let status = Command::new("git").arg("init").arg("-q").arg(root.path()).status().unwrap();
         assert!(status.success());
         root
+    }
+
+    #[test]
+    fn complete_scan_rejects_a_changed_git_listing() {
+        let root = worktree();
+        fs::write(root.path().join("lib.rs"), "fn original() {}\n").unwrap();
+        let initial = listed_files(root.path()).unwrap();
+        require_stable_listing(root.path(), &initial).unwrap();
+
+        fs::write(root.path().join("new.rs"), "fn added() {}\n").unwrap();
+        assert!(require_stable_listing(root.path(), &initial).unwrap_err()
+            .contains("listing changed"));
+        fs::remove_file(root.path().join("new.rs")).unwrap();
+        fs::remove_file(root.path().join("lib.rs")).unwrap();
+        assert!(require_stable_listing(root.path(), &initial).unwrap_err()
+            .contains("listing changed"));
     }
 
     #[test]
