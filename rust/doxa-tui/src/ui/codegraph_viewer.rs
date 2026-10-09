@@ -41,6 +41,8 @@ fn answer_lines(answer: &Answer) -> Vec<String> {
             answer.coverage.skipped.count, answer.coverage.unparseable.count),
         format!("Rust scan inputs: {}", answer.scan_input_sha256.as_deref()
             .unwrap_or("unknown (skipped or unparseable input)")),
+        format!("Python scan inputs: {}", answer.python_scan_input_sha256.as_deref()
+            .unwrap_or("unknown (skipped or unparseable input)")),
         "Syntax only · semantic bindings are unknown; Python module targets are unresolved".into(),
     ];
     for (language, count) in &answer.coverage.unsupported_languages {
@@ -81,6 +83,9 @@ fn answer_lines(answer: &Answer) -> Vec<String> {
         if let Some(candidate) = &edge.conditional_candidate {
             lines.push(format!("  conditional candidate only: {}", display(candidate)));
         }
+        if let Some(candidate) = &edge.structural_candidate {
+            lines.push(format!("  structural candidate only: {}", display(candidate)));
+        }
         hash(&mut lines, "source", &edge.source_sha256);
         lines.push(format!("  source read: {} Unix ms", edge.source_read_unix_ms));
         if let Some(value) = &edge.target_sha256 { hash(&mut lines, "target", value); }
@@ -88,6 +93,10 @@ fn answer_lines(answer: &Answer) -> Vec<String> {
         if let Some(value) = &edge.conditional_candidate_sha256 { hash(&mut lines, "conditional candidate", value); }
         if let Some(value) = edge.conditional_candidate_read_unix_ms {
             lines.push(format!("  conditional candidate read: {value} Unix ms"));
+        }
+        if let Some(value) = &edge.structural_candidate_sha256 { hash(&mut lines, "structural candidate", value); }
+        if let Some(value) = edge.structural_candidate_read_unix_ms {
+            lines.push(format!("  structural candidate read: {value} Unix ms"));
         }
     }
     for (label, count) in [("rows", answer.omitted_rows), ("calls", answer.omitted_edges),
@@ -118,6 +127,9 @@ fn stored_lines(snapshot: &CodegraphSnapshot) -> Vec<String> {
                     row.referenced_sources.status, row.referenced_sources.checked_files),
                 format!("Rust scan inputs: {} · {} checked · {}",
                     row.scan_inputs.status, row.scan_inputs.checked_files, row.scan_inputs.reason),
+                format!("Python scan inputs: {} · {} checked · {}",
+                    row.python_scan_inputs.status, row.python_scan_inputs.checked_files,
+                    row.python_scan_inputs.reason),
                 "Binding: unknown · syntax data only".into(),
                 String::new(),
             ];
@@ -292,11 +304,14 @@ mod tests {
                 checked_files: 0, issues: vec![] },
             scan_inputs: doxa_lore::ScanInputFreshness { status: "unknown",
                 checked_files: 0, reason: "scan_input_digest_absent" },
+            python_scan_inputs: doxa_lore::ScanInputFreshness { status: "unknown",
+                checked_files: 0, reason: "python_scan_input_digest_absent" },
         };
         let lines = stored_lines(&CodegraphSnapshot::Current(row)).join("\n");
         assert!(lines.contains("revision 3"));
         assert!(lines.contains("requested source verified at read time"));
         assert!(lines.contains("Included reference files: unknown"));
+        assert!(lines.contains("Python scan inputs: unknown"));
         assert!(lines.contains("Binding: unknown"));
         assert!(lines.contains("conditional_candidate"));
         assert!(lines.contains("conditional_compilation_unverified"));

@@ -31,16 +31,53 @@ fn unavailable(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message.into())
 }
 
-fn current_cgroup() -> io::Result<PathBuf> {
-    let text = fs::read_to_string("/proc/self/cgroup")?;
-    let relative = text.lines().find_map(|line| line.strip_prefix("0::"))
+/// A populated leaf cannot enable domain controllers for its own children.
+/// Require the caller in a supervisor leaf immediately below an empty,
+/// owner-delegated parent, and place each worker in a sibling of that leaf.
+fn delegated_parent_at(root: &Path, membership: &str, uid: u32, pid: u32) -> io::Result<PathBuf> {
+    let mut unified = membership.lines().filter_map(|line| line.strip_prefix("0::"));
+    let relative = unified.next()
         .ok_or_else(|| unavailable("unified cgroup v2 membership unavailable"))?;
+    if unified.next().is_some() {
+        return Err(unavailable("ambiguous cgroup v2 membership"));
+    }
     if relative.len() > 1024 || !relative.starts_with('/')
         || Path::new(relative).components().any(|component| !matches!(component, Component::RootDir | Component::Normal(_))) {
         return Err(unavailable("invalid cgroup v2 membership"));
     }
-    let root = Path::new(CGROUP_ROOT);
-    let group = root.join(relative.trim_start_matches('/'));
+    let leaf = root.join(relative.trim_start_matches('/'));
+    if leaf == root { return Err(unavailable("plugin supervisor leaf is the cgroup root")); }
+    let parent = leaf.parent().filter(|parent| *parent != root && parent.starts_with(root))
+        .ok_or_else(|| unavailable("plugin supervisor leaf lacks a delegated parent"))?;
+    let mut group = leaf.as_path();
+    while group != root {
+        let metadata = fs::symlink_metadata(group)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(unavailable("cgroup membership traverses a non-directory or symlink"));
+        }
+        group = group.parent().ok_or_else(|| unavailable("cgroup membership escaped the hierarchy"))?;
+    }
+    let leaf_procs = fs::read_to_string(leaf.join("cgroup.procs"))?;
+    if !leaf_procs.lines().any(|line| line.parse::<u32>().ok() == Some(pid)) {
+        return Err(unavailable("caller is not in the supervisor leaf"));
+    }
+    let metadata = fs::symlink_metadata(parent)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink()
+        || metadata.uid() != uid
+        || metadata.permissions().mode() & 0o200 == 0 {
+        return Err(unavailable("parent cgroup is not delegated to this user"));
+    }
+    if !fs::read_to_string(parent.join("cgroup.procs"))?.trim().is_empty() {
+        return Err(unavailable("delegated parent contains processes"));
+    }
+    let enabled = fs::read_to_string(parent.join("cgroup.subtree_control"))?;
+    if !["memory", "pids", "cpu"].iter().all(|controller| enabled.split_whitespace().any(|value| value == *controller)) {
+        return Err(unavailable("memory, pids and cpu cgroup controllers are not delegated"));
+    }
+    Ok(parent.to_path_buf())
+}
+
+fn delegated_cgroup_parent() -> io::Result<PathBuf> {
     let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
     let root_c = CString::new(CGROUP_ROOT).unwrap();
     if unsafe { libc::statfs(root_c.as_ptr(), &mut stat) } < 0 {
@@ -49,17 +86,9 @@ fn current_cgroup() -> io::Result<PathBuf> {
     if stat.f_type != libc::CGROUP2_SUPER_MAGIC as libc::c_long {
         return Err(unavailable("cgroup hierarchy is not cgroup v2"));
     }
-    let metadata = fs::symlink_metadata(&group)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.permissions().mode() & 0o200 == 0 {
-        return Err(unavailable("current cgroup is not delegated to this user"));
-    }
-    let enabled = fs::read_to_string(group.join("cgroup.subtree_control"))?;
-    if !["memory", "pids", "cpu"].iter().all(|controller| enabled.split_whitespace().any(|value| value == *controller)) {
-        return Err(unavailable("memory, pids and cpu cgroup controllers are not delegated"));
-    }
-    Ok(group)
+    let membership = fs::read_to_string("/proc/self/cgroup")?;
+    delegated_parent_at(Path::new(CGROUP_ROOT), &membership,
+        unsafe { libc::geteuid() }, std::process::id())
 }
 
 fn write_and_check(path: &Path, value: &str) -> io::Result<()> {
@@ -78,7 +107,7 @@ pub(crate) struct CgroupBudget { path: PathBuf, stopped: bool }
 
 impl CgroupBudget {
     pub(crate) fn create() -> io::Result<Self> {
-        let parent = current_cgroup()?;
+        let parent = delegated_cgroup_parent()?;
         let path = parent.join(format!("doxa-plugin-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
         fs::create_dir(&path)?;
         let budget = Self { path, stopped: false };
@@ -116,6 +145,10 @@ impl CgroupBudget {
 impl Drop for CgroupBudget {
     fn drop(&mut self) { let _ = self.stop(); }
 }
+
+#[cfg(test)]
+#[path = "runner_sandbox_acceptance.rs"]
+mod acceptance;
 
 fn open_trusted_executable(path: &Path) -> io::Result<File> {
     if !path.is_absolute() { return Err(unavailable("plugin worker path must be absolute")); }
@@ -380,17 +413,61 @@ mod tests {
         (capture, wrapper)
     }
 
+    fn fake_delegated_tree() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("cgroup");
+        let parent = root.join("delegated");
+        let leaf = parent.join("supervisor");
+        fs::create_dir_all(&leaf).unwrap();
+        fs::write(parent.join("cgroup.procs"), "").unwrap();
+        fs::write(parent.join("cgroup.subtree_control"), "cpu memory pids\n").unwrap();
+        fs::write(leaf.join("cgroup.procs"), "4242\n").unwrap();
+        (dir, root, parent)
+    }
+
     #[test]
-    fn admission_fails_closed_without_delegated_cgroup() {
-        if current_cgroup().is_err() {
-            assert!(CgroupBudget::create().is_err());
-        } else {
-            let mut budget = CgroupBudget::create().expect("delegated cgroup must accept hard budgets");
-            assert_eq!(fs::read_to_string(budget.path.join("memory.max")).unwrap().trim(), MEMORY_MAX);
-            assert_eq!(fs::read_to_string(budget.path.join("pids.max")).unwrap().trim(), PIDS_MAX);
-            assert_eq!(fs::read_to_string(budget.path.join("cpu.max")).unwrap().trim(), CPU_MAX);
-            budget.stop().expect("empty budget must be removable");
+    fn delegated_parent_is_empty_controller_enabled_sibling_of_supervisor() {
+        let (_dir, root, parent) = fake_delegated_tree();
+        let uid = unsafe { libc::geteuid() };
+        assert_eq!(delegated_parent_at(&root, "0::/delegated/supervisor\n", uid, 4242).unwrap(), parent);
+        assert!(delegated_parent_at(&root, "0::/delegated/supervisor\n", uid, 9999).is_err());
+        assert!(delegated_parent_at(&root, "0::/delegated\n", uid, 4242).is_err());
+        assert!(delegated_parent_at(&root, "0::/\n", uid, 4242).is_err());
+    }
+
+    #[test]
+    fn delegated_parent_rejects_populated_unowned_unwritable_or_disabled_parent() {
+        let (_dir, root, parent) = fake_delegated_tree();
+        let uid = unsafe { libc::geteuid() };
+        let membership = "0::/delegated/supervisor\n";
+        fs::write(parent.join("cgroup.procs"), "42\n").unwrap();
+        assert!(delegated_parent_at(&root, membership, uid, 4242).is_err());
+        fs::write(parent.join("cgroup.procs"), "").unwrap();
+        fs::write(parent.join("cgroup.subtree_control"), "cpu pids\n").unwrap();
+        assert!(delegated_parent_at(&root, membership, uid, 4242).is_err());
+        fs::write(parent.join("cgroup.subtree_control"), "cpu memory pids\n").unwrap();
+        assert!(delegated_parent_at(&root, membership, uid.wrapping_add(1), 4242).is_err());
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(delegated_parent_at(&root, membership, uid, 4242).is_err());
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn delegated_parent_rejects_ambiguous_paths_and_symlinked_parent() {
+        let (_dir, root, parent) = fake_delegated_tree();
+        let uid = unsafe { libc::geteuid() };
+        for membership in ["0::/delegated/../supervisor\n", "0::/delegated/supervisor\n0::/other\n",
+            "1:name=systemd:/delegated/supervisor\n"] {
+            assert!(delegated_parent_at(&root, membership, uid, 4242).is_err(), "{membership}");
         }
+        std::os::unix::fs::symlink(&parent, root.join("linked")).unwrap();
+        assert!(delegated_parent_at(&root, "0::/linked/supervisor\n", uid, 4242).is_err());
+        let nested = parent.join("supervisor/nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(parent.join("supervisor/cgroup.procs"), "").unwrap();
+        fs::write(parent.join("supervisor/cgroup.subtree_control"), "cpu memory pids\n").unwrap();
+        fs::write(nested.join("cgroup.procs"), "4242\n").unwrap();
+        assert!(delegated_parent_at(&root, "0::/linked/supervisor/nested\n", uid, 4242).is_err());
     }
 
     #[test]

@@ -1,13 +1,14 @@
 //! Opt-in, data-only rust-analyzer producer contract.
 //!
 //! No function here starts Docker or promotes an LSP reply to a binding. The
-//! actual runtime must attest rootless cgroup enforcement, no network, mounts,
-//! configuration, quiescence, and source identity before it can be connected.
+//! disabled launcher seam in `semantic_runtime` observes selected effective
+//! settings, but live network, quota, and analyzer proof is still required.
 
 use super::worktree_root;
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::io::BufRead;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -18,7 +19,7 @@ const TMPFS_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A reviewable Docker invocation and pinned LSP initialization request.
 /// `docker_command` is built with an empty inherited environment; there is no
-/// `spawn` method because runtime verification is not yet implemented.
+/// public `spawn` method while production attestation remains incomplete.
 #[derive(Debug)]
 pub struct ProducerPlan {
     pub root: PathBuf,
@@ -100,6 +101,40 @@ impl ProducerPlan {
         command.env_clear().env("DOCKER_HOST", &self.docker_host)
             .args(&self.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         command
+    }
+
+    /// Internal launcher seam. The caller owns a fresh, private CID path and
+    /// must attest that the observed container ID and policy match this run.
+    /// No CLI path calls this method while production attestation is disabled.
+    pub(crate) fn observed_docker_command(&self, docker_binary: &Path, cidfile: &Path, name: &str) -> Result<Command, String> {
+        if !docker_binary.is_absolute() || !cidfile.is_absolute() || cidfile.symlink_metadata().is_ok() {
+            return Err("Docker binary and fresh CID file must be absolute paths".into());
+        }
+        let suffix = name.strip_prefix("doxa-semantic-").ok_or("invalid Docker container name")?;
+        if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) {
+            return Err("invalid Docker container name".into());
+        }
+        // ProducerPlan's fields are public for inspection, so rederive the
+        // complete profile before granting a launch. A caller must not be
+        // able to add --privileged or change LSP configuration after planning.
+        let expected = plan_rust_analyzer(&self.root, &self.image, &self.docker_host, true)?;
+        if self.args != expected.args || self.initialize != expected.initialize
+            || self.attestation != expected.attestation || self.root != expected.root {
+            return Err("Docker producer plan changed after validation".into());
+        }
+        let parent = cidfile.parent().ok_or("missing private CID directory")?;
+        let metadata = parent.symlink_metadata().map_err(|_| "missing private CID directory")?;
+        let canonical = parent.canonicalize().map_err(|_| "invalid private CID directory")?;
+        if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0 || canonical.starts_with(&self.root) {
+            return Err("CID directory must be private and outside the worktree".into());
+        }
+        let mut command = Command::new(docker_binary);
+        command.env_clear().env("DOCKER_HOST", &self.docker_host)
+            .args(&self.args[..self.args.len() - 1]).arg("--name").arg(name)
+            .arg("--cidfile").arg(cidfile)
+            .arg(&self.image).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        Ok(command)
     }
 }
 

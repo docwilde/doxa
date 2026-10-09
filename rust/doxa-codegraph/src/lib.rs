@@ -87,6 +87,9 @@ pub struct Answer {
     /// any Rust input was skipped or failed to parse. This is a scan-input
     /// inventory, not proof of compiler bindings or an atomic filesystem view.
     pub scan_input_sha256: Option<String>,
+    /// Digest of every listed, readable, parseable Python source path and
+    /// digest. Absent if any Python input was skipped or failed to parse.
+    pub python_scan_input_sha256: Option<String>,
     pub status: String,
     pub coverage: Coverage,
     pub rows: Vec<Row>,
@@ -107,6 +110,8 @@ pub struct Coverage {
     pub parsed_python_files: usize,
     pub rust_skipped_files: usize,
     pub rust_unparseable_files: usize,
+    pub python_skipped_files: usize,
+    pub python_unparseable_files: usize,
     pub unsupported_languages: BTreeMap<String, usize>,
     pub other_files: usize,
     pub unparseable: Issues,
@@ -177,6 +182,10 @@ pub struct ModuleEdge {
     /// verified target because this query does not evaluate compilation cfg.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conditional_candidate: Option<String>,
+    /// Unique worktree layout match for a Python import spelling, never a
+    /// runtime import target or a resolved binding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structural_candidate: Option<String>,
     pub resolution: &'static str,
     pub reason: &'static str,
     pub source_sha256: String,
@@ -187,9 +196,13 @@ pub struct ModuleEdge {
     pub conditional_candidate_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conditional_candidate_read_unix_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structural_candidate_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structural_candidate_read_unix_ms: Option<u128>,
 }
 
-const NOTE: &str = "Rust and Python syntax only; semantic binding is unknown. Rust call candidates match a final name segment, not bindings; even one candidate is unverified. Imports are declarations. Rust module edges resolve file layout only, not compilation reachability; cfg-gated files are candidates, never verified targets. Python calls are lexical sites with unknown binding, including indirect expression calls. Python module edges are import spellings with unknown targets. cfg predicates, cfg_attr, macro expansion, and runtime import resolution are not evaluated.";
+const NOTE: &str = "Rust and Python syntax only; semantic binding is unknown. Rust call candidates match a final name segment, not bindings; even one candidate is unverified. Imports are declarations. Rust module edges resolve file layout only, not compilation reachability; cfg-gated files are candidates, never verified targets. Python calls are lexical sites with unknown binding, including indirect expression calls. Python module edges are import spellings with unknown runtime targets; unique local layout matches are unverified structural candidates. cfg predicates, cfg_attr, macro expansion, and runtime import resolution are not evaluated.";
 
 fn source_language(path: &str) -> Option<&'static str> {
     match Path::new(path).extension().and_then(|s| s.to_str()) {
@@ -287,9 +300,9 @@ pub fn source_sha256(root: &Path, relative: &str) -> Result<String, String> {
     file_bytes(root, relative).map(|(_, sha, _)| sha)
 }
 
-fn scan_digest<'a>(entries: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+fn scan_digest<'a>(domain: &[u8], entries: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"doxa-rust-scan-input-v1\0");
+    hasher.update(domain);
     for (path, digest) in entries {
         hasher.update((path.len() as u64).to_be_bytes());
         hasher.update(path.as_bytes());
@@ -319,7 +332,36 @@ pub fn current_scan_input_sha256(root: &Path) -> Result<(String, usize), String>
         return Err("Git worktree listing changed during scan verification".into());
     }
     let count = entries.len();
-    Ok((scan_digest(entries.iter().map(|(path, sha)| (*path, sha.as_str()))), count))
+    Ok((scan_digest(b"doxa-rust-scan-input-v1\0", entries.iter().map(|(path, sha)| (*path, sha.as_str()))), count))
+}
+
+/// Re-enumerate and rehash every nonignored Git-listed Python input. Any
+/// unreadable input, changed listing, or scan-budget breach fails closed.
+pub fn current_python_scan_input_sha256(root: &Path) -> Result<(String, usize), String> {
+    let root = worktree_root(root)?;
+    let started = Instant::now();
+    let paths = listed_files(&root)?;
+    let mut entries = Vec::new();
+    let mut total = 0u64;
+    for path in paths.iter().filter(|path| source_language(path) == Some("python")) {
+        if started.elapsed() >= MAX_PYTHON_SCAN_TIME {
+            return Err("Python source scan exceeded ten-second limit; no partial verification".into());
+        }
+        let (content, sha, _) = file_bytes(&root, path)?;
+        total = total.saturating_add(content.len() as u64);
+        if total > MAX_TOTAL_SOURCE_BYTES {
+            return Err("Python source scan exceeded 64 MiB; no partial verification".into());
+        }
+        entries.push((path.as_str(), sha));
+    }
+    if started.elapsed() >= MAX_PYTHON_SCAN_TIME {
+        return Err("Python source scan exceeded ten-second limit; no partial verification".into());
+    }
+    if paths != listed_files(&root)? {
+        return Err("Git worktree listing changed during Python scan verification".into());
+    }
+    let count = entries.len();
+    Ok((scan_digest(b"doxa-python-scan-input-v1\0", entries.iter().map(|(path, sha)| (*path, sha.as_str()))), count))
 }
 
 #[derive(Clone)]
@@ -627,10 +669,12 @@ fn python_module_edge(node: tree_sitter::Node<'_>, file: &str, module: &str, sha
     modules.push(ModuleEdge {
         source: file.into(), line: node.start_position().row + 1,
         column: node.start_position().column + 1, module: module.into(),
-        target: None, conditional_candidate: None, resolution: "unknown", reason,
+        target: None, conditional_candidate: None, structural_candidate: None,
+        resolution: "unknown", reason,
         source_sha256: sha.into(), source_read_unix_ms: read_unix_ms,
         target_sha256: None, target_read_unix_ms: None,
         conditional_candidate_sha256: None, conditional_candidate_read_unix_ms: None,
+        structural_candidate_sha256: None, structural_candidate_read_unix_ms: None,
     });
     Ok(())
 }
@@ -812,10 +856,12 @@ fn module_edges(root: &Path, source: &str, declarations: &[ModuleDecl],
         let mut edge = ModuleEdge {
             source: source.into(), line: declaration.line, column: declaration.column,
             module: declaration.name.clone(), target: None, conditional_candidate: None,
+            structural_candidate: None,
             resolution: "unknown", reason: "no_listed_candidate",
             source_sha256: source_sha.into(), source_read_unix_ms,
             target_sha256: None, target_read_unix_ms: None,
             conditional_candidate_sha256: None, conditional_candidate_read_unix_ms: None,
+            structural_candidate_sha256: None, structural_candidate_read_unix_ms: None,
         };
         if counts[declaration.name.as_str()] > 1 {
             edge.reason = "duplicate_declaration";
@@ -879,6 +925,65 @@ fn module_edges(root: &Path, source: &str, declarations: &[ModuleDecl],
     (edges, omitted)
 }
 
+fn python_structural_candidates(root: &Path, edges: &mut [ModuleEdge],
+    listed: &BTreeSet<String>, facts: &BTreeMap<String, (String, u128)>) {
+    for edge in edges {
+        // Relative imports need package context, and __future__ is a language
+        // feature. Neither is a worktree-root module spelling.
+        let module = edge.module.as_str();
+        if module.starts_with('.') || module == "__future__" || module.len() > MAX_PATH_BYTES {
+            continue;
+        }
+        let parts = module.split('.').collect::<Vec<_>>();
+        if parts.is_empty() || !parts.iter().all(|part| {
+            let mut chars = part.bytes();
+            chars.next().is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+                && chars.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        }) { continue; }
+        let mut parent = String::new();
+        let mut blocked = false;
+        for part in &parts[..parts.len() - 1] {
+            if !parent.is_empty() { parent.push('/'); }
+            parent.push_str(part);
+            let package = format!("{parent}/__init__.py");
+            let sibling = format!("{parent}.py");
+            if listed.contains(&sibling) || possible_unlisted_candidate(root, &sibling) {
+                edge.reason = "python_ambiguous_package_layout";
+                blocked = true;
+                break;
+            }
+            if !listed.contains(&package) || !facts.contains_key(&package) {
+                edge.reason = "python_package_context_unknown";
+                blocked = true;
+                break;
+            }
+        }
+        if blocked { continue; }
+        let stem = parts.join("/");
+        let candidates = [format!("{stem}.py"), format!("{stem}/__init__.py")];
+        let present = candidates.iter().filter(|path| listed.contains(path.as_str()))
+            .collect::<Vec<_>>();
+        if present.len() > 1 {
+            edge.reason = "python_ambiguous_layout";
+            continue;
+        }
+        if candidates.iter().filter(|path| !listed.contains(path.as_str()))
+            .any(|path| possible_unlisted_candidate(root, path)) {
+            edge.reason = "python_unlisted_or_uncheckable_candidate";
+            continue;
+        }
+        let Some(path) = present.first() else { continue; };
+        let Some((sha, read_unix_ms)) = facts.get(path.as_str()) else {
+            edge.reason = "python_candidate_uncheckable";
+            continue;
+        };
+        edge.structural_candidate = Some((*path).clone());
+        edge.structural_candidate_sha256 = Some(sha.clone());
+        edge.structural_candidate_read_unix_ms = Some(*read_unix_ms);
+        edge.reason = "python_unique_worktree_layout_candidate";
+    }
+}
+
 pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
     let root = worktree_root(root)?;
     let paths = listed_files(&root)?;
@@ -894,7 +999,7 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
     let mut answer = Answer { scope: root.to_string_lossy().into_owned(), query: kind, value: value.clone(),
         observed_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
         requested_source_sha256: None, requested_source_read_unix_ms: None,
-        scan_input_sha256: None,
+        scan_input_sha256: None, python_scan_input_sha256: None,
         status: "ok".into(), coverage: Coverage::default(), rows: Vec::new(), omitted_rows: 0,
         edges: Vec::new(), omitted_edges: 0,
         module_edges: Vec::new(), omitted_module_edges: 0, skipped_nested_modules: 0,
@@ -904,6 +1009,8 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
     let mut python_total = 0u64;
     let mut python_scan_started = None;
     let mut rust_scan_complete = true;
+    let mut python_scan_complete = true;
+    let mut python_facts = BTreeMap::<String, (String, u128)>::new();
     let mut candidates: BTreeMap<String, Vec<Row>> = BTreeMap::new();
     let mut candidate_count = 0usize;
     let mut source_facts = BTreeMap::<String, SourceFact>::new();
@@ -973,6 +1080,8 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                     Ok(result) => result,
                     Err(reason) => {
                         answer.coverage.skipped.add(path, reason);
+                        answer.coverage.python_skipped_files += 1;
+                        python_scan_complete = false;
                         if path == &value { answer.status = "skipped".into(); }
                         continue;
                     }
@@ -989,11 +1098,14 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                             return Err("Python source scan exceeded ten-second limit; no partial answer".into());
                         }
                         answer.coverage.unparseable.add(path, reason);
+                        answer.coverage.python_unparseable_files += 1;
+                        python_scan_complete = false;
                         if path == &value { answer.status = "unparseable".into(); }
                         continue;
                     }
                 };
                 answer.coverage.parsed_python_files += 1;
+                python_facts.insert(path.clone(), (sha.clone(), read_unix_ms));
                 if path == &value && kind != "symbol" {
                     answer.requested_source_sha256 = Some(sha);
                     answer.requested_source_read_unix_ms = Some(read_unix_ms);
@@ -1027,12 +1139,19 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
         }
     }
     if rust_scan_complete {
-        answer.scan_input_sha256 = Some(scan_digest(source_facts.iter().map(|(path, fact)| {
+        answer.scan_input_sha256 = Some(scan_digest(b"doxa-rust-scan-input-v1\0", source_facts.iter().map(|(path, fact)| {
             let SourceFact::Parsed { sha256, .. } = fact else {
                 unreachable!("complete scan has only parsed Rust sources")
             };
             (path.as_str(), sha256.as_str())
         })));
+    }
+    if python_scan_complete {
+        answer.python_scan_input_sha256 = Some(scan_digest(b"doxa-python-scan-input-v1\0",
+            python_facts.iter().map(|(path, (sha, _))| (path.as_str(), sha.as_str()))));
+    }
+    if kind == "modules" && source_language(&value) == Some("python") {
+        python_structural_candidates(&root, &mut answer.module_edges, &paths, &python_facts);
     }
     if let Some((declarations, nested, sha, read_unix_ms)) = requested_modules {
         answer.skipped_nested_modules = nested;
@@ -1096,6 +1215,43 @@ mod tests {
         assert_eq!(current_scan_input_sha256(root.path()).unwrap().0, expected);
         fs::remove_file(root.path().join("lib.rs")).unwrap();
         assert_ne!(current_scan_input_sha256(root.path()).unwrap().0, expected);
+    }
+
+    #[test]
+    fn complete_python_scan_digest_detects_edits_additions_and_removals() {
+        let root = worktree();
+        fs::write(root.path().join("lib.rs"), "fn stable() {}\n").unwrap();
+        fs::write(root.path().join("service.py"), "def first(): pass\n").unwrap();
+        let answer = query(root.path(), Query::File("service.py".into())).unwrap();
+        let expected = answer.python_scan_input_sha256.unwrap();
+        assert_eq!(current_python_scan_input_sha256(root.path()).unwrap(), (expected.clone(), 1));
+        fs::write(root.path().join("lib.rs"), "fn changed() {}\n").unwrap();
+        assert_eq!(current_python_scan_input_sha256(root.path()).unwrap().0, expected);
+        fs::write(root.path().join("service.py"), "def second(): pass\n").unwrap();
+        assert_ne!(current_python_scan_input_sha256(root.path()).unwrap().0, expected);
+        fs::write(root.path().join("service.py"), "def first(): pass\n").unwrap();
+        fs::write(root.path().join("added.py"), "def added(): pass\n").unwrap();
+        assert_ne!(current_python_scan_input_sha256(root.path()).unwrap().0, expected);
+        fs::remove_file(root.path().join("added.py")).unwrap();
+        assert_eq!(current_python_scan_input_sha256(root.path()).unwrap().0, expected);
+        fs::remove_file(root.path().join("service.py")).unwrap();
+        assert_ne!(current_python_scan_input_sha256(root.path()).unwrap().0, expected);
+    }
+
+    #[test]
+    fn unparseable_or_uncheckable_python_input_has_no_complete_digest() {
+        let root = worktree();
+        fs::write(root.path().join("service.py"), "def good(): pass\n").unwrap();
+        fs::write(root.path().join("broken.py"), "def broken(:\n").unwrap();
+        let broken = query(root.path(), Query::File("service.py".into())).unwrap();
+        assert!(broken.python_scan_input_sha256.is_none());
+        assert_eq!(broken.coverage.python_unparseable_files, 1);
+        fs::remove_file(root.path().join("broken.py")).unwrap();
+        symlink(root.path().join("service.py"), root.path().join("linked.py")).unwrap();
+        let linked = query(root.path(), Query::File("service.py".into())).unwrap();
+        assert!(linked.python_scan_input_sha256.is_none());
+        assert_eq!(linked.coverage.python_skipped_files, 1);
+        assert!(current_python_scan_input_sha256(root.path()).is_err());
     }
 
     #[test]
@@ -1286,6 +1442,55 @@ mod tests {
             && edge.target_sha256.is_none() && edge.resolution == "unknown"
             && edge.source_sha256 == answer.requested_source_sha256.clone().unwrap()));
         assert!(answer.module_edges.iter().all(|edge| edge.module != "dynamic"));
+    }
+
+    #[test]
+    fn python_module_layout_candidates_require_unambiguous_readable_packages() {
+        let root = worktree();
+        fs::create_dir(root.path().join("pkg")).unwrap();
+        fs::write(root.path().join("service.py"),
+            "import pkg.helper\nimport plain\nfrom . import relative\n").unwrap();
+        fs::write(root.path().join("pkg/__init__.py"), "pass\n").unwrap();
+        fs::write(root.path().join("pkg/helper.py"), "pass\n").unwrap();
+        fs::write(root.path().join("plain.py"), "pass\n").unwrap();
+        let first = query(root.path(), Query::Modules("service.py".into())).unwrap();
+        assert_eq!(first.module_edges[0].structural_candidate.as_deref(), Some("pkg/helper.py"));
+        assert_eq!(first.module_edges[1].structural_candidate.as_deref(), Some("plain.py"));
+        assert!(first.module_edges[2].structural_candidate.is_none());
+        assert!(first.module_edges.iter().all(|edge| edge.resolution == "unknown"
+            && edge.target.is_none() && edge.target_sha256.is_none()));
+        assert_eq!(first.module_edges[0].structural_candidate_sha256.as_deref(),
+            Some(format!("{:x}", Sha256::digest(b"pass\n")).as_str()));
+
+        fs::create_dir(root.path().join("pkg/helper")).unwrap();
+        fs::write(root.path().join("pkg/helper/__init__.py"), "pass\n").unwrap();
+        let collided = query(root.path(), Query::Modules("service.py".into())).unwrap();
+        assert_eq!(collided.module_edges[0].reason, "python_ambiguous_layout");
+        assert!(collided.module_edges[0].structural_candidate.is_none());
+        fs::remove_file(root.path().join("pkg/helper/__init__.py")).unwrap();
+        fs::write(root.path().join("pkg.py"), "pass\n").unwrap();
+        let parent_collision = query(root.path(), Query::Modules("service.py".into())).unwrap();
+        assert_eq!(parent_collision.module_edges[0].reason, "python_ambiguous_package_layout");
+        assert!(parent_collision.module_edges[0].structural_candidate.is_none());
+
+        fs::remove_file(root.path().join("pkg.py")).unwrap();
+        fs::write(root.path().join("pkg/helper.py"), "def broken(:\n").unwrap();
+        let unparseable = query(root.path(), Query::Modules("service.py".into())).unwrap();
+        assert!(unparseable.module_edges[0].structural_candidate.is_none());
+        assert_eq!(unparseable.module_edges[0].reason, "python_candidate_uncheckable");
+        fs::remove_file(root.path().join("pkg/helper.py")).unwrap();
+        symlink(root.path().join("plain.py"), root.path().join("pkg/helper.py")).unwrap();
+        let linked = query(root.path(), Query::Modules("service.py".into())).unwrap();
+        assert!(linked.module_edges[0].structural_candidate.is_none());
+
+        fs::remove_file(root.path().join("pkg/helper.py")).unwrap();
+        fs::create_dir(root.path().join("plain")).unwrap();
+        fs::write(root.path().join(".gitignore"), "plain/__init__.py\n").unwrap();
+        fs::write(root.path().join("plain/__init__.py"), "pass\n").unwrap();
+        let ignored_collision = query(root.path(), Query::Modules("service.py".into())).unwrap();
+        assert!(ignored_collision.module_edges[1].structural_candidate.is_none());
+        assert_eq!(ignored_collision.module_edges[1].reason,
+            "python_unlisted_or_uncheckable_candidate");
     }
 
     #[test]

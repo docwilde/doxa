@@ -121,8 +121,10 @@ death and no surviving marked descendant.
 The fixture also shows a diagnostic limit: Bubblewrap maps a child killed by
 SIGKILL to exit code 137, which is indistinguishable from a deliberate exit 137.
 
-A Linux sandbox seam requires a delegated cgroup v2 subtree with
-`memory`, `pids` and `cpu` controllers before it can build a child command. It
+A Linux sandbox seam requires an empty, owner-delegated cgroup v2 parent with
+`memory`, `pids` and `cpu` enabled for its children, while DOXA runs in a
+direct supervisor leaf. Plugin workers receive sibling cgroups; admission
+refuses a populated or non-delegated parent before it can build a command. It
 installs 256 MiB memory, zero swap, 16 PIDs and one CPU of aggregate bandwidth;
 the child also gets address-space, CPU-time, file-descriptor and core-dump
 limits. Setup moves the child into the cgroup before Bubblewrap executes,
@@ -135,6 +137,9 @@ environment are unavailable; resource fixtures show memory and CPU exhaustion
 stopped by kernel limits. This host has no user-delegated cgroup subtree, so
 the aggregate limits and cgroup cleanup **cannot be exercised here**; admission
 refuses to spawn in that condition.
+An [ignored delegated-host acceptance fixture](../native-plugins.md#delegated-host-acceptance-fixture)
+now measures the actual aggregate limits, namespace boundary and cgroup
+cleanup in one bounded run. It has not yet run on a delegated host.
 
 The sandbox opens the trusted worker executable with `O_NOFOLLOW` and
 binds that descriptor into the private mount; replacing its pathname after

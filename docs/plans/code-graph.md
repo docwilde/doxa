@@ -30,9 +30,13 @@ binding. Python `calls` lists bare-name, attribute, and indirect call expression
 under their lexical caller. Decorator, default-argument, annotation, and class-base
 calls belong to the enclosing scope; definition bodies use the new scope. Every
 Python call has `binding: unresolved` and no candidates. Python `modules` lists
-static `import` and `from ... import`
-module spellings, including relative imports; its targets and resolutions stay
-unknown even when a matching file is present. Dynamic imports are calls, not
+static `import` and `from ... import` module spellings. Runtime targets and
+resolutions stay unknown. An absolute spelling may show a hashed
+`structural_candidate` when one parsed, Git-listed `.py` or package
+`__init__.py` matches a complete local package layout. Relative imports,
+namespace packages, file/package collisions, ignored files, symlinks, and
+unparseable candidates yield no such candidate. This is a worktree layout
+observation, not Python import resolution. Dynamic imports are calls, not
 module edges.
 Rust `modules` lists top-level `mod child;` declarations and resolves a unique
 listed, readable, parseable `child.rs` or `child/mod.rs` with source and target
@@ -89,15 +93,14 @@ Every query enumerates the current tracked **and untracked, nonignored** Git
 files and reads Rust and Python bytes afresh. There is no index that can lag an edit.
 Each row and call edge carries its file, line, SHA-256 of the parsed bytes, and
 read time. Candidate declarations carry their own source hashes and read times.
-When **every listed Rust file parses**, the answer also contains a deterministic
-`scan_input_sha256` over each Rust path and source hash. A skipped or
-unparseable Rust file leaves it null. Python issues do not alter this Rust-only
-digest. This inventory covers listed Rust inputs, not ignored files, Python,
-macro expansion, or compiler semantics. Coverage counts parsed Python files and
-names Python parse or read issues in the bounded issue lists. Rust-only skipped
-and unparseable counters let LORE verify the Rust digest even when Python input
-has errors. Older stored answers without these counters retain the conservative
-aggregate coverage check.
+When **every listed Rust file parses**, the answer contains deterministic
+`scan_input_sha256` over Rust paths and source hashes. The corresponding
+`python_scan_input_sha256` covers every parsed, Git-listed Python path and hash.
+Each digest is absent if an input in that language was skipped or unparseable.
+The inventories exclude ignored files and do not prove compiler or Python
+runtime semantics. Separate skipped and unparseable counters let LORE recheck
+each language independently. Older stored answers without Python inventory
+fields report its freshness as unknown.
 File-scoped answers also carry the requested source's hash and read time, even
 when that parsed file produces no rows.
 The answer names its worktree and reports parsed files, unsupported languages,
@@ -148,11 +151,12 @@ and rehashes the requested file on each read. A source edit or checkout
 replacement rejects the read. DOXA also rechecks the hashes of included row,
 call-candidate, and module-target files through a bounded, symlink-safe reader.
 The result reports `verified`, `stale`, or `unknown` for those included
-references, with bounded reasons. When the graph has a complete scan-input
-digest, DOXA also re-enumerates and rehashes every listed Rust input at read
-time. An edit, addition, or removal makes `scan_inputs` stale; an unreadable
-or symlinked source makes it unknown. Older snapshots without the digest stay
-unknown. This check is a read-time observation, not an atomic repository
+references, with bounded reasons. When the graph has complete scan-input
+digests, DOXA also re-enumerates and rehashes every listed Rust and Python
+input at read time. An edit, addition, or removal makes that language's
+inventory stale; an unreadable or symlinked source makes it unknown. Older
+snapshots without the matching digest stay unknown. These checks are read-time
+observations, not an atomic repository
 snapshot. Omitted result rows and semantic Rust bindings remain outside its
 claim.
 
@@ -183,7 +187,7 @@ is read-only and creates no second memory authority.
 - Decide whether reviewed snapshots need an operator index, retention policy,
   and explicit invalidation across worktree lifecycle. The current read is
   exact worktree/query/path; it verifies the requested source, included
-  references, and complete Git-listed Rust scan inputs when a digest exists.
+  references, and complete Git-listed Rust and Python scan inputs when a digest exists.
 - Resolve imports and actual Rust call bindings with crate, trait, type, and
   conditional-compilation context. Module edges remain top-level and structural;
   `cfg_attr` and conditional reachability are unresolved. Call candidates stop
@@ -203,7 +207,7 @@ is read-only and creates no second memory authority.
 - Decide whether a reviewed agent tool or persistent TUI tree is useful. The
   current viewer offers explicit fresh and stored queries only.
 - Decide whether other languages justify a parser dependency and coverage bar.
-  Python module resolution, runtime imports, and type-aware
+  Python runtime module resolution, dynamic imports, and type-aware
   binding remain outside the shipped syntax slice.
 - The [warm-cache scan benchmark](../codegraph-scan-benchmark-2026-10-09.md)
   measured 0.371 s median on DOXA and 1.641 s on a 6,944-file Python-heavy
