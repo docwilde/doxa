@@ -89,7 +89,9 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         "A ${marker.operation} to ${marker.scope.target} (incarnation ${marker.scope.incarnation}) " +
             "on ${marker.scope.origin} may have completed. " +
             "The request body was not saved; review a fresh snapshot before another write."
-    } ?: "A prior write marker could not be read. Review a fresh snapshot before another write."
+    } ?: "A prior write marker is unreadable. The app cannot establish what was sent or whether it ran, " +
+        "so writes stay blocked. Clearing this app's storage is an explicit last resort after " +
+        "independent review; it also removes local settings and drafts."
     val recoveryUnreadable: Boolean get() = writeRecovery.unreadableMarker
 
     private fun writeScope(session: Session) = PendingWriteScope(origin, session.id, session.incarnation)
@@ -585,11 +587,13 @@ private fun RemoteScreen(state: RemoteController, alerts: LocalAlerts, push: Bac
                         "The selected hub or session incarnation differs from the saved write. " +
                             "Return to that exact scope and load its snapshot before clearing this block.",
                         style = MaterialTheme.typography.bodySmall)
-                    Text(if (state.recoveryReviewed) "Fresh snapshot loaded. Review the transcript and pending inputs."
-                        else "Connect and load a complete snapshot of the saved session and pending inputs.",
-                        style = MaterialTheme.typography.bodySmall)
-                    OutlinedButton(onClick = state::askRecoveryReview,
-                        enabled = state.recoveryReviewed && !state.busy) { Text("Acknowledge after review") }
+                    if (!state.recoveryUnreadable) {
+                        Text(if (state.recoveryReviewed) "Fresh snapshot loaded. Review the transcript and pending inputs."
+                            else "Connect and load a complete snapshot of the saved session and pending inputs.",
+                            style = MaterialTheme.typography.bodySmall)
+                        OutlinedButton(onClick = state::askRecoveryReview,
+                            enabled = state.recoveryReviewed && !state.busy) { Text("Acknowledge after review") }
+                    }
                 }
             }
         }
@@ -671,9 +675,7 @@ private fun RemoteScreen(state: RemoteController, alerts: LocalAlerts, push: Bac
         dismissButton = { TextButton(onClick = state::cancelFresh) { Text("Cancel") } })
     if (state.confirmRecovery) AlertDialog(onDismissRequest = state::cancelRecoveryReview,
         title = { Text("Clear uncertain write?") },
-        text = { Text(if (state.recoveryUnreadable)
-            "The saved marker is unreadable, so its original scope is unknown. Review the fresh transcript and pending inputs before clearing this block. The earlier write may have completed and will not be replayed."
-            else "The previous write may have completed. Compare the fresh transcript and pending inputs for the saved hub and session incarnation. The request body is unavailable after restart and will not be replayed. Clearing this marker allows new writes.") },
+        text = { Text("The previous write may have completed. Compare the fresh transcript and pending inputs for the saved hub and session incarnation. The request body is unavailable after restart and will not be replayed. Clearing this marker allows new writes.") },
         confirmButton = { TextButton(onClick = state::acknowledgeRecovery) { Text("I reviewed the snapshot") } },
         dismissButton = { TextButton(onClick = state::cancelRecoveryReview) { Text("Keep blocked") } })
 }

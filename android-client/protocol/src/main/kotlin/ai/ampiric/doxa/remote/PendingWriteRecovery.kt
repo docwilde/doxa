@@ -94,12 +94,12 @@ class PendingWriteGuard(private val store: PendingWriteMarkerStore) {
     fun forgetSnapshot() { observedScope = null }
 
     fun observeSnapshot(scope: PendingWriteScope, pendingInputsComplete: Boolean) {
-        observedScope = if (blocked && pendingInputsComplete && scope.valid() &&
-            (unreadable || marker?.scope == scope)) scope else null
+        observedScope = if (!unreadable && blocked && pendingInputsComplete && scope.valid() &&
+            marker?.scope == scope) scope else null
     }
 
-    fun canAcknowledge(scope: PendingWriteScope): Boolean = blocked && observedScope == scope &&
-        (unreadable || marker?.scope == scope)
+    fun canAcknowledge(scope: PendingWriteScope): Boolean = !unreadable && blocked &&
+        observedScope == scope && marker?.scope == scope
 
     fun acknowledgeAfterReview(scope: PendingWriteScope): Boolean {
         if (!canAcknowledge(scope) || !runCatching { store.clear() }.getOrDefault(false)) return false

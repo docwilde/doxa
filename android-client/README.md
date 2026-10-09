@@ -51,8 +51,10 @@ until a fresh authoritative snapshot of the saved hub and session incarnation,
 including a complete pending-input review, has loaded and the user explicitly
 acknowledges the uncertain result in the
 app. If that exact scope is unavailable, the readable marker stays blocked.
-An unreadable marker can be cleared only after a fresh snapshot and explicit
-review, since its original scope is unknown. A terminal host response clears
+An unreadable marker stays blocked because its request ID and scope cannot be
+fenced or verified. The app offers no in-app bypass; clearing app storage is a
+last resort after independent outcome review and also removes local settings
+and drafts. A terminal host response clears
 the marker; a failed local clear keeps writes blocked for review. A corrupted
 marker also fails closed. The app cannot establish from a lost response alone
 whether the earlier write ran.

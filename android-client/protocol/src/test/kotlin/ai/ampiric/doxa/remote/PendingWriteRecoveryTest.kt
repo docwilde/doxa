@@ -108,7 +108,7 @@ class PendingWriteRecoveryTest {
         assertNull(store.value)
     }
 
-    @Test fun unreadableStoredMarkerRequiresSnapshotAndReview() {
+    @Test fun unreadableStoredMarkerCannotBeClearedBySnapshot() {
         val store = Store("{invalid")
         val guard = PendingWriteGuard(store)
         val reviewed = scope.copy(target = "host~other", incarnation = "incarnation-2")
@@ -117,9 +117,12 @@ class PendingWriteRecoveryTest {
         assertFalse(guard.begin(marker))
         assertFalse(guard.acknowledgeAfterReview(reviewed))
         guard.observeSnapshot(reviewed, true)
-        assertTrue(guard.acknowledgeAfterReview(reviewed))
-        assertFalse(guard.blocked)
-        assertNull(store.value)
+        assertFalse(guard.canAcknowledge(reviewed))
+        assertFalse(guard.acknowledgeAfterReview(reviewed))
+        guard.observeSnapshot(scope, true)
+        assertFalse(guard.acknowledgeAfterReview(scope))
+        assertTrue(guard.blocked)
+        assertEquals("{invalid", store.value)
     }
 
     @Test fun incompletePendingInputSnapshotCannotClearUncertainAnswer() {
