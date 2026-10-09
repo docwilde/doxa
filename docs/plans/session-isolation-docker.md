@@ -244,9 +244,10 @@ names the original connector when another process writes the frame. No
 production broker calls this probe.
 
 A disabled Linux probe now enables `SO_PASSPIDFD` and `SO_PASSCRED` before
-accepting a socket. Its bounded `recvmsg` loop requires one kernel-supplied
-sender pidfd and credentials for every frame segment and refuses a mixed
-sender, missing control message or unsupported kernel option. An inherited
+accepting a socket. Its 65,536-byte and five-second-bounded `recvmsg` loop
+requires one kernel-supplied sender pidfd and credentials for every frame
+segment and refuses empty frames, stalled or mixed senders, missing control
+messages, and unsupported kernel options. An inherited
 socket test shows `SCM_PIDFD` names the child that sent bytes, while the
 connect-time credentials name its parent. This is stronger sender evidence,
 but the probe is not wired into `HookBroker`: it has no authenticated binding

@@ -4,10 +4,13 @@
 
 use crate::error;
 use std::{fs::{self, File}, io::{self, Read}, mem, os::{fd::{AsRawFd, FromRawFd},
-    unix::{fs::MetadataExt, net::{UnixListener, UnixStream}}}, path::PathBuf};
+    unix::{fs::MetadataExt, net::{UnixListener, UnixStream}}}, path::PathBuf,
+    time::{Duration, Instant}};
 
 const MAX_FRAME: usize = 65_536;
 const MAX_CONTROL: usize = 256;
+const MAX_FRAME_TIME: Duration = Duration::from_secs(5);
+const RECV_TIMEOUT: Duration = Duration::from_millis(200);
 // Linux include/linux/socket.h. SCM_PIDFD is a kernel-generated, read-only cmsg.
 const SCM_PIDFD: libc::c_int = 4;
 
@@ -164,10 +167,19 @@ fn recv_sender_chunk(stream: &UnixStream, bytes: &mut [u8]) -> io::Result<(usize
 }
 
 fn read_exact_from_one_sender(stream: &UnixStream, bytes: &mut [u8], first: &mut Option<File>,
-    first_cred: &mut Option<libc::ucred>) -> io::Result<()> {
+    first_cred: &mut Option<libc::ucred>, deadline: Instant) -> io::Result<()> {
     let mut position = 0;
     while position < bytes.len() {
-        let (read, pidfd, cred) = recv_sender_chunk(stream, &mut bytes[position..])?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err(error("broker sender frame deadline exceeded")); }
+        stream.set_read_timeout(Some(remaining.min(RECV_TIMEOUT)))?;
+        let (read, pidfd, cred) = match recv_sender_chunk(stream, &mut bytes[position..]) {
+            Ok(chunk) => chunk,
+            Err(err) if matches!(err.kind(), io::ErrorKind::WouldBlock
+                | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => continue,
+            Err(err) => return Err(err),
+        };
+        if Instant::now() >= deadline { return Err(error("broker sender frame deadline exceeded")); }
         if let Some(original) = first {
             if !same_pidfd(original, &pidfd)? || first_cred.as_ref().is_none_or(|old|
                 (old.pid, old.uid, old.gid) != (cred.pid, cred.uid, cred.gid)) {
@@ -186,13 +198,18 @@ fn read_exact_from_one_sender(stream: &UnixStream, bytes: &mut [u8], first: &mut
 /// must carry the same kernel sender pidfd and credentials. No fallback to
 /// SO_PEERCRED is allowed. The caller must enable options before any send.
 fn read_frame_sender(stream: &UnixStream) -> io::Result<(Vec<u8>, Sender)> {
+    read_frame_sender_until(stream, Instant::now() + MAX_FRAME_TIME)
+}
+
+fn read_frame_sender_until(stream: &UnixStream, deadline: Instant) -> io::Result<(Vec<u8>, Sender)> {
     let mut pidfd = None; let mut cred = None;
     let mut length = [0; 4];
-    read_exact_from_one_sender(stream, &mut length, &mut pidfd, &mut cred)?;
+    read_exact_from_one_sender(stream, &mut length, &mut pidfd, &mut cred, deadline)?;
     let size = u32::from_be_bytes(length) as usize;
+    if size == 0 { return Err(error("empty broker sender frame")); }
     if size > MAX_FRAME { return Err(error("broker sender frame exceeds bound")); }
     let mut bytes = vec![0; size];
-    read_exact_from_one_sender(stream, &mut bytes, &mut pidfd, &mut cred)?;
+    read_exact_from_one_sender(stream, &mut bytes, &mut pidfd, &mut cred, deadline)?;
     let sender = sender_from_pidfd(&pidfd.unwrap(), cred.unwrap())?;
     Ok((bytes, sender))
 }
@@ -246,6 +263,25 @@ mod tests {
         // Even a same-UID sender in this host's own namespace is not a
         // container-origin proof.
         assert!(!candidate_matches(&sender.scope, &sender.scope, &sender.scope));
+    }
+
+    #[test]
+    fn stalled_sender_cannot_complete_a_partial_frame_after_deadline() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        enable_sender_pidfds(server.as_raw_fd()).unwrap();
+        client.write_all(&[0, 0]).unwrap();
+        let err = read_frame_sender_until(&server, Instant::now() + Duration::from_millis(30))
+            .unwrap_err();
+        assert!(err.to_string().contains("deadline exceeded"), "{err}");
+    }
+
+    #[test]
+    fn zero_length_sender_frame_is_rejected() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        enable_sender_pidfds(server.as_raw_fd()).unwrap();
+        client.write_all(&0u32.to_be_bytes()).unwrap();
+        let err = read_frame_sender(&server).unwrap_err();
+        assert!(err.to_string().contains("empty broker sender frame"), "{err}");
     }
 
     #[test]
