@@ -165,7 +165,7 @@ fn delegated_cgroup_containment_acceptance() {
         "set DOXA_PLUGIN_CGROUP_ACCEPTANCE=1 after provisioning a delegated fixture host");
     assert!(std::thread::available_parallelism().unwrap().get() >= 2,
         "CPU throttling proof needs at least two available processors");
-    let parent = current_cgroup().expect("delegated cgroup v2 controllers unavailable");
+    let parent = delegated_cgroup_parent().expect("empty delegated parent and supervisor leaf required");
     assert!(parent.starts_with(CGROUP_ROOT));
 
     let host_marker = fixture_dir();

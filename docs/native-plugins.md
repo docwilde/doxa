@@ -128,8 +128,10 @@ CLI path rechecks the exact approved bytes, then calls only the dedicated
 home or repository mount, network, host functions or credentials; IPC and
 output are bounded, the wall deadline is five seconds, and Ctrl-C, termination
 or hangup requests cgroup cleanup. It prints a single integer on success or a
-conservative failure class on error. Without a delegated cgroup v2 subtree
-with memory, CPU and PID controllers, it fails closed before spawning the
+conservative failure class on error. The caller must run in a supervisor leaf
+below an empty, user-owned delegated cgroup v2 parent with memory, CPU and PID
+controllers enabled for its children. Each worker gets a sibling cgroup under
+that parent. Without this layout, admission fails closed before spawning the
 worker. The current host lacks that delegation, so end-to-end aggregate cgroup
 containment still needs proof on a delegated host. TUI execution, nonempty
 grants, native shared libraries, scripts, provider backends, hooks and
@@ -143,9 +145,17 @@ cancellation. The current host cannot exercise those cgroup checks.
 
 ### Delegated-host acceptance fixture
 
-On a disposable Linux host, delegate a private cgroup v2 subtree with the
-`memory`, `pids` and `cpu` controllers to the test user. The host also needs
-Bubblewrap with `--ro-bind-fd` and `--json-status-fd`, Python 3, `setsid`,
+On a disposable Linux host, delegate a private cgroup v2 parent to the test
+user, leave its `cgroup.procs` empty, enable `memory`, `pids` and `cpu` in its
+`cgroup.subtree_control`, and run the test process in a direct child named
+`supervisor`. The fixture creates each limited worker in a sibling of
+`supervisor`. A process in the delegated parent itself cannot enable the
+domain controllers required by cgroup v2. For a systemd-managed disposable
+host, a transient service with `User=<test user>`, `Delegate=yes` and
+`DelegateSubgroup=supervisor` can provide this shape; the service must still
+enable the three controllers in its empty delegated parent before testing.
+Do not create cgroups under a systemd-owned, non-delegated slice. The host also
+needs Bubblewrap with `--ro-bind-fd` and `--json-status-fd`, Python 3, `setsid`,
 two available CPUs, and a private real-disk scratch directory. Then run:
 
 ```sh
