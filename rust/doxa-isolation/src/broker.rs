@@ -1,5 +1,7 @@
 //! One narrow session-bound Codex compaction endpoint, outside the worker.
 use super::{active, error, nonce, Manifest};
+#[cfg(target_os = "linux")]
+use super::broker_sender;
 use serde_json::{json, Value};
 use std::{fs, io::{self, Read, Write}, os::unix::{fs::{MetadataExt, PermissionsExt}, net::{UnixListener, UnixStream}, io::AsRawFd},
     path::{Component, Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
@@ -7,9 +9,9 @@ use std::{fs, io::{self, Read, Write}, os::unix::{fs::{MetadataExt, PermissionsE
 const MAX_FRAME: usize = 65536;
 const BLOCKED: &str = "DOXA rejected invalid or unreviewed session hook";
 
-// Rootless container UID 0 maps to the owner of its Engine. This check
-// rejects other host users, but does not prove which same-UID process owns a
-// connection. A hardened broker needs a separate container-origin attestation.
+// Rootless container UID 0 maps to the owner of its Engine. This connector
+// check rejects other host users. Docker frame reads additionally check the
+// kernel-reported writer for every segment, but neither proves container origin.
 #[cfg(target_os = "linux")]
 fn require_owner_peer(stream: &UnixStream) -> io::Result<()> {
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
@@ -65,10 +67,18 @@ fn process_client(mut stream: UnixStream, capability: &str, manifest: &Manifest,
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         require_owner_peer(&stream)?;
-        let mut size = [0; 4]; stream.read_exact(&mut size)?;
-        let size = u32::from_be_bytes(size) as usize;
-        if size > MAX_FRAME { return Err(error("broker frame exceeds bound")); }
-        let mut bytes = vec![0; size]; stream.read_exact(&mut bytes)?;
+        let bytes = if manifest.profile.docker() {
+            #[cfg(target_os = "linux")]
+            { broker_sender::read_owner_frame(&stream)? }
+            #[cfg(not(target_os = "linux"))]
+            { return Err(error("Docker hook sender attestation requires Linux")); }
+        } else {
+            let mut size = [0; 4]; stream.read_exact(&mut size)?;
+            let size = u32::from_be_bytes(size) as usize;
+            if size > MAX_FRAME { return Err(error("broker frame exceeds bound")); }
+            let mut bytes = vec![0; size]; stream.read_exact(&mut bytes)?;
+            bytes
+        };
         let frame: Value = serde_json::from_slice(&bytes)?;
         Ok(handler(checked_event(frame, capability, manifest)?, manifest))
     })().unwrap_or_else(|_| json!({"continue":false,"suppressOutput":true,"stopReason":BLOCKED}));
@@ -94,6 +104,15 @@ impl HookBroker {
             fs::remove_file(&socket)?;
         }
         let listener = UnixListener::bind(&socket)?; fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+        if manifest.profile.docker() {
+            #[cfg(target_os = "linux")]
+            if let Err(cause) = broker_sender::prepare_listener(&listener) {
+                let _ = fs::remove_file(&socket);
+                return Err(cause);
+            }
+            #[cfg(not(target_os = "linux"))]
+            { let _ = fs::remove_file(&socket); return Err(error("Docker hook sender attestation requires Linux")); }
+        }
         listener.set_nonblocking(true)?;
         let meta = fs::metadata(&socket)?; let identity = (meta.dev(),meta.ino());
         let capability = nonce()?;
@@ -140,6 +159,8 @@ mod tests {
     fn roundtrip(frame: &Value, result: Value) -> (Value, usize) {
         let root = tempfile::tempdir().unwrap();
         let listener = UnixListener::bind(root.path().join("hook.sock")).unwrap();
+        #[cfg(target_os = "linux")]
+        broker_sender::prepare_listener(&listener).unwrap();
         let mut client = UnixStream::connect(root.path().join("hook.sock")).unwrap();
         let (server, _) = listener.accept().unwrap();
         let bytes = serde_json::to_vec(frame).unwrap();
@@ -165,6 +186,26 @@ mod tests {
         // This client is a same-UID host process. Rootless UID and a bearer
         // capability cannot distinguish it from the worker if that capability
         // is exposed. Hardened admission therefore remains unavailable.
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_hook_refuses_frames_without_kernel_sender_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let listener = UnixListener::bind(root.path().join("hook.sock")).unwrap();
+        let mut client = UnixStream::connect(root.path().join("hook.sock")).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let bytes = serde_json::to_vec(&frame()).unwrap();
+        client.write_all(&(bytes.len() as u32).to_be_bytes()).unwrap();
+        client.write_all(&bytes).unwrap();
+        let calls = AtomicUsize::new(0);
+        process_client(server, "fixture-capability", &manifest(root.path()), &|_, _| {
+            calls.fetch_add(1, Ordering::SeqCst); json!({"continue":true})
+        });
+        let mut size = [0; 4]; client.read_exact(&mut size).unwrap();
+        let mut answer = vec![0; u32::from_be_bytes(size) as usize];
+        client.read_exact(&mut answer).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&answer).unwrap()["continue"], false);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
     #[test]
     fn malformed_capability_event_or_path_never_reaches_review_handler() {

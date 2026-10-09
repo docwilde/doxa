@@ -1,5 +1,6 @@
-//! Disabled Linux per-send HookBroker origin probe. The current broker still
-//! uses its bounded legacy stream protocol; no production path calls this.
+//! Linux per-send HookBroker frame reader and disabled container-origin probe.
+//! The live Docker broker uses sender pidfds and credentials for every frame
+//! segment. Exact container admission still needs an authenticated Engine.
 #![allow(dead_code)]
 
 use crate::error;
@@ -42,7 +43,7 @@ fn enable_sender_pidfds(fd: libc::c_int) -> io::Result<()> {
 /// Enable before the listener accepts or receives worker bytes. The kernel
 /// propagates both options to accepted sockets; a late enable fails closed if
 /// queued bytes have no sender cmsg. Unsupported kernels return an error.
-fn prepare_listener(listener: &UnixListener) -> io::Result<()> {
+pub(crate) fn prepare_listener(listener: &UnixListener) -> io::Result<()> {
     enable_sender_pidfds(listener.as_raw_fd())
 }
 
@@ -199,6 +200,17 @@ fn read_exact_from_one_sender(stream: &UnixStream, bytes: &mut [u8], first: &mut
 /// SO_PEERCRED is allowed. The caller must enable options before any send.
 fn read_frame_sender(stream: &UnixStream) -> io::Result<(Vec<u8>, Sender)> {
     read_frame_sender_until(stream, Instant::now() + MAX_FRAME_TIME)
+}
+
+/// Read the live Docker hook frame with kernel provenance for every segment.
+/// This proves the writer's identity at send time, but does not establish
+/// that the writer belongs to an authenticated Docker container.
+pub(crate) fn read_owner_frame(stream: &UnixStream) -> io::Result<Vec<u8>> {
+    let (bytes, sender) = read_frame_sender(stream)?;
+    if sender.uid != unsafe { libc::geteuid() } {
+        return Err(error("broker message sender is not the rootless Engine owner"));
+    }
+    Ok(bytes)
 }
 
 fn read_frame_sender_until(stream: &UnixStream, deadline: Instant) -> io::Result<(Vec<u8>, Sender)> {

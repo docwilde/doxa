@@ -271,7 +271,9 @@ closed.
 The Codex hook broker checks the Unix peer owner UID and a bounded
 `PreCompact` frame. A local same-UID process with the session capability can
 still satisfy both checks; that negative fixture is in the isolation tests.
-Production hardened admission requires kernel-stable peer-to-container origin
+Production Docker hook frames now require kernel sender pidfds and credentials
+for every segment; a missing kernel feature or changed writer blocks the hook.
+Production hardened admission still requires kernel-stable peer-to-container origin
 evidence for each accepted connection, with host and sibling processes denied
 through worker, daemon and Engine restarts. This has not been proved.
 
