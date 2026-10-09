@@ -141,6 +141,45 @@ counterexample. It does not establish a host namespace or trusted client
 binary, attest broker code/configuration, or bind any Docker or LSP stream.
 The CLI still never calls either socket seam.
 
+### Disabled stream-origin observation
+
+`semantic_broker::observe_stream_definition` rederives the restrictive
+producer plan, rehashes the call and target sources before and after the
+exchange, and passes a fresh nonce, exact query digest, and both hashes to a
+root-owned `SOCK_SEQPACKET` endpoint. A three-phase, size-bounded response
+must keep the same kernel-reported UID-zero sender PID, 64-digit container
+ID, nonce, and query digest across `opened`, ordered byte chunks, and
+`closed`. The final packet binds the chunk count and SHA-256 of exactly one
+LSP frame; EOF is required, so a trailing second frame fails. The normal
+definition evidence checker validates the response against the current
+source and displayed candidate. The only result is
+`one_sender_stream_untrusted` with `binding: unknown`. No CLI path calls it.
+
+The [six-case offline guest](../../scripts/semantic-broker-proof/README.md)
+measures a root sender and rejects a UID-1000 listener handoff, midstream UID
+drop, different root sender PID, changed container ID, and extra packet.
+This proves packet-origin and transcript consistency only in that guest.
+Its root fixture sends a synthetic LSP frame. It does **not** inspect a
+rootless Engine, launch rust-analyzer, establish a complete workspace
+snapshot, prove that the inspected container produced the frame, or attest
+the broker executable. Same-UID replacement of the DOXA client and
+namespace-relative UID observations remain unresolved. The claimed image
+ID and container ID are syntax-checked, not verified against image bytes or
+Engine state. PID continuity alone does not pin an executable or exclude PID
+reuse after process exit.
+
+To advance the binding, install a reviewed broker outside the DOXA user's
+write and ptrace authority. It must preserve a kernel-stable broker identity,
+open a reviewed rootless Engine endpoint, create/start/inspect/attach the
+same full container ID through that endpoint, and relay every LSP byte
+directly from the attached stream. It must hash the complete source snapshot
+mounted into the container and recheck the effective image, mounts,
+namespaces, egress, cgroup and disk limits, and cleanup after the reply.
+The disposable guest must then inject a fake same-UID daemon, swapped
+Engine/attach FDs, daemon restart, socket replacement, policy drift, and
+failed cleanup. Until those tests and a live rootless fixture pass,
+semantic binding remains `unknown`.
+
 The library-only LSP driver exercises a bounded initialize, quiescence,
 definition, and shutdown exchange against a fixture server. It caps messages
 and output, enforces a 20-second maximum deadline, and kills the process group
