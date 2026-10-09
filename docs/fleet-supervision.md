@@ -297,6 +297,20 @@ label fields are operator attestations; the scorer cannot verify them. No
 consented real-message corpus is shipped with DOXA, so these metrics remain
 unmeasured on real fleet traffic.
 
+After a supervised native run finishes, `doxa fleet debrief RUN --root /absolute/fleet/root`
+reads the owned manifest and private host guard journal. It reports worker
+completion only when the host admitted a completion with its receipt checks;
+dependency holds and current pauses are shown as blocked, while every other
+outcome remains unknown. It counts typed handoffs, read-backs, confirmations,
+corrections and human releases, and verifies signed host test receipts before
+counting them. The review-event history retains at most 256 observations, so
+quarantine and supervisor counts are labeled as counts within that window.
+Test duration and token-based review cost are estimates or measurements only
+where the journal records them. Worker spend and total run wall time remain
+unknown. The report reads no peer message bodies, makes no model calls, and
+changes no fleet policy. Unsupervised runs have no guard journal, so the
+debrief explicitly leaves those outcomes unknown.
+
 Open coordination work includes live-host validation of automatic test collection and
 calibration against real fleet messages. The host checks the typed handoff chain and checkpoint provenance;
 the operator decides whether that evidence is sufficient to release a worker.

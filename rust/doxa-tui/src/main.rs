@@ -105,7 +105,7 @@ API keys come from provider environment variables.
 
 Fleet: doxa fleet preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root PATH]
        doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD
-       doxa fleet runs | status RUN_ID | stop RUN_ID | attach RUN_ID SLOT
+       doxa fleet runs | status RUN_ID | debrief RUN_ID | stop RUN_ID | attach RUN_ID SLOT
 
 Run doxa doctor --engine NAME to check a provider; doxa --version shows the build.
 Update requires an installed Rust launcher. From a checkout, use ./task install.
@@ -693,6 +693,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
         ["mesh", run] => return mesh_control::serve(&mesh_control::run_ledger(&root, run)?),
         ["runs"] => println!("{}", fleet_view::runs(&root)?),
         ["status", run] => println!("{}", fleet_view::status(&root, run)?),
+        ["debrief", run] => println!("{}", doxa_tui::fleet_debrief::read(&root, run)?),
         ["resume", run] => return fleet_control::resume(&root, run),
         ["continue", run, charter_hash] => println!("{}", fleet_control::continue_run(&root,run,charter_hash)?),
         ["dependency-review", run, worker] => {
@@ -734,7 +735,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
             let (socket, session_id) = fleet_view::slot_socket(&root, run, slot)?;
             return bridge::run_socket_expected(socket, Some(&session_id));
         }
-        _ => return Err(invalid("usage: doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD [--worker-after INDEX:PREDECESSOR] [--test-recipe ABSOLUTE_JSON_PATH] | preflight | runs | status RUN | test RUN SLOT | dependency-evidence RUN SLOT | dependency-review RUN SLOT | dependency-release RUN SLOT TOKEN | resume RUN | stop RUN | attach RUN SLOT [--root ABSOLUTE_PATH]")),
+        _ => return Err(invalid("usage: doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD [--worker-after INDEX:PREDECESSOR] [--test-recipe ABSOLUTE_JSON_PATH] | preflight | runs | status RUN | debrief RUN | test RUN SLOT | dependency-evidence RUN SLOT | dependency-review RUN SLOT | dependency-release RUN SLOT TOKEN | resume RUN | stop RUN | attach RUN SLOT [--root ABSOLUTE_PATH]")),
     }
     Ok(())
 }
