@@ -808,7 +808,7 @@ fn test_backend_renders_groups_transcript_prompt_and_small_terminal() {
     let mut app = App::default();
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
     app.collections.push(doxa_tui::collections::Collection {
-        name: "Work".into(), sessions: vec!["one".into()], collapsed: false,
+        name: "Work".into(), sessions: vec!["one".into()], collapsed: false, colour: None,
     });
     app.groups[1].tabs.push("one".into());
     app.input = "draft".into();

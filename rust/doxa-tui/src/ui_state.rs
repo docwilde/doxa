@@ -874,7 +874,7 @@ mod tests {
         let mut store = UiStateStore::new(temp.path(), "/project", "machine").unwrap();
         let mut app = App::default();
         app.groups[0].tabs.push("one".into());
-        app.collections.push(Collection { name:"Changed".into(), sessions:vec!["one".into()], collapsed:false });
+        app.collections.push(Collection { name:"Changed".into(), sessions:vec!["one".into()], collapsed:false, colour:None });
         assert_eq!(store.save(&app).unwrap_err().kind(), io::ErrorKind::Unsupported);
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved, original);
@@ -885,7 +885,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut store = UiStateStore::new(temp.path(), "/project", "machine").unwrap();
         let mut app = App::default();
-        app.collections.push(Collection { name:"Later".into(), sessions:vec![], collapsed:true });
+        app.collections.push(Collection { name:"Later".into(), sessions:vec![], collapsed:true, colour:None });
         store.save(&app).unwrap();
         assert!(!store.path().exists());
         assert_eq!(app.collections[0].name, "Later");

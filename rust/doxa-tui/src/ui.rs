@@ -1342,6 +1342,7 @@ impl RenderedTranscript {
 enum RailRow {
     Heading(usize),
     Session(usize),
+    Pane { group: usize, active: usize },
     ProjectHeading(String),
     PastHeading,
 }

@@ -9,6 +9,8 @@ pub struct Collection {
     pub name: String,
     pub sessions: Vec<String>,
     pub collapsed: bool,
+    /// Optional named palette hue. Unknown legacy values remain stored but render without hue.
+    pub colour: Option<String>,
 }
 
 fn clean_name(raw: &str) -> String {
@@ -58,7 +60,9 @@ pub fn from_json(value: Option<&Value>, keep: &HashSet<String>) -> Vec<Collectio
             .map(str::to_owned).collect();
         if sessions.is_empty() { continue; }
         names.insert(key(&name));
-        out.push(Collection { name, sessions, collapsed: row.get("collapsed").and_then(Value::as_bool).unwrap_or(false) });
+        out.push(Collection { name, sessions, collapsed: row.get("collapsed").and_then(Value::as_bool).unwrap_or(false),
+            colour: row.get("colour").and_then(Value::as_str)
+                .filter(|value| value.len() <= 32 && !value.chars().any(char::is_control)).map(str::to_owned) });
     }
     out
 }
@@ -71,6 +75,7 @@ pub fn to_json(items: &[Collection], keep: &HashSet<String>) -> Vec<Value> {
         if sessions.is_empty() { return None; }
         let mut row = json!({"name": item.name, "sessions": sessions});
         if item.collapsed { row["collapsed"] = Value::Bool(true); }
+        if let Some(colour) = item.colour.as_deref() { row["colour"] = Value::String(colour.into()); }
         Some(row)
     }).collect()
 }
@@ -82,17 +87,29 @@ pub fn edit(items: &mut Vec<Collection>, verb: &str, rest: &str, active: Option<
         "new" => {
             if name.is_empty() { return Err("a collection needs a name".into()); }
             if index(items, &name).is_some() { return Err(format!("there is already a collection called {name:?}")); }
-            items.push(Collection { name: name.clone(), sessions: Vec::new(), collapsed: false });
+            items.push(Collection { name: name.clone(), sessions: Vec::new(), collapsed: false, colour: None });
             Ok(format!("collection {name:?} — empty, so far"))
         }
         "rename" => {
-            let Some((old, new)) = rest.split_once(char::is_whitespace) else { return Err("Usage: /collection rename <old> <new>".into()) };
+            let Some((old, new)) = rest.split_once(" -> ").or_else(|| rest.split_once(char::is_whitespace))
+                else { return Err("Usage: /collection rename <old> -> <new>".into()) };
             let new = clean_name(new);
             if new.is_empty() { return Err("a collection needs a name".into()); }
             let Some(target) = index(items, old) else { return Err(format!("no collection called {:?}", clean_name(old))) };
             if index(items, &new).is_some_and(|other| other != target) { return Err(format!("there is already a collection called {new:?}")); }
             items[target].name = new.clone();
             Ok(format!("{old:?} is now {new:?}"))
+        }
+        "colour" | "color" | "hue" => {
+            let Some((name, colour)) = rest.rsplit_once(char::is_whitespace) else {
+                return Err("Usage: /collection hue <name> <blue|teal|amber|violet|coral|green|none>".into());
+            };
+            let Some(target) = index(items, name) else { return Err(format!("no collection called {:?}", clean_name(name))) };
+            if colour != "none" && !matches!(colour, "blue"|"teal"|"amber"|"violet"|"coral"|"green") {
+                return Err("Use blue, teal, amber, violet, coral, green, or none".into());
+            }
+            items[target].colour = (colour != "none").then(|| colour.to_owned());
+            Ok(format!("collection {:?} hue: {colour}", items[target].name))
         }
         "delete" => {
             let Some(target) = index(items, &name) else { return Err(format!("no collection called {name:?}")) };
@@ -103,7 +120,7 @@ pub fn edit(items: &mut Vec<Collection>, verb: &str, rest: &str, active: Option<
             let Some(id) = active else { return Err("select a session before moving it".into()) };
             if name.is_empty() { return Err("a collection needs a name".into()); }
             let target = match index(items, &name) { Some(index) => index, None => {
-                items.push(Collection { name: name.clone(), sessions: Vec::new(), collapsed: false });
+                items.push(Collection { name: name.clone(), sessions: Vec::new(), collapsed: false, colour: None });
                 items.len() - 1
             }};
             if items[target].sessions.iter().any(|member| member == id) { return Ok(format!("this session is already in {name:?}")); }
@@ -118,7 +135,7 @@ pub fn edit(items: &mut Vec<Collection>, verb: &str, rest: &str, active: Option<
             item.sessions.retain(|member| member != id);
             Ok("this session is now ungrouped".into())
         }
-        _ => Err("Usage: /collection new|rename|delete|add|remove [name]".into()),
+        _ => Err("Usage: /collection new|rename|hue|delete|add|remove [name]".into()),
     }
 }
 
@@ -156,10 +173,29 @@ mod tests {
     #[test]
     fn empty_and_pruned_collections_are_not_persisted_like_python() {
         let items = vec![
-            Collection { name:"Empty".into(), sessions:vec![], collapsed:false },
-            Collection { name:"Dead".into(), sessions:vec!["gone".into()], collapsed:false },
+            Collection { name:"Empty".into(), sessions:vec![], collapsed:false, colour:None },
+            Collection { name:"Dead".into(), sessions:vec!["gone".into()], collapsed:false, colour:None },
         ];
         assert!(to_json(&items, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn manual_hue_and_label_edit_round_trip_without_guessing_invalid_hue() {
+        let keep = ["one".to_owned()].into_iter().collect();
+        let mut rows = from_json(Some(&json!([
+            {"name":"Client Work","sessions":["one"],"colour":"future-palette"}
+        ])), &keep);
+        assert_eq!(rows[0].colour.as_deref(), Some("future-palette"));
+        assert_eq!(to_json(&rows, &keep)[0]["colour"], "future-palette");
+        assert!(edit(&mut rows, "hue", "Client Work ultraviolet", None).is_err());
+        assert_eq!(rows[0].colour.as_deref(), Some("future-palette"));
+        edit(&mut rows, "hue", "Client Work teal", None).unwrap();
+        edit(&mut rows, "rename", "Client Work -> Release Work", None).unwrap();
+        assert_eq!(rows[0].name, "Release Work");
+        assert_eq!(rows[0].colour.as_deref(), Some("teal"));
+        edit(&mut rows, "hue", "Release Work none", None).unwrap();
+        assert_eq!(rows[0].colour, None);
+        assert_eq!(to_json(&rows, &keep), vec![json!({"name":"Release Work","sessions":["one"]})]);
     }
 
     #[test]
@@ -167,7 +203,7 @@ mod tests {
         assert_eq!(suggested_name(Some("Acme"), Some("doxa"), Some("Fix picker")), "Acme · doxa · Fix picker");
         assert_eq!(suggested_name(None, Some("doxa"), None), "doxa");
         assert_eq!(suggested_name(None, None, None), "New collection");
-        let items = vec![Collection { name: "doxa".into(), sessions: vec![], collapsed: false }];
+        let items = vec![Collection { name: "doxa".into(), sessions: vec![], collapsed: false, colour: None }];
         assert_eq!(unique_name(&items, "doxa"), "doxa 2");
         assert_eq!(items[0].name, "doxa");
         let config = "[project_customers]\n'/repo' = 'Acme'\n".parse::<toml::Table>().unwrap();

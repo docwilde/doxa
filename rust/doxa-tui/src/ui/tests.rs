@@ -1577,7 +1577,7 @@ for line in sys.stdin:
         app.session_identity.insert("old".into(), (Some("codex".into()), Some("old-model".into())));
         app.session_cwds.insert("old".into(), PathBuf::from("/repo"));
         app.session_activity.insert("old".into(), (false, 0));
-        app.collections.push(crate::collections::Collection { name:"Work".into(), sessions:vec!["old".into()], collapsed:false });
+        app.collections.push(crate::collections::Collection { name:"Work".into(), sessions:vec!["old".into()], collapsed:false, colour:None });
         app.input = "/clear".into();
         assert!(app.submit_local_command());
         assert_eq!(app.pending_launches.len(), 1);
@@ -3912,8 +3912,8 @@ for line in sys.stdin:
             }));
         }
         app.collections = vec![
-            crate::collections::Collection { name:"A".into(), sessions:vec!["first".into(), "second".into()], collapsed:false },
-            crate::collections::Collection { name:"B".into(), sessions:vec!["third".into()], collapsed:false },
+            crate::collections::Collection { name:"A".into(), sessions:vec!["first".into(), "second".into()], collapsed:false, colour:None },
+            crate::collections::Collection { name:"B".into(), sessions:vec!["third".into()], collapsed:false, colour:None },
         ];
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"third",
             "event":{"type":"needs_input", "data":{"id":"req", "kind":"ask_user",
@@ -3952,8 +3952,8 @@ for line in sys.stdin:
                 collection:id.into(), transcript:String::new(), status:"Ready".into() }));
         }
         app.collections = vec![
-            crate::collections::Collection { name:"A".into(), sessions:vec!["a".into()], collapsed:false },
-            crate::collections::Collection { name:"B".into(), sessions:vec!["b".into()], collapsed:false },
+            crate::collections::Collection { name:"A".into(), sessions:vec!["a".into()], collapsed:false, colour:None },
+            crate::collections::Collection { name:"B".into(), sessions:vec!["b".into()], collapsed:false, colour:None },
         ];
         app.rail_selected = 1;
         app.session_telemetry.entry("b".into()).or_default().context_percent = Some(60.0);
@@ -4022,8 +4022,8 @@ for line in sys.stdin:
         app.session_cwds.insert("local".into(), PathBuf::from("/fixture/own"));
         app.session_cwds.insert("host~remote".into(), PathBuf::from("/fixture/elsewhere"));
         app.collections = vec![
-            crate::collections::Collection { name:"Work".into(), sessions:vec!["local".into()], collapsed:true },
-            crate::collections::Collection { name:"Elsewhere".into(), sessions:vec!["host~remote".into()], collapsed:true },
+            crate::collections::Collection { name:"Work".into(), sessions:vec!["local".into()], collapsed:true, colour:None },
+            crate::collections::Collection { name:"Elsewhere".into(), sessions:vec!["host~remote".into()], collapsed:true, colour:None },
         ];
         let now = Instant::now();
         app.lore_pending_cache.insert("local".into(), LorePendingSignal {
@@ -4169,6 +4169,115 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn pane_rail_navigates_existing_groups_and_aggregates_hidden_urgency() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 30));
+        app.sidebar_auto = false; app.rail_visible = true;
+        app.preferences.set_for_test("rail_entries", "panes");
+        for (id, title) in [("a", "Alpha"), ("b", "Beta"), ("c", "Gamma")] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:title.into(),
+                collection:"Work".into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.groups[0].tabs = vec!["a".into(), "b".into()]; app.groups[0].active = 0;
+        app.groups[1].tabs = vec!["c".into()]; app.groups[1].active = 0;
+        assert_eq!(app.rail_order(), [0, 2]);
+        assert!(app.rail_rows().iter().any(|row| matches!(row, RailRow::Pane { group:0, active:0 })));
+        assert!(!app.rail_rows().iter().any(|row| matches!(row, RailRow::Session(1))));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"b",
+            "event":{"type":"needs_input", "data":{"id":"req", "kind":"ask_user",
+                "title":"Choose", "questions":[{"question":"Choose","options":[]}]}}}));
+        assert_eq!(app.rail_groups()[0].2, 4);
+        assert!(app.pane_signal("a").unwrap().badge().contains("!#2:Beta"));
+        app.focus = Focus::Rail; app.rail_selected = 1;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.active_group, 1);
+        assert_eq!(app.groups[0].tabs, ["a", "b"]);
+        let rail = app.layout(app.size).rail.unwrap();
+        let row = app.rail_rows().iter().position(|row| matches!(row, RailRow::Pane { group:0, .. })).unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind:MouseEventKind::Down(MouseButton::Left),
+            column:rail.x + 2, row:rail.y + 1 + row as u16, modifiers:KeyModifiers::NONE }));
+        assert_eq!(app.active_group, 0);
+        assert_eq!(app.groups[1].tabs, ["c"]);
+        app.focus = Focus::Tabs;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("b"));
+        assert_eq!(app.rail_order(), [1, 2]);
+        assert_eq!(app.rail_selected, 0); // Selection follows the pane, not the old tab.
+    }
+
+    #[test]
+    fn pane_rail_group_sort_waits_for_settling_and_keeps_member_order() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 30));
+        app.sidebar_auto = false; app.rail_visible = true;
+        app.preferences.set_for_test("rail_entries", "panes");
+        app.preferences.set_for_test("collection_sort", "urgency");
+        for id in ["a", "b", "c"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:String::new(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.groups[0].tabs = vec!["a".into(), "b".into()]; app.groups[0].active = 0;
+        app.groups[1].tabs = vec!["c".into()]; app.groups[1].active = 0;
+        app.collections = vec![
+            crate::collections::Collection { name:"A".into(), sessions:vec!["a".into()], collapsed:false, colour:None },
+            crate::collections::Collection { name:"C".into(), sessions:vec!["c".into()], collapsed:false, colour:None },
+        ];
+        app.session_telemetry.entry("c".into()).or_default().context_percent = Some(60.0);
+        let start = Instant::now();
+        assert!(!app.tick_rail_sort(start));
+        assert!(matches!(app.rail_rows()[0], RailRow::Heading(0)));
+        assert!(app.tick_rail_sort(start + Duration::from_secs(2)));
+        assert!(matches!(app.rail_rows()[0], RailRow::Heading(1)));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"b",
+            "event":{"type":"needs_input", "data":{"id":"req", "kind":"ask_user",
+                "title":"Choose", "questions":[{"question":"Choose","options":[]}]}}}));
+        assert!(!app.tick_rail_sort(start + Duration::from_secs(3)));
+        assert!(matches!(app.rail_rows()[0], RailRow::Heading(1)));
+        assert!(app.tick_rail_sort(start + Duration::from_secs(5)));
+        assert!(matches!(app.rail_rows()[0], RailRow::Heading(0)));
+        assert_eq!(app.rail_order(), [0, 2]);
+        assert_eq!(app.groups[0].tabs, ["a", "b"]);
+    }
+
+    #[test]
+    fn manual_collection_hue_paints_heading_without_replacing_its_label() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"a".into(), title:"Alpha".into(),
+            collection:String::new(), transcript:String::new(), status:"Ready".into() }));
+        app.collections.push(crate::collections::Collection {
+            name:"Release Work".into(), sessions:vec!["a".into()], collapsed:false, colour:Some("teal".into()),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|frame| app.draw_rail(frame, Rect::new(0, 0, 40, 8))).unwrap();
+        let line = (1..39).map(|x| terminal.backend().buffer()[(x, 1)].symbol()).collect::<String>();
+        assert!(line.contains("Release Work"));
+        assert!((1..39).any(|x| terminal.backend().buffer()[(x, 1)].fg == Color::Rgb(0x78, 0xCF, 0xC3)));
+    }
+
+    #[test]
+    fn pane_rail_withholds_project_hue_for_mixed_or_unknown_roots() {
+        let mut app = App::default();
+        app.preferences.set_for_test("rail_entries", "panes");
+        app.project_colours = Some(HashMap::new());
+        for id in ["a", "b"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:"repo".into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.groups[0].tabs = vec!["a".into(), "b".into()]; app.groups[0].active = 0;
+        let root = PathBuf::from("/verified/repo");
+        app.project_roots.insert("a".into(), root.clone());
+        app.project_colours.as_mut().unwrap().insert(root.clone(), "blue".into());
+        assert_eq!(app.pane_project_marker(0), " [root?]");
+        assert_eq!(app.rail_project_colour("repo"), None);
+        app.project_roots.insert("b".into(), PathBuf::from("/verified/other"));
+        assert_eq!(app.pane_project_marker(0), " [mixed]");
+        assert_eq!(app.rail_project_colour("repo"), None);
+        app.project_roots.insert("b".into(), root);
+        assert_eq!(app.pane_project_marker(0), "");
+        assert_eq!(app.rail_project_colour("repo"), Some(Color::Rgb(0x8A, 0xBF, 0xF2)));
+    }
+
+    #[test]
     fn project_hue_requires_one_known_root_even_when_labels_match() {
         let mut app = App::default();
         app.project_colours = Some(HashMap::new());
@@ -4308,7 +4417,7 @@ for line in sys.stdin:
                 collection:String::new(), transcript:String::new(), status:"Ready".into() }));
         }
         app.collections.push(crate::collections::Collection {
-            name:"Work".into(), sessions:vec!["held".into()], collapsed:false,
+            name:"Work".into(), sessions:vec!["held".into()], collapsed:false, colour:None,
         });
         assert_eq!(app.rail_order(), [0, 1]);
         let click = |row| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),

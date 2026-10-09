@@ -33,6 +33,7 @@ impl App {
     }
 
     pub(super) fn rail_groups(&self) -> Vec<(RailGroupKey, Vec<RailRow>, u8)> {
+        if self.preferences.value("rail_entries") == "panes" { return self.rail_pane_groups(); }
         let mut groups = Vec::new();
         let mut seen = HashSet::new();
         for (heading, item) in self.collections.iter().enumerate() {
@@ -64,6 +65,67 @@ impl App {
             groups.push((RailGroupKey::Project(project), rows, urgency));
         }
         groups
+    }
+
+    /// Pane view has one navigable row per open pane. Detached live sessions
+    /// remain individual rows, and hidden tabs only contribute to their pane.
+    fn rail_pane_groups(&self) -> Vec<(RailGroupKey, Vec<RailRow>, u8)> {
+        let mut groups = Vec::new();
+        let mut placed = HashSet::new();
+        for (heading, collection) in self.collections.iter().enumerate() {
+            let mut rows = vec![RailRow::Heading(heading)];
+            let mut urgency = 0;
+            let mut members = 0;
+            for id in &collection.sessions {
+                let Some(index) = self.sessions.iter().position(|session| &session.id == id) else { continue };
+                if !placed.insert(index) || self.offline_ids.contains(id) || !self.rail_session_visible(index) { continue; }
+                if let Some(row) = self.rail_entry(index) {
+                    members += 1;
+                    urgency = urgency.max(self.rail_entry_urgency(&row, index));
+                    if !collection.collapsed { rows.push(row); }
+                }
+            }
+            if members > 0 || collection.sessions.is_empty() {
+                groups.push((RailGroupKey::Collection(collection.name.clone()), rows, urgency));
+            }
+        }
+        let mut projects: BTreeMap<String, Vec<(RailRow, u8)>> = BTreeMap::new();
+        for index in 0..self.sessions.len() {
+            let id = &self.sessions[index].id;
+            if !placed.insert(index) || self.offline_ids.contains(id) || !self.rail_session_visible(index) { continue; }
+            if let Some(row) = self.rail_entry(index) {
+                let label = self.rail_project_label(index).to_owned();
+                let urgency = self.rail_entry_urgency(&row, index);
+                projects.entry(label).or_default().push((row, urgency));
+            }
+        }
+        for (project, entries) in projects {
+            let urgency = entries.iter().map(|(_, rank)| *rank).max().unwrap_or(0);
+            let mut rows = vec![RailRow::ProjectHeading(project.clone())];
+            rows.extend(entries.into_iter().map(|(row, _)| row));
+            groups.push((RailGroupKey::Project(project), rows, urgency));
+        }
+        groups
+    }
+
+    fn rail_entry(&self, index: usize) -> Option<RailRow> {
+        let id = &self.sessions[index].id;
+        for (group, pane) in self.groups.iter().enumerate() {
+            if pane.tabs.iter().any(|tab| tab == id) {
+                return (pane.active_id() == Some(id.as_str())).then_some(RailRow::Pane { group, active: index });
+            }
+        }
+        Some(RailRow::Session(index))
+    }
+
+    fn rail_entry_urgency(&self, row: &RailRow, index: usize) -> u8 {
+        match row {
+            RailRow::Pane { group, .. } => self.groups[*group].tabs.iter().filter_map(|id|
+                self.sessions.iter().position(|session| session.id == *id)
+                    .filter(|_| !self.offline_ids.contains(id)).map(|index| self.rail_urgency(index)))
+                .max().unwrap_or(0),
+            _ => self.rail_urgency(index),
+        }
     }
 
     pub(super) fn chip_hint_for(&self, kind: &str, group: usize) -> String {
@@ -229,7 +291,7 @@ impl App {
         self.rail_rows()
             .into_iter()
             .filter_map(|row| match row {
-                RailRow::Session(index) => Some(index),
+                RailRow::Session(index) | RailRow::Pane { active: index, .. } => Some(index),
                 _ => None,
             })
             .collect()
@@ -247,7 +309,7 @@ impl App {
         let rows = self.rail_rows();
         let index = usize::from(row - rail.y - 1) + self.rail_view_start(rail, &rows);
         match rows.get(index)? {
-            RailRow::Session(index) => Some(&self.sessions[*index].id),
+            RailRow::Session(index) | RailRow::Pane { active: index, .. } => Some(&self.sessions[*index].id),
             _ => None,
         }
     }
@@ -258,7 +320,10 @@ impl App {
             return 0;
         }
         let selected = self.rail_order().get(self.rail_selected).copied();
-        let row = rows.iter().position(|item| matches!(item, RailRow::Session(index) if Some(*index) == selected)).unwrap_or(0);
+        let row = rows.iter().position(|item| match item {
+            RailRow::Session(index) | RailRow::Pane { active: index, .. } => Some(*index) == selected,
+            _ => false,
+        }).unwrap_or(0);
         row.saturating_sub(visible - 1).min(rows.len() - visible)
     }
 

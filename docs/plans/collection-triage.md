@@ -33,10 +33,20 @@ identity. The name remains visible independently of colour.
 
 When a pane contains multiple tabs, its active session row displays the tab
 count and strongest existing urgency rank across all live tabs. If a hidden
-tab supplies that rank, the badge gives its tab number and clipped title. Unknown context
-stays unranked. Session-row navigation and click targets remain intact; a
-full one-row-per-pane rail, editable project labels, and manual collection
-hues remain open.
+tab supplies that rank, the badge gives its tab number and clipped title.
+Unknown context stays unranked.
+
+The native follow-up adds `/collection view panes` (default remains `sessions`):
+one navigable row per open pane, with its hidden tabs feeding the urgency badge.
+Keyboard Enter and mouse click focus the existing pane without moving tabs;
+detached live sessions remain individual rows. A pane with unknown or mixed
+project roots shows `[root?]` or `[mixed]` and receives no project hue. Group
+urgency still waits for the 1.5-second settling boundary and never sorts
+members within a group. `/collection view sessions` restores session rows.
+Manual collections now accept a named hue with `/collection hue <name>
+<blue|teal|amber|violet|coral|green|none>`; their names remain editable with
+`/collection rename <old> -> <new>`. Invalid saved hue names remain stored but
+render without a hue. Automatic project-label editing remains open.
 
 The remainder of this document is the historical Python design and uses
 Python module/test names. Its shipped labels do not describe the Rust rail.
