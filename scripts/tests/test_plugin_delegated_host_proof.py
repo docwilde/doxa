@@ -181,6 +181,27 @@ class DelegatedShapeTests(unittest.TestCase):
                        "/proc/self/ns/pid"):
             self.assertIn(source, smoke_script[0])
 
+    def test_route_policy_allows_loopback_and_denies_egress(self) -> None:
+        ipv4_header = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n"
+        ipv4_loopback = "lo 0000007F 00000000 0001 0 0 0 000000FF 0 0 0\n"
+        ipv6_loopback = ("0" * 32 + " 00 " + "0" * 32 + " 00 " + "0" * 32
+                         + " ffffffff 00000001 00000000 00200200 lo\n")
+        route_file = Path(self.temp.name) / "routes"
+
+        def accepted(policy: str, contents: str) -> bool:
+            route_file.write_text(contents)
+            return subprocess.run(["/usr/bin/awk", policy, str(route_file)],
+                                  capture_output=True, check=False).returncode == 0
+
+        self.assertTrue(accepted(proof.IPV4_ROUTE_POLICY, ipv4_header + ipv4_loopback))
+        self.assertTrue(accepted(proof.IPV6_ROUTE_POLICY, ipv6_loopback))
+        self.assertFalse(accepted(proof.IPV4_ROUTE_POLICY,
+                                  ipv4_header + ipv4_loopback.replace("lo ", "eth0 ")))
+        self.assertFalse(accepted(proof.IPV6_ROUTE_POLICY,
+                                  ipv6_loopback.replace(" lo\n", " eth0\n")))
+        self.assertFalse(accepted(proof.IPV4_ROUTE_POLICY, ipv4_header + "eth0\n"))
+        self.assertFalse(accepted(proof.IPV6_ROUTE_POLICY, "malformed lo\n"))
+
 
 if __name__ == "__main__":
     unittest.main()

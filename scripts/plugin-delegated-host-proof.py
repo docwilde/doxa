@@ -30,6 +30,8 @@ BWRAP_FLAGS = (
     "--ro-bind", "--tmpfs", "--size",
 )
 NAMESPACES = ("net", "mnt", "user", "pid")
+IPV4_ROUTE_POLICY = 'NR == 1 { if (NF != 11 || $1 != "Iface") exit 1; next } { if (NF != 11 || $1 != "lo") exit 1 } END { if (NR == 0) exit 1 }'
+IPV6_ROUTE_POLICY = 'NF { if (NF != 10 || $10 != "lo") exit 1 }'
 
 
 class ProofError(Exception):
@@ -189,9 +191,9 @@ def check_bwrap() -> str:
         "/usr/bin/setsid /bin/true\n"
         "/usr/bin/awk 'NR > 2 { split($0, a, \":\"); gsub(/[[:space:]]/, \"\", a[1]); "
         "if (a[1] != \"lo\") exit 1 }' /proc/net/dev\n"
-        "/usr/bin/awk 'NR > 1 { exit 1 }' /proc/net/route\n"
+        f"/usr/bin/awk '{IPV4_ROUTE_POLICY}' /proc/net/route\n"
         "if test -f /proc/net/ipv6_route; then "
-        "/usr/bin/awk 'NF { exit 1 }' /proc/net/ipv6_route; fi\n"
+        f"/usr/bin/awk '{IPV6_ROUTE_POLICY}' /proc/net/ipv6_route; fi\n"
         "printf 'net=%s\\nmnt=%s\\nuser=%s\\npid=%s\\n' "
         "\"$(/usr/bin/readlink /proc/self/ns/net)\" "
         "\"$(/usr/bin/readlink /proc/self/ns/mnt)\" "
@@ -275,7 +277,7 @@ def main() -> int:
                 "--run requires both DOXA_PLUGIN_CGROUP_ACCEPTANCE=1 and DOXA_PLUGIN_DISPOSABLE_HOST=1")
         target = check_target_dir(os.environ.get("CARGO_TARGET_DIR", ""))
     parent, scratch, version = preflight()
-    print(f"plugin-proof host-ready namespace=isolated net=loopback-only routes=none "
+    print(f"plugin-proof host-ready namespace=isolated net=loopback-only routes=loopback-only "
           f"kernel={platform.release()} bwrap={version} "
           f"uid={os.geteuid()} cpus={len(os.sched_getaffinity(0))} "
           f"parent={parent} scratch={scratch}", flush=True)

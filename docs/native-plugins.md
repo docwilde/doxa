@@ -173,7 +173,7 @@ PID denial and CPU throttling. The read-only preflight checks the mount,
 caller membership, empty delegated parent, enabled controllers, executable,
 tools and scratch prerequisites. It also starts an unprivileged Bubblewrap
 smoke probe and requires distinct network, mount, user and PID namespace
-identities, only loopback interfaces, and no IPv4 or IPv6 routes. This checks
+identities, only loopback interfaces and only loopback IPv4/IPv6 routes. This checks
 admission prerequisites; cgroup limit enforcement and descendant cleanup are
 measured only by the opt-in acceptance run. Run from the repository checkout:
 
