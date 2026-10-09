@@ -139,10 +139,52 @@ It requires an explicit exact limit; the fixture's maximum write size is
 Unsupported filesystems, unavailable `quotactl_fd`, and any mismatch refuse
 verification. A rootless owner can receive `EPERM` or `EACCES` from the
 project-limit query: XFS/ext4 `Q_XGETQUOTA` requires `CAP_SYS_ADMIN` for this
-project ID. The verifier reports that denial and refuses. Production needs a
-narrow privileged **read-only** helper bound to the exact session directory
-descriptor and owner-controlled quota policy; it must not pass quota-changing
-privileges or Docker access to the worker. No such helper exists yet.
+project ID. The verifier reports that denial and refuses. An opt-in
+`doxa-quota-helper` now supplies this read-only query. It requires an
+administrator-installed, root-owned mode `0600` JSON policy and one systemd
+socket-activation descriptor. Its policy fixes a session root, project ID,
+exact hard limit, filesystem device, mount ID and inode for the root and all
+four bind sources. It opens and rechecks those descriptors, authenticates the
+peer through `SO_PEERCRED`, and requires a dedicated caller UID distinct from
+the session tree owner. The peer supplies no request body, path, project ID or
+expected limit. The result always says `admissible_as_hard_quota=false`. The
+helper does not configure quotas, call Docker, or enable `docker-hardened`.
+
+The service is inert unless an administrator explicitly installs a policy and
+socket unit. The policy path and socket path must be absolute; every policy
+ancestor must be root-owned and not group/other writable. The policy itself
+must be a regular single-link root-owned file with exact mode `0600` and at
+most 8 KiB. An illustrative policy shape is:
+
+```json
+{
+  "version": 1,
+  "session_id": "SESSION_ID",
+  "root": "/private/isolation/SESSION_ID",
+  "socket_path": "/run/doxa/quota/SESSION_ID.sock",
+  "caller_uid": 2001,
+  "owner_uid": 2002,
+  "project_id": 1002,
+  "hard_limit_bytes": 33554432,
+  "bindings": {
+    "root": {"device": 1, "inode": 2, "mount_id": 3},
+    "checkout": {"device": 1, "inode": 4, "mount_id": 3},
+    "home": {"device": 1, "inode": 5, "mount_id": 3},
+    "cache": {"device": 1, "inode": 6, "mount_id": 3},
+    "broker": {"device": 1, "inode": 7, "mount_id": 3}
+  }
+}
+```
+
+Those numbers are placeholders; an administrator must capture the live exact
+identities and provision quota accounting, enforcement and the hard limit
+separately. The activation socket must be root-owned, bound to the policy
+path, and accessible only to the dedicated caller. DOXA's current host
+controller and rootless worker commonly share a host UID, so this deliberately
+refuses their existing arrangement; a separated service identity and reviewed
+runtime integration are still needed. Root privilege or `CAP_SYS_ADMIN` for
+the project quota syscall must stay with the helper. No live host service is
+installed by the repository.
 The descendant walk covers the three data bind sources; it does not establish
 an immutable tree. The broker audit may report zero sockets, and its socket
 names and inode snapshots do not bind an entry to the live host listener or

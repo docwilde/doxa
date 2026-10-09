@@ -18,6 +18,7 @@ mod broker_origin;
 pub mod egress;
 pub mod hardened;
 pub mod quota_verify;
+pub mod quota_helper;
 pub mod workspace;
 pub mod test_runner;
 pub mod migration;

@@ -9,6 +9,10 @@ license = "AGPL-3.0-only"
 name = "doxa-isolation-worker"
 path = "src/main.rs"
 
+[[bin]]
+name = "doxa-quota-helper"
+path = "src/bin/doxa-quota-helper.rs"
+
 [dependencies]
 errno = "0.3"
 libc = "0.2"
