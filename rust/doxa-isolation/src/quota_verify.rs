@@ -351,6 +351,7 @@ mod linux {
     const FS_IOC_FSGETXATTR: libc::c_ulong = 0x801c581f;
     const FS_XFLAG_PROJINHERIT: u32 = 0x00000200;
     const XFS_SUPER_MAGIC: libc::c_long = 0x58465342;
+    const EXT4_SUPER_MAGIC: libc::c_long = 0xEF53;
     const Q_XGETQUOTA: libc::c_int = 0x5803;
     const Q_XGETQSTATV: libc::c_int = 0x5808;
     const PRJQUOTA: libc::c_int = 2;
@@ -391,6 +392,9 @@ mod linux {
             id as libc::c_int, value as *mut T) };
         if result < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
     }
+    fn supported_project_quota_filesystem(kind: libc::c_long) -> bool {
+        kind == XFS_SUPER_MAGIC || kind == EXT4_SUPER_MAGIC
+    }
     impl QuotaReader for KernelQuotaReader {
         fn project(&self, directory: &File) -> io::Result<ProjectState> {
             let mut fsx = Fsxattr::default();
@@ -414,9 +418,14 @@ mod linux {
             if unsafe { libc::fstatfs(directory.as_raw_fd(), &mut filesystem) } < 0 {
                 return Err(io::Error::last_os_error());
             }
-            if filesystem.f_type != XFS_SUPER_MAGIC {
-                return Err(error("descriptor-bound hard-limit query currently supports XFS only"));
+            if !supported_project_quota_filesystem(filesystem.f_type) {
+                return Err(error("descriptor-bound hard-limit query supports XFS or ext4 only"));
             }
+            // Linux's generic quota dispatch implements Q_XGETQSTATV and
+            // Q_XGETQUOTA for ext4 via dquot_get_state/get_dqblk. The former
+            // exposes separate project accounting and enforcement bits;
+            // the latter converts the hard limit to 512-byte blocks. Keep
+            // both exact checks below. No quota configuration is changed.
             let mut status = QuotaStatV { version: 1, ..Default::default() };
             quota_call(directory, Q_XGETQSTATV, 0, &mut status)?;
             let mut quota = FsDiskQuota::default();
@@ -441,6 +450,15 @@ mod linux {
         assert_eq!(std::mem::size_of::<QuotaStatV>(), 160);
         assert_eq!(std::mem::offset_of!(FsDiskQuota, blk_hardlimit), 8);
         assert_eq!(std::mem::offset_of!(QuotaStatV, flags), 2);
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn descriptor_bound_quota_reader_accepts_only_reviewed_filesystems() {
+        assert!(supported_project_quota_filesystem(XFS_SUPER_MAGIC));
+        assert!(supported_project_quota_filesystem(EXT4_SUPER_MAGIC));
+        assert!(!supported_project_quota_filesystem(0));
+        assert!(!supported_project_quota_filesystem(0x01021994)); // tmpfs
     }
 }
 

@@ -117,12 +117,11 @@ creation in its read-only bind returned `EROFS` (errno 30). A separate XFS
 four-bind control with project ID 1001 returned `ENOSPC` (errno 28) after
 33,554,432 bytes, not `EDQUOT`. The disposable container and markers were
 removed. These are exact-fixture observations, not a production session or
-admission token. The current Rust kernel quota reader supports XFS only, while
-the observed strict `EDQUOT` behavior occurred on ext4; neither tested
-filesystem satisfies both current proof gates.
+admission token. The observed strict `EDQUOT` behavior occurred on ext4;
+the XFS fixture does not satisfy that gate.
 
 The Rust hardened-admission seam reads a bounded receipt and checks the saved
-session profile and exact tree. Its read-only Linux XFS verifier can inspect
+session profile and exact tree. Its read-only Linux XFS/ext4 verifier can inspect
 the exact session root and four bind-source directory descriptors, then walk
 up to 4,096 existing entries and 64 directory levels within checkout, home
 and cache. It checks project ID, directory inheritance, filesystem and mount
@@ -145,6 +144,15 @@ receipt is not an owner-controlled policy, and the admission seam still
 refuses even a
 hand-edited `admissible_as_hard_quota=true`. Selecting `docker-hardened` remains
 unavailable.
+
+The ext4 query branch uses the same descriptor-bound, read-only
+`Q_XGETQSTATV` and `Q_XGETQUOTA` calls as XFS. Linux's generic quota dispatcher
+routes those calls through ext4's quota state and limit operations, including
+separate project accounting and enforcement flags. The code checks the exact
+project ID and 512-byte block limit. This branch has unit coverage but has
+not yet been exercised against a live ext4 project-quota mount; a disposable
+read-only syscall probe and negative controls for disabled enforcement remain
+required before counting it as production evidence.
 
 The Codex hook broker checks the Unix peer owner UID and a bounded
 `PreCompact` frame. A local same-UID process with the session capability can
