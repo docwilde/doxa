@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.36 — 2026-10-09
+
+**Verified follow-ons**
+
+- Revalidate repeated explicit TUI `file`, `symbol`, `imports` and `calls` answers against the full listed source set before reuse. `modules` always rescans; semantic binding stays `unknown`.
+- Fence TUI plugin dispatch against owner exit and wait for an admitted supervisor to return. Installed-host admission remains disabled; a join does not prove cgroup cleanup.
+- Prove the guarded egress connector scope check in a clean, hashed disposable guest across in-scope, host, dead-init and replacement cases. Docker Engine and provider origin remain unproved.
+
 ## 2.0.0-beta.35 — 2026-10-09
 
 **Plugin lifecycle**
