@@ -324,7 +324,10 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         scope.launch {
             try {
                 val history = client.transcript(session.id, session.encrypted, before)
-                if (mine != generation) return@launch
+                if (mine != generation || api !== client) return@launch
+                require(AndroidReview.matchesIncarnation(history, session.incarnation)) {
+                    "History belongs to a different session incarnation"
+                }
                 require(history.getLong("before") < before) { "Invalid history page" }
                 entries = (turnEntries(history.getJSONArray("turns")) + entries).takeLast(300)
                 olderBefore = if (history.optBoolean("has_more")) history.getLong("before") else null
