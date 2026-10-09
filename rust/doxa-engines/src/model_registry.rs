@@ -128,8 +128,8 @@ pub fn lookup(engine: &str, model: &str) -> ModelFacts {
             "gpt-5.6-terra" => Some((11.0, 39.6)),
             "gpt-5.6-luna" => Some((1.1, 3.96)),
             // Specialized Codex Fast rate; no cache-write or long-context tier
-            // is listed, and this model predates the regional uplift cutoff.
-            "gpt-5.3-codex" => Some((3.5, 28.0)),
+            // is listed. FedRAMP's 10% uplift has no model release-date cutoff.
+            "gpt-5.3-codex" => Some((3.85, 30.8)),
             _ => None,
         };
         facts.budget_input_usd_per_million = bound.map(|(input, _)| Fact::static_value(input, "https://developers.openai.com/api/docs/pricing", "2026-10-09")).unwrap_or(Fact::unknown());
@@ -232,7 +232,7 @@ mod tests {
             ("gpt-5.6-terra", (2.0, 12.0), Some((11.0, 39.6))),
             ("gpt-5.6-luna", (0.2, 1.2), Some((1.1, 3.96))),
             ("gpt-5.5", (5.0, 30.0), None),
-            ("gpt-5.3-codex", (1.75, 14.0), Some((3.5, 28.0))),
+            ("gpt-5.3-codex", (1.75, 14.0), Some((3.85, 30.8))),
         ] {
             let facts = lookup("codex", model);
             assert_eq!(facts.priced_pair(), Some((standard.0, standard.1, source, "2026-10-09")));

@@ -88,8 +88,9 @@ and [Fast](https://developers.openai.com/api/docs/guides/fast-mode) and
 [Ultrafast](https://developers.openai.com/api/docs/guides/ultrafast-mode) guides
 were checked on 2026-10-09. For tiered models, each budget-bound input field
 uses the highest documented long-context cache-write rate; each output field
-uses the highest long-context output rate. A 10% regional uplift is included
-where relevant. GPT-5.3-Codex uses its specialized Fast rate.
+uses the highest long-context output rate. A 10% regional or FedRAMP uplift is
+included where relevant. GPT-5.3-Codex uses its specialized Fast rate plus
+FedRAMP uplift, which has no model release-date cutoff.
 The bound applies to **all** input/output tokens in each Codex turn because
 the turn reports neither individual request sizes nor service tiers. This
 overestimates short requests and cache reads but does not miss a long-context
@@ -102,7 +103,7 @@ token premium for admitted models.
 | [`gpt-5.6-terra`](https://developers.openai.com/api/docs/models/gpt-5.6-terra) | 2 / 12 | 11 / 39.6 | Fast long cache write 10 / output 36, ×1.10 |
 | [`gpt-5.6-luna`](https://developers.openai.com/api/docs/models/gpt-5.6-luna) | 0.2 / 1.2 | 1.1 / 3.96 | Fast long cache write 1 / output 3.6, ×1.10 |
 | [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) | 5 / 30 | Unknown | Fast long-context price not established |
-| [`gpt-5.3-codex`](https://developers.openai.com/api/docs/models/gpt-5.3-codex) | 1.75 / 14 | 3.5 / 28 | Specialized Fast rate; no long tier published |
+| [`gpt-5.3-codex`](https://developers.openai.com/api/docs/models/gpt-5.3-codex) | 1.75 / 14 | 3.85 / 30.8 | Specialized Fast rate 3.5 / 28, ×1.10 FedRAMP; no long tier published |
 
 Unknown bounds refuse native priced-budget admission at session start.
 The [prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
