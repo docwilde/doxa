@@ -299,10 +299,11 @@ unmeasured on real fleet traffic.
 
 After a supervised native run finishes, `doxa fleet debrief RUN --root /absolute/fleet/root`
 reads the owned manifest and private host guard journal. It reports worker
-completion only when the host admitted a completion with its receipt checks;
+completion admission only when its recorded diff and passing test receipts
+still verify; the final source tree is not rechecked by this report.
 dependency holds and current pauses are shown as blocked, while every other
 outcome remains unknown. It counts typed handoffs, read-backs, confirmations,
-corrections and current human release records, and verifies signed host test receipts before
+corrections and recorded human release entries (which may be stale), and verifies signed host test receipts before
 counting them. The review-event history retains at most 256 observations, so
 quarantine and supervisor counts are labeled as counts within that window.
 Test duration and token-based review cost are estimates or measurements only

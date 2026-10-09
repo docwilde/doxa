@@ -89,7 +89,7 @@ fn reviewed_native_fleet_freezes_guard_context_budget_and_host_evidence_without_
     let report=fixture.command().args(["fleet","debrief","run","--root",fixture.root.to_str().unwrap()]).output().unwrap();
     assert!(report.status.success(),"{}",String::from_utf8_lossy(&report.stderr));
     let text=String::from_utf8_lossy(&report.stdout);
-    assert!(text.contains("Assignment counts:")&&text.contains("Host test receipts: 0"));
+    assert!(text.contains("Assignment counts: completion admitted")&&text.contains("Host test receipts: 0"));
     assert_eq!(fs::read(&context.state_path).unwrap(),before,"debrief must not rewrite the guard journal");
 }
 

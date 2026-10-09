@@ -164,10 +164,20 @@ pub fn recorded_test(context: &Context, id: &str, value: &Value) -> io::Result<O
 /// Exact sender, charter, baseline, and tree must agree across both receipts.
 /// The current tree is checked by the daemon before calling this function.
 fn validate_receipts(context: &Context, state: &State, envelope: &Envelope) -> io::Result<(String, String)> {
-    let assignment = context.assignment(&envelope.from_session)?;
+    receipt_pair(context, state, &envelope.from_session, &envelope.artifact_refs)
+}
+
+/// Recheck the persisted receipt pair without touching the current checkout.
+/// This proves only what admission recorded at that time, not current source.
+pub fn recorded_completion_receipts(context: &Context, state: &State, from_session: &str, artifact_refs: &[String]) -> io::Result<()> {
+    receipt_pair(context, state, from_session, artifact_refs).map(|_| ())
+}
+
+fn receipt_pair(context: &Context, state: &State, from_session: &str, artifact_refs: &[String]) -> io::Result<(String, String)> {
+    let assignment = context.assignment(from_session)?;
     let mut diff: Option<DiffEvidence> = None;
     let mut test: Option<TestEvidence> = None;
-    for id in &envelope.artifact_refs {
+    for id in artifact_refs {
         let Some(value) = state.artifacts.get(id) else { continue; };
         let receipt = verify(context, id, value)?;
         match receipt.kind.as_str() {

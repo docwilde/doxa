@@ -35,16 +35,18 @@ pub fn read(root: &Path, id: &str) -> io::Result<String> {
 }
 
 fn render(id: &str, context: &Context, state: &State) -> io::Result<String> {
-    let completions: BTreeSet<&str> = state.traces.values()
-        .filter(|trace| trace.seq > 0 && trace.kind == Kind::Completion)
-        .map(|trace| trace.from.as_str()).collect();
+    let mut completions = BTreeSet::new();
+    for trace in state.traces.values().filter(|trace| trace.seq > 0 && trace.kind == Kind::Completion) {
+        doxa_fleet::evidence::recorded_completion_receipts(context, state, &trace.from, &trace.artifact_refs)?;
+        completions.insert(trace.from.as_str());
+    }
     let mut lines = vec![format!("fleet {} debrief", label(id)),
-        "Recorded host evidence only; no peer text or recommendations".into(),
+        "Owner-private host journal summary; no peer text or recommendations".into(),
         "Assignments".into()];
     let mut complete = 0; let mut blocked = 0; let mut unknown = 0;
-    for assignment in context.assignments.iter().filter(|row| row.role == "worker") {
+    for (slot, assignment) in context.assignments.iter().enumerate().filter(|(_, row)| row.role == "worker") {
         let outcome = if completions.contains(assignment.session_id.as_str()) {
-            complete += 1; "completion admitted with host receipts"
+            complete += 1; "completion admitted with recorded host receipts; current tree unknown"
         } else if !assignment.depends_on.is_empty()
             && !state.dispatched_assignments.get(&assignment.id).copied().unwrap_or(false) {
             blocked += 1; "blocked at dependency dispatch"
@@ -53,9 +55,9 @@ fn render(id: &str, context: &Context, state: &State) -> io::Result<String> {
         } else {
             unknown += 1; "outcome unknown"
         };
-        lines.push(format!("  {}: {outcome}", label(&assignment.id)));
+        lines.push(format!("  worker slot {slot}: {outcome}"));
     }
-    lines.push(format!("Assignment counts: completed {complete} · blocked {blocked} · unknown {unknown}"));
+    lines.push(format!("Assignment counts: completion admitted {complete} · blocked {blocked} · unknown {unknown}"));
 
     let handoffs: Vec<_> = state.traces.iter()
         .filter(|(_, trace)| trace.seq > 0 && trace.kind == Kind::Handoff).collect();
@@ -84,7 +86,7 @@ fn render(id: &str, context: &Context, state: &State) -> io::Result<String> {
             }
         }
     }
-    lines.push(format!("Handoffs: {} · read-backs {readbacks} · confirmations {confirmations} · agreed {agreed} · corrections {corrections} · open questions {open_questions} · current human release records {}",
+    lines.push(format!("Handoffs: {} · read-backs {readbacks} · confirmations {confirmations} · agreed {agreed} · corrections {corrections} · open questions {open_questions} · recorded human release entries {} (may be stale)",
         handoffs.len(), state.dependency_releases.len()));
 
     let mut tests = 0u64; let mut passed = 0u64; let mut failed = 0u64; let mut test_ms = 0u64;
@@ -95,7 +97,7 @@ fn render(id: &str, context: &Context, state: &State) -> io::Result<String> {
             test_ms = test_ms.saturating_add(test.duration_ms);
         }
     }
-    lines.push(format!("Host test receipts: {tests} · passed {passed} · failed {failed} · measured test time {}",
+    lines.push(format!("Host test receipts: {tests} · passed {passed} · failed {failed} · sum of recorded test durations {}",
         if tests == 0 { "unknown (no receipt)".into() } else { format!("{test_ms} ms") }));
 
     // The observation ring retains at most 256 entries. These are lower
@@ -121,11 +123,11 @@ fn render(id: &str, context: &Context, state: &State) -> io::Result<String> {
         state.observations.len(), quarantine_ids.len()));
     lines.push(format!("Current fleet pause: {}", if state.paused { "yes" } else { "no" }));
     if state.accounting_unknown {
-        lines.push("Review cost estimate: unknown (accounting flagged uncertain)".into());
+        lines.push("Review token estimate: unknown (accounting flagged uncertain)".into());
     } else if state.calls > 0 {
-        lines.push(format!("Recorded review token estimate: ${:.6} across {} reserved calls", state.actual_estimated_usd, state.calls));
+        lines.push(format!("Recorded review token estimate: ${:.6} across {} reserved calls; actual billed cost unknown", state.actual_estimated_usd, state.calls));
     } else {
-        lines.push("Recorded review token estimate: $0.000000 across 0 calls".into());
+        lines.push("Recorded review token estimate: $0.000000 across 0 calls; actual billed cost unknown".into());
     }
     lines.push("Worker spend and run wall time: unknown (not recorded in the host journal)".into());
     Ok(lines.join("\n"))
@@ -136,7 +138,7 @@ mod tests {
     use super::*;
     use doxa_fleet::{Assignment, Charter, DependencyRelease, HandoffReadback, HandoffResponse,
         MessageTrace, ReviewConfig};
-    use doxa_fleet::evidence::{Binding, TestEvidence, TestRecipe};
+    use doxa_fleet::evidence::{Binding, DiffEvidence, TestEvidence, TestRecipe};
     use serde_json::json;
     use std::{fs, path::Path};
     use std::os::unix::fs::PermissionsExt;
@@ -169,14 +171,19 @@ mod tests {
         doxa_fleet::evidence::create_key(&context).unwrap();
         let binding = Binding { fleet_id: "run".into(), charter_sha256: context.charter_sha256.clone(),
             assignment_id: "run-1".into(), session_id: "worker-one".into(), base_commit: "a".repeat(40), snapshot_sha256: "b".repeat(64) };
+        let diff = DiffEvidence { binding: binding.clone(), changed_paths: vec!["src/lib.rs".into()] };
+        let (diff_id, diff_value) = doxa_fleet::evidence::issue(&context, "git_diff", json!(diff)).unwrap();
         let receipt = TestEvidence { binding, recipe_sha256: doxa_fleet::hash(context.charter.test_recipe.as_ref().unwrap()).unwrap(),
             runner_image: format!("image@sha256:{}", "c".repeat(64)), exit_code: 0, passed: true,
             duration_ms: 123, output_sha256: "d".repeat(64), output_bytes: 0 };
         let (test_id, test_value) = doxa_fleet::evidence::issue(&context, "test_result", json!(receipt)).unwrap();
         let mut state = State { charter_sha256: context.charter_sha256.clone(),
             assignments_sha256: doxa_fleet::hash(&context.assignments).unwrap(), ..State::default() };
-        state.artifacts.insert(test_id, test_value);
-        state.traces.insert("completion".into(), trace("worker-one", "coordinator", 1, Kind::Completion, None));
+        state.artifacts.insert(diff_id.clone(), diff_value);
+        state.artifacts.insert(test_id.clone(), test_value);
+        let mut completion = trace("worker-one", "coordinator", 1, Kind::Completion, None);
+        completion.artifact_refs = vec![diff_id.clone(), test_id];
+        state.traces.insert("completion".into(), completion);
         state.traces.insert("handoff".into(), trace("worker-one", "coordinator", 2, Kind::Handoff, None));
         let mut ack = trace("coordinator", "worker-one", 3, Kind::Ack, Some("handoff"));
         ack.readback = Some(HandoffReadback { next_action: "Review result".into(), assumptions: vec![], open_questions: vec![] });
@@ -190,12 +197,15 @@ mod tests {
         state.observations.push(json!({"event":"admission","admission":{"delivered":false,"reason":"semantic review requires human review","message_id":"held"},"body":"secret peer text"}));
         state.calls = 2; state.actual_estimated_usd = 0.125;
         let report = render("run", &context, &state).unwrap();
-        assert!(report.contains("completed 1 · blocked 1 · unknown 0"));
+        assert!(report.contains("completion admitted 1 · blocked 1 · unknown 0"));
+        assert!(report.contains("worker slot 1: completion admitted"));
         assert!(report.contains("Handoffs: 1 · read-backs 1 · confirmations 1 · agreed 1"));
-        assert!(report.contains("Host test receipts: 1 · passed 1 · failed 0 · measured test time 123 ms"));
+        assert!(report.contains("Host test receipts: 1 · passed 1 · failed 0 · sum of recorded test durations 123 ms"));
         assert!(report.contains("judge quarantine IDs 1"));
         assert!(report.contains("$0.125000"));
         assert!(!report.contains("secret peer text"));
+        state.artifacts.remove(&diff_id);
+        assert!(render("run", &context, &state).is_err(), "a partial completion receipt must not be reported as completed");
     }
 
     #[test]
@@ -214,11 +224,26 @@ mod tests {
         fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o600)).unwrap();
         let before = fs::read(&manifest_path).unwrap(); let guard_before = fs::read(&context.state_path).unwrap();
         let report = read(temp.path(), "run").unwrap();
-        assert!(report.contains("Assignment counts: completed 0 · blocked 1 · unknown 1"));
+        assert!(report.contains("Assignment counts: completion admitted 0 · blocked 1 · unknown 1"));
         assert_eq!(fs::read(&manifest_path).unwrap(), before);
         assert_eq!(fs::read(&context.state_path).unwrap(), guard_before);
         let mut invalid = state; invalid.assignments_sha256 = "changed".into();
         doxa_fleet::save_private(&context.state_path, &invalid).unwrap();
         assert!(read(temp.path(), "run").is_err());
+        fs::write(&context.state_path, b"{partial").unwrap();
+        assert!(read(temp.path(), "run").is_err());
+        fs::write(&manifest_path, b"{partial").unwrap();
+        assert!(read(temp.path(), "run").is_err());
+    }
+
+    #[test]
+    fn debrief_does_not_print_private_assignment_labels() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut context = context(temp.path());
+        context.assignments[1].id = "confidential user message".into();
+        let state = State::default();
+        let report = render("run", &context, &state).unwrap();
+        assert!(report.contains("worker slot 1"));
+        assert!(!report.contains("confidential user message"));
     }
 }
