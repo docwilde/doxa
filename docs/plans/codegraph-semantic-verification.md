@@ -147,7 +147,11 @@ The CLI still never calls either socket seam.
 
 `semantic_broker::observe_stream_definition` rederives the restrictive
 producer plan, rehashes the call and target sources before and after the
-exchange, and passes a fresh nonce, exact query digest, and both hashes to a
+exchange, and requires the complete Git-listed Rust scan digest from the
+originating syntax query. It re-enumerates and rehashes those Rust files before
+and after the stream, and includes the digest in the challenge and opening and
+closing receipts. A changed third Rust file or added Rust path fails the
+observation. It passes a fresh nonce, source-bound query digest, and both hashes to a
 root-owned `SOCK_SEQPACKET` endpoint. A three-phase, size-bounded response
 must keep the same kernel-reported UID-zero sender PID, 64-digit container
 ID, nonce, and query digest across `opened`, ordered byte chunks, and
@@ -167,8 +171,13 @@ snapshot, prove that the inspected container produced the frame, or attest
 the broker executable. Same-UID replacement of the DOXA client and
 namespace-relative UID observations remain unresolved. The claimed image
 ID and container ID are syntax-checked, not verified against image bytes or
-Engine state. PID continuity alone does not pin an executable or exclude PID
-reuse after process exit.
+Engine state. The Rust digest covers Git-listed, nonignored `.rs` files at
+separate read times; it excludes ignored files, manifests, configuration, and
+other bytes visible to a whole-worktree mount. Edits restored between reads
+can escape it. The guest fixture predates the added digest field and needs a
+new offline run before its prior receipt can cover this packet format. PID
+continuity alone does not pin an executable or exclude PID reuse after process
+exit.
 
 To advance the binding, install a reviewed broker outside the DOXA user's
 write and ptrace authority. It must preserve a kernel-stable broker identity,

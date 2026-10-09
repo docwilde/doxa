@@ -8,7 +8,7 @@
 use super::semantic_evidence::inspect_definition_reply;
 use super::semantic_producer::{plan_rust_analyzer, read_lsp_frame, ProducerPlan};
 use super::semantic_runtime::bounded_unix_connect;
-use super::{file_bytes, CallCandidate, CallEdge};
+use super::{current_scan_input_sha256, file_bytes, CallCandidate, CallEdge};
 use serde::de::{MapAccess, Visitor};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -47,6 +47,33 @@ fn query_digest(plan: &ProducerPlan, edge: &CallEdge, candidate: &CallCandidate)
         "edge":edge,"candidate":candidate});
     let bytes = serde_json::to_vec(&query).map_err(|_| "cannot encode broker query")?;
     Ok(sha256_hex(&bytes))
+}
+
+// Bind this particular stream challenge to the complete Git-listed Rust
+// source digest from the syntax query. The hash is a local observation, not a
+// snapshot of every byte visible in the analyzer's eventual mount.
+fn stream_query_digest(plan: &ProducerPlan, edge: &CallEdge,
+    candidate: &CallCandidate, rust_scan: &str) -> Result<String, String> {
+    let query = query_digest(plan, edge, candidate)?;
+    let bytes = serde_json::to_vec(&json!({"protocol":STREAM_PROTOCOL,
+        "query_sha256":query,"rust_scan_input_sha256":rust_scan}))
+        .map_err(|_| "cannot encode source-bound stream query")?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn with_rust_scan_basis<T>(root: &Path, expected: &str,
+    exchange: impl FnOnce(&str) -> Result<T, String>) -> Result<(T, String), String> {
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("missing or invalid Rust scan input digest from syntax query".into());
+    }
+    let (before, count) = current_scan_input_sha256(root)?;
+    if before != expected { return Err("Rust source inventory changed since syntax query".into()); }
+    let result = exchange(&before)?;
+    let (after, after_count) = current_scan_input_sha256(root)?;
+    if after != before || after_count != count {
+        return Err("Rust source inventory changed during stream observation".into());
+    }
+    Ok((result, before))
 }
 
 /// Require UID-zero ownership as seen in the caller's namespace. This is a
@@ -293,6 +320,7 @@ struct StreamAssembler<'a> {
     query: &'a str,
     source: &'a str,
     target: &'a str,
+    rust_scan: &'a str,
     sender_pid: Option<libc::pid_t>,
     cid: Option<String>,
     bytes: Vec<u8>,
@@ -302,8 +330,9 @@ struct StreamAssembler<'a> {
 
 #[allow(dead_code)]
 impl<'a> StreamAssembler<'a> {
-    fn new(nonce: &'a str, query: &'a str, source: &'a str, target: &'a str) -> Self {
-        Self { nonce, query, source, target, sender_pid: None, cid: None,
+    fn new(nonce: &'a str, query: &'a str, source: &'a str, target: &'a str,
+        rust_scan: &'a str) -> Self {
+        Self { nonce, query, source, target, rust_scan, sender_pid: None, cid: None,
             bytes: Vec::new(), chunks: 0, stage: 0 }
     }
 
@@ -329,8 +358,9 @@ impl<'a> StreamAssembler<'a> {
         let phase = packet.get("phase").and_then(Value::as_str).ok_or("missing broker stream phase")?;
         match (self.stage, phase) {
             (0, "opened") => {
-                if object.len() != 9 || packet.get("source_sha256").and_then(Value::as_str) != Some(self.source)
+                if object.len() != 10 || packet.get("source_sha256").and_then(Value::as_str) != Some(self.source)
                     || packet.get("target_sha256").and_then(Value::as_str) != Some(self.target)
+                    || packet.get("rust_scan_input_sha256").and_then(Value::as_str) != Some(self.rust_scan)
                     || packet.get("status").and_then(Value::as_str) != Some("observation_only")
                     || !packet.get("image_id").and_then(Value::as_str).is_some_and(valid_image_id) {
                     return Err("broker stream opening is incomplete or claims authority".into());
@@ -357,9 +387,10 @@ impl<'a> StreamAssembler<'a> {
                 Ok(false)
             }
             (1, "closed") => {
-                if object.len() != 8 || self.chunks == 0
+                if object.len() != 9 || self.chunks == 0
                     || packet.get("chunks").and_then(Value::as_u64) != Some(self.chunks as u64)
                     || packet.get("stream_sha256").and_then(Value::as_str) != Some(sha256_hex(&self.bytes).as_str())
+                    || packet.get("rust_scan_input_sha256").and_then(Value::as_str) != Some(self.rust_scan)
                     || packet.get("status").and_then(Value::as_str) != Some("observation_only") {
                     return Err("broker stream closure is incomplete or mismatched".into());
                 }
@@ -402,7 +433,7 @@ fn require_stream_eof(fd: libc::c_int, deadline: Instant) -> Result<(), String> 
 /// not prove that sender's code, the Engine, or the actual analyzer byte path.
 #[allow(dead_code)]
 fn observe_stream_packets(path: &Path, nonce: &str, digest: &str,
-    source: &str, target: &str) -> Result<Value, String> {
+    source: &str, target: &str, rust_scan: &str) -> Result<Value, String> {
     if unsafe { libc::geteuid() } == 0 { return Err("broker client must run unprivileged".into()); }
     let inode = root_owned_socket(path)?;
     let deadline = Instant::now() + DEADLINE;
@@ -410,14 +441,15 @@ fn observe_stream_packets(path: &Path, nonce: &str, digest: &str,
     uid_zero_peer_fd(socket.as_raw_fd())?;
     if root_owned_socket(path)? != inode { return Err("broker socket changed during connect".into()); }
     let request = json!({"protocol":STREAM_PROTOCOL,"operation":"observe_stream",
-        "nonce":nonce,"query_sha256":digest,"source_sha256":source,"target_sha256":target});
+        "nonce":nonce,"query_sha256":digest,"source_sha256":source,"target_sha256":target,
+        "rust_scan_input_sha256":rust_scan});
     let body = serde_json::to_vec(&request).map_err(|_| "cannot encode broker stream challenge")?;
     if body.len() > MAX_WIRE_BYTES { return Err("broker stream challenge exceeds bound".into()); }
     packet_ready(socket.as_raw_fd(), libc::POLLOUT, deadline)?;
     let sent = unsafe { libc::send(socket.as_raw_fd(), body.as_ptr().cast(), body.len(),
         libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT) };
     if sent != body.len() as isize { return Err("broker stream challenge send failed".into()); }
-    let mut assembler = StreamAssembler::new(nonce, digest, source, target);
+    let mut assembler = StreamAssembler::new(nonce, digest, source, target, rust_scan);
     for _ in 0..(MAX_STREAM_CHUNKS + 2) {
         let (packet, sender) = receive_root_packet_with_sender(socket.as_raw_fd(), deadline)?;
         if assembler.accept(&packet, sender.pid)? {
@@ -434,7 +466,8 @@ fn observe_stream_packets(path: &Path, nonce: &str, digest: &str,
 /// is absent. The CLI has no call to this function.
 #[allow(dead_code)]
 pub(crate) fn observe_stream_definition(path: &Path, plan: &ProducerPlan,
-    edge: &CallEdge, candidate: &CallCandidate) -> Result<Value, String> {
+    edge: &CallEdge, candidate: &CallCandidate,
+    rust_scan_input_sha256: &str) -> Result<Value, String> {
     let expected = plan_rust_analyzer(&plan.root, &plan.image, &plan.docker_host, true)?;
     if plan.root != expected.root || plan.args != expected.args
         || plan.initialize != expected.initialize || plan.attestation != expected.attestation {
@@ -445,14 +478,16 @@ pub(crate) fn observe_stream_definition(path: &Path, plan: &ProducerPlan,
     if source != edge.sha256 || target != candidate.sha256 {
         return Err("semantic source changed before stream challenge".into());
     }
-    let nonce = challenge_nonce()?;
-    let digest = query_digest(plan, edge, candidate)?;
-    let response = observe_stream_packets(path, &nonce, &digest, &source, &target)?;
-    let request = json!({"jsonrpc":"2.0","id":7,"method":"textDocument/definition",
-        "params":{"textDocument":{"uri":format!("file://{}/{}",plan.root.display(),edge.file)},
-            "position":{"line":edge.line.checked_sub(1).ok_or("invalid source line")?,
-                "character":edge.column}}});
-    let evidence = inspect_definition_reply(&plan.root, edge, candidate, &request, &response)?;
+    let (evidence, rust_scan) = with_rust_scan_basis(&plan.root, rust_scan_input_sha256, |basis| {
+        let nonce = challenge_nonce()?;
+        let digest = stream_query_digest(plan, edge, candidate, basis)?;
+        let response = observe_stream_packets(path, &nonce, &digest, &source, &target, basis)?;
+        let request = json!({"jsonrpc":"2.0","id":7,"method":"textDocument/definition",
+            "params":{"textDocument":{"uri":format!("file://{}/{}",plan.root.display(),edge.file)},
+                "position":{"line":edge.line.checked_sub(1).ok_or("invalid source line")?,
+                    "character":edge.column}}});
+        inspect_definition_reply(&plan.root, edge, candidate, &request, &response)
+    })?;
     for (relative, expected) in [(&edge.file, &source), (&candidate.file, &target)] {
         if file_bytes(&plan.root, relative)?.1 != *expected {
             return Err("semantic source changed after stream observation".into());
@@ -460,7 +495,8 @@ pub(crate) fn observe_stream_definition(path: &Path, plan: &ProducerPlan,
     }
     Ok(json!({"status":"protocol_match_untrusted","binding":"unknown",
         "socket_observation":"one_sender_stream_untrusted",
-        "reason":"analyzer_engine_and_broker_binary_unproven","evidence":evidence}))
+        "reason":"analyzer_engine_and_broker_binary_unproven",
+        "rust_scan_input_sha256":rust_scan,"evidence":evidence}))
 }
 
 /// Guest-only check of a reply *sender* on one packet. Still returns unknown:
@@ -661,30 +697,32 @@ mod tests {
         assert!(start.elapsed() < Duration::from_millis(250));
     }
 
-    fn stream_fixture() -> (String, String, String, String, Value, Value, Value) {
+    fn stream_fixture() -> (String, String, String, String, String, Value, Value, Value) {
         let nonce = "a".repeat(64);
         let query = "b".repeat(64);
         let source = "c".repeat(64);
         let target = "d".repeat(64);
+        let rust_scan = "a".repeat(64);
         let cid = "e".repeat(64);
         let frame = b"Content-Length: 2\r\n\r\n{}";
         let opened = json!({"protocol":STREAM_PROTOCOL,"nonce":nonce,"query_sha256":query,
             "cid":cid,"phase":"opened","source_sha256":source,
-            "target_sha256":target,"image_id":format!("sha256:{}", "f".repeat(64)),
+            "target_sha256":target,"rust_scan_input_sha256":rust_scan,
+            "image_id":format!("sha256:{}", "f".repeat(64)),
             "status":"observation_only"});
         let chunk = json!({"protocol":STREAM_PROTOCOL,"nonce":nonce,"query_sha256":query,
             "cid":cid,"phase":"chunk","sequence":0,
             "data_hex":frame.iter().map(|byte| format!("{byte:02x}")).collect::<String>()});
         let closed = json!({"protocol":STREAM_PROTOCOL,"nonce":nonce,"query_sha256":query,
             "cid":cid,"phase":"closed","chunks":1,"stream_sha256":sha256_hex(frame),
-            "status":"observation_only"});
-        (nonce, query, source, target, opened, chunk, closed)
+            "rust_scan_input_sha256":rust_scan,"status":"observation_only"});
+        (nonce, query, source, target, rust_scan, opened, chunk, closed)
     }
 
     #[test]
     fn stream_observation_requires_one_ordered_sender_and_exact_lsp_frame() {
-        let (nonce, query, source, target, opened, chunk, closed) = stream_fixture();
-        let mut stream = StreamAssembler::new(&nonce, &query, &source, &target);
+        let (nonce, query, source, target, rust_scan, opened, chunk, closed) = stream_fixture();
+        let mut stream = StreamAssembler::new(&nonce, &query, &source, &target, &rust_scan);
         assert!(!stream.accept(&opened, 101).unwrap());
         assert!(!stream.accept(&chunk, 101).unwrap());
         assert!(stream.accept(&closed, 101).unwrap());
@@ -703,10 +741,11 @@ mod tests {
 
     #[test]
     fn stream_observation_rejects_packet_splice_replay_and_claimed_authority() {
-        let (nonce, query, source, target, opened, chunk, closed) = stream_fixture();
-        let fresh = || StreamAssembler::new(&nonce, &query, &source, &target);
+        let (nonce, query, source, target, rust_scan, opened, chunk, closed) = stream_fixture();
+        let fresh = || StreamAssembler::new(&nonce, &query, &source, &target, &rust_scan);
         for (field, wrong) in [("nonce", json!("old")), ("query_sha256", json!("old")),
             ("source_sha256", json!("old")), ("target_sha256", json!("old")),
+            ("rust_scan_input_sha256", json!("old")),
             ("status", json!("attested")), ("image_id", json!("latest"))] {
             let mut changed = opened.clone(); changed[field] = wrong;
             assert!(fresh().accept(&changed, 101).is_err(), "{field}");
@@ -728,6 +767,7 @@ mod tests {
         let mut stream = fresh(); stream.accept(&opened, 101).unwrap();
         stream.accept(&chunk, 101).unwrap();
         for (field, wrong) in [("chunks", json!(2)), ("stream_sha256", json!("0".repeat(64))),
+            ("rust_scan_input_sha256", json!("0".repeat(64))),
             ("cid", json!("f".repeat(64))), ("status", json!("verified"))] {
             let mut changed = closed.clone(); changed[field] = wrong;
             assert!(stream.accept(&changed, 101).is_err(), "{field}");
@@ -742,20 +782,77 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         assert!(Command::new("git").arg("init").arg("-q").arg(root.path()).status().unwrap().success());
         fs::write(root.path().join("a.rs"), "fn caller() { target(); }\nfn target() {}\n").unwrap();
+        fs::write(root.path().join("third.rs"), "fn unrelated() {}\n").unwrap();
         assert!(Command::new("git").arg("add").arg("a.rs").current_dir(root.path()).status().unwrap().success());
         let answer = query(root.path(), Query::Calls("a.rs".into())).unwrap();
+        let rust_scan = answer.scan_input_sha256.clone().unwrap();
         let edge = answer.edges.iter().find(|row| row.target == "target").unwrap();
         let candidate = edge.candidates.first().unwrap();
         let mut plan = plan_rust_analyzer(root.path(), IMAGE,
             "unix:///run/user/1000/docker.sock", true).unwrap();
         let same_uid_socket = root.path().join("fake.sock");
         plan.args.push("--privileged".into());
-        let error = observe_stream_definition(&same_uid_socket, &plan, edge, candidate).unwrap_err();
+        let error = observe_stream_definition(&same_uid_socket, &plan, edge, candidate,
+            &rust_scan).unwrap_err();
         assert!(error.contains("plan changed"), "{error}");
         plan.args.pop();
+        fs::write(root.path().join("third.rs"), "fn changed() {}\n").unwrap();
+        let error = observe_stream_definition(&same_uid_socket, &plan, edge, candidate,
+            &rust_scan).unwrap_err();
+        assert!(error.contains("source inventory changed since syntax query"), "{error}");
+        fs::write(root.path().join("third.rs"), "fn unrelated() {}\n").unwrap();
         fs::write(root.path().join("a.rs"), "fn caller() { target(); }\nfn target() {}\n// changed\n").unwrap();
-        let error = observe_stream_definition(&same_uid_socket, &plan, edge, candidate).unwrap_err();
+        let error = observe_stream_definition(&same_uid_socket, &plan, edge, candidate,
+            &rust_scan).unwrap_err();
         assert!(error.contains("source changed"), "{error}");
+    }
+
+    #[test]
+    fn stream_source_basis_rejects_third_rust_file_drift_and_added_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(Command::new("git").arg("init").arg("-q").arg(root.path()).status().unwrap().success());
+        fs::write(root.path().join("a.rs"), "fn caller() { target(); }\n").unwrap();
+        fs::write(root.path().join("b.rs"), "fn target() {}\n").unwrap();
+        fs::write(root.path().join("third.rs"), "fn unrelated() {}\n").unwrap();
+        let answer = query(root.path(), Query::Calls("a.rs".into())).unwrap();
+        let expected = answer.scan_input_sha256.unwrap();
+        let (seen, basis) = with_rust_scan_basis(root.path(), &expected,
+            |digest| Ok(digest.to_owned())).unwrap();
+        assert_eq!(seen, expected);
+        assert_eq!(basis, expected);
+
+        let error = with_rust_scan_basis(root.path(), &expected, |_| {
+            fs::write(root.path().join("third.rs"), "fn changed() {}\n").unwrap();
+            Ok(())
+        }).unwrap_err();
+        assert!(error.contains("during stream observation"), "{error}");
+        let error = with_rust_scan_basis(root.path(), &expected, |_| Ok(())).unwrap_err();
+        assert!(error.contains("since syntax query"), "{error}");
+
+        fs::write(root.path().join("third.rs"), "fn unrelated() {}\n").unwrap();
+        let error = with_rust_scan_basis(root.path(), &expected, |_| {
+            fs::write(root.path().join("added.rs"), "fn new() {}\n").unwrap();
+            Ok(())
+        }).unwrap_err();
+        assert!(error.contains("during stream observation"), "{error}");
+    }
+
+    #[test]
+    fn stream_query_digest_binds_whole_rust_scan_to_challenge() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(Command::new("git").arg("init").arg("-q").arg(root.path()).status().unwrap().success());
+        fs::write(root.path().join("a.rs"), "fn caller() { target(); }\nfn target() {}\n").unwrap();
+        let answer = query(root.path(), Query::Calls("a.rs".into())).unwrap();
+        let edge = answer.edges.first().unwrap();
+        let candidate = edge.candidates.first().unwrap();
+        let plan = plan_rust_analyzer(root.path(), IMAGE,
+            "unix:///run/user/1000/docker.sock", true).unwrap();
+        let basis = answer.scan_input_sha256.as_deref().unwrap();
+        let digest = stream_query_digest(&plan, edge, candidate, basis).unwrap();
+        assert_ne!(digest, stream_query_digest(&plan, edge, candidate, &"0".repeat(64)).unwrap());
+        assert_ne!(digest, query_digest(&plan, edge, candidate).unwrap());
+        assert_eq!(with_rust_scan_basis(root.path(), "", |_| Ok(())).unwrap_err(),
+            "missing or invalid Rust scan input digest from syntax query");
     }
 
     /// Guest only: root owns this endpoint and sends a complete stream in
@@ -767,7 +864,7 @@ mod tests {
         let mode = std::env::var("DOXA_STREAM_MODE").unwrap();
         let path = Path::new("/run/doxa-semantic/stream.sock");
         let result = observe_stream_packets(path, &"a".repeat(64), &"b".repeat(64),
-            &"c".repeat(64), &"d".repeat(64));
+            &"c".repeat(64), &"d".repeat(64), &"f".repeat(64));
         if mode == "root" {
             assert_eq!(result.unwrap(), json!({}));
             println!("DOXA_STREAM_RECEIPT mode=root ordered_root_sender=observed binding=unknown");
