@@ -11,7 +11,7 @@
 > [!WARNING]
 > Rust 2.0 is in beta. Agents can edit files and run commands with your privileges. Choose a [session isolation profile](docs/session-isolation.md) and review the [platform limits](#platform-and-scope) before using DOXA on important work.
 
-![DOXA Rust beta.36 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.36-hero.png)
+![DOXA Rust beta.37 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.37-hero.png)
 
 [How the gallery was captured](docs/rust-gallery.md)
 
@@ -76,13 +76,13 @@ Remote control is opt in. `doxa remote serve` exposes a private Rust browser vie
 
 ## Gallery
 
-These beta.36 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
+These beta.37 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
 
-The gallery also shows the [read-only code graph modal](assets/shots/rust-2.0.0-beta.36-codegraph.png), [explicit project label](assets/shots/rust-2.0.0-beta.36-project-label.png), and [pane-row rail](assets/shots/rust-2.0.0-beta.36-pane-triage.png).
+The gallery also shows the [read-only code graph modal](assets/shots/rust-2.0.0-beta.37-codegraph.png), [explicit project label](assets/shots/rust-2.0.0-beta.37-project-label.png), and [pane-row rail](assets/shots/rust-2.0.0-beta.37-pane-triage.png).
 
 | Image preview | Isolation details | Fleet release review |
 | --- | --- | --- |
-| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.36-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.36-isolation.png) | ![Synthetic checkpoint and handoff evidence in the fleet release modal](assets/shots/rust-2.0.0-beta.36-fleet-release-review.png) |
+| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.37-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.37-isolation.png) | ![Synthetic checkpoint and handoff evidence in the fleet release modal](assets/shots/rust-2.0.0-beta.37-fleet-release-review.png) |
 
 ## Platform and scope
 

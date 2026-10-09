@@ -92,8 +92,10 @@ unknown for both Rust and Python rows.
 
 Every CLI query enumerates the current tracked **and untracked, nonignored** Git
 files and reads Rust and Python bytes afresh. Git root lookup and file enumeration
-use a ten-second subprocess deadline, bounded stdout and stderr, and process-group
-cleanup before reaping the Git leader. A timeout, failed command, oversized listing, or incomplete
+use a ten-second subprocess deadline, 4 KiB/4 MiB root/list stdout caps and a
+16 KiB stderr cap. On failure, `waitid(WNOWAIT)` reserves the leader's group ID
+until process-group cleanup kills descendants, including ones that closed their
+pipes. A timeout, failed command, oversized listing, or incomplete
 NUL-delimited path list returns no answer. The explicit TUI query cache
 re-reads and hashes those bytes before reusing an answer.
 Each row and call edge carries its file, line, SHA-256 of the parsed bytes, and
