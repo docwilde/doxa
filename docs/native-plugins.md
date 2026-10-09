@@ -129,8 +129,10 @@ grantless execution route; TUI execution stays disabled.
 It requires the running CLI to occupy a direct supervisor leaf beneath an
 empty, owner-delegated cgroup v2 parent with `memory`, `pids` and `cpu`
 controllers enabled. It refuses leftover `doxa-plugin-*` children, unsafe or
-linked executables, and binary replacement during observation. The report
-records the parent's and supervisor's device/inode identities plus SHA-256,
+linked executables, and replacement during each binary's identity read. The
+three binaries are checked sequentially: a pathname can change after its
+check, so the report is not an atomic snapshot. It records the parent's and
+supervisor's device/inode identities plus SHA-256,
 size and device/inode for the opened frontend, companion
 `doxa-plugin-worker` and `/usr/bin/bwrap` binaries. It does not create a
 cgroup, launch a worker or issue TUI authority.
