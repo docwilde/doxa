@@ -1,21 +1,23 @@
 //! Unwired Linux sandbox admission for the future grantless plugin child.
 //! A command is constructed only after a private cgroup v2 budget is installed.
-//! No TUI or CLI path calls this module yet: the dedicated child protocol and
-//! containment acceptance suite are still required before activation.
+//! No TUI or CLI path calls this module yet: cgroup-backed containment
+//! acceptance on a delegated host is still required before activation.
 #![cfg(target_os = "linux")]
 #![allow(dead_code)] // staged admission API has no production caller
 
 use std::ffi::CString;
-use std::fs;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom};
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::{Duration, Instant};
+use serde_json::Value;
 
 const BWRAP: &str = "/usr/bin/bwrap";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
@@ -116,16 +118,26 @@ impl Drop for CgroupBudget {
     fn drop(&mut self) { let _ = self.stop(); }
 }
 
-fn require_trusted_executable(path: &Path) -> io::Result<PathBuf> {
-    let path = fs::canonicalize(path)?;
-    let metadata = fs::metadata(&path)?;
+fn open_trusted_executable(path: &Path) -> io::Result<File> {
+    if !path.is_absolute() { return Err(unavailable("plugin worker path must be absolute")); }
+    let file = OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(path)?;
+    let metadata = file.metadata()?;
     if !path.is_absolute() || !metadata.is_file()
         || ![0, unsafe { libc::geteuid() }].contains(&metadata.uid())
         || metadata.permissions().mode() & 0o022 != 0
-        || metadata.permissions().mode() & 0o111 == 0 {
+        || metadata.permissions().mode() & 0o111 == 0
+        || metadata.nlink() != 1 {
         return Err(unavailable("plugin worker executable is not private or root-owned"));
     }
-    Ok(path)
+    Ok(file)
+}
+
+fn status_memfd() -> io::Result<File> {
+    let label = CString::new("doxa-plugin-bwrap-status").unwrap();
+    let fd = unsafe { libc::memfd_create(label.as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 { return Err(io::Error::last_os_error()); }
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 unsafe fn set_limit(resource: libc::__rlimit_resource_t, value: libc::rlim_t) -> io::Result<()> {
@@ -151,61 +163,162 @@ unsafe fn apply_process_limits() -> io::Result<()> {
     Ok(())
 }
 
-/// Build a command with a zero-grant filesystem and network view. This is not
-/// an activation switch: no production caller or worker executable exists.
-/// The exact module bytes must later arrive through the bounded stdin pipe.
-fn command(worker: &Path, cgroup: &CgroupBudget) -> io::Result<Command> {
-    let bwrap = require_trusted_executable(Path::new(BWRAP))?;
-    let worker = require_trusted_executable(worker)?;
-    let procs = cgroup.procs_path()?;
-    let mut command = Command::new(bwrap);
+struct WorkerCommand { command: Command, status: File }
+
+/// The worker is opened with O_NOFOLLOW and mounted from that opened inode.
+/// Replacing its pathname after this call cannot change the bytes executed.
+/// The separate status descriptor belongs to Bubblewrap and is not mounted
+/// into the child; it distinguishes setup failure from a started child.
+fn command_impl(worker: &Path, args: &[&str], cgroup: Option<&CgroupBudget>) -> io::Result<WorkerCommand> {
+    let _bwrap = open_trusted_executable(Path::new(BWRAP))?;
+    let worker_file = open_trusted_executable(worker)?;
+    let status = status_memfd()?;
+    let status_child = status.try_clone()?;
+    let worker_fd = worker_file.as_raw_fd();
+    let status_fd = status_child.as_raw_fd();
+    if worker_fd == status_fd { return Err(unavailable("worker and status descriptors collided")); }
+    let procs = cgroup.map(CgroupBudget::procs_path).transpose()?;
+    let mut command = Command::new(BWRAP);
     command.env_clear().current_dir("/");
-    command.args(["--unshare-all", "--unshare-user", "--die-with-parent", "--disable-userns",
+    command.args(["--json-status-fd", &status_fd.to_string(),
+        "--unshare-all", "--unshare-user", "--die-with-parent", "--disable-userns",
         "--cap-drop", "ALL", "--clearenv", "--ro-bind", "/usr", "/usr",
         "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib",
-        "--symlink", "usr/lib64", "/lib64", "--ro-bind", worker.to_str()
-            .ok_or_else(|| unavailable("plugin worker path is not UTF-8"))?, "/worker",
+        "--symlink", "usr/lib64", "/lib64", "--ro-bind-fd", &worker_fd.to_string(), "/worker",
         "--proc", "/proc", "--dev", "/dev", "--size", "16777216",
         "--tmpfs", "/tmp", "--chdir", "/", "--", "/worker"]);
+    command.args(args);
     // SAFETY: only async-signal-safe libc calls run between fork and exec.
     // The cgroup write moves the untrusted child before bwrap can execute.
+    // The two explicitly passed descriptors are reopened after close_range;
+    // Rust's spawn error pipe remains close-on-exec and is never overwritten.
     unsafe { command.pre_exec(move || {
-        let fd = libc::open(procs.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
-        if fd < 0 { return Err(io::Error::last_os_error()); }
-        let wrote = libc::write(fd, b"0".as_ptr().cast(), 1);
-        let saved_error = io::Error::last_os_error();
-        libc::close(fd);
-        if wrote != 1 { return Err(saved_error); }
-        apply_process_limits()
+        if let Some(procs) = &procs {
+            let fd = libc::open(procs.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+            if fd < 0 { return Err(io::Error::last_os_error()); }
+            let wrote = libc::write(fd, b"0".as_ptr().cast(), 1);
+            let saved_error = io::Error::last_os_error();
+            libc::close(fd);
+            if wrote != 1 { return Err(saved_error); }
+        }
+        apply_process_limits()?;
+        for fd in [worker_file.as_raw_fd(), status_child.as_raw_fd()] {
+            if libc::fcntl(fd, libc::F_SETFD, 0) < 0 { return Err(io::Error::last_os_error()); }
+        }
+        Ok(())
     }); }
-    Ok(command)
+    Ok(WorkerCommand { command, status })
+}
+
+fn command(worker: &Path, cgroup: &CgroupBudget) -> io::Result<WorkerCommand> {
+    command_impl(worker, &[], Some(cgroup))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WrapperStatus { child_started: bool, exit_code: Option<i32> }
+
+fn read_wrapper_status(mut file: File) -> io::Result<WrapperStatus> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.take(4097).read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 { return Err(unavailable("Bubblewrap status exceeded limit")); }
+    let mut status = WrapperStatus::default();
+    let mut rows = 0;
+    for line in bytes.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
+        rows += 1;
+        if rows > 4 { return Err(unavailable("too many Bubblewrap status rows")); }
+        let value: Value = serde_json::from_slice(line)
+            .map_err(|_| unavailable("invalid Bubblewrap status JSON"))?;
+        let object = value.as_object().ok_or_else(|| unavailable("invalid Bubblewrap status object"))?;
+        if let Some(pid) = object.get("child-pid") {
+            if status.child_started || pid.as_u64().is_none_or(|pid| pid == 0) {
+                return Err(unavailable("invalid Bubblewrap child status"));
+            }
+            status.child_started = true;
+        }
+        if let Some(code) = object.get("exit-code") {
+            if status.exit_code.is_some() {
+                return Err(unavailable("duplicate Bubblewrap exit status"));
+            }
+            status.exit_code = Some(code.as_i64().and_then(|code| i32::try_from(code).ok())
+                .ok_or_else(|| unavailable("invalid Bubblewrap exit code"))?);
+        }
+    }
+    Ok(status)
+}
+
+/// Worker results require an entry receipt and matching wrapper exit. A
+/// worker that crashes after its receipt is distinct from failure before its
+/// entry. Bubblewrap's child-pid is a namespace helper, not proof that the
+/// worker binary reached main; pre-entry failures remain one conservative
+/// class. It also cannot distinguish a signal from deliberate nonzero exit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IsolatedOutcome {
+    Return(i32),
+    ModuleFailure(super::runner::WorkerFailure),
+    Timeout,
+    Cancelled,
+    OutputLimit,
+    WorkerAbnormalExit(i32),
+    SandboxOrPreEntryFailure(i32),
+    WrapperCrash(i32),
+    ProtocolFailure,
+}
+
+fn classify(capture: &super::runner_process::Capture, status: WrapperStatus) -> IsolatedOutcome {
+    use super::runner_process::Outcome;
+    match capture.outcome {
+        Outcome::Timeout => IsolatedOutcome::Timeout,
+        Outcome::Cancelled => IsolatedOutcome::Cancelled,
+        Outcome::OutputLimit => IsolatedOutcome::OutputLimit,
+        Outcome::Crash(signal) => IsolatedOutcome::WrapperCrash(signal),
+        Outcome::Exit(code) if !capture.stderr.starts_with(super::runner::READY_MARKER) =>
+            IsolatedOutcome::SandboxOrPreEntryFailure(code),
+        Outcome::Exit(code) if !status.child_started || status.exit_code != Some(code) =>
+            IsolatedOutcome::ProtocolFailure,
+        Outcome::Exit(0) if capture.stderr != super::runner::READY_MARKER =>
+            IsolatedOutcome::ProtocolFailure,
+        Outcome::Exit(0) => match super::runner::decode_response(capture.stdout.as_slice()) {
+            Ok(Ok(value)) => IsolatedOutcome::Return(value),
+            Ok(Err(failure)) => IsolatedOutcome::ModuleFailure(failure),
+            Err(_) => IsolatedOutcome::ProtocolFailure,
+        },
+        Outcome::Exit(code) => IsolatedOutcome::WorkerAbnormalExit(code),
+    }
 }
 
 /// Unwired containment seam. It rechecks exact owner approval before spawn,
 /// sends the verified bytes through one bounded pipe, and kills the entire
-/// cgroup after every process outcome. A dedicated worker executable and
-/// response classification are still required before any app caller exists.
+/// cgroup after every process outcome. It remains without an app caller until
+/// aggregate cgroup containment is tested on a delegated host.
 pub(crate) fn supervise_reviewed(
     home: &Path,
     review: &super::packages::Review,
     worker: &Path,
     cancel: &AtomicBool,
     deadline: Instant,
-) -> io::Result<super::runner_process::Capture> {
+) -> io::Result<IsolatedOutcome> {
     let package = super::packages::recheck_approved(home, review)?;
     let frame = super::runner::encode_request(&package)?;
     let mut budget = CgroupBudget::create()?;
-    let mut command = command(worker, &budget)?;
+    let WorkerCommand { mut command, status } = command(worker, &budget)?;
     let result = super::runner_process::supervise_with_input(
         &mut command, Some(&frame), cancel, deadline);
     budget.stop()?;
-    result
+    let capture = result?;
+    if matches!(capture.outcome, super::runner_process::Outcome::Timeout
+        | super::runner_process::Outcome::Cancelled
+        | super::runner_process::Outcome::OutputLimit) {
+        return Ok(classify(&capture, WrapperStatus::default()));
+    }
+    let status = read_wrapper_status(status)?;
+    Ok(classify(&capture, status))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::runner_process::{supervise, Outcome};
+    use super::super::runner_process::{supervise, supervise_with_input, Outcome};
     use std::sync::atomic::AtomicBool;
     use std::net::TcpListener;
     use std::os::fd::AsRawFd;
@@ -221,6 +334,30 @@ mod tests {
         // SAFETY: this uses the launcher's async-signal-safe pre-exec limits.
         unsafe { command.pre_exec(|| apply_process_limits()); }
         command
+    }
+
+    fn sandbox_available() -> bool {
+        let features = Command::new(BWRAP).arg("--help").output()
+            .is_ok_and(|output| {
+                let help = String::from_utf8_lossy(&output.stdout);
+                help.contains("--ro-bind-fd") && help.contains("--json-status-fd")
+            });
+        features
+            && fixture("exit 0").stdout(Stdio::null()).stderr(Stdio::null())
+                .status().is_ok_and(|status| status.success())
+    }
+
+    fn script(path: &Path, body: &str) {
+        fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    fn run_bwrap(launch: WorkerCommand) -> (super::super::runner_process::Capture, WrapperStatus) {
+        let WorkerCommand { mut command, status } = launch;
+        let capture = supervise_with_input(&mut command, None, &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(3)).unwrap();
+        let wrapper = read_wrapper_status(status).unwrap();
+        (capture, wrapper)
     }
 
     #[test]
@@ -242,11 +379,74 @@ mod tests {
         let worker = dir.path().join("worker");
         fs::write(&worker, b"worker").unwrap();
         fs::set_permissions(&worker, fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(require_trusted_executable(&worker).is_err());
+        assert!(open_trusted_executable(&worker).is_err());
+    }
+
+    #[test]
+    fn opened_worker_inode_survives_path_replacement() {
+        if !sandbox_available() { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let worker = dir.path().join("worker");
+        script(&worker, "printf 'DOXA-WORKER-READY-v1\\n' >&2; printf 'DOXAR1\\000\\000\\000\\052\\000\\000\\000'");
+        let launch = command_impl(&worker, &[], None).unwrap();
+        fs::rename(&worker, dir.path().join("original")).unwrap();
+        script(&worker, "printf 'replaced'");
+        let (capture, wrapper) = run_bwrap(launch);
+        assert!(wrapper.child_started);
+        assert_eq!(classify(&capture, wrapper), IsolatedOutcome::Return(42));
+    }
+
+    #[test]
+    fn wrapper_descriptors_are_not_exposed_to_worker() {
+        if !sandbox_available() { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let worker = dir.path().join("worker");
+        script(&worker, "ls -l /proc/self/fd | grep -E 'doxa-plugin-bwrap-status|/home/' >/dev/null && exit 9; printf 'DOXA-WORKER-READY-v1\\n' >&2; printf 'DOXAR1\\000\\000\\000\\001\\000\\000\\000'");
+        let (capture, wrapper) = run_bwrap(command_impl(&worker, &[], None).unwrap());
+        assert_eq!(classify(&capture, wrapper), IsolatedOutcome::Return(1));
+    }
+
+    #[test]
+    fn started_child_crash_and_protocol_failure_are_distinct() {
+        if !sandbox_available() { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let worker = dir.path().join("worker");
+        script(&worker, "printf 'DOXA-WORKER-READY-v1\\n' >&2; kill -KILL $$");
+        let (capture, wrapper) = run_bwrap(command_impl(&worker, &[], None).unwrap());
+        assert!(wrapper.child_started);
+        assert_eq!(classify(&capture, wrapper), IsolatedOutcome::WorkerAbnormalExit(137));
+
+        script(&worker, "printf 'DOXA-WORKER-READY-v1\\n' >&2; exit 0");
+        let (capture, wrapper) = run_bwrap(command_impl(&worker, &[], None).unwrap());
+        assert_eq!(classify(&capture, wrapper), IsolatedOutcome::ProtocolFailure);
+    }
+
+    #[test]
+    fn wrapper_setup_failure_has_no_child_start_receipt() {
+        if !sandbox_available() { return; }
+        let status = status_memfd().unwrap();
+        let fd = status.as_raw_fd();
+        let mut command = Command::new(BWRAP);
+        command.args(["--json-status-fd", &fd.to_string(), "--unshare-all", "--unshare-user",
+            "--ro-bind", "/does-not-exist-doxa-plugin", "/worker", "--", "/worker"]);
+        // SAFETY: only the trusted wrapper gets this explicitly passed FD.
+        unsafe { command.pre_exec(move || {
+            apply_process_limits()?;
+            if libc::fcntl(fd, libc::F_SETFD, 0) < 0 { return Err(io::Error::last_os_error()); }
+            Ok(())
+        }); }
+        let capture = supervise(&mut command, &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(3)).unwrap();
+        let wrapper = read_wrapper_status(status).unwrap();
+        // Bubblewrap may report its namespace helper PID even when a mount
+        // fails before the worker enters. Only the worker receipt proves entry.
+        assert!(!capture.stderr.starts_with(super::super::runner::READY_MARKER));
+        assert!(matches!(classify(&capture, wrapper), IsolatedOutcome::SandboxOrPreEntryFailure(_)));
     }
 
     #[test]
     fn namespace_fixture_hides_host_file_environment_and_network() {
+        if !sandbox_available() { return; }
         let marker = tempfile::tempdir().unwrap();
         let secret = marker.path().join("private-marker");
         fs::write(&secret, b"secret").unwrap();
@@ -259,6 +459,7 @@ mod tests {
 
     #[test]
     fn namespace_fixture_cannot_connect_to_host_listener() {
+        if !sandbox_available() { return; }
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -270,6 +471,7 @@ mod tests {
 
     #[test]
     fn namespace_fixture_closes_ambient_descriptor() {
+        if !sandbox_available() { return; }
         let file = tempfile::tempfile().unwrap();
         let inherited = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 200) };
         assert!(inherited >= 200);

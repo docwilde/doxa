@@ -1,9 +1,8 @@
-//! Worker contract for a future sandboxed, grantless plugin runner.
-//! No production code calls the interpreter, and there is no child command or
-//! TUI activation path. OS isolation, deadlines and cleanup remain open.
+//! Grantless WebAssembly worker contract and dedicated child entrypoint.
+//! No TUI or plugin command launches it; end-to-end cgroup proof remains open.
 use super::packages::{self, RecheckedPackage, MAX_MODULE};
 use sha2::{Digest, Sha256};
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read, Write};
 use wasmparser::{ExternalKind, Parser, Payload};
 use wasmi::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder, TrapCode};
 
@@ -11,6 +10,7 @@ const REQUEST_MAGIC: &[u8; 8] = b"DOXAW1\0\0";
 const REQUEST_HEADER: usize = REQUEST_MAGIC.len() + 4 + 32;
 const RESPONSE_MAGIC: &[u8; 8] = b"DOXAR1\0\0";
 const RESPONSE_BYTES: usize = RESPONSE_MAGIC.len() + 1 + 4;
+pub(crate) const READY_MARKER: &[u8] = b"DOXA-WORKER-READY-v1\n";
 const FUEL: u64 = 5_000_000;
 const MEMORY_BYTES: usize = 256 * 65_536;
 const TABLE_ELEMENTS: usize = 1024;
@@ -170,6 +170,28 @@ pub(crate) fn execute_worker(bytes: &[u8]) -> Result<i32, WorkerFailure> {
             WorkerFailure::Trap
         }
     })
+}
+
+/// Dedicated child entrypoint. Its only input is one bounded, independently
+/// decoded frame on stdin; its only output is the fixed 13-byte response.
+/// The parent must launch this binary through the cgroup-backed sandbox seam.
+pub(crate) fn serve_stdio() -> io::Result<()> {
+    if io::stdin().is_terminal() || io::stdout().is_terminal() {
+        return Err(invalid("plugin worker requires private pipes"));
+    }
+    // The parent can now distinguish a child that reached the worker entry
+    // from a Bubblewrap setup or loader failure. No module bytes are read yet.
+    let mut diagnostic = io::stderr().lock();
+    diagnostic.write_all(READY_MARKER)?;
+    diagnostic.flush()?;
+    drop(diagnostic);
+    let result = match decode_request(io::stdin().lock()) {
+        Ok(bytes) => execute_worker(&bytes),
+        Err(_) => Err(WorkerFailure::InvalidModule),
+    };
+    let mut output = io::stdout().lock();
+    output.write_all(&encode_response(result))?;
+    output.flush()
 }
 
 #[cfg(test)]

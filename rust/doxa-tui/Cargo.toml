@@ -9,6 +9,10 @@ license = "AGPL-3.0-only"
 name = "doxa-rs"
 path = "src/main.rs"
 
+[[bin]]
+name = "doxa-plugin-worker"
+path = "src/bin/plugin_worker.rs"
+
 [dependencies]
 doxa-codegraph = { path = "../doxa-codegraph" }
 doxa-fleet = { path = "../doxa-fleet" }

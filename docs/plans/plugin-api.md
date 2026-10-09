@@ -1,6 +1,6 @@
 # Native DOXA plugin API
 
-Status: **data-only v1, package preflight and an unwired runner contract implemented; executable plugins remain open**.
+Status: **data-only v1; package preflight, isolated-child components and tests staged; executable plugins remain unavailable**.
 This plan supersedes the Python/Textual `Plugin` and `PANE_COMMANDS` draft. The
 Rust frontend uses its own command registry, palette and help panel. Claude Code
 plugin adoption through `/plugins` is a separate provider feature.
@@ -86,10 +86,10 @@ also rejects any memory or table without a declared maximum, memory above
 static admission bounds, **not runtime enforcement**. Validation does not
 make the module safe to run.
 
-The next execution slice needs an isolated, resource-limited runner with a
-narrow host protocol, grant enforcement, cancellation and crash reporting.
-Preflight cannot establish safe execution. Native shared libraries and
-in-process callbacks remain out of scope.
+Activation still needs cgroup-backed containment proof on a delegated host and
+an explicit grantless command with reviewed failure reporting. Preflight
+cannot establish safe execution. Native shared libraries and in-process
+callbacks remain out of scope.
 
 ### Runner design and test seam
 
@@ -104,9 +104,12 @@ a freshly rechecked, owner-approved package with **zero grants**. Focused tests 
 a return value, infinite loop fuel exhaustion, trap, wrong signature, memory
 growth at the cap, changed approval and malformed request/response frames.
 
-This interpreter core is **not wired to a command or TUI path**. Its current
-tests invoke it in-process; doing that with an untrusted package in production
-would be unsafe. A separate, unwired child supervisor starts a caller-built
+This interpreter core is **not wired to a command or TUI path**. Unit tests
+invoke it in-process; production must not. The separate `doxa-plugin-worker`
+binary independently decodes and validates the bounded frame, executes the
+grantless module, and emits only the fixed 13-byte result. Child-process tests
+cover success, malformed, truncated, oversized and changed-digest requests,
+fuel exhaustion and traps. A separate, unwired child supervisor starts a caller-built
 command in its own process group, bounds captured stdout and stderr to 64 KiB
 each, and can send one input frame of at most 8 MiB plus its header through a
 nonblocking pipe. It polls a wall deadline and cancellation flag, sends SIGKILL
@@ -131,12 +134,19 @@ stopped by kernel limits. This host has no user-delegated cgroup subtree, so
 the aggregate limits and cgroup cleanup **cannot be exercised here**; admission
 refuses to spawn in that condition.
 
-There is still no dedicated child binary, independent child-side request
-decoder in a process, response classification or end-to-end cgroup acceptance
-run. The worker-binary mount needs descriptor-bound identity to eliminate a
-path-swap race before activation. Child and wrapper crashes also need a
-reliable distinction. Thus DOXA has **no runner command, child binary, or
-plugin execution path**. Do not treat owner approval,
+The sandbox now opens the trusted worker executable with `O_NOFOLLOW` and
+binds that descriptor into the private mount; replacing its pathname after
+open cannot replace the executed inode. Bubblewrap writes a bounded status
+receipt to a separate anonymous descriptor. The child emits a fixed entry
+marker before reading the module, allowing the parent to distinguish a worker
+that fails after entry from sandbox or pre-entry failure. Timeouts,
+cancellations, output overflow, malformed responses and module traps have
+separate result classes. Bubblewrap cannot distinguish a signalled child from
+a deliberate nonzero exit, so those remain one abnormal-worker class. A
+setup failure and a worker failure before its entry marker remain one
+conservative class. There is still no end-to-end cgroup acceptance run on a
+delegated host. Thus DOXA has **no runner command or plugin execution path**.
+Do not treat owner approval,
 the request frame, fuel or store limits as an execution switch. The handoff is
 `recheck_approved(home, review) -> RecheckedPackage`: it returns the exact,
 revalidated bytes and fails if either owner file, inode, digest, approval, or
@@ -144,24 +154,23 @@ requested grant changed. The encoder consumes those bytes, never a reopened
 path.
 
 The first runnable prototype should be an explicit, grantless developer-only
-command, never TUI startup or a native slash command. It should require an
+command, never TUI startup or a native slash command. It must require an
 approved package with **zero** requested grants and a single exported
 `doxa_main: () -> i32`; no WASI, host functions, imports, start function,
 ambient credentials, home directory, repository path, or provider connection.
-The parent must pipe the `RecheckedPackage` bytes to a dedicated child rather
-than passing a path. The child must independently validate the length, digest,
-module shape and export signature before instantiation. Only a fixed-size
-integer result and bounded failure reason may return. `render-local-panel-v1`
+The staged parent seam pipes the `RecheckedPackage` bytes to the dedicated
+child rather than passing a module path. The child independently validates the
+length, digest, module shape and export signature before instantiation. Only
+a fixed-size integer result and bounded failure code return. `render-local-panel-v1`
 remains a reserved name until a separate reviewed protocol and grant gate
 exist.
 
-The remaining step is to run the interpreter in a dedicated child binary and
-prove the cgroup-backed path on a host with delegated controllers, including
-fork and process-group escape attempts. That binary must decode the request
-again and emit the fixed-size response. A real launcher must report timeout,
-cancel, trap, crash and sandbox failure distinctly. Parent-side deadlines and
-module-declared maxima are not hard resource guarantees. Other platforms stay
-unavailable until equivalent isolation is proven.
+The remaining step is to prove the complete child path on a host with
+delegated controllers, including aggregate memory/CPU/PID enforcement and
+fork and process-group escape attempts. An explicit developer command may
+follow only after those gates pass. Parent-side deadlines and module-declared
+maxima are not hard resource guarantees. Other platforms stay unavailable
+until equivalent isolation is proven.
 
 The acceptance fixture must run a valid return module, an infinite loop,
 memory growth at the cap, a trap and a crashing child; exercise cancellation
