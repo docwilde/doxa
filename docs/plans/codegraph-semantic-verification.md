@@ -22,6 +22,14 @@ headers at 1 KiB and bodies at 32 KiB. The Docker command clears the inherited
 environment. **The plan has no spawn method or runtime attestation.** Neither
 it nor an LSP JSON object proves the server actually used those settings.
 
+The library-only LSP driver exercises a bounded initialize, quiescence,
+definition, and shutdown exchange against a fixture server. It caps messages
+and output, enforces a 20-second maximum deadline, and kills the process group
+on failure. On Linux it also observes a successful server exit without first
+reaping the group leader, then kills any descendants before reaping it. A
+fixture verifies this path. The fake attestation gate used by these tests is
+not a production Docker attester.
+
 This checker and plan are deliberately not wired to `/codegraph calls` or
 persisted snapshots. No rust-analyzer binary or reviewed, pinned image is
 installed in the development environment. The
@@ -34,8 +42,8 @@ substitute for enforcing the container boundary.
 Before promoting any LSP result to a binding, verify the rootless Engine and
 effective cgroup v2 memory/CPU/PID controls, pinned image bytes, exact mount
 set, offline network namespace, process limits, disk quota, and absence of host
-secrets at runtime. Add a bounded process supervisor with a hard deadline and
-kill/reap path. It must complete the LSP initialize/initialized exchange,
+secrets at runtime. Connect the bounded process supervisor to an attested
+runtime. It must complete the LSP initialize/initialized exchange,
 observe successful workspace indexing and a quiescent diagnostic state, and
 attest the exact server binary/configuration, request and response, source and
 target hashes, and container policy. Treat missing, timed-out, conditional,
