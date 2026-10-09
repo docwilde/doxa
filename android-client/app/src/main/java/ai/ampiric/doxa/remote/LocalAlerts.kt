@@ -17,6 +17,7 @@ import androidx.compose.runtime.setValue
 
 /** Best-effort local alerts while an authenticated SSE connection is still running. */
 internal class LocalAlerts(private val context: Context, private val prefs: SharedPreferences) {
+    companion object { @Volatile var appVisible = false }
     private val manager = context.getSystemService(NotificationManager::class.java)
     private val channel = "doxa_remote_local_events"
     private val last = mutableMapOf<AlertKind, Long>()

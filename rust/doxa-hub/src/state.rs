@@ -13,6 +13,7 @@ const MAX_RETAINED_COMMANDS: usize = 512;
 const MAX_EVENTS: usize = 512;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_EVENT_BYTES: usize = 32 * 1024 * 1024;
+const ANDROID_LEASE: Duration = Duration::from_secs(24 * 3600);
 
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.bytes().enumerate().all(|(i,b)|b.is_ascii_alphanumeric() || (i>0&&b==b'-'))
@@ -34,6 +35,7 @@ fn same_secret(actual:&str, supplied:&str)->bool {
     actual.len()==supplied.len() && bool::from(actual.as_bytes().ct_eq(supplied.as_bytes()))
 }
 struct Host { lease:String, expires:Instant, sessions:Vec<Value>, pending:VecDeque<String> }
+struct AndroidSubscription { token:String, host:String, session:String, incarnation:String, tag:String, expires:Instant }
 struct Command { owner:String, host:String, session:String, op:String, payload:Value,
     state:&'static str, result:Option<Value>, created:Instant }
 pub struct Hub { hosts:HashMap<(String,String),Host>, commands:HashMap<String,Command>,
@@ -42,10 +44,12 @@ pub struct Hub { hosts:HashMap<(String,String),Host>, commands:HashMap<String,Co
     event_order:VecDeque<((String,String,String),u64,usize)>,event_bytes:usize,
     subscriptions:HashMap<String,Vec<Subscription>>,
     pending_push:VecDeque<(String,PushKind)>,
+    android:HashMap<String,Vec<AndroidSubscription>>,
+    pending_android:VecDeque<(String,String,String,String,PushKind)>,
     last_push:HashMap<(String,String,String,PushKind),Instant> }
 impl Hub {
     pub fn new()->Self{Self{hosts:HashMap::new(),commands:HashMap::new(),requests:HashMap::new(),events:HashMap::new(),event_order:VecDeque::new(),event_bytes:0,
-        subscriptions:HashMap::new(),pending_push:VecDeque::new(),last_push:HashMap::new()}}
+        subscriptions:HashMap::new(),pending_push:VecDeque::new(),android:HashMap::new(),pending_android:VecDeque::new(),last_push:HashMap::new()}}
     fn reap(&mut self){
         let now=Instant::now();
         let old_hosts=self.hosts.len();
@@ -57,6 +61,7 @@ impl Hub {
         }
         self.commands.retain(|_,command|now.duration_since(command.created)<COMMAND_TTL*2);
         self.requests.retain(|_,id|self.commands.contains_key(id));
+        for entries in self.android.values_mut() { entries.retain(|entry| entry.expires > now); }
         self.last_push.retain(|_,sent|now.duration_since(*sent)<Duration::from_secs(3600));
         for host in self.hosts.values_mut(){
             host.pending.retain(|id|self.commands.get(id).is_some_and(|command|command.state=="queued"));
@@ -85,6 +90,43 @@ impl Hub {
         while let Some((owner,kind))=self.pending_push.pop_front(){
             if let Some(entries)=self.subscriptions.get(&owner){
                 deliveries.extend(entries.iter().cloned().map(|item|(owner.clone(),item,kind)));
+            }
+        }
+        deliveries
+    }
+    pub fn subscribe_android(&mut self,owner:&str,target:&str,incarnation:&str,token:&str,tag:&str)->Result<Value,&'static str>{
+        self.reap();
+        if !crate::fcm::valid_token(token) || !crate::fcm::valid_tag(tag) || incarnation.is_empty() || incarnation.len()>64 {
+            return Err("invalid Android subscription");
+        }
+        let (host_id,session_id)=target.split_once('~').filter(|(h,s)|valid_id(h)&&valid_id(s))
+            .ok_or("invalid session target")?;
+        let host=self.hosts.get(&(owner.to_owned(),host_id.to_owned())).ok_or("session offline")?;
+        if !host.sessions.iter().any(|session|session["id"]==session_id && session["incarnation"]==incarnation){
+            return Err("session incarnation changed");
+        }
+        let total=self.android.values().map(Vec::len).sum::<usize>();
+        let entries=self.android.entry(owner.to_owned()).or_default();
+        let next=AndroidSubscription { token:token.into(),host:host_id.into(),session:session_id.into(),
+            incarnation:incarnation.into(),tag:tag.into(),expires:Instant::now()+ANDROID_LEASE };
+        if let Some(old)=entries.iter_mut().find(|old|old.token==token){*old=next;}
+        else if entries.len()>=16 || total>=256 {return Err("Android subscription limit reached")}
+        else {entries.push(next);}
+        Ok(json!({"subscribed":true,"expires_in":ANDROID_LEASE.as_secs()}))
+    }
+    pub fn unsubscribe_android(&mut self,owner:&str,token:&str)->Value{
+        if let Some(entries)=self.android.get_mut(owner){entries.retain(|entry|entry.token!=token);}
+        json!({"subscribed":false})
+    }
+    pub fn take_android(&mut self)->Vec<(String,String,String,PushKind)> {
+        self.reap();
+        let mut deliveries=Vec::new();
+        while let Some((owner,host,session,incarnation,kind))=self.pending_android.pop_front(){
+            if self.hosts.get(&(owner.clone(),host.clone())).is_none_or(|current|
+                !current.sessions.iter().any(|item|item["id"]==session && item["incarnation"]==incarnation)){continue;}
+            if let Some(entries)=self.android.get(&owner){
+                deliveries.extend(entries.iter().filter(|entry|entry.host==host&&entry.session==session
+                    &&entry.incarnation==incarnation).map(|entry|(owner.clone(),entry.token.clone(),entry.tag.clone(),kind)));
             }
         }
         deliveries
@@ -191,6 +233,8 @@ impl Hub {
         self.reap();let host=self.host(owner,host_id,lease)?;
         if !host.sessions.iter().any(|session|session["id"]==session_id){return Err("session offline");}
         let encrypted=host.sessions.iter().any(|session|session["id"]==session_id&&session["encrypted"]==true);
+        let incarnation=host.sessions.iter().find(|item|item["id"]==session_id)
+            .and_then(|item|item["incarnation"].as_str()).unwrap_or("").to_owned();
         if encrypted && !frame["event"]["data"]["sealed"].is_object() { return Err("encrypted event required"); }
         if !encrypted && frame["event"]["data"].get("sealed").is_some() { return Err("unexpected encrypted event"); }
         let seq=frame["seq"].as_u64().ok_or("event sequence required")?;
@@ -203,10 +247,14 @@ impl Hub {
         ring.push_back(frame);
         if let Some(kind)=ring.back().and_then(|frame|frame["event"]["type"].as_str()).and_then(PushKind::from_event){
             let key=(owner.to_owned(),host_id.to_owned(),session_id.to_owned(),kind);
-            if self.subscriptions.get(owner).is_some_and(|entries|!entries.is_empty())
-                && self.last_push.get(&key).is_none_or(|sent|sent.elapsed()>=Duration::from_secs(5)){
+            let web=self.subscriptions.get(owner).is_some_and(|entries|!entries.is_empty());
+            let android=!incarnation.is_empty() && self.android.get(owner).is_some_and(|entries|
+                entries.iter().any(|entry|entry.host==host_id&&entry.session==session_id
+                    &&entry.incarnation==incarnation&&entry.expires>Instant::now()));
+            if (web||android) && self.last_push.get(&key).is_none_or(|sent|sent.elapsed()>=Duration::from_secs(5)){
                 self.last_push.insert(key,Instant::now());
-                if self.pending_push.len()<64{self.pending_push.push_back((owner.to_owned(),kind));}
+                if web && self.pending_push.len()<64{self.pending_push.push_back((owner.to_owned(),kind));}
+                if android && self.pending_android.len()<64{self.pending_android.push_back((owner.to_owned(),host_id.to_owned(),session_id.to_owned(),incarnation,kind));}
             }
         }
         let key=(owner.into(),host_id.into(),session_id.into());
@@ -298,6 +346,48 @@ impl Hub {
         assert!(hub.take_push().is_empty());
         hub.unsubscribe("owner@example.com",&deliveries[0].1.endpoint);
         assert!(hub.subscriptions["owner@example.com"].is_empty());
+    }
+    #[test]fn android_push_is_bound_to_owner_session_incarnation_and_current_tag(){
+        let mut hub=Hub::new();
+        let owner="owner@example.com";
+        let lease=hub.register(owner,"host",bounded_sessions(&json!([
+            {"id":"one","incarnation":"one-v1"},{"id":"two","incarnation":"two-v1"}
+        ])).unwrap(),None).unwrap()["lease"].as_str().unwrap().to_owned();
+        let token="fcm:abcdefghijklmnopqrstuvwxyz0123456789";
+        let tag="abcdef0123456789abcdef0123456789";
+        assert!(hub.subscribe_android("other@example.com","host~one","one-v1",token,tag).is_err());
+        assert!(hub.subscribe_android(owner,"host~two","one-v1",token,tag).is_err());
+        assert!(hub.subscribe_android(owner,"host~one","stale",token,tag).is_err());
+        assert!(hub.subscribe_android(owner,"host~one","one-v1",token,"invalid").is_err());
+        hub.subscribe_android(owner,"host~one","one-v1",token,tag).unwrap();
+        assert!(hub.list(owner)["sessions"].as_array().unwrap().iter().any(|item|
+            item["id"]=="host~one" && item["incarnation"]=="one-v1"));
+        let event=|seq|json!({"type":"event","seq":seq,"event":{"type":"needs_input","data":{"id":"private"}}});
+        hub.event(owner,"host",&lease,"two",event(1)).unwrap();
+        assert!(hub.take_android().is_empty());
+        hub.event(owner,"host",&lease,"one",event(1)).unwrap();
+        let sent=hub.take_android();
+        assert_eq!(sent.len(),1);
+        assert_eq!(sent[0].0,owner);
+        assert_eq!(sent[0].1,token);
+        assert_eq!(sent[0].2,tag);
+        assert!(hub.take_android().is_empty());
+        hub.register(owner,"host",bounded_sessions(&json!([
+            {"id":"one","incarnation":"one-v2"},{"id":"two","incarnation":"two-v1"}
+        ])).unwrap(),Some(&lease)).unwrap();
+        hub.event(owner,"host",&lease,"one",event(2)).unwrap();
+        assert!(hub.take_android().is_empty());
+        assert!(hub.subscribe_android(owner,"host~one","one-v1",token,tag).is_err());
+        hub.subscribe_android(owner,"host~one","one-v2",token,tag).unwrap();
+        hub.android.get_mut(owner).unwrap()[0].expires=Instant::now()-Duration::from_secs(1);
+        hub.event(owner,"host",&lease,"one",event(3)).unwrap();
+        assert!(hub.android.get(owner).is_some_and(Vec::is_empty));
+        assert!(hub.take_android().is_empty());
+        hub.subscribe_android(owner,"host~one","one-v2",token,tag).unwrap();
+        hub.unsubscribe_android("other@example.com",token);
+        assert_eq!(hub.android[owner].len(),1);
+        hub.unsubscribe_android(owner,token);
+        assert!(hub.android[owner].is_empty());
     }
     #[test]fn lease_owner_queue_and_no_redelivery(){
         let mut hub=Hub::new();let sessions=bounded_sessions(&json!([{"id":"session-1","title":"Session"}])).unwrap();

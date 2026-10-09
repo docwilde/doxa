@@ -15,7 +15,7 @@ import java.nio.ByteBuffer
 import java.util.UUID
 import kotlin.coroutines.coroutineContext
 
-data class Session(val id: String, val title: String, val engine: String, val encrypted: Boolean)
+data class Session(val id: String, val title: String, val engine: String, val encrypted: Boolean, val incarnation: String = "")
 class RemoteRefusal(message: String) : Exception(message)
 
 /** Keeps the exact serialized request while its result is uncertain. Never regenerates its ID on retry. */
@@ -85,6 +85,31 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
         } finally { conn.disconnect() }
     }
 
+    private fun delete(path: String, body: JSONObject): JSONObject {
+        val bytes = body.toString().toByteArray(Charsets.UTF_8)
+        require(bytes.size <= 8_192) { "Remote request exceeds bound" }
+        val conn = connection(path, "DELETE")
+        try {
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setFixedLengthStreamingMode(bytes.size)
+            conn.outputStream.use { it.write(bytes) }
+            return json(conn)
+        } finally { conn.disconnect() }
+    }
+
+    suspend fun registerAndroidPush(session: Session, token: String, tag: String): JSONObject = withContext(Dispatchers.IO) {
+        require(Wire.target(session.id) && session.incarnation.isNotBlank() && session.incarnation.length <= 64)
+        require(AndroidPushWire.token(token) && AndroidPushWire.validTag(tag))
+        post("api/push/android", JSONObject().put("target", session.id)
+            .put("incarnation", session.incarnation).put("token", token).put("tag", tag))
+    }
+
+    suspend fun unregisterAndroidPush(token: String): JSONObject = withContext(Dispatchers.IO) {
+        require(AndroidPushWire.token(token))
+        delete("api/push/android", JSONObject().put("token", token))
+    }
+
     suspend fun sessions(): List<Session> = withContext(Dispatchers.IO) {
         val items = get("api/sessions").getJSONArray("sessions")
         require(items.length() <= 64) { "Invalid hub session inventory" }
@@ -93,7 +118,8 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
             val id = row.getString("id")
             require(Wire.target(id)) { "Invalid hub session target" }
             Session(id, row.optString("title", id).take(160),
-                row.optString("engine", "session").take(32), row.optBoolean("encrypted"))
+                row.optString("engine", "session").take(32), row.optBoolean("encrypted"),
+                row.optString("incarnation").take(64))
         }
     }
 
