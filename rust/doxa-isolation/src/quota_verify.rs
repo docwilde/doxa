@@ -636,11 +636,14 @@ mod tests {
         let mut wrong = pinned; wrong.root.inode += 1;
         assert!(inspect_with_owner(&manifest, expected, &reader, owner, Some(&wrong))
             .unwrap_err().to_string().contains("administrator policy"));
-        for altered in [QuotaBindings { checkout: QuotaBinding { inode: wrong.root.inode, ..pinned.checkout }, ..pinned },
-            QuotaBindings { home: QuotaBinding { mount_id: mount_id + 1, ..pinned.home }, ..pinned },
-            QuotaBindings { cache: QuotaBinding { device: pinned.cache.device + 1, ..pinned.cache }, ..pinned },
-            QuotaBindings { broker: QuotaBinding { inode: pinned.broker.inode + 1, ..pinned.broker }, ..pinned }] {
-            assert!(inspect_with_owner(&manifest, expected, &reader, owner, Some(&altered)).is_err());
+        for (label, altered) in [
+            ("checkout inode", QuotaBindings { checkout: QuotaBinding {
+                inode: pinned.checkout.inode.wrapping_add(1), ..pinned.checkout }, ..pinned }),
+            ("home mount", QuotaBindings { home: QuotaBinding { mount_id: mount_id + 1, ..pinned.home }, ..pinned }),
+            ("cache device", QuotaBindings { cache: QuotaBinding { device: pinned.cache.device + 1, ..pinned.cache }, ..pinned }),
+            ("broker inode", QuotaBindings { broker: QuotaBinding { inode: pinned.broker.inode + 1, ..pinned.broker }, ..pinned }),
+        ] {
+            assert!(inspect_with_owner(&manifest, expected, &reader, owner, Some(&altered)).is_err(), "{label}");
         }
         let old_cache = manifest.cache.with_file_name("old-cache");
         fs::rename(&manifest.cache, &old_cache).unwrap();
