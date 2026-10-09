@@ -9,7 +9,7 @@ echo DOXA_BROKER_VM_START
 /broker_fixture &
 broker_pid=$!
 /bin/busybox sleep 1
-/bin/busybox su guest -s /bin/sh -c '/codegraph-test disposable_guest_root_peer_identity_proof --ignored --nocapture'
+/bin/busybox su guest -s /bin/sh -c '/codegraph-test disposable_guest_listener_drop_stays_untrusted --ignored --nocapture'
 test_status=$?
 if [ "$test_status" -ne 0 ]; then
   /bin/busybox kill "$broker_pid"

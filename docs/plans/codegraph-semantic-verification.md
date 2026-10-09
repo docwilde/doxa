@@ -76,8 +76,8 @@ a live fixture for this boundary. Fake Engine tests alone
 would verify protocol parsing, not daemon identity or containment.
 
 Before implementing an activatable path, supply an owner-reviewed rootless
-Engine fixture or a trusted broker that passes an authenticated connected
-socket/daemon identity to DOXA. The launcher must pin that identity across
+Engine fixture or a trusted broker with a host-controlled trust anchor that
+DOXA can verify beyond socket credentials. The launcher must pin that identity across
 every Engine request, use the `create` response's full ID for `start`,
 `inspect`, and `attach`, and carry every LSP byte on that exact upgraded
 connection. It must check non-TTY multiplexing, effective mounts, namespaces,
@@ -91,8 +91,8 @@ The recommended next artifact is a **host-managed broker proof fixture** on
 a disposable Linux host. The broker must run under a host-controlled identity
 distinct from DOXA's user, expose a Unix socket in a directory that DOXA's
 user cannot replace, and attest its reviewed binary/configuration and the
-rootless Engine it controls. DOXA must authenticate the broker's peer
-credentials on each connection and receive one transaction bound to a fresh
+rootless Engine it controls. DOXA must verify the broker's host-controlled
+identity on each connection and receive one transaction bound to a fresh
 nonce, exact container ID, image bytes, effective policy, attached LSP stream,
 and cleanup result. The fixture should first show that a same-UID attacker
 cannot substitute the broker socket or inject an LSP stream, then exercise
@@ -102,31 +102,31 @@ should the CLI gain an activatable semantic binding path. A same-UID helper,
 private directory, socket inode check, or process-PID check alone cannot
 provide this proof.
 
-An initial private broker identity protocol is now implemented in
-`semantic_broker`. It requires an unprivileged DOXA client, a root-owned
-unsymlinked Unix socket under root-owned, nonwritable parents, and kernel
-`SO_PEERCRED` UID 0 on the connected peer. Over that connection it sends a
-fresh 256-bit nonce and a SHA-256 digest of the exact producer plan, call edge,
-and displayed candidate in a 4 KiB length-bounded message. An `identity_only`
-reply must echo the protocol, nonce, and query digest exactly; extra fields,
-including a claimed binding, are rejected. Connect and exchange share a
-two-second wall-clock deadline, and the socket inode is rechecked after the
-exchange. A same-UID fake socket is rejected before the challenge. This
-authenticates only the host-managed endpoint under a root-trusted host model;
-it does not attest that a broker has launched rust-analyzer, carried LSP bytes,
-or enforced containment. The CLI never calls this seam and still reports
-`binding: unknown`. The current workstation user's Docker/sudo group access
-also prevents treating this workstation as an adversarial same-UID proof host;
-use a disposable guest with a restricted client account for positive testing.
-The threat model also assumes the client binary and process are protected from
-replacement or ptrace by the attacker; endpoint authentication cannot repair
-a compromised client.
-The [offline guest fixture](../../scripts/semantic-broker-proof/README.md)
-does exactly that: the kernel peer is root, the client is UID 1000, the root
-socket cannot be removed by that client, and the identity-only exchange
-passes. The fixture has no network device, Docker, or analyzer. It proves the
-cross-UID handshake only; the exact producer launch, stream, policy, and
-cleanup gates remain open.
+An initial private socket-observation protocol is implemented in
+`semantic_broker`. It requires an unprivileged DOXA client, a canonical,
+unsymlinked Unix socket and nonwritable parents that report UID 0, plus
+`SO_PEERCRED` UID 0. Over that connection it sends a fresh 256-bit nonce and
+a SHA-256 digest of the exact producer plan, call edge, and candidate in a
+4 KiB length-bounded message. An `observation_only` reply must echo the
+protocol, nonce, and query digest exactly; extra fields or a claimed
+`attested` status are rejected. Connect and exchange share a two-second
+wall-clock deadline, and the socket inode is rechecked after the exchange.
+The only success result is `uid_zero_echo_untrusted` with `binding: unknown`.
+The CLI never calls this seam.
+
+These UID and path ownership values are relative to the caller's user and
+mount namespaces. `SO_PEERCRED` can reflect credentials recorded on the
+listening socket before its FD is handed to another process or the listener
+drops privilege. They do not authenticate a live producer, a host-owned
+endpoint, or the source of LSP bytes. The
+[offline guest fixture](../../scripts/semantic-broker-proof/README.md)
+demonstrates this directly: a process listens as guest UID 0, drops to UID
+1000 before accepting and answering, yet the client can observe UID 0 on the
+connection. The result remains untrusted. The workstation user's Docker/sudo
+groups and possible client replacement or ptrace are additional reasons this
+host cannot supply the adversarial production proof. A host-controlled trust
+anchor beyond namespace-relative metadata remains necessary before enabling
+producer attestation, launch, or semantic binding.
 
 The library-only LSP driver exercises a bounded initialize, quiescence,
 definition, and shutdown exchange against a fixture server. It caps messages

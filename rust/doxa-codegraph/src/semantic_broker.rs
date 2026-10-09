@@ -1,9 +1,9 @@
-//! Disabled, identity-only handshake for a future host-managed semantic broker.
+//! Disabled socket-observation handshake for a future semantic broker.
 //!
-//! A same-UID fake Engine cannot satisfy the root-owned path and kernel peer
-//! credential requirements. This does not attest a producer or return a
-//! semantic binding: the broker implementation and live containment proof do
-//! not exist yet. Nothing in the CLI calls this module.
+//! Path ownership and SO_PEERCRED values are namespace-relative. Credentials
+//! may describe the original listener even after it hands the FD to an
+//! unprivileged worker. These observations do not authenticate a live
+//! producer or return a semantic binding. Nothing in the CLI calls this.
 
 use super::semantic_producer::ProducerPlan;
 use super::semantic_runtime::bounded_unix_connect;
@@ -18,7 +18,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const PROTOCOL: &str = "doxa-semantic-broker-identity-v1";
+const PROTOCOL: &str = "doxa-semantic-socket-observation-v1";
 const MAX_WIRE_BYTES: usize = 4096;
 const DEADLINE: Duration = Duration::from_secs(2);
 
@@ -43,8 +43,8 @@ fn query_digest(plan: &ProducerPlan, edge: &CallEdge, candidate: &CallCandidate)
     Ok(sha256_hex(&bytes))
 }
 
-/// Every component of the socket path must be owned by host root. Writable
-/// parents, symlinks and a rootless user's private socket are rejected.
+/// Require UID-zero ownership as seen in the caller's namespace. This is a
+/// consistency check, not proof of host ownership or a live producer.
 fn root_owned_socket(path: &Path) -> Result<(u64, u64), String> {
     if !path.is_absolute() || path.components().any(|part| matches!(part, Component::CurDir | Component::ParentDir)) {
         return Err("broker socket path must be absolute without traversal".into());
@@ -59,7 +59,7 @@ fn root_owned_socket(path: &Path) -> Result<(u64, u64), String> {
         current.push(component.as_os_str());
         let metadata = fs::symlink_metadata(&current).map_err(|_| "broker socket path is missing")?;
         if metadata.uid() != 0 || metadata.file_type().is_symlink() {
-            return Err("broker socket path is not host-root-owned and unsymlinked".into());
+            return Err("broker socket path is not UID-zero-owned and unsymlinked".into());
         }
         if index + 1 == components.len() {
             if !metadata.file_type().is_socket() {
@@ -74,14 +74,14 @@ fn root_owned_socket(path: &Path) -> Result<(u64, u64), String> {
     Err("broker socket path is empty".into())
 }
 
-fn root_peer(stream: &UnixStream) -> Result<(), String> {
+fn uid_zero_peer(stream: &UnixStream) -> Result<(), String> {
     let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     if unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
         &mut peer as *mut _ as *mut _, &mut length) } < 0
         || length as usize != std::mem::size_of::<libc::ucred>()
         || peer.pid <= 0 || peer.uid != 0 {
-        return Err("broker peer is not host root".into());
+        return Err("broker peer UID is not zero in the caller namespace".into());
     }
     Ok(())
 }
@@ -123,31 +123,37 @@ fn match_reply(reply: &Value, nonce: &str, digest: &str) -> Result<(), String> {
     if object.len() != 4 || reply.get("protocol").and_then(Value::as_str) != Some(PROTOCOL)
         || reply.get("nonce").and_then(Value::as_str) != Some(nonce)
         || reply.get("query_sha256").and_then(Value::as_str) != Some(digest)
-        || reply.get("status").and_then(Value::as_str) != Some("identity_only") {
-        return Err("broker reply does not match identity challenge".into());
+        || reply.get("status").and_then(Value::as_str) != Some("observation_only") {
+        return Err("broker reply does not match observation challenge".into());
     }
     Ok(())
 }
 
-/// Authenticate only the host-managed endpoint and echo of one exact query.
-/// This private seam never starts an analyzer, accepts producer claims, or
-/// changes `binding: unknown`.
+fn untrusted_status() -> Value {
+    json!({"status":"unknown","binding":"unknown",
+        "socket_observation":"uid_zero_echo_untrusted",
+        "reason":"namespace_and_fd_handoff_unproven","producer":"not_started"})
+}
+
+/// Record only UID/inode observations and echo of one exact query. This
+/// private seam never authenticates a producer, starts an analyzer, accepts
+/// producer claims, or changes `binding: unknown`.
 #[allow(dead_code)]
-pub(crate) fn identity_probe(path: &Path, plan: &ProducerPlan,
+pub(crate) fn observe_socket(path: &Path, plan: &ProducerPlan,
     edge: &CallEdge, candidate: &CallCandidate) -> Result<Value, String> {
     if unsafe { libc::geteuid() } == 0 {
         return Err("broker client must run unprivileged".into());
     }
-    let identity = root_owned_socket(path)?;
+    let inode = root_owned_socket(path)?;
     let deadline = Instant::now() + DEADLINE;
     let mut stream = bounded_unix_connect(path, deadline)?;
-    root_peer(&stream)?;
-    if root_owned_socket(path)? != identity { return Err("broker socket changed during connect".into()); }
+    uid_zero_peer(&stream)?;
+    if root_owned_socket(path)? != inode { return Err("broker socket changed during connect".into()); }
     stream.set_nonblocking(true).map_err(|_| "cannot configure broker socket")?;
     let nonce = challenge_nonce()?;
     let digest = query_digest(plan, edge, candidate)?;
     let request = json!({"protocol":PROTOCOL,"nonce":nonce,"query_sha256":digest,
-        "operation":"identity_only"});
+        "operation":"observe_only"});
     let body = serde_json::to_vec(&request).map_err(|_| "cannot encode broker challenge")?;
     if body.len() > MAX_WIRE_BYTES { return Err("broker challenge exceeds bound".into()); }
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();
@@ -155,9 +161,8 @@ pub(crate) fn identity_probe(path: &Path, plan: &ProducerPlan,
     io_until(&mut stream, &mut frame, true, deadline)?;
     let reply = read_reply(&mut stream, deadline)?;
     match_reply(&reply, &nonce, &digest)?;
-    if root_owned_socket(path)? != identity { return Err("broker socket changed during exchange".into()); }
-    Ok(json!({"status":"unknown","binding":"unknown",
-        "broker_identity":"host_root_peer_observed","producer":"not_started"}))
+    if root_owned_socket(path)? != inode { return Err("broker socket changed during exchange".into()); }
+    Ok(untrusted_status())
 }
 
 #[cfg(test)]
@@ -184,16 +189,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("producer.sock");
         let _server = UnixListener::bind(&socket).unwrap();
-        let error = identity_probe(&socket, &plan, edge, candidate).unwrap_err();
-        assert!(error.contains("host-root-owned"), "{error}");
+        let error = observe_socket(&socket, &plan, edge, candidate).unwrap_err();
+        assert!(error.contains("UID-zero-owned"), "{error}");
     }
 
     #[test]
-    fn reply_requires_exact_nonce_query_and_identity_only_status() {
+    fn reply_requires_exact_nonce_query_and_observation_only_status() {
         let nonce = "a".repeat(64);
         let digest = "b".repeat(64);
         let valid = json!({"protocol":PROTOCOL,"nonce":nonce,
-            "query_sha256":digest,"status":"identity_only"});
+            "query_sha256":digest,"status":"observation_only"});
         assert!(match_reply(&valid, &nonce, &digest).is_ok());
         for key in ["protocol", "nonce", "query_sha256", "status"] {
             let mut invalid = valid.clone();
@@ -203,6 +208,12 @@ mod tests {
         let mut extra = valid.clone();
         extra["binding"] = json!("verified");
         assert!(match_reply(&extra, &nonce, &digest).is_err());
+        let mut promoted = valid.clone();
+        promoted["status"] = json!("attested");
+        assert!(match_reply(&promoted, &nonce, &digest).is_err());
+        let status = untrusted_status();
+        assert_eq!(status["binding"], "unknown");
+        assert_eq!(status["reason"], "namespace_and_fd_handoff_unproven");
     }
 
     #[test]
@@ -220,11 +231,11 @@ mod tests {
         assert!(start.elapsed() < Duration::from_millis(250));
     }
 
-    /// Run only inside a disposable guest with a root-owned broker fixture.
-    /// This proves the OS identity boundary, not an analyzer or containment.
+    /// Run only inside a disposable guest. The root listener drops to UID
+    /// 1000 before accept, but SO_PEERCRED still reports the listening UID.
     #[test]
     #[ignore]
-    fn disposable_guest_root_peer_identity_proof() {
+    fn disposable_guest_listener_drop_stays_untrusted() {
         let path = Path::new("/run/doxa-semantic/producer.sock");
         let plan = ProducerPlan { root: PathBuf::from("/work"), image: IMAGE.into(),
             docker_host: "unix:///run/user/1000/docker.sock".into(), args: Vec::new(),
@@ -235,8 +246,9 @@ mod tests {
             omitted_candidates: 0, sha256: "a".repeat(64), read_unix_ms: 0 };
         let candidate = CallCandidate { file: "a.rs".into(), line: 2,
             qualified: "target".into(), sha256: "a".repeat(64), read_unix_ms: 0 };
-        let status = identity_probe(path, &plan, &edge, &candidate).unwrap();
-        assert_eq!(status["broker_identity"], "host_root_peer_observed");
+        let status = observe_socket(path, &plan, &edge, &candidate).unwrap();
+        assert_eq!(status["socket_observation"], "uid_zero_echo_untrusted");
+        assert_eq!(status["reason"], "namespace_and_fd_handoff_unproven");
         assert_eq!(status["producer"], "not_started");
         assert_eq!(status["binding"], "unknown");
         assert!(fs::remove_file(path).is_err(), "guest client replaced the root socket");

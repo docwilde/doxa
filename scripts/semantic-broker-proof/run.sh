@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the disabled broker identity handshake inside a disposable offline VM.
+# Run the disabled socket observation against a root-listen-drop VM fixture.
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
@@ -48,5 +48,6 @@ timeout 40s qemu-system-x86_64 -machine q35,accel=kvm -cpu host -m 512M -smp 1 \
   -append 'console=ttyS0 rdinit=/init panic=1' -display none \
   -serial "file:$output_dir/guest-serial.log" -monitor none -no-reboot -net none
 grep -q 'test result: ok. 1 passed; 0 failed' "$output_dir/guest-serial.log"
+grep -q 'BROKER_SERVING_UID=1000' "$output_dir/guest-serial.log"
 grep -q 'DOXA_BROKER_TEST_STATUS=0 BROKER_STATUS=0' "$output_dir/guest-serial.log"
-echo "identity proof passed; log: $output_dir/guest-serial.log"
+echo "root-listen-drop observation passed; log: $output_dir/guest-serial.log"

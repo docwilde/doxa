@@ -1,4 +1,4 @@
-// Disposable guest-only root-owned identity echo fixture. No Docker or LSP.
+// Disposable guest-only root-listen, UID-1000-serving echo fixture. No Docker or LSP.
 #include <arpa/inet.h>
 #include <errno.h>
 #include <stddef.h>
@@ -57,6 +57,11 @@ int main(void) {
     strcpy(address.sun_path, path);
     if (bind(server, (const struct sockaddr *)&address, sizeof address) < 0) return 12;
     if (chmod(path, 0666) < 0 || listen(server, 1) < 0) return 13;
+    // The listening socket was created under UID 0. Hand its FD to the same
+    // process after dropping privilege; SO_PEERCRED may still report UID 0.
+    if (setgid(1000) < 0 || setuid(1000) < 0) return 22;
+    fprintf(stderr, "BROKER_SERVING_UID=%ld\n", (long)geteuid());
+    fflush(stderr);
     int client = accept(server, NULL, NULL);
     if (client < 0) return 14;
     unsigned int size;
@@ -66,12 +71,12 @@ int main(void) {
     char request[4097];
     if (read_all(client, request, size) < 0) return 17;
     request[size] = 0;
-    if (!strstr(request, "\"operation\":\"identity_only\"")) return 18;
+    if (!strstr(request, "\"operation\":\"observe_only\"")) return 18;
     char nonce[65], digest[65];
     if (field64(request, "nonce", nonce) < 0 || field64(request, "query_sha256", digest) < 0) return 19;
     char response[512];
     int length = snprintf(response, sizeof response,
-        "{\"protocol\":\"doxa-semantic-broker-identity-v1\",\"nonce\":\"%s\",\"query_sha256\":\"%s\",\"status\":\"identity_only\"}",
+        "{\"protocol\":\"doxa-semantic-socket-observation-v1\",\"nonce\":\"%s\",\"query_sha256\":\"%s\",\"status\":\"observation_only\"}",
         nonce, digest);
     if (length <= 0 || (size_t)length >= sizeof response) return 20;
     size = htonl((unsigned int)length);
