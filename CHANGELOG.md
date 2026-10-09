@@ -15,7 +15,7 @@ the stable 2.0 release has not been cut.
 
 **Plugin isolation**
 
-- Add an ignored delegated-cgroup acceptance fixture for aggregate limits, namespace isolation, and cleanup. It has not run on a delegated host; TUI activation remains closed.
+- Require an empty delegated cgroup parent with a separate supervisor leaf, and add an ignored host fixture for aggregate limits, namespace isolation, and cleanup. Host proof and TUI activation remain open.
 
 ## 2.0.0-beta.26 — 2026-10-09
 
