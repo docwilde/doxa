@@ -258,9 +258,8 @@ fn require_stable_listing(root: &Path, initial: &BTreeSet<String>) -> Result<(),
     Ok(())
 }
 
-fn verify_parsed_source_hashes<'a>(root: &Path, language: &str,
+fn verify_parsed_source_hashes<'a>(root: &Path, language: &str, started: Instant,
     sources: impl Iterator<Item = (&'a str, &'a str)>) -> Result<(), String> {
-    let started = Instant::now();
     let mut total = 0u64;
     for (path, expected) in sources {
         if started.elapsed() >= MAX_FINAL_REHASH_TIME {
@@ -377,7 +376,7 @@ fn current_scan_input_sha256_with_pre_rehash(root: &Path,
     // later files are being read. Recheck every observed byte digest before
     // returning a read-time inventory; this still is not an atomic snapshot.
     before_rehash(&root);
-    verify_parsed_source_hashes(&root, "Rust", entries.iter()
+    verify_parsed_source_hashes(&root, "Rust", started, entries.iter()
         .map(|(path, sha)| (*path, sha.as_str())))?;
     require_stable_listing(&root, &paths)?;
     let count = entries.len();
@@ -412,7 +411,7 @@ fn current_python_scan_input_sha256_with_pre_rehash(root: &Path,
         return Err("Python source scan exceeded ten-second limit; no partial verification".into());
     }
     before_rehash(&root);
-    verify_parsed_source_hashes(&root, "Python", entries.iter()
+    verify_parsed_source_hashes(&root, "Python", started, entries.iter()
         .map(|(path, sha)| (*path, sha.as_str())))?;
     require_stable_listing(&root, &paths)?;
     let count = entries.len();
@@ -1045,6 +1044,11 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
 
 fn query_with_pre_rehash(root: &Path, request: Query,
     before_rehash: impl FnOnce(&Path)) -> Result<Answer, String> {
+    query_with_rehash_hooks(root, request, before_rehash, |_| {})
+}
+
+fn query_with_rehash_hooks(root: &Path, request: Query,
+    before_rehash: impl FnOnce(&Path), between_rehashes: impl FnOnce(&Path)) -> Result<Answer, String> {
     let root = worktree_root(root)?;
     let paths = listed_files(&root)?;
     let (kind, value) = match request {
@@ -1245,12 +1249,23 @@ fn query_with_pre_rehash(root: &Path, request: Query,
     // Check parsed bytes again after every candidate and edge was assembled.
     // The private hook makes a post-parse edit deterministic in tests; normal
     // queries pass a no-op. This still cannot provide an atomic worktree view.
+    let final_started = Instant::now();
     before_rehash(&root);
-    verify_parsed_source_hashes(&root, "Rust", source_facts.iter().filter_map(|(path, fact)| {
+    verify_parsed_source_hashes(&root, "Rust", final_started, source_facts.iter().filter_map(|(path, fact)| {
         let SourceFact::Parsed { sha256, .. } = fact else { return None; };
         Some((path.as_str(), sha256.as_str()))
     }))?;
-    verify_parsed_source_hashes(&root, "Python", python_facts.iter()
+    verify_parsed_source_hashes(&root, "Python", final_started, python_facts.iter()
+        .map(|(path, (sha, _))| (path.as_str(), sha.as_str())))?;
+    // An early Rust file can change while the later Python pass is reading,
+    // and vice versa if a writer is racing the scan. Repeat the full supported
+    // source set before returning; the result remains a non-atomic observation.
+    between_rehashes(&root);
+    verify_parsed_source_hashes(&root, "Rust", final_started, source_facts.iter().filter_map(|(path, fact)| {
+        let SourceFact::Parsed { sha256, .. } = fact else { return None; };
+        Some((path.as_str(), sha256.as_str()))
+    }))?;
+    verify_parsed_source_hashes(&root, "Python", final_started, python_facts.iter()
         .map(|(path, (sha, _))| (path.as_str(), sha.as_str())))?;
     // Check the complete Git inventory immediately before returning. A file
     // added or removed during parsing or candidate processing must not leave
@@ -1306,6 +1321,23 @@ mod tests {
             fs::write(root.join("service.py"), "def omega(): pass\n").unwrap();
         }).unwrap_err();
         assert!(python_error.contains("Python source changed during codegraph scan: service.py"));
+    }
+
+    #[test]
+    fn fresh_query_rejects_edits_between_complete_rehash_passes() {
+        let root = worktree();
+        fs::write(root.path().join("early.rs"), "fn first() {}\n").unwrap();
+        fs::write(root.path().join("late.py"), "def first(): pass\n").unwrap();
+        let error = query_with_rehash_hooks(root.path(), Query::File("early.rs".into()),
+            |_| {}, |root| fs::write(root.join("early.rs"), "fn changed() {}\n").unwrap())
+            .unwrap_err();
+        assert!(error.contains("Rust source changed during codegraph scan: early.rs"), "{error}");
+
+        fs::write(root.path().join("early.rs"), "fn first() {}\n").unwrap();
+        let error = query_with_rehash_hooks(root.path(), Query::File("early.rs".into()),
+            |_| {}, |root| fs::write(root.join("late.py"), "def changed(): pass\n").unwrap())
+            .unwrap_err();
+        assert!(error.contains("Python source changed during codegraph scan: late.py"), "{error}");
     }
 
     #[test]

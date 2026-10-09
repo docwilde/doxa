@@ -100,10 +100,11 @@ Each digest is absent if an input in that language was skipped or unparseable.
 The fresh query also re-enumerates Git files after parsing and fails without
 an answer if the listing changed during the scan. This catches added or removed
 inputs before a complete digest is reported. Immediately before returning, it
-also rereads every parsed Rust and Python file and compares its source hash;
-a byte edit after parsing fails without an answer if it remains changed when
-that file is rechecked. Each rehash pass has the same 64 MiB source cap and a
-ten-second elapsed-time limit checked between file reads. It cannot interrupt
+also rereads every parsed Rust and Python file twice and compares its source
+hash; a byte edit after parsing fails without an answer if it remains changed
+when that file is rechecked. Each language has the same 64 MiB cap per pass,
+and all final rereads share a ten-second elapsed-time limit checked between
+file reads. It cannot interrupt
 a stalled filesystem read. An edit after a file's final read, or an edit and
 restoration between reads, can still escape detection; this is not an atomic
 repository snapshot.
