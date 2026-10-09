@@ -349,11 +349,20 @@ fn scan_digest<'a>(domain: &[u8], entries: impl IntoIterator<Item = (&'a str, &'
 /// uncheckable file or scan-budget breach fails closed. Callers compare this
 /// with an answer's scan-input digest to detect edits, additions, and removals.
 pub fn current_scan_input_sha256(root: &Path) -> Result<(String, usize), String> {
+    current_scan_input_sha256_with_pre_rehash(root, |_| {})
+}
+
+fn current_scan_input_sha256_with_pre_rehash(root: &Path,
+    before_rehash: impl FnOnce(&Path)) -> Result<(String, usize), String> {
     let root = worktree_root(root)?;
+    let started = Instant::now();
     let paths = listed_files(&root)?;
     let mut entries = Vec::new();
     let mut total = 0u64;
     for path in paths.iter().filter(|path| source_language(path) == Some("rust")) {
+        if started.elapsed() >= MAX_FINAL_REHASH_TIME {
+            return Err("Rust source scan exceeded ten-second limit; no partial verification".into());
+        }
         let (content, sha, _) = file_bytes(&root, path)?;
         total = total.saturating_add(content.len() as u64);
         if total > MAX_TOTAL_SOURCE_BYTES {
@@ -361,6 +370,15 @@ pub fn current_scan_input_sha256(root: &Path) -> Result<(String, usize), String>
         }
         entries.push((path.as_str(), sha));
     }
+    if started.elapsed() >= MAX_FINAL_REHASH_TIME {
+        return Err("Rust source scan exceeded ten-second limit; no partial verification".into());
+    }
+    // A stable path listing alone cannot detect an early source edit while
+    // later files are being read. Recheck every observed byte digest before
+    // returning a read-time inventory; this still is not an atomic snapshot.
+    before_rehash(&root);
+    verify_parsed_source_hashes(&root, "Rust", entries.iter()
+        .map(|(path, sha)| (*path, sha.as_str())))?;
     require_stable_listing(&root, &paths)?;
     let count = entries.len();
     Ok((scan_digest(b"doxa-rust-scan-input-v1\0", entries.iter().map(|(path, sha)| (*path, sha.as_str()))), count))
@@ -369,6 +387,11 @@ pub fn current_scan_input_sha256(root: &Path) -> Result<(String, usize), String>
 /// Re-enumerate and rehash every nonignored Git-listed Python input. Any
 /// unreadable input, changed listing, or scan-budget breach fails closed.
 pub fn current_python_scan_input_sha256(root: &Path) -> Result<(String, usize), String> {
+    current_python_scan_input_sha256_with_pre_rehash(root, |_| {})
+}
+
+fn current_python_scan_input_sha256_with_pre_rehash(root: &Path,
+    before_rehash: impl FnOnce(&Path)) -> Result<(String, usize), String> {
     let root = worktree_root(root)?;
     let started = Instant::now();
     let paths = listed_files(&root)?;
@@ -388,6 +411,9 @@ pub fn current_python_scan_input_sha256(root: &Path) -> Result<(String, usize), 
     if started.elapsed() >= MAX_PYTHON_SCAN_TIME {
         return Err("Python source scan exceeded ten-second limit; no partial verification".into());
     }
+    before_rehash(&root);
+    verify_parsed_source_hashes(&root, "Python", entries.iter()
+        .map(|(path, sha)| (*path, sha.as_str())))?;
     require_stable_listing(&root, &paths)?;
     let count = entries.len();
     Ok((scan_digest(b"doxa-python-scan-input-v1\0", entries.iter().map(|(path, sha)| (*path, sha.as_str()))), count))
@@ -1280,6 +1306,36 @@ mod tests {
             fs::write(root.join("service.py"), "def omega(): pass\n").unwrap();
         }).unwrap_err();
         assert!(python_error.contains("Python source changed during codegraph scan: service.py"));
+    }
+
+    #[test]
+    fn stored_rust_inventory_rejects_early_file_edit_with_stable_listing() {
+        let root = worktree();
+        fs::write(root.path().join("a.rs"), "fn first() {}\n").unwrap();
+        fs::write(root.path().join("z.rs"), "fn last() {}\n").unwrap();
+        let paths = listed_files(root.path()).unwrap();
+        let original = current_scan_input_sha256(root.path()).unwrap().0;
+        let error = current_scan_input_sha256_with_pre_rehash(root.path(), |root| {
+            fs::write(root.join("a.rs"), "fn changed() {}\n").unwrap();
+        }).unwrap_err();
+        assert!(error.contains("Rust source changed during codegraph scan: a.rs"), "{error}");
+        assert_eq!(listed_files(root.path()).unwrap(), paths);
+        assert_ne!(current_scan_input_sha256(root.path()).unwrap().0, original);
+    }
+
+    #[test]
+    fn stored_python_inventory_rejects_early_file_edit_with_stable_listing() {
+        let root = worktree();
+        fs::write(root.path().join("a.py"), "def first(): pass\n").unwrap();
+        fs::write(root.path().join("z.py"), "def last(): pass\n").unwrap();
+        let paths = listed_files(root.path()).unwrap();
+        let original = current_python_scan_input_sha256(root.path()).unwrap().0;
+        let error = current_python_scan_input_sha256_with_pre_rehash(root.path(), |root| {
+            fs::write(root.join("a.py"), "def changed(): pass\n").unwrap();
+        }).unwrap_err();
+        assert!(error.contains("Python source changed during codegraph scan: a.py"), "{error}");
+        assert_eq!(listed_files(root.path()).unwrap(), paths);
+        assert_ne!(current_python_scan_input_sha256(root.path()).unwrap().0, original);
     }
 
     #[test]
