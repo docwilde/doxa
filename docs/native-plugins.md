@@ -172,7 +172,10 @@ disposable machine with at least 1 GiB of spare memory: the proof deliberately e
 PID denial and CPU throttling. The read-only preflight checks the mount,
 caller membership, empty delegated parent, enabled controllers, executable,
 tools and scratch prerequisites. It also starts an unprivileged Bubblewrap
-namespace smoke probe. Run from the repository checkout:
+smoke probe and requires distinct network, mount, user and PID namespace
+identities, only loopback interfaces, and no IPv4 or IPv6 routes. This checks
+admission prerequisites; cgroup limit enforcement and descendant cleanup are
+measured only by the opt-in acceptance run. Run from the repository checkout:
 
 ```sh
 mkdir -p "$HOME/t" "$HOME/ssd-cache"

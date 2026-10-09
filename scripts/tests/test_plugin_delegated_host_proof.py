@@ -134,6 +134,22 @@ class DelegatedShapeTests(unittest.TestCase):
             with proof.staged_worker(alias, Path(self.temp.name)):
                 pass
 
+    def test_namespace_receipt_requires_four_distinct_private_identities(self) -> None:
+        host = {name: f"{name}:[100]" for name in proof.NAMESPACES}
+        receipt = b"net=net:[201]\nmnt=mnt:[202]\nuser=user:[203]\npid=pid:[204]\n"
+        proof.check_namespace_receipt(receipt, host)
+        for bad in (
+            b"net=net:[100]\nmnt=mnt:[202]\nuser=user:[203]\npid=pid:[204]\n",
+            b"net=net:[201]\nmnt=mnt:[202]\nuser=user:[203]\n",
+            receipt + b"net=net:[205]\n",
+            b"mnt=mnt:[202]\nnet=net:[201]\nuser=user:[203]\npid=pid:[204]\n",
+            b"net=net:[x]\nmnt=mnt:[202]\nuser=user:[203]\npid=pid:[204]\n",
+            receipt + b"\xff",
+            b"x" * 1025,
+        ):
+            with self.subTest(bad=bad[:40]), self.assertRaises(proof.ProofError):
+                proof.check_namespace_receipt(bad, host)
+
 
 if __name__ == "__main__":
     unittest.main()

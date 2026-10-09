@@ -148,7 +148,10 @@ cleanup in one bounded run. The opt-in `scripts/plugin-delegated-host-proof.py`
 checks the disposable host's delegated cgroup shape, writable cgroup v2 mount,
 fixed tools, Bubblewrap features and namespace support, private real-disk
 scratch, and available CPUs before building the real worker and running the
-fixture. One case sends an approved zero-grant Wasm module through the
+fixture. Its read-only preflight requires distinct network, mount, user and
+PID namespace identities and no non-loopback interface or IPv4/IPv6 route;
+actual cgroup limit and cleanup proof remains in the opt-in fixture. One case
+sends an approved zero-grant Wasm module through the
 production review, frame and sandbox path, and rejects stale approval before
 spawn. Its boundary case
 compares worker network, mount, user and PID namespace identities with the
