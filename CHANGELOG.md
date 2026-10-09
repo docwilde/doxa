@@ -20,7 +20,7 @@ the stable 2.0 release has not been cut.
 **Extensions and provider startup**
 
 - Bound WASM package memory and table declarations and stage a grantless child protocol. There is no plugin runner or execution path yet.
-- Fix transient executable-busy spawn failures with bounded retries in Claude CLI startup and the TUI update advisory.
+- Fix transient executable-busy spawn failures with bounded retries in Claude CLI startup, worktree Git commands, and the TUI update advisory.
 
 ## 2.0.0-beta.17 — 2026-10-09
 
