@@ -124,7 +124,8 @@ mod tests {
     #[test]
     fn positive_kernel_snapshot_still_cannot_admit_without_runtime_proof() {
         let snapshot = QuotaSnapshot { project_id: 42, hard_limit_bytes: 64 * 1024 * 1024,
-            mount_id: 123, filesystem_device: 456, descendants_checked: 3 };
+            mount_id: 123, filesystem_device: 456, descendants_checked: 3,
+            broker_entries_checked: 1 };
         assert!(require_runtime_enforcement_proof(snapshot).unwrap_err().to_string()
             .contains("EDQUOT, broker-path and restart"));
     }

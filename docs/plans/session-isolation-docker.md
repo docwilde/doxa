@@ -219,8 +219,9 @@ and an exact per-session hard-quota proof. Current fixture receipts cannot
 authorize it; even a changed receipt flag is refused until a live kernel
 limit/restart verifier exists. A Linux XFS read-only verifier checks the four
 exact session directories, bounded existing descendants in the three data
-binds, and the effective project hard limit through open descriptors. A live
-broker-path audit and production EDQUOT/restart/remount proof remain open. The
+binds, only the expected owner-private broker sockets, and the effective
+project hard limit through open descriptors. Live broker peer/protocol
+attestation and production EDQUOT/restart/remount proof remain open. The
 opt-in disposable quota fixture can compare aggregate writes through all three
 binds and recheck EDQUOT after restarting the same container; it does not
 restart the Engine, remount the source or produce a production admission token.

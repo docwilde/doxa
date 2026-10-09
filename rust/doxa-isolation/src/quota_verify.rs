@@ -16,7 +16,8 @@ pub struct QuotaExpectation { pub project_id: u32, pub hard_limit_bytes: u64 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuotaSnapshot { pub project_id: u32, pub hard_limit_bytes: u64,
-    pub mount_id: u64, pub filesystem_device: u64, pub descendants_checked: usize }
+    pub mount_id: u64, pub filesystem_device: u64, pub descendants_checked: usize,
+    pub broker_entries_checked: usize }
 
 #[derive(Clone, Copy, Debug)]
 struct ProjectState { id: u32, inherits: bool, mount_id: u64 }
@@ -30,7 +31,8 @@ trait QuotaReader {
 }
 
 /// Verify the *current* four directory inodes, bounded data-bind descendants,
-/// and effective project quota on their filesystem. The expectation must come
+/// expected broker socket entries and effective project quota on their
+/// filesystem. The expectation must come
 /// from an owner-controlled session policy; a fixture receipt alone is not one.
 pub fn inspect_session_hard_quota(manifest: &Manifest, expected: QuotaExpectation) -> io::Result<QuotaSnapshot> {
     inspect_with(manifest, expected, &KernelQuotaReader)
@@ -79,6 +81,23 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
             return Err(error("session bind source changed during quota inspection"));
         }
     }
+    let broker = open_child(&root, "broker")?;
+    let broker_meta = private_metadata(&broker)?;
+    if broker_meta.dev() != root_meta.dev() {
+        return Err(error("session broker crosses a filesystem boundary"));
+    }
+    let broker_state = reader.project(&broker)
+        .map_err(|_| error("session broker project metadata unavailable"))?;
+    if broker_state.id != expected.project_id || !broker_state.inherits
+        || broker_state.mount_id != root_state.mount_id {
+        return Err(error("session broker has wrong project ID, inheritance, or mount"));
+    }
+    let broker_entries = audit_broker_entries(&broker, root_state.mount_id, root_meta.dev())?;
+    let visible_broker = open_absolute_directory(&manifest.broker)?;
+    let visible_meta = visible_broker.metadata()?;
+    if (broker_meta.dev(), broker_meta.ino()) != (visible_meta.dev(), visible_meta.ino()) {
+        return Err(error("session broker changed during quota inspection"));
+    }
     let limit = reader.limit(&root, expected.project_id)
         .map_err(|_| error("effective project hard block limit unavailable"))?;
     if limit.id != expected.project_id || !limit.accounting || !limit.enforcing
@@ -91,7 +110,91 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
         return Err(error("session root changed during quota inspection"));
     }
     Ok(QuotaSnapshot { project_id: expected.project_id, hard_limit_bytes: limit.hard_limit_bytes,
-        mount_id: root_state.mount_id, filesystem_device: root_meta.dev(), descendants_checked: descendants })
+        mount_id: root_state.mount_id, filesystem_device: root_meta.dev(),
+        descendants_checked: descendants, broker_entries_checked: broker_entries })
+}
+
+// Only the two host-created Unix sockets may appear in the read-only worker
+// broker bind. This checks visible inode identities, ownership, permissions
+// and mount identity at one instant; it does not prove the peer or quota on
+// future socket writes. A live transport attestation is still required.
+fn audit_broker_entries(directory: &File, mount_id: u64, device: u64) -> io::Result<usize> {
+    let before = directory.metadata()?;
+    let duplicate = directory.try_clone()?;
+    let stream = unsafe { libc::fdopendir(duplicate.as_raw_fd()) };
+    if stream.is_null() { return Err(io::Error::last_os_error()); }
+    std::mem::forget(duplicate);
+    struct DirectoryStream(*mut libc::DIR);
+    impl Drop for DirectoryStream {
+        fn drop(&mut self) { unsafe { libc::closedir(self.0); } }
+    }
+    let stream = DirectoryStream(stream);
+    let mut checked = 0;
+    loop {
+        errno::set_errno(errno::Errno(0));
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            if errno::errno().0 != 0 { return Err(io::Error::last_os_error()); }
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." { continue; }
+        checked += 1;
+        if checked > 2 || !matches!(name.to_bytes(), b"hook.sock" | b"egress.sock") {
+            return Err(error("session broker contains an unexpected entry"));
+        }
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatat(directory.as_raw_fd(), name.as_ptr(), &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW) } < 0 { return Err(io::Error::last_os_error()); }
+        #[cfg(target_os = "linux")]
+        let pinned = {
+            let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            if fd < 0 { return Err(io::Error::last_os_error()); }
+            unsafe { File::from_raw_fd(fd) }
+        };
+        #[cfg(not(target_os = "linux"))]
+        return Err(error("broker socket inspection requires Linux"));
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            let meta = pinned.metadata()?;
+            if !same_entry(&stat, &meta) || !meta.file_type().is_socket()
+                || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1
+                || meta.mode() & 0o777 != 0o600 || meta.dev() != device {
+                return Err(error("session broker socket has unsafe identity or permissions"));
+            }
+            if entry_mount_id(&pinned)? != mount_id {
+                return Err(error("session broker socket crosses a mount boundary"));
+            }
+            let current = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            if current < 0 { return Err(io::Error::last_os_error()); }
+            let visible = unsafe { File::from_raw_fd(current) };
+            if !same_entry(&stat, &visible.metadata()?) {
+                return Err(error("session broker socket changed during inspection"));
+            }
+        }
+    }
+    let after = directory.metadata()?;
+    if (before.dev(), before.ino(), before.mtime(), before.mtime_nsec(), before.ctime(), before.ctime_nsec())
+        != (after.dev(), after.ino(), after.mtime(), after.mtime_nsec(), after.ctime(), after.ctime_nsec()) {
+        return Err(error("session broker changed during entry inspection"));
+    }
+    Ok(checked)
+}
+
+#[cfg(target_os = "linux")]
+fn entry_mount_id(file: &File) -> io::Result<u64> {
+    let mut statx: libc::statx = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statx(file.as_raw_fd(), c"".as_ptr(),
+        libc::AT_EMPTY_PATH | libc::AT_STATX_DONT_SYNC, libc::STATX_MNT_ID, &mut statx) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if statx.stx_mask & libc::STATX_MNT_ID == 0 {
+        return Err(error("kernel did not report broker socket mount identity"));
+    }
+    Ok(statx.stx_mnt_id)
 }
 
 // Walk from an open directory, never through a pathname supplied by an entry.
@@ -377,7 +480,7 @@ mod tests {
             base_sha: String::new(), branch: String::new(), private_home: root.join("home"),
             cache: root.join("cache"), broker: root.join("broker"), container_id: None,
             nonce: String::new(), state: "ready".into() };
-        let states = [root.to_path_buf(), root.join("checkout"), root.join("home"), root.join("cache")]
+        let states = [root.to_path_buf(), root.join("checkout"), root.join("home"), root.join("cache"), root.join("broker")]
             .into_iter().map(|path| (fs::metadata(path).unwrap().ino(), ProjectState { id: 41, inherits: true, mount_id: 9 })).collect();
         let reader = FakeReader { states, limit: Ok(LimitState { id: 41, hard_limit_bytes: 64 * 1024 * 1024,
             accounting: true, enforcing: true }) };
@@ -390,6 +493,56 @@ mod tests {
         assert_eq!(snapshot.project_id, 41);
         assert_eq!(snapshot.hard_limit_bytes, expected.hard_limit_bytes);
         assert_eq!(snapshot.descendants_checked, 0);
+        assert_eq!(snapshot.broker_entries_checked, 0);
+    }
+    #[test]
+    fn broker_root_requires_same_private_project_and_mount() {
+        let (_temp, manifest, mut reader, expected) = fixture();
+        let ino = fs::metadata(&manifest.broker).unwrap().ino();
+        let original = reader.states[&ino];
+        for altered in [ProjectState { id: 42, ..original },
+            ProjectState { inherits: false, ..original },
+            ProjectState { mount_id: 10, ..original }] {
+            reader.states.insert(ino, altered);
+            assert!(inspect_with(&manifest, expected, &reader).unwrap_err().to_string()
+                .contains("session broker has wrong project"));
+        }
+        reader.states.insert(ino, original);
+        fs::set_permissions(&manifest.broker, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(inspect_with(&manifest, expected, &reader).is_err());
+    }
+    #[test]
+    fn broker_replacement_and_unknown_entries_refuse_snapshot() {
+        let (temp, manifest, reader, expected) = fixture();
+        fs::write(manifest.broker.join("unexpected"), b"x").unwrap();
+        assert!(inspect_with(&manifest, expected, &reader).unwrap_err().to_string()
+            .contains("unexpected entry"));
+        fs::remove_file(manifest.broker.join("unexpected")).unwrap();
+        symlink("/dev/null", manifest.broker.join("hook.sock")).unwrap();
+        assert!(inspect_with(&manifest, expected, &reader).is_err());
+        fs::remove_file(manifest.broker.join("hook.sock")).unwrap();
+        fs::rename(&manifest.broker, temp.path().join("old-broker")).unwrap();
+        symlink("old-broker", &manifest.broker).unwrap();
+        assert!(inspect_with(&manifest, expected, &reader).is_err());
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_private_owned_socket_entries_pass_broker_snapshot() {
+        use std::os::unix::net::UnixListener;
+        let (_temp, manifest, mut reader, expected) = fixture();
+        let mount_id = entry_mount_id(&File::open(&manifest.broker).unwrap()).unwrap();
+        for state in reader.states.values_mut() { state.mount_id = mount_id; }
+        let hook = manifest.broker.join("hook.sock");
+        let _hook = UnixListener::bind(&hook).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(inspect_with(&manifest, expected, &reader).unwrap().broker_entries_checked, 1);
+        let egress = manifest.broker.join("egress.sock");
+        let _egress = UnixListener::bind(&egress).unwrap();
+        fs::set_permissions(&egress, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(inspect_with(&manifest, expected, &reader).unwrap().broker_entries_checked, 2);
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(inspect_with(&manifest, expected, &reader).unwrap_err().to_string()
+            .contains("unsafe identity or permissions"));
     }
     #[test]
     fn existing_data_bind_descendants_require_matching_project_and_inheritance() {
