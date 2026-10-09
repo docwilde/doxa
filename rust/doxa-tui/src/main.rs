@@ -61,6 +61,8 @@ Commands:
                        Review one owner-local WebAssembly package without running it
   native-plugin run NAME --grantless-prototype
                        Run a zero-grant, owner-approved package in a Linux cgroup sandbox
+  model-facts ENGINE MODEL [--review-before YYYY-MM-DD]
+                       Review exact static facts and operator-selected check dates
   codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH
                        Query current Rust syntax and structural module files with source hashes
   codegraph --lore-map [--root WORKTREE] file|imports|calls|modules PATH
@@ -167,6 +169,16 @@ fn run(args: &[String]) -> io::Result<()> {
             "update" => {
                 if args.len() != 1 { return Err(invalid("update takes no arguments")); }
                 return update();
+            }
+            "model-facts" => {
+                let before = match args {
+                    [_, _, _] => None,
+                    [_, _, _, option, date] if option == "--review-before" => Some(date.as_str()),
+                    _ => return Err(invalid("usage: doxa model-facts ENGINE MODEL [--review-before YYYY-MM-DD]")),
+                };
+                let report = doxa_tui::model_fact_review::report(&args[1], &args[2], before).map_err(invalid)?;
+                println!("{report}");
+                return Ok(());
             }
             "codegraph" => {
                 if args.get(1).is_some_and(|arg| arg == "--stored") {
