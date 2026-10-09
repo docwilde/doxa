@@ -5,6 +5,23 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.41 — 2026-10-09
+
+**Native plugin runner**
+
+- Recheck opened worker and Bubblewrap executable metadata just before sandbox exec, and reject writable delegated cgroup components.
+- A same-user edit in the final check-to-exec interval remains possible. The nine-case installed-host run is unperformed and TUI authority stays closed.
+
+**Guarded egress relay**
+
+- Check kernel writer identity and pinned connector scope for every worker-to-upstream relay chunk before forwarding; reject changed writers and close the tunnel.
+- Checks are sequential. Process movement, exact Engine/container identity and real provider flows remain unproved; hardened admission stays closed.
+
+**Code graph semantic probe**
+
+- Add bounded, repeated whole-worktree observations to the disabled stream challenge, including ignored files, manifests and Git control files.
+- Sequential reads do not attest container-mounted bytes or catch every restored edit. A same-UID fake Engine still passes; semantic `binding=unknown`.
+
 ## 2.0.0-beta.40 — 2026-10-09
 
 **Code graph transport proof**

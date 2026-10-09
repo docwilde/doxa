@@ -11,7 +11,7 @@
 > [!WARNING]
 > Rust 2.0 is in beta. Agents can edit files and run commands with your privileges. Choose a [session isolation profile](docs/session-isolation.md) and review the [platform limits](#platform-and-scope) before using DOXA on important work.
 
-![DOXA Rust beta.40 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.40-hero.png)
+![DOXA Rust beta.41 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.41-hero.png)
 
 [How the gallery was captured](docs/rust-gallery.md)
 
@@ -76,13 +76,13 @@ Remote control is opt in. `doxa remote serve` exposes a private Rust browser vie
 
 ## Gallery
 
-These beta.40 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
+These beta.41 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
 
-The gallery also shows the [read-only code graph modal](assets/shots/rust-2.0.0-beta.40-codegraph.png), [explicit project label](assets/shots/rust-2.0.0-beta.40-project-label.png), and [pane-row rail](assets/shots/rust-2.0.0-beta.40-pane-triage.png).
+The gallery also shows the [read-only code graph modal](assets/shots/rust-2.0.0-beta.41-codegraph.png), [explicit project label](assets/shots/rust-2.0.0-beta.41-project-label.png), and [pane-row rail](assets/shots/rust-2.0.0-beta.41-pane-triage.png).
 
 | Image preview | Isolation details | Fleet release review |
 | --- | --- | --- |
-| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.40-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.40-isolation.png) | ![Synthetic checkpoint and handoff evidence in the fleet release modal](assets/shots/rust-2.0.0-beta.40-fleet-release-review.png) |
+| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.41-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.41-isolation.png) | ![Synthetic checkpoint and handoff evidence in the fleet release modal](assets/shots/rust-2.0.0-beta.41-fleet-release-review.png) |
 
 ## Platform and scope
 
@@ -94,10 +94,10 @@ DOXA loads selected provider plugins with scoped adoption rules. Remote access n
 
 - [Rust guide](rust/README.md) — install, sessions, review, fleets, and remote use.
 - [Engine capabilities](docs/engine-capabilities.md) — what each provider supports.
-- [Session isolation](docs/session-isolation.md) — Docker profiles and their limits; guarded egress checks CONNECT and ClientHello writers, while later relay and provider flows remain unproved. The [quota helper](docs/hard-quota-preflight.md) is inactive; hardened admission stays closed.
+- [Session isolation](docs/session-isolation.md) — Docker profiles and their limits; guarded egress checks kernel writers and connector scope through each upload chunk, but the checks are sequential and exact Engine/container identity and provider flows remain unproved. The [quota helper](docs/hard-quota-preflight.md) is inactive; hardened admission stays closed.
 - [Fleet supervision](docs/fleet-supervision.md) — independent review and message judging.
-- [Code graph queries](docs/plans/code-graph.md) — bounded Rust and Python syntax queries with source-read deadlines; a blocked reader can linger until process exit. The [disabled one-socket semantic probe](docs/plans/codegraph-semantic-verification.md) checks inspect, attach and one LSP exchange but remains `binding=unknown`; [scan benchmark](docs/codegraph-scan-benchmark-2026-10-09.md).
-- [Native plugins](docs/native-plugins.md) — owner-approved text commands, status files and read-only host checks. The nine-case installed-host proof remains unrun and does not issue TUI authority.
+- [Code graph queries](docs/plans/code-graph.md) — bounded Rust and Python syntax queries with source-read deadlines; a blocked reader can linger until process exit. The [disabled semantic probe](docs/plans/codegraph-semantic-verification.md) repeats a bounded whole-worktree observation around one inspect/attach/LSP exchange, but the mutable reads are non-atomic and `binding=unknown`; [scan benchmark](docs/codegraph-scan-benchmark-2026-10-09.md).
+- [Native plugins](docs/native-plugins.md) — owner-approved text commands, status files and read-only host checks. The Linux runner rechecks opened worker and Bubblewrap identity before exec and rejects writable delegated cgroup components. The nine-case installed-host proof remains unrun and TUI authority closed.
 - [Plans and open work](docs/plans/README.md) — current implementation status.
 
 DOXA is licensed under [AGPL-3.0-only](LICENSE), with a [commercial licence](LICENSE-COMMERCIAL.md) available. The name and mark follow the [trademark policy](TRADEMARK.md).
