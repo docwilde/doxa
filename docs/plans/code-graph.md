@@ -99,8 +99,14 @@ When **every listed Rust file parses**, the answer contains deterministic
 Each digest is absent if an input in that language was skipped or unparseable.
 The fresh query also re-enumerates Git files after parsing and fails without
 an answer if the listing changed during the scan. This catches added or removed
-inputs before a complete digest is reported; it cannot make concurrent byte
-edits into an atomic repository snapshot.
+inputs before a complete digest is reported. Immediately before returning, it
+also rereads every parsed Rust and Python file and compares its source hash;
+a byte edit after parsing fails without an answer if it remains changed when
+that file is rechecked. Each rehash pass has the same 64 MiB source cap and a
+ten-second elapsed-time limit checked between file reads. It cannot interrupt
+a stalled filesystem read. An edit after a file's final read, or an edit and
+restoration between reads, can still escape detection; this is not an atomic
+repository snapshot.
 The inventories exclude ignored files and do not prove compiler or Python
 runtime semantics. Separate skipped and unparseable counters let LORE recheck
 each language independently. Older stored answers without Python inventory
