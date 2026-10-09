@@ -17,10 +17,13 @@ pub fn read(root: &Path, id: &str) -> io::Result<String> {
     if manifest["live"] != false || manifest["phase"] != "finished" {
         return Err(invalid("debrief requires a finished fleet run"));
     }
-    let Some(raw) = manifest["supervision"]["context"].as_object() else {
-        return Ok(format!("fleet {id} debrief\nHost guard journal: unavailable (unsupervised run)\nAssignment outcomes, handoffs, test receipts, judge events and spend: unknown"));
+    let context_value = match manifest.as_object().and_then(|row| row.get("supervision")) {
+        None => return Ok(format!("fleet {id} debrief\nHost guard journal: unavailable (unsupervised run)\nAssignment outcomes, handoffs, test receipts, judge events and spend: unknown")),
+        Some(Value::Object(guard)) => guard.get("context")
+            .ok_or_else(|| invalid("supervised fleet debrief is missing its host context"))?,
+        Some(_) => return Err(invalid("invalid supervised fleet debrief journal")),
     };
-    let context: Context = serde_json::from_value(Value::Object(raw.clone()))
+    let context: Context = serde_json::from_value(context_value.clone())
         .map_err(|_| invalid("invalid debrief fleet context"))?;
     context.validate()?;
     if context.charter.fleet_id != id || context.state_path != root.join(id).join("guard-state.json") {
@@ -245,5 +248,25 @@ mod tests {
         let report = render("run", &context, &state).unwrap();
         assert!(report.contains("worker slot 1"));
         assert!(!report.contains("confidential user message"));
+    }
+
+    #[test]
+    fn only_absent_supervision_is_reported_as_unsupervised() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let run = temp.path().join("run"); fs::create_dir(&run).unwrap();
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = run.join("manifest.json");
+        let base = json!({"native_version":1,"run_id":"run","live":false,"phase":"finished"});
+        fs::write(&path, serde_json::to_vec(&base).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read(temp.path(), "run").unwrap().contains("unsupervised run"));
+        for malformed in [json!({}), json!({"context":null}), json!({"context":[]}),
+            Value::Null, json!("off")] {
+            let mut manifest = base.clone();
+            manifest["supervision"] = malformed;
+            fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            assert!(read(temp.path(), "run").is_err(), "present malformed supervision must fail closed");
+        }
     }
 }
