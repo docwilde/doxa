@@ -16,6 +16,10 @@ pub mod packages;
 // Staged worker contract has no production caller until the OS sandbox lands.
 #[allow(dead_code)]
 pub(crate) mod runner;
+// Child lifecycle component is staged without any package execution route.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub(crate) mod runner_process;
 const MAX_CONFIG: u64 = 1024 * 1024;
 const MAX_MANIFEST: u64 = 16 * 1024;
 const MAX_PLUGINS: usize = 16;

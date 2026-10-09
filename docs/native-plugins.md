@@ -122,7 +122,10 @@ a path, enforce each grant and isolate crashes and resource use.
 
 Wasmi 2.0.0 now supplies an unwired interpreter core and bounded,
 digest-checked request and response frames for approved packages with zero
-grants. It has no public run command or isolated child yet. The interpreter
-is currently exercised only by tests; running untrusted code inside DOXA
-would be unsafe. Native shared libraries, scripts, provider backends, hooks
+grants. A separate unwired child supervisor now has a wall deadline,
+cancellation and 64 KiB limits for each output stream. It kills its owned
+process group and reaps the leader. This still has no public run command or
+package child: OS resource limits and file/network isolation have not passed.
+The interpreter is currently exercised only by tests; running untrusted code
+inside DOXA would be unsafe. Native shared libraries, scripts, provider backends, hooks
 and automatic startup remain unsupported.
