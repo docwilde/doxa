@@ -5,6 +5,15 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.26 — 2026-10-09
+
+**Runtime verification**
+
+- Audit bounded existing XFS quota descendants through pinned descriptors and refuse special entries; hardened Docker admission still awaits live broker-path, `EDQUOT`, and restart/remount proof.
+- Serialize egress gateway startup with a private host-only lock; a full backlog no longer causes live-socket reclamation. Restricted egress still awaits live rootless provider and bypass proof.
+- Stop surviving LSP process-group helpers after successful server exit. Semantic binding remains unknown pending effective container attestation and real analyzer evidence.
+- Launch Bubblewrap from its checked open descriptor to close pathname replacement at spawn. Plugin TUI activation and delegated-cgroup aggregate proof remain open.
+
 ## 2.0.0-beta.25 — 2026-10-09
 
 **Code graph operations**

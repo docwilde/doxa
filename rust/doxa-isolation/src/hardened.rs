@@ -64,9 +64,9 @@ pub(crate) fn require_session_hard_quota(manifest: &Manifest, receipt: &[u8]) ->
 }
 
 fn require_runtime_enforcement_proof(_snapshot: QuotaSnapshot) -> io::Result<()> {
-    // A read-only inode/quota snapshot and forgeable JSON cannot attest
-    // descendant IDs, EDQUOT through bind mounts, or restart/remount behavior.
-    Err(error("per-session EDQUOT, descendant and restart verification is unavailable"))
+    // A read-only data-bind snapshot and forgeable JSON cannot attest the
+    // live broker path, EDQUOT through binds, or restart/remount behavior.
+    Err(error("per-session EDQUOT, broker-path and restart verification is unavailable"))
 }
 
 #[cfg(test)]
@@ -124,8 +124,8 @@ mod tests {
     #[test]
     fn positive_kernel_snapshot_still_cannot_admit_without_runtime_proof() {
         let snapshot = QuotaSnapshot { project_id: 42, hard_limit_bytes: 64 * 1024 * 1024,
-            mount_id: 123, filesystem_device: 456 };
+            mount_id: 123, filesystem_device: 456, descendants_checked: 3 };
         assert!(require_runtime_enforcement_proof(snapshot).unwrap_err().to_string()
-            .contains("EDQUOT, descendant and restart"));
+            .contains("EDQUOT, broker-path and restart"));
     }
 }

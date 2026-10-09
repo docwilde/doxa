@@ -185,6 +185,29 @@ impl Session {
 
     fn exit_successfully(&mut self) -> Result<(), String> {
         loop {
+            // A successful server can leave helpers behind. Observe its exit
+            // without reaping the group leader, whose PID must stay reserved
+            // until the whole process group has been killed. This also avoids
+            // signaling an unrelated group after PID reuse.
+            #[cfg(target_os = "linux")]
+            {
+                let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+                let result = unsafe { libc::waitid(libc::P_PID, self.child.id(), &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+                if result < 0 {
+                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err("LSP wait failed".into());
+                }
+                if unsafe { info.si_pid() } != 0 {
+                    unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL); }
+                    let status = self.child.wait().map_err(|_| "LSP wait failed")?;
+                    self.reaped = true;
+                    return if status.success() { Ok(()) } else { Err("LSP server exited unsuccessfully".into()) };
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
             if let Some(status) = self.child.try_wait().map_err(|_| "LSP wait failed")? {
                 self.reaped = true;
                 return if status.success() { Ok(()) } else { Err("LSP server exited unsuccessfully".into()) };
@@ -307,7 +330,7 @@ mod tests {
     const IMAGE: &str = "reviewed/rust-analyzer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const SOCKET: &str = "unix:///run/user/1000/docker.sock";
     const FAKE: &str = r#"
-import json, os, sys, time
+import json, os, subprocess, sys, time
 mode, target_uri, target_path, pid_path = sys.argv[1:]
 with open(pid_path, 'w') as f: f.write(str(os.getpid()))
 def read():
@@ -361,6 +384,9 @@ if mode == 'mutate_after_reply':
     with open(target_path, 'a') as f: f.write('// changed after definition reply\n')
 send({'jsonrpc':'2.0','id':99,'result':None})
 assert read()['method'] == 'exit'
+if mode == 'spawn_descendant':
+    descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+    with open(pid_path + '.descendant', 'w') as f: f.write(str(descendant.pid))
 "#;
 
     struct FakeGate;
@@ -405,6 +431,20 @@ assert read()['method'] == 'exit'
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child {pid} was not reaped");
     }
 
+    #[cfg(target_os = "linux")]
+    fn assert_not_running(pid_path: &Path) {
+        let pid: i32 = fs::read_to_string(pid_path).unwrap().parse().unwrap();
+        for _ in 0..100 {
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat"));
+            if stat.is_err() || stat.as_ref().is_ok_and(|value| value.split(") ").nth(1)
+                .is_some_and(|tail| tail.starts_with('Z'))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("LSP descendant {pid} survived successful server exit");
+    }
+
     #[test]
     fn fake_server_requires_initialize_quiescence_and_definition_then_returns_unknown() {
         let (root, plan, edge, candidate, command) = fixture("ok");
@@ -415,6 +455,17 @@ assert read()['method'] == 'exit'
         let status = unavailable_status(&plan);
         assert_eq!(status["docker_launch"], "not_attempted");
         assert_eq!(status["binding"], "unknown");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn successful_server_exit_kills_descendants_before_reaping_group_leader() {
+        let (root, plan, edge, candidate, command) = fixture("spawn_descendant");
+        let evidence = run_definition(&plan, &edge, &candidate, command, &FakeGate,
+            Duration::from_secs(3)).unwrap();
+        assert_eq!(evidence.binding, "unknown");
+        assert_reaped(&root.path().join("child.pid"));
+        assert_not_running(&root.path().join("child.pid.descendant"));
     }
 
     #[test]

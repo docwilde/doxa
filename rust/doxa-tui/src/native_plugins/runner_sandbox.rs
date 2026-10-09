@@ -168,16 +168,25 @@ struct WorkerCommand { command: Command, status: File }
 /// Replacing its pathname after this call cannot change the bytes executed.
 /// The separate status descriptor belongs to Bubblewrap and is not mounted
 /// into the child; it distinguishes setup failure from a started child.
-fn command_impl(worker: &Path, args: &[&str], cgroup: Option<&CgroupBudget>) -> io::Result<WorkerCommand> {
-    let _bwrap = open_trusted_executable(Path::new(BWRAP))?;
+fn command_impl_with_bwrap(bwrap: &Path, worker: &Path, args: &[&str], cgroup: Option<&CgroupBudget>) -> io::Result<WorkerCommand> {
+    let bwrap_file = open_trusted_executable(bwrap)?;
     let worker_file = open_trusted_executable(worker)?;
     let status = status_memfd()?;
     let status_child = status.try_clone()?;
+    let bwrap_fd = bwrap_file.as_raw_fd();
+    let bwrap_metadata = bwrap_file.metadata()?;
     let worker_fd = worker_file.as_raw_fd();
     let status_fd = status_child.as_raw_fd();
-    if worker_fd == status_fd { return Err(unavailable("worker and status descriptors collided")); }
+    if bwrap_fd == worker_fd || bwrap_fd == status_fd || worker_fd == status_fd {
+        return Err(unavailable("plugin executable and status descriptors collided"));
+    }
     let procs = cgroup.map(CgroupBudget::procs_path).transpose()?;
-    let mut command = Command::new(BWRAP);
+    // execve resolves this descriptor in the forked child. The descriptor is
+    // intentionally close-on-exec: the kernel resolves the checked ELF before
+    // closing it, and Bubblewrap cannot pass the descriptor to its worker.
+    // A replacement of bwrap's pathname after validation cannot change the
+    // wrapper that starts. The pre-exec closure owns the file until execve.
+    let mut command = Command::new(format!("/proc/self/fd/{bwrap_fd}"));
     command.env_clear().current_dir("/");
     command.args(["--json-status-fd", &status_fd.to_string(),
         "--unshare-all", "--unshare-user", "--die-with-parent", "--disable-userns",
@@ -204,9 +213,21 @@ fn command_impl(worker: &Path, args: &[&str], cgroup: Option<&CgroupBudget>) -> 
         for fd in [worker_file.as_raw_fd(), status_child.as_raw_fd()] {
             if libc::fcntl(fd, libc::F_SETFD, 0) < 0 { return Err(io::Error::last_os_error()); }
         }
+        let mut observed: libc::stat = std::mem::zeroed();
+        if libc::fstat(bwrap_file.as_raw_fd(), &mut observed) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if observed.st_dev != bwrap_metadata.dev() as libc::dev_t
+            || observed.st_ino != bwrap_metadata.ino() as libc::ino_t {
+            return Err(io::Error::from_raw_os_error(libc::EACCES));
+        }
         Ok(())
     }); }
     Ok(WorkerCommand { command, status })
+}
+
+fn command_impl(worker: &Path, args: &[&str], cgroup: Option<&CgroupBudget>) -> io::Result<WorkerCommand> {
+    command_impl_with_bwrap(Path::new(BWRAP), worker, args, cgroup)
 }
 
 fn command(worker: &Path, cgroup: &CgroupBudget) -> io::Result<WorkerCommand> {
@@ -396,11 +417,28 @@ mod tests {
     }
 
     #[test]
+    fn opened_wrapper_inode_survives_path_replacement() {
+        if !sandbox_available() { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let bwrap = dir.path().join("bwrap");
+        fs::copy(BWRAP, &bwrap).unwrap();
+        fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o700)).unwrap();
+        let worker = dir.path().join("worker");
+        script(&worker, "printf 'DOXA-WORKER-READY-v1\\n' >&2; printf 'DOXAR1\\000\\000\\000\\052\\000\\000\\000'");
+        let launch = command_impl_with_bwrap(&bwrap, &worker, &[], None).unwrap();
+        fs::rename(&bwrap, dir.path().join("original-wrapper")).unwrap();
+        script(&bwrap, "printf 'replacement-wrapper'; exit 9");
+        let (capture, wrapper) = run_bwrap(launch);
+        assert!(wrapper.child_started);
+        assert_eq!(classify(&capture, wrapper), IsolatedOutcome::Return(42));
+    }
+
+    #[test]
     fn wrapper_descriptors_are_not_exposed_to_worker() {
         if !sandbox_available() { return; }
         let dir = tempfile::tempdir().unwrap();
         let worker = dir.path().join("worker");
-        script(&worker, "ls -l /proc/self/fd | grep -E 'doxa-plugin-bwrap-status|/home/' >/dev/null && exit 9; printf 'DOXA-WORKER-READY-v1\\n' >&2; printf 'DOXAR1\\000\\000\\000\\001\\000\\000\\000'");
+        script(&worker, "ls -l /proc/self/fd | grep -E 'doxa-plugin-bwrap-status|/usr/bin/bwrap|/home/' >/dev/null && exit 9; printf 'DOXA-WORKER-READY-v1\\n' >&2; printf 'DOXAR1\\000\\000\\000\\001\\000\\000\\000'");
         let (capture, wrapper) = run_bwrap(command_impl(&worker, &[], None).unwrap());
         assert_eq!(classify(&capture, wrapper), IsolatedOutcome::Return(1));
     }

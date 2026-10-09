@@ -86,13 +86,20 @@ credential helpers are not used.
 
 The Rust hardened-admission seam reads a bounded receipt and checks the saved
 session profile and exact tree. Its read-only Linux XFS verifier can inspect
-the exact session root and three bind-source directory descriptors: project
-ID and inheritance, filesystem and mount identity, and the effective project
-hard block limit with accounting and enforcement enabled. It requires an
-explicit exact limit; the fixture's maximum write size is **not** that limit.
+the exact session root and three bind-source directory descriptors, then walk
+up to 4,096 existing entries and 64 directory levels within checkout, home
+and cache. It checks project ID, directory inheritance, filesystem and mount
+identity, rejects symlinks and special entries, and compares entry identities
+again after inspection. On Linux it classifies each entry without following a
+link, pins it with `O_PATH`, then reopens the pinned regular file or directory
+through procfs for quota metadata. Missing procfs refuses the snapshot. The
+verifier also reads the effective project hard
+block limit with accounting and enforcement enabled. It requires an explicit
+exact limit; the fixture's maximum write size is **not** that limit.
 Unsupported filesystems, unavailable `quotactl_fd`, and any mismatch refuse
-verification. This is a point-in-time snapshot of four directories, not a
-complete descendant audit or an EDQUOT/restart proof. The receipt is not an
+verification. The descendant walk covers the three data bind sources; it does
+not establish an immutable tree or prove the live broker path. This is a
+point-in-time snapshot, not an EDQUOT/restart proof. The receipt is not an
 owner-controlled policy, and the admission seam still refuses even a
 hand-edited `admissible_as_hard_quota=true`. Selecting `docker-hardened` remains
 unavailable.

@@ -7,10 +7,11 @@
 use crate::{error, inspect_network, preflight, private_directory, read_manifest, Profile};
 use std::{
     collections::HashSet,
-    fs,
+    ffi::OsString,
+    fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
-    os::unix::{fs::{FileTypeExt, MetadataExt, PermissionsExt}, net::{UnixListener, UnixStream}},
+    os::{fd::AsRawFd, unix::{fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt}, net::{UnixListener, UnixStream}}},
     path::{Path, PathBuf},
     sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}},
     thread::{self, JoinHandle},
@@ -22,6 +23,9 @@ const MAX_CLIENTS: usize = 32;
 const IO_TIMEOUT: Duration = Duration::from_millis(200);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CLIENT_HELLO: usize = 64 * 1024;
+
+#[cfg(target_os = "linux")]
+use std::os::{fd::{FromRawFd, OwnedFd}, unix::ffi::OsStrExt};
 
 type Resolver = dyn Fn(&str) -> io::Result<Vec<SocketAddr>> + Send + Sync;
 type Connector = dyn Fn(SocketAddr) -> io::Result<TcpStream> + Send + Sync;
@@ -258,6 +262,73 @@ fn tunnel(mut client: UnixStream, mut upstream: TcpStream, stop: &AtomicBool) ->
     })
 }
 
+// A blocking connect can wait forever behind a full Unix listener backlog.
+// Only ECONNREFUSED proves that an owned socket inode has no listener; EAGAIN
+// and every other failure must leave the existing path untouched.
+#[cfg(target_os = "linux")]
+fn stale_socket(socket: &Path) -> io::Result<bool> {
+    let bytes = socket.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.is_empty() || bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return Err(error("invalid egress socket path"));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (target, byte) in address.sun_path.iter_mut().zip(bytes) { *target = *byte as libc::c_char; }
+    let descriptor = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
+    if descriptor < 0 { return Err(io::Error::last_os_error()); }
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    if unsafe { libc::connect(descriptor.as_raw_fd(), (&raw const address).cast(), std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t) } == 0 {
+        return Ok(false);
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ECONNREFUSED) { Ok(true) } else { Err(err) }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn stale_socket(_socket: &Path) -> io::Result<bool> {
+    Err(error("stale egress socket reclamation requires Linux"))
+}
+
+// The broker itself is mounted read-only into the worker. The lock must live
+// beside it in the private host-only session root: even a read-only file can
+// be flocked by a worker. Never unlink the lock while the broker may exist.
+fn gateway_lock_path(broker_dir: &Path) -> io::Result<PathBuf> {
+    let parent = broker_dir.parent().ok_or_else(|| error("egress broker has no parent"))?;
+    private_directory(parent, false)?;
+    let name = broker_dir.file_name().ok_or_else(|| error("egress broker has no name"))?;
+    let mut filename = OsString::from(".");
+    filename.push(name);
+    filename.push(".egress.lock");
+    Ok(parent.join(filename))
+}
+fn gateway_lock(broker_dir: &Path) -> io::Result<File> {
+    let path = gateway_lock_path(broker_dir)?;
+    // Reject known special files before opening them. A concurrent swap can
+    // still occur, so O_NONBLOCK and the descriptor check remain mandatory.
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if !meta.is_file() => return Err(error("unsafe egress gateway lock")),
+        Ok(_) => {},
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {},
+        Err(e) => return Err(e),
+    }
+    let file = OpenOptions::new().read(true).write(true).create(true).mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(&path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.nlink() != 1 || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+        return Err(error("unsafe egress gateway lock"));
+    }
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::WouldBlock { return Err(error("egress gateway already starting or live")); }
+        return Err(err);
+    }
+    let current = fs::symlink_metadata(&path)?;
+    if !current.is_file() || (current.dev(), current.ino()) != (meta.dev(), meta.ino()) {
+        return Err(error("egress gateway lock changed during startup"));
+    }
+    Ok(file)
+}
+
 fn serve(mut client: UnixStream, hosts: &AllowedHosts, resolver: &Resolver, connector: &Connector, stop: &AtomicBool) -> io::Result<()> {
     let request = match read_header(&mut client) {
         Ok(request) => request,
@@ -297,7 +368,7 @@ fn serve(mut client: UnixStream, hosts: &AllowedHosts, resolver: &Resolver, conn
 /// Bound to a private session broker directory. Dropping it closes active
 /// fixture tunnels and removes only the socket inode it created.
 pub struct EgressGateway {
-    socket: PathBuf, identity: (u64, u64), stop: Arc<AtomicBool>, worker: Option<JoinHandle<()>>,
+    socket: PathBuf, identity: (u64, u64), stop: Arc<AtomicBool>, worker: Option<JoinHandle<()>>, _lock: File,
 }
 impl EgressGateway {
     /// Reserved production entry point. It cannot open a socket until quota
@@ -330,11 +401,20 @@ impl EgressGateway {
         Self::start_with(broker_dir, hosts, resolver, connector)
     }
     fn start_with(broker_dir: &Path, hosts: AllowedHosts, resolver: Arc<Resolver>, connector: Arc<Connector>) -> io::Result<Self> {
+        Self::start_with_after_lock(broker_dir, hosts, resolver, connector, || {})
+    }
+    fn start_with_after_lock(broker_dir: &Path, hosts: AllowedHosts, resolver: Arc<Resolver>, connector: Arc<Connector>, after_lock: impl FnOnce()) -> io::Result<Self> {
         private_directory(broker_dir, false)?;
+        let lock = gateway_lock(broker_dir)?;
+        after_lock();
         let socket = broker_dir.join("egress.sock");
         if let Ok(meta) = fs::symlink_metadata(&socket) {
             if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() } { return Err(error("unsafe stale egress socket")); }
-            if UnixStream::connect(&socket).is_ok() { return Err(error("egress gateway already live")); }
+            if !stale_socket(&socket)? { return Err(error("egress gateway already live")); }
+            let current = fs::symlink_metadata(&socket)?;
+            if (current.dev(), current.ino()) != (meta.dev(), meta.ino()) || !current.file_type().is_socket() {
+                return Err(error("egress socket changed during stale check"));
+            }
             fs::remove_file(&socket)?;
         }
         let listener = UnixListener::bind(&socket)?;
@@ -375,7 +455,7 @@ impl EgressGateway {
             }
             for client in clients { let _ = client.join(); }
         });
-        Ok(Self { socket, identity, stop, worker: Some(worker) })
+        Ok(Self { socket, identity, stop, worker: Some(worker), _lock: lock })
     }
     pub fn socket(&self) -> &Path { &self.socket }
 }
@@ -437,12 +517,17 @@ mod tests {
     use super::*;
     use std::{os::unix::fs::PermissionsExt, sync::atomic::AtomicUsize};
 
-    fn fixture_dir() -> tempfile::TempDir {
+    struct FixtureDir { _root: tempfile::TempDir, broker: PathBuf }
+    impl FixtureDir { fn path(&self) -> &Path { &self.broker } }
+    fn fixture_dir() -> FixtureDir {
         // The checkout may exceed AF_UNIX's path budget in an agent worktree.
         // Callers choose a short real-disk TMPDIR for these socket fixtures.
         let root = tempfile::tempdir().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        root
+        let broker = root.path().join("broker");
+        fs::create_dir(&broker).unwrap();
+        fs::set_permissions(&broker, fs::Permissions::from_mode(0o700)).unwrap();
+        FixtureDir { _root: root, broker }
     }
     fn hosts() -> AllowedHosts { AllowedHosts::new(&["api.example.test".to_owned()]).unwrap() }
     fn gateway(root: &Path, addresses: Vec<SocketAddr>, upstream: SocketAddr, calls: Arc<AtomicUsize>) -> EgressGateway {
@@ -646,6 +731,129 @@ mod tests {
         bridge.join().unwrap();
         std::os::unix::fs::symlink("/etc/passwd", root.path().join("egress.sock")).unwrap();
         assert!(EgressGateway::start(root.path(), hosts()).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn full_live_socket_backlog_is_not_reclaimed() {
+        use std::os::fd::AsRawFd;
+        let root = fixture_dir();
+        let socket = root.path().join("egress.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let queued = UnixStream::connect(&socket).unwrap();
+        let identity = fs::metadata(&socket).unwrap();
+        let path = root.path().to_owned();
+        let (done, result) = std::sync::mpsc::channel();
+        let attempt = thread::spawn(move || { let _ = done.send(EgressGateway::start(&path, hosts()).is_err()); });
+        let bounded_result = result.recv_timeout(Duration::from_secs(2));
+        let after = fs::metadata(&socket).unwrap();
+        drop(queued);
+        drop(listener);
+        if bounded_result.is_ok() { attempt.join().unwrap(); }
+        assert_eq!(bounded_result.unwrap(), true, "live-socket check blocked behind its backlog");
+        assert_eq!((after.dev(), after.ino()), (identity.dev(), identity.ino()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refused_owned_socket_is_reclaimed() {
+        let root = fixture_dir();
+        let socket = root.path().join("egress.sock");
+        let stale = UnixListener::bind(&socket).unwrap();
+        drop(stale);
+        assert!(stale_socket(&socket).unwrap());
+        let gateway = EgressGateway::start(root.path(), hosts()).unwrap();
+        assert!(!stale_socket(gateway.socket()).unwrap());
+        drop(gateway);
+        assert!(!socket.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_starts_cannot_replace_the_first_gateways_socket() {
+        let root = fixture_dir();
+        let socket = root.path().join("egress.sock");
+        let stale = UnixListener::bind(&socket).unwrap();
+        drop(stale);
+        let (locked, ready) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let broker = root.path().to_owned();
+        let starter = thread::spawn(move || EgressGateway::start_with_after_lock(
+            &broker, hosts(), Arc::new(|_| Ok(vec![])),
+            Arc::new(|_| Err(error("unused connector"))),
+            || { locked.send(()).unwrap(); proceed.recv().unwrap(); },
+        ).unwrap());
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        let occupied = EgressGateway::start(root.path(), hosts()).err().unwrap();
+        assert!(occupied.to_string().contains("already starting or live"), "{occupied}");
+        release.send(()).unwrap();
+        let gateway = starter.join().unwrap();
+        assert!(UnixStream::connect(gateway.socket()).is_ok());
+        let occupied = EgressGateway::start(root.path(), hosts()).err().unwrap();
+        assert!(occupied.to_string().contains("already starting or live"), "{occupied}");
+        drop(gateway);
+        assert!(!socket.exists());
+        let lock = gateway_lock_path(root.path()).unwrap();
+        assert!(lock.exists());
+        assert_eq!(lock.parent(), root.path().parent());
+        assert!(!root.path().join("egress.lock").exists(), "worker-visible broker must not expose host lock");
+        let meta = fs::symlink_metadata(&lock).unwrap();
+        assert_eq!(meta.uid(), unsafe { libc::geteuid() });
+        assert_eq!(meta.mode() & 0o777, 0o600);
+        assert_eq!(meta.nlink(), 1);
+        let restarted = EgressGateway::start(root.path(), hosts()).unwrap();
+        drop(restarted);
+    }
+
+    #[test]
+    fn unsafe_gateway_lock_inodes_fail_before_socket_binding() {
+        for kind in ["symlink", "hardlink", "public"] {
+            let root = fixture_dir();
+            let target = root.path().join("target");
+            fs::write(&target, b"fixture").unwrap();
+            let lock = gateway_lock_path(root.path()).unwrap();
+            match kind {
+                "symlink" => std::os::unix::fs::symlink(&target, &lock).unwrap(),
+                "hardlink" => fs::hard_link(&target, &lock).unwrap(),
+                "public" => {
+                    fs::write(&lock, b"").unwrap();
+                    fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(EgressGateway::start(root.path(), hosts()).is_err(), "{kind}");
+            assert!(!root.path().join("egress.sock").exists(), "{kind}");
+            assert_eq!(fs::read(&target).unwrap(), b"fixture", "{kind}");
+        }
+    }
+
+    #[test]
+    fn gateway_lock_requires_private_host_only_parent() {
+        let root = fixture_dir();
+        let parent = root.path().parent().unwrap();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(EgressGateway::start(root.path(), hosts()).is_err());
+        assert!(!root.path().join("egress.sock").exists());
+        assert!(!parent.join(".broker.egress.lock").exists());
+    }
+
+    #[test]
+    fn fifo_lock_path_is_refused_without_blocking_startup() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let root = fixture_dir();
+        let lock = gateway_lock_path(root.path()).unwrap();
+        let path = CString::new(lock.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let broker = root.path().to_owned();
+        let (sent, received) = std::sync::mpsc::channel();
+        let attempt = thread::spawn(move || {
+            let _ = sent.send(EgressGateway::start(&broker, hosts()).err().map(|e| e.to_string()));
+        });
+        let result = received.recv_timeout(Duration::from_secs(2));
+        if result.is_ok() { attempt.join().unwrap(); }
+        assert!(result.unwrap().is_some_and(|e| e.contains("unsafe egress gateway lock")));
+        assert!(!root.path().join("egress.sock").exists());
     }
 
     #[test]

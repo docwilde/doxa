@@ -1,20 +1,22 @@
 //! Read-only, descriptor-anchored project-quota snapshot for a session tree.
 //!
 //! This is one necessary admission check, not a durable enforcement proof:
-//! descendants, Docker bind behavior, EDQUOT, and restart/remount still need
-//! independent verification before a hardened profile may be enabled.
+//! Docker bind behavior, EDQUOT, and restart/remount still need independent
+//! verification before a hardened profile may be enabled.
 use crate::{error, Manifest, Profile};
-use std::{ffi::CString, fs::File, io, os::fd::{AsRawFd, FromRawFd},
+use std::{ffi::{CStr, CString}, fs::File, io, os::fd::{AsRawFd, FromRawFd},
     os::unix::{ffi::OsStrExt, fs::MetadataExt}, path::{Component, Path}};
 
 const MAX_HARD_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+const MAX_DESCENDANTS: usize = 4096;
+const MAX_DEPTH: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuotaExpectation { pub project_id: u32, pub hard_limit_bytes: u64 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuotaSnapshot { pub project_id: u32, pub hard_limit_bytes: u64,
-    pub mount_id: u64, pub filesystem_device: u64 }
+    pub mount_id: u64, pub filesystem_device: u64, pub descendants_checked: usize }
 
 #[derive(Clone, Copy, Debug)]
 struct ProjectState { id: u32, inherits: bool, mount_id: u64 }
@@ -27,9 +29,9 @@ trait QuotaReader {
     fn limit(&self, directory: &File, project_id: u32) -> io::Result<LimitState>;
 }
 
-/// Verify the *current* four directory inodes and the effective project quota
-/// on their filesystem. The expectation must come from an owner-controlled
-/// session policy; a fixture receipt alone is not such a policy.
+/// Verify the *current* four directory inodes, bounded data-bind descendants,
+/// and effective project quota on their filesystem. The expectation must come
+/// from an owner-controlled session policy; a fixture receipt alone is not one.
 pub fn inspect_session_hard_quota(manifest: &Manifest, expected: QuotaExpectation) -> io::Result<QuotaSnapshot> {
     inspect_with(manifest, expected, &KernelQuotaReader)
 }
@@ -55,6 +57,7 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
     if root_state.id != expected.project_id || !root_state.inherits || root_state.mount_id == 0 {
         return Err(error("session root has wrong project ID, inheritance, or mount identity"));
     }
+    let mut descendants = 0;
     for (name, path) in [("checkout", &manifest.checkout), ("home", &manifest.private_home), ("cache", &manifest.cache)] {
         let directory = open_child(&root, name)?;
         let meta = private_metadata(&directory)?;
@@ -66,6 +69,8 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
         if state.id != expected.project_id || !state.inherits || state.mount_id != root_state.mount_id {
             return Err(error("session bind source has wrong project ID, inheritance, or mount"));
         }
+        audit_descendants(&directory, reader, expected.project_id, root_state.mount_id,
+            root_meta.dev(), &mut descendants, 0)?;
         // Re-open the visible path after reading the descriptor to reject a
         // replaced bind source. This remains a snapshot, not a race-proof lease.
         let visible = open_absolute_directory(path)?;
@@ -86,7 +91,123 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
         return Err(error("session root changed during quota inspection"));
     }
     Ok(QuotaSnapshot { project_id: expected.project_id, hard_limit_bytes: limit.hard_limit_bytes,
-        mount_id: root_state.mount_id, filesystem_device: root_meta.dev() })
+        mount_id: root_state.mount_id, filesystem_device: root_meta.dev(), descendants_checked: descendants })
+}
+
+// Walk from an open directory, never through a pathname supplied by an entry.
+// Reopening each entry and comparing its inode catches ordinary replacement
+// during the walk. Directory timestamps catch ordinary additions/removals.
+// This remains a bounded, point-in-time inspection, not an immutable lease.
+fn audit_descendants(directory: &File, reader: &impl QuotaReader, project_id: u32,
+    mount_id: u64, device: u64, checked: &mut usize, depth: usize) -> io::Result<()> {
+    if depth > MAX_DEPTH { return Err(error("quota descendant directory depth exceeds bound")); }
+    let before = directory.metadata()?;
+    let duplicate = directory.try_clone()?;
+    let raw = duplicate.as_raw_fd();
+    let stream = unsafe { libc::fdopendir(raw) };
+    if stream.is_null() { return Err(io::Error::last_os_error()); }
+    std::mem::forget(duplicate); // closed by closedir, including on error
+    struct DirectoryStream(*mut libc::DIR);
+    impl Drop for DirectoryStream {
+        fn drop(&mut self) { unsafe { libc::closedir(self.0); } }
+    }
+    let stream = DirectoryStream(stream);
+    loop {
+        errno::set_errno(errno::Errno(0));
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            if errno::errno().0 != 0 { return Err(io::Error::last_os_error()); }
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." { continue; }
+        *checked += 1;
+        if *checked > MAX_DESCENDANTS { return Err(error("quota descendant count exceeds bound")); }
+        let child = open_entry(directory, name)?;
+        let meta = child.metadata()?;
+        if !meta.is_file() && !meta.is_dir() {
+            return Err(error("quota data bind contains a symlink or special entry"));
+        }
+        if meta.dev() != device { return Err(error("quota data bind crosses a filesystem boundary")); }
+        let state = reader.project(&child).map_err(|_| error("quota descendant project metadata unavailable"))?;
+        if state.id != project_id || state.mount_id != mount_id || (meta.is_dir() && !state.inherits) {
+            return Err(error("quota descendant has wrong project ID, inheritance, or mount"));
+        }
+        if meta.is_dir() {
+            audit_descendants(&child, reader, project_id, mount_id, device, checked, depth + 1)?;
+        }
+        let visible = open_entry(directory, name)?;
+        let now = visible.metadata()?;
+        if (meta.dev(), meta.ino(), meta.mode(), meta.mtime(), meta.mtime_nsec(), meta.ctime(), meta.ctime_nsec())
+            != (now.dev(), now.ino(), now.mode(), now.mtime(), now.mtime_nsec(), now.ctime(), now.ctime_nsec()) {
+            return Err(error("quota descendant changed during inspection"));
+        }
+    }
+    let after = directory.metadata()?;
+    if (before.dev(), before.ino(), before.mtime(), before.mtime_nsec(), before.ctime(), before.ctime_nsec())
+        != (after.dev(), after.ino(), after.mtime(), after.mtime_nsec(), after.ctime(), after.ctime_nsec()) {
+        return Err(error("quota directory changed during descendant inspection"));
+    }
+    Ok(())
+}
+
+fn open_entry(parent: &File, name: &CStr) -> io::Result<File> {
+    let mut before: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(parent.as_raw_fd(), name.as_ptr(), &mut before, libc::AT_SYMLINK_NOFOLLOW) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let kind = before.st_mode as u32 & libc::S_IFMT as u32;
+    if kind != libc::S_IFREG as u32 && kind != libc::S_IFDIR as u32 {
+        return Err(error("quota data bind contains a symlink or special entry"));
+    }
+    // O_PATH pins a Linux inode without opening a device, FIFO or socket. If
+    // the name changes after fstatat, the pinned descriptor is reclassified
+    // before any read-capable descriptor is obtained.
+    #[cfg(target_os = "linux")]
+    let pinned = {
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        unsafe { File::from_raw_fd(fd) }
+    };
+    #[cfg(target_os = "linux")]
+    {
+        let meta = pinned.metadata()?;
+        if !same_entry(&before, &meta) { return Err(error("quota descendant changed before open")); }
+        // The procfd names the pinned inode, not the mutable directory entry.
+        // The kernel quota ioctl needs a read-capable descriptor; an absent
+        // procfs or refused reopen fails this snapshot closed.
+        let path = CString::new(format!("/proc/self/fd/{}", pinned.as_raw_fd())).unwrap();
+        let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK
+            | if meta.is_dir() { libc::O_DIRECTORY } else { 0 };
+        let fd = unsafe { libc::open(path.as_ptr(), flags) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        let opened = unsafe { File::from_raw_fd(fd) };
+        if !same_entry(&before, &opened.metadata()?) {
+            return Err(error("quota pinned descendant changed before ioctl"));
+        }
+        return Ok(opened);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Non-Linux uses only fake quota readers in tests; the kernel reader
+        // refuses inspection. O_DIRECTORY excludes device replacement for a
+        // directory entry, and identity comparison rejects other changes.
+        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK
+            | if kind == libc::S_IFDIR as u32 { libc::O_DIRECTORY } else { 0 };
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        let opened = unsafe { File::from_raw_fd(fd) };
+        if !same_entry(&before, &opened.metadata()?) {
+            return Err(error("quota descendant changed before open"));
+        }
+        Ok(opened)
+    }
+}
+
+fn same_entry(before: &libc::stat, meta: &std::fs::Metadata) -> bool {
+    before.st_dev as u64 == meta.dev() && before.st_ino as u64 == meta.ino()
+        && before.st_mode as u32 == meta.mode()
 }
 
 fn private_metadata(directory: &File) -> io::Result<std::fs::Metadata> {
@@ -229,7 +350,7 @@ impl QuotaReader for KernelQuotaReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::HashMap, fs, os::unix::fs::{symlink, PermissionsExt}, path::PathBuf};
+    use std::{cell::Cell, collections::HashMap, fs, os::unix::fs::{symlink, PermissionsExt}, path::PathBuf};
 
     struct FakeReader { states: HashMap<u64, ProjectState>, limit: io::Result<LimitState> }
     impl QuotaReader for FakeReader {
@@ -268,6 +389,98 @@ mod tests {
         let snapshot = inspect_with(&manifest, expected, &reader).unwrap();
         assert_eq!(snapshot.project_id, 41);
         assert_eq!(snapshot.hard_limit_bytes, expected.hard_limit_bytes);
+        assert_eq!(snapshot.descendants_checked, 0);
+    }
+    #[test]
+    fn existing_data_bind_descendants_require_matching_project_and_inheritance() {
+        let (_temp, manifest, mut reader, expected) = fixture();
+        let nested = manifest.checkout.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let file = nested.join("existing.txt");
+        fs::write(&file, b"fixture").unwrap();
+        let nested_ino = fs::metadata(&nested).unwrap().ino();
+        let file_ino = fs::metadata(&file).unwrap().ino();
+        let valid = ProjectState { id: 41, inherits: true, mount_id: 9 };
+        reader.states.insert(nested_ino, valid);
+        reader.states.insert(file_ino, valid);
+        assert_eq!(inspect_with(&manifest, expected, &reader).unwrap().descendants_checked, 2);
+        reader.states.insert(file_ino, ProjectState { id: 42, ..valid });
+        assert!(inspect_with(&manifest, expected, &reader).unwrap_err().to_string()
+            .contains("quota descendant has wrong project ID"));
+        reader.states.insert(file_ino, ProjectState { mount_id: 10, ..valid });
+        assert!(inspect_with(&manifest, expected, &reader).unwrap_err().to_string()
+            .contains("quota descendant has wrong project ID"));
+        reader.states.insert(file_ino, valid);
+        reader.states.insert(nested_ino, ProjectState { inherits: false, ..valid });
+        assert!(inspect_with(&manifest, expected, &reader).unwrap_err().to_string()
+            .contains("quota descendant has wrong project ID"));
+    }
+    #[test]
+    fn symlink_and_special_data_bind_entries_refuse_snapshot() {
+        let (_temp, manifest, reader, expected) = fixture();
+        let cache = File::open(&manifest.cache).unwrap();
+        let shortcut = manifest.cache.join("shortcut");
+        symlink(&manifest.private_home, &shortcut).unwrap();
+        assert!(open_entry(&cache, c"shortcut").unwrap_err().to_string()
+            .contains("symlink or special"));
+        assert!(inspect_with(&manifest, expected, &reader).is_err());
+        fs::remove_file(&shortcut).unwrap();
+        let fifo = manifest.cache.join("pipe");
+        let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(open_entry(&cache, c"pipe").unwrap_err().to_string()
+            .contains("symlink or special"));
+        assert!(inspect_with(&manifest, expected, &reader).is_err());
+        fs::remove_file(&fifo).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(manifest.cache.join("socket")).unwrap();
+        assert!(open_entry(&cache, c"socket").unwrap_err().to_string()
+            .contains("symlink or special"));
+    }
+    #[test]
+    fn descendant_count_and_depth_are_bounded() {
+        let (_temp, manifest, mut reader, expected) = fixture();
+        let mut nested = manifest.checkout.clone();
+        let valid = ProjectState { id: 41, inherits: true, mount_id: 9 };
+        for _ in 0..=MAX_DEPTH {
+            nested = nested.join("d");
+            fs::create_dir(&nested).unwrap();
+            reader.states.insert(fs::metadata(&nested).unwrap().ino(), valid);
+        }
+        assert!(inspect_with(&manifest, expected, &reader).unwrap_err().to_string().contains("depth exceeds bound"));
+        fs::remove_dir_all(&manifest.checkout).unwrap();
+        fs::create_dir(&manifest.checkout).unwrap();
+        // The checkout inode changed, so exercise the same bounded walker
+        // directly with one shared counter across all sibling files.
+        let checkout = File::open(&manifest.checkout).unwrap();
+        for index in 0..=MAX_DESCENDANTS {
+            let path = manifest.checkout.join(format!("f{index}"));
+            fs::write(&path, b"").unwrap();
+            reader.states.insert(fs::metadata(path).unwrap().ino(), valid);
+        }
+        assert!(audit_descendants(&checkout, &reader, 41, 9, checkout.metadata().unwrap().dev(),
+            &mut 0, 0).unwrap_err().to_string().contains("count exceeds bound"));
+    }
+    #[test]
+    fn replacing_a_descendant_during_inspection_refuses_snapshot() {
+        struct ReplacingReader { path: PathBuf, replaced: Cell<bool> }
+        impl QuotaReader for ReplacingReader {
+            fn project(&self, _: &File) -> io::Result<ProjectState> {
+                if !self.replaced.replace(true) {
+                    fs::remove_file(&self.path)?;
+                    fs::write(&self.path, b"replacement")?;
+                }
+                Ok(ProjectState { id: 41, inherits: true, mount_id: 9 })
+            }
+            fn limit(&self, _: &File, _: u32) -> io::Result<LimitState> { unreachable!() }
+        }
+        let (_temp, manifest, _reader, _expected) = fixture();
+        let file = manifest.checkout.join("file");
+        fs::write(&file, b"original").unwrap();
+        let checkout = File::open(&manifest.checkout).unwrap();
+        let reader = ReplacingReader { path: file, replaced: Cell::new(false) };
+        assert!(audit_descendants(&checkout, &reader, 41, 9, checkout.metadata().unwrap().dev(),
+            &mut 0, 0).unwrap_err().to_string().contains("changed during inspection"));
+        assert!(reader.replaced.get());
     }
     #[test]
     fn mismatched_project_mount_inheritance_limit_or_enforcement_refuses() {
