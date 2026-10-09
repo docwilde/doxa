@@ -85,8 +85,9 @@ data class PendingWriteMarker(
 /** The Android adapter must make writes and deletes durable before returning true. */
 interface PendingWriteMarkerStore {
     fun read(): String?
-    fun write(value: String): Boolean
-    fun clear(): Boolean
+    fun writeIfEmpty(value: String): Boolean
+    fun replace(expected: String, value: String): Boolean
+    fun clear(expected: String): Boolean
 }
 
 /** A prior write blocks every new write until a fresh snapshot and explicit review. */
@@ -94,13 +95,14 @@ class PendingWriteGuard(private val store: PendingWriteMarkerStore) {
     private var unreadable = false
     var marker: PendingWriteMarker? = null
         private set
+    private var persistedRaw: String? = null
     private var observedScope: PendingWriteScope? = null
     private var fencedMarker: PendingWriteMarker? = null
 
     init {
         val raw = try { store.read() } catch (_: Exception) { unreadable = true; null }
         if (raw != null) {
-            marker = try { PendingWriteMarker.decode(raw) }
+            marker = try { PendingWriteMarker.decode(raw).also { persistedRaw = raw } }
             catch (_: Exception) { unreadable = true; null }
         }
     }
@@ -109,8 +111,11 @@ class PendingWriteGuard(private val store: PendingWriteMarkerStore) {
     val unreadableMarker: Boolean get() = unreadable
 
     fun begin(next: PendingWriteMarker): Boolean {
-        if (blocked || !next.valid() || !runCatching { store.write(next.encode()) }.getOrDefault(false)) return false
+        if (blocked || !next.valid()) return false
+        val encoded = next.encode()
+        if (!runCatching { store.writeIfEmpty(encoded) }.getOrDefault(false)) return false
         marker = next
+        persistedRaw = encoded
         observedScope = null
         fencedMarker = null
         return true
@@ -119,8 +124,10 @@ class PendingWriteGuard(private val store: PendingWriteMarkerStore) {
     fun matches(current: PendingWriteMarker): Boolean = marker == current && !unreadable
 
     fun finish(current: PendingWriteMarker): Boolean {
-        if (!matches(current) || !runCatching { store.clear() }.getOrDefault(false)) return false
+        val expected = persistedRaw ?: return false
+        if (!matches(current) || !runCatching { store.clear(expected) }.getOrDefault(false)) return false
         marker = null
+        persistedRaw = null
         observedScope = null
         fencedMarker = null
         return true
@@ -144,8 +151,10 @@ class PendingWriteGuard(private val store: PendingWriteMarkerStore) {
         observedScope == scope && marker?.scope == scope && fencedMarker == marker
 
     fun acknowledgeAfterReview(scope: PendingWriteScope): Boolean {
-        if (!canAcknowledge(scope) || !runCatching { store.clear() }.getOrDefault(false)) return false
+        val expected = persistedRaw ?: return false
+        if (!canAcknowledge(scope) || !runCatching { store.clear(expected) }.getOrDefault(false)) return false
         marker = null
+        persistedRaw = null
         unreadable = false
         observedScope = null
         fencedMarker = null
@@ -154,9 +163,12 @@ class PendingWriteGuard(private val store: PendingWriteMarkerStore) {
 
     fun replaceAfterReview(prior: PendingWriteMarker, next: PendingWriteMarker,
                            scope: PendingWriteScope): Boolean {
-        if (!matches(prior) || !canAcknowledge(scope) || !next.valid() ||
-            !runCatching { store.write(next.encode()) }.getOrDefault(false)) return false
+        val expected = persistedRaw ?: return false
+        if (!matches(prior) || !canAcknowledge(scope) || !next.valid()) return false
+        val encoded = next.encode()
+        if (!runCatching { store.replace(expected, encoded) }.getOrDefault(false)) return false
         marker = next
+        persistedRaw = encoded
         observedScope = null
         fencedMarker = null
         return true

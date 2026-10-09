@@ -18,14 +18,20 @@ class PendingWriteRecoveryTest {
         var failClear = false
         var writes = 0
         override fun read(): String? = value
-        override fun write(value: String): Boolean {
+        override fun writeIfEmpty(value: String): Boolean {
             writes++
-            if (failWrite) return false
+            if (failWrite || this.value != null) return false
             this.value = value
             return true
         }
-        override fun clear(): Boolean {
-            if (failClear) return false
+        override fun replace(expected: String, value: String): Boolean {
+            writes++
+            if (failWrite || this.value != expected) return false
+            this.value = value
+            return true
+        }
+        override fun clear(expected: String): Boolean {
+            if (failClear || value != expected) return false
             value = null
             return true
         }
@@ -84,8 +90,9 @@ class PendingWriteRecoveryTest {
     @Test fun storageExceptionFailsClosedBeforeSubmission() {
         val store = object : PendingWriteMarkerStore {
             override fun read(): String? = null
-            override fun write(value: String): Boolean = error("disk unavailable")
-            override fun clear(): Boolean = true
+            override fun writeIfEmpty(value: String): Boolean = error("disk unavailable")
+            override fun replace(expected: String, value: String): Boolean = error("disk unavailable")
+            override fun clear(expected: String): Boolean = true
         }
         val guard = PendingWriteGuard(store)
         assertFalse(guard.begin(marker))
@@ -188,5 +195,23 @@ class PendingWriteRecoveryTest {
         assertFalse(guard.canAcknowledge(scope))
         guard.observeSnapshot(scope, true)
         assertTrue(guard.canAcknowledge(scope))
+    }
+
+    @Test fun staleControllerCannotClearOrReplaceNewerMarker() {
+        val store = Store()
+        val old = PendingWriteGuard(store)
+        assertTrue(old.begin(marker))
+        val current = PendingWriteGuard(store)
+        assertTrue(current.recordFence(marker, safeFence))
+        current.observeSnapshot(scope, true)
+        assertTrue(current.acknowledgeAfterReview(scope))
+        val next = marker.copy(requestId = secondId, createdAt = 2_000)
+        assertTrue(current.begin(next))
+        assertFalse(old.finish(marker))
+        assertEquals(next, PendingWriteMarker.decode(store.value!!))
+        assertTrue(old.recordFence(marker, safeFence))
+        old.observeSnapshot(scope, true)
+        assertFalse(old.replaceAfterReview(marker, marker.copy(createdAt = 3_000), scope))
+        assertEquals(next, PendingWriteMarker.decode(store.value!!))
     }
 }

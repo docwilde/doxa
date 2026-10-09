@@ -30,9 +30,20 @@ private data class Entry(val kind: String, val text: String)
 private class ReplayGap : Exception()
 
 private class PreferencesPendingWriteStore(private val prefs: SharedPreferences) : PendingWriteMarkerStore {
-    override fun read(): String? = prefs.getString("pending_write_marker_v1", null)
-    override fun write(value: String): Boolean = prefs.edit().putString("pending_write_marker_v1", value).commit()
-    override fun clear(): Boolean = prefs.edit().remove("pending_write_marker_v1").commit()
+    companion object {
+        private const val KEY = "pending_write_marker_v1"
+        private val lock = Any()
+    }
+    override fun read(): String? = synchronized(lock) { prefs.getString(KEY, null) }
+    override fun writeIfEmpty(value: String): Boolean = synchronized(lock) {
+        prefs.getString(KEY, null) == null && prefs.edit().putString(KEY, value).commit()
+    }
+    override fun replace(expected: String, value: String): Boolean = synchronized(lock) {
+        prefs.getString(KEY, null) == expected && prefs.edit().putString(KEY, value).commit()
+    }
+    override fun clear(expected: String): Boolean = synchronized(lock) {
+        prefs.getString(KEY, null) == expected && prefs.edit().remove(KEY).commit()
+    }
 }
 
 private class RemoteController(private val prefs: SharedPreferences, private val scope: CoroutineScope,
