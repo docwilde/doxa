@@ -300,6 +300,14 @@ pub struct EgressGateway {
     socket: PathBuf, identity: (u64, u64), stop: Arc<AtomicBool>, worker: Option<JoinHandle<()>>,
 }
 impl EgressGateway {
+    /// Reserved production entry point. It cannot open a socket until quota
+    /// enforcement is verified on this exact session after restart. A fixture
+    /// receipt is insufficient, even if a caller changes its Boolean fields.
+    pub fn start_hardened_for_session(manifest_path: &Path, quota_receipt: &[u8], hosts: AllowedHosts) -> io::Result<Self> {
+        let manifest = read_manifest(manifest_path)?;
+        crate::hardened::require_session_hard_quota(&manifest, quota_receipt)?;
+        Self::start_for_session(manifest_path, hosts)
+    }
     /// Guarded host preparation path. It refuses a saved profile with any
     /// worker network, an unverified rootless Engine, or an altered container.
     /// The caller must retain this handle for the complete session lifetime.
@@ -713,6 +721,8 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let error = EgressGateway::start_for_session(&path, hosts()).err().unwrap();
+        assert!(error.to_string().contains("network-none Docker session"));
+        let error = EgressGateway::start_hardened_for_session(&path, b"{}", hosts()).err().unwrap();
         assert!(error.to_string().contains("network-none Docker session"));
         assert!(!session.join("egress.sock").exists());
     }

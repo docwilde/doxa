@@ -81,6 +81,7 @@ project-inheritance preflight and a bounded, opt-in rootless container write
 probe for an administrator-prepared fixture. A successful fixture `EDQUOT`
 receipt is never production admission; per-session quota provisioning,
 restart/remount verification and a reviewed runtime admission path remain open.
+`docker-hardened` requests fail with that explicit gate; there is no fallback.
 See [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/),
 [Docker's storage option requirements](https://docs.docker.com/reference/cli/docker/container/run/),
 and [XFS project quotas](https://man7.org/linux/man-pages/man8/xfs_quota.8.html).
@@ -183,3 +184,17 @@ The test sends no token, cookie, URL query or request body and does not follow
 redirects. A pass proves only that this exact hostname's TLS and HTTP transport
 worked in the selected image and rootless Engine. Provider streaming, login,
 refresh, redirects and alternate outbound paths remain unverified.
+
+An additional ignored smoke uses Python's `HTTPS_PROXY` handling to read a
+response in chunks, attempts a second denied destination, and verifies that a
+direct fallback still fails in `network=none`. Select a public HTTPS host with
+a 2xx `/` response and a nonempty body:
+
+    DOXA_ISOLATION_TEST_IMAGE=sha256:CONTENT_ID \
+    DOXA_ISOLATION_TEST_HOST=unix:///run/user/UID/doxa-test-docker.sock \
+    DOXA_ISOLATION_TEST_EGRESS_UPSTREAM=PUBLIC_HTTPS_HOST \
+    cargo test -p doxa-isolation --test egress_docker \
+      network_none_provider_style_proxy_stream_denies_second_host_and_direct_fallback -- --ignored
+
+This is a standard-library client pattern, not actual Claude, Codex or vendor
+login/streaming evidence. The hardened profile remains unavailable.

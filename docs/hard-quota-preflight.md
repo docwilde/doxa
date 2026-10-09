@@ -84,6 +84,12 @@ moment, not runtime admission or proof across restart/remount. No quota is
 configured or changed by the probe. The host's ordinary Docker context and
 credential helpers are not used.
 
+The Rust hardened-admission seam reads a bounded receipt and checks the saved
+session profile and exact tree. It refuses a receipt for another tree and also
+refuses a hand-edited `admissible_as_hard_quota=true`: no per-session kernel
+limit and restart verifier exists yet. Selecting `docker-hardened` reports this
+gate instead of silently using open or offline mode.
+
 For the focused refusal-path tests:
 
 ```sh
