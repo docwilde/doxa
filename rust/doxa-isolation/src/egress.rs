@@ -717,6 +717,68 @@ mod tests {
     }
 
     #[test]
+    fn dns_rebinding_cannot_change_a_checked_dial_or_reuse_an_old_answer() {
+        let root = fixture_dir();
+        let checked: SocketAddr = "1.1.1.1:443".parse().unwrap();
+        let rebound: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let local = listener.local_addr().unwrap();
+        let upstream = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                        thread::sleep(Duration::from_millis(5)),
+                    Err(e) => panic!("mock upstream was not reached before deadline: {e}"),
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            stream.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).unwrap();
+            stream.write_all(&received).unwrap();
+            received
+        });
+        let resolutions = Arc::new(AtomicUsize::new(0));
+        let resolutions_for_resolver = resolutions.clone();
+        let dialed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dialed_by_connector = dialed.clone();
+        let gateway = EgressGateway::start_with(root.path(), hosts(),
+            Arc::new(move |host| {
+                assert_eq!(host, "api.example.test");
+                let answer = if resolutions_for_resolver.fetch_add(1, Ordering::AcqRel) == 0 {
+                    checked
+                } else {
+                    rebound
+                };
+                Ok(vec![answer])
+            }),
+            Arc::new(move |address| {
+                dialed_by_connector.lock().unwrap().push(address);
+                if address != checked { return Err(error("unchecked dial target")); }
+                TcpStream::connect_timeout(&local, Duration::from_secs(2))
+            }),
+        ).unwrap();
+
+        let hello = client_hello("api.example.test");
+        let mut first = b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n".to_vec();
+        first.extend_from_slice(&hello);
+        let response = request(gateway.socket(), &first);
+        assert!(response.starts_with(b"HTTP/1.1 200 Connection Established\r\n\r\n"));
+        assert!(response.ends_with(&hello));
+        assert_eq!(upstream.join().unwrap(), hello);
+        assert_eq!(resolutions.load(Ordering::Acquire), 1, "dial must use the checked answer without re-resolving");
+        assert_eq!(*dialed.lock().unwrap(), vec![checked]);
+
+        let denied = request(gateway.socket(), b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n");
+        assert!(denied.starts_with(b"HTTP/1.1 403 Forbidden"), "{denied:?}");
+        assert_eq!(resolutions.load(Ordering::Acquire), 2, "each new tunnel must validate fresh DNS answers");
+        assert_eq!(*dialed.lock().unwrap(), vec![checked], "a private rebound address must never reach the connector");
+    }
+
+    #[test]
     fn dead_gateway_and_unsafe_socket_fail_closed() {
         let root = fixture_dir(); let calls = Arc::new(AtomicUsize::new(0));
         let gateway = gateway(root.path(), vec!["1.1.1.1:443".parse().unwrap()],

@@ -142,9 +142,12 @@ an orphan provider writer when the supervisor crashes.
 Implementation limits: this is a Linux rootless Docker boundary, not a VM.
 The restricted-egress gateway has an exact hostname/443 `CONNECT` allowlist and
 checks TLS SNI before dialing the pinned DNS answer. It rejects ECH, TLS early
-data and extra handshake bytes in a network-none fixture, but is not wired into
-a production profile. Provider streaming, login, refresh and bypass tests in a rootless
-container remain the gate. There is no hard disk quota or CLI credential secrecy.
+data and extra handshake bytes in a network-none fixture. An offline rebinding
+test checks that a later private DNS answer cannot reach the connector and that
+the first tunnel never re-resolves after validating its public answer. The gateway
+is not wired into a production profile. Provider streaming, login, refresh and
+bypass tests in a rootless container remain the gate. There is no hard disk quota
+or CLI credential secrecy.
 macOS Docker Desktop, remote Engines and nested privileged Docker are refused.
 
 ## Integration smoke
