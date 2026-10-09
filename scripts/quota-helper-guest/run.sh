@@ -31,8 +31,14 @@ done
 
 evidence=$(mktemp -d "$evidence_parent/quota-helper-guest.XXXXXXXX")
 rootfs=$evidence/rootfs
-mkdir -p "$rootfs"/{bin,proc,sys,dev,etc,run,quota,alias,lib/modules}
+mkdir -p "$rootfs"/{bin,proc,sys,dev,etc/doxa/quota,etc/systemd/system,run,quota,alias,lib/modules,usr/libexec/doxa}
 chmod 0755 "$rootfs" "$rootfs"/{bin,proc,sys,dev,etc,run,quota,alias,lib,lib/modules}
+chmod 0755 "$rootfs"/etc/{doxa,doxa/quota,systemd,systemd/system} "$rootfs"/usr "$rootfs"/usr/libexec "$rootfs"/usr/libexec/doxa
+printf 'root:x:0:0:root:/root:/bin/sh\ndoxa-quota-caller:x:2001:2001::/nonexistent:/bin/false\n' > "$rootfs/etc/passwd"
+printf 'root:x:0:\ndoxa-quota-readers:x:2001:doxa-quota-caller\n' > "$rootfs/etc/group"
+cp "$repo/packaging/systemd/doxa-quota-helper@.service" "$rootfs/etc/systemd/system/"
+cp "$repo/packaging/systemd/doxa-quota-helper@.socket" "$rootfs/etc/systemd/system/"
+chmod 0644 "$rootfs/etc/passwd" "$rootfs/etc/group" "$rootfs/etc/systemd/system/doxa-quota-helper@.service" "$rootfs/etc/systemd/system/doxa-quota-helper@.socket"
 cp /usr/bin/busybox "$rootfs/bin/busybox"
 ln -s busybox "$rootfs/bin/sh"
 cp "$repo/scripts/quota-helper-guest/init" "$rootfs/init"
@@ -40,8 +46,13 @@ chmod 0755 "$rootfs/init"
 
 TMPDIR=$TMPDIR CARGO_TARGET_DIR="$evidence/target" RUSTFLAGS='-C target-feature=+crt-static' \
   cargo build --locked --target x86_64-unknown-linux-gnu -p doxa-isolation \
-  --bin doxa-quota-helper --example quota_helper_client_read --release --manifest-path "$repo/Cargo.toml"
+  --bin doxa-quota-helper --bin doxa-quota-install-preflight \
+  --example quota_helper_client_read --release --manifest-path "$repo/Cargo.toml"
 cp "$evidence/target/x86_64-unknown-linux-gnu/release/doxa-quota-helper" "$rootfs/doxa-quota-helper"
+cp "$evidence/target/x86_64-unknown-linux-gnu/release/doxa-quota-helper" "$rootfs/usr/libexec/doxa/doxa-quota-helper"
+cp "$evidence/target/x86_64-unknown-linux-gnu/release/doxa-quota-install-preflight" "$rootfs/doxa-quota-install-preflight"
+chmod 0755 "$rootfs/doxa-quota-helper" "$rootfs/usr/libexec/doxa/doxa-quota-helper" "$rootfs/doxa-quota-install-preflight"
+sha256sum "$rootfs/usr/libexec/doxa/doxa-quota-helper" | cut -d ' ' -f1 > "$rootfs/reviewed-helper.sha256"
 cp "$evidence/target/x86_64-unknown-linux-gnu/release/examples/quota_helper_client_read" "$rootfs/quota_helper_client_read"
 gcc -static -O2 -Wall -Wextra -o "$rootfs/guest_harness" "$repo/scripts/quota-helper-guest/harness.c"
 zstd -dc "$module_root/fs/quota/quota_tree.ko.zst" > "$rootfs/lib/modules/quota_tree.ko"
@@ -58,15 +69,18 @@ timeout 120s qemu-system-x86_64 -machine accel=tcg -m 1024 -smp 2 -nographic \
   -initrd "$evidence/initramfs.cpio.gz" -append 'console=ttyS0 panic=1' \
   -drive "file=$evidence/quota.raw,format=raw,if=virtio" \
   > "$evidence/serial.log" 2>&1
-if ! rg -q 'DOXA_QUOTA_HELPER_GUEST_PASS cases=25 admission=false' "$evidence/serial.log" \
+if ! rg -q 'DOXA_QUOTA_HELPER_GUEST_PASS cases=32 admission=false' "$evidence/serial.log" \
    || ! rg -q 'DOXA_QUOTA_VM_STATUS=0' "$evidence/serial.log"; then
   echo "guest proof refused; inspect $evidence/serial.log" >&2
   exit 1
 fi
-sha256sum "$kernel" "$rootfs/doxa-quota-helper" "$rootfs/quota_helper_client_read" "$rootfs/guest_harness" \
+sha256sum "$kernel" "$rootfs/doxa-quota-helper" "$rootfs/doxa-quota-install-preflight" \
+  "$rootfs/etc/systemd/system/doxa-quota-helper@.service" "$rootfs/etc/systemd/system/doxa-quota-helper@.socket" \
+  "$rootfs/quota_helper_client_read" "$rootfs/guest_harness" \
   "$evidence/initramfs.cpio.gz" "$evidence/quota.raw" "$evidence/serial.log" \
   > "$evidence/SHA256SUMS"
-sha256sum "$repo/rust/doxa-isolation/src/quota_helper.rs" \
+sha256sum "$repo/rust/doxa-isolation/src/quota_helper.rs" "$repo/rust/doxa-isolation/src/quota_install.rs" \
+  "$repo/packaging/systemd/doxa-quota-helper@.service" "$repo/packaging/systemd/doxa-quota-helper@.socket" \
   "$repo/scripts/quota-helper-guest/harness.c" "$repo/scripts/quota-helper-guest/init" \
   "$repo/scripts/quota-helper-guest/run.sh" >> "$evidence/SHA256SUMS"
 git -C "$repo" rev-parse HEAD > "$evidence/BASE_COMMIT"

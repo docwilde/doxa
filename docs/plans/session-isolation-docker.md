@@ -236,7 +236,11 @@ hardened admission. A host client now caps the helper response at 4 KiB and
 verifies the root-owned endpoint, kernel server UID and exact saved session
 root and checkout identity before accepting advisory evidence. The disposable guest runner now
 contains four additional client identity cases, all passed in a disposable
-QEMU guest. Installed-host systemd and session
+QEMU guest. An inactive systemd socket/service package and read-only
+installation preflight are staged for administrator review. The preflight
+requires an independently reviewed helper SHA-256. A disposable ext4 quota
+guest passed 32 helper/client/install cases while keeping admission
+closed. Installed-host systemd and session
 launcher integration remain open. The socket
 inventory also permits zero sockets and does not tie a visible socket inode
 to the live host listener. Exact live endpoint identity, broker peer/protocol

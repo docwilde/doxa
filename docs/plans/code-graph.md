@@ -111,8 +111,11 @@ also rereads every parsed Rust and Python file twice and compares its source
 hash; a byte edit after parsing fails without an answer if it remains changed
 when that file is rechecked. Each language has the same 64 MiB cap per pass,
 and all final rereads share a ten-second elapsed-time limit checked between
-file reads. It cannot interrupt
-a stalled filesystem read. An edit after a file's final read, or an edit and
+file reads. Source opens and reads run on one process-local worker with a
+two-second caller deadline, including any wait for that worker. A timeout
+rejects that source and permanently disables further source reads in this
+process; the blocked worker may remain in the kernel until process exit.
+An edit after a file's final read, or an edit and
 restoration between reads, can still escape detection; this is not an atomic
 repository snapshot.
 The inventories exclude ignored files and do not prove compiler or Python
@@ -127,7 +130,8 @@ remain separate candidates. A no-hit answer names a live-search fallback.
 
 Work is bounded: at most 20,000 files, 1 MiB per Rust or Python file, 64 MiB
 total source per language, ten seconds for the Python scan, and two seconds of
-parsing, 200,000 syntax nodes, and 128 nested definition levels per Python file.
+source open/read and two seconds of parsing, 200,000 syntax nodes, and 128
+nested definition levels per Python file.
 Results hold at most 100 rows,
 call edges, or module declarations, 10,000 call sites in the requested
 Rust or Python file, 10,000 Python import-module declarations, 4 KiB per
@@ -149,8 +153,9 @@ candidate checks also probe ignored and unlisted paths. Before reuse, it re-enum
 the complete Git path list and reads every listed Rust and Python source three
 times: one inventory pass and two hash rechecks. The check is capped at 64 MiB
 per language per pass and a ten-second elapsed check between reads, with the
-same no-symlink reader as a fresh query. A stalled filesystem read can exceed
-that time. It compares both language digests and the whole path listing;
+same no-symlink reader as a fresh query. A stalled filesystem read fails the
+two-second source deadline and disables the reader for this process. It
+compares both language digests and the whole path listing;
 any mismatch triggers a fresh query. Skipped or unparseable inputs are never
 cached. The viewer labels a reused answer and preserves its original observed
 time, so a cache hit is not presented as a newly parsed graph. The CLI and
@@ -204,8 +209,8 @@ inventory stale; an unreadable or symlinked source makes it unknown. Older
 snapshots without the matching digest stay unknown. Each readback checks the
 full source set twice, with a 64 MiB cap and elapsed-time checks before and
 after file reads, then checks the Git path list again. Each Git subprocess has
-a ten-second deadline. A blocked source read may still exceed the source
-rehash deadline before the check can refuse the result.
+a ten-second deadline. A blocked source read makes the inventory unknown at
+the two-second caller deadline; a stuck worker can remain until process exit.
 An early file that remains changed during the
 second pass makes the inventory unknown instead of falsely verified. Edits
 after a file's second read, or an edit restored between reads, can still escape

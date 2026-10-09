@@ -222,6 +222,16 @@ including error paths, still needs installed-host acceptance. Parent deadlines
 and module maxima are not hard resource guarantees; other platforms need
 equivalent isolation proof.
 
+An opt-in installed-host proof command now pairs the exact installed
+frontend, worker and Bubblewrap identities with a clean-source Rust test
+executable. Its read-only check precedes any cgroup write. The run requires
+operator-supplied expected digests and exercises the seven namespace and
+resource cases plus trapped-module and post-allocation launch-error cleanup.
+Its private receipt stays review-only; no code consumes it as TUI authority.
+The nine-case installed-host run has not been performed.
+An operator policy must still authenticate the result, bind the running TUI
+instance and define expiry and revocation before the issuer can open.
+
 ### Other extensions
 
 The Python draft also proposed transcript renderers, lifecycle hooks, LORE

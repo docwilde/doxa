@@ -164,6 +164,45 @@ fn approved_wasm_case(parent: &Path) {
         start.elapsed().as_millis());
 }
 
+fn installed_error_cases(parent: &Path) {
+    let worker = PathBuf::from(std::env::var_os("DOXA_PLUGIN_ACCEPTANCE_WORKER")
+        .expect("installed proof must supply the exact approved worker"));
+    let home = fixture_dir();
+    let package_dir = home.path().join("native-plugin-packages/trap");
+    fs::create_dir_all(&package_dir).unwrap();
+    for path in [home.path().to_path_buf(), home.path().join("native-plugin-packages"), package_dir.clone()] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let module = wat::parse_str("(module (func (export \"doxa_main\") (result i32) unreachable))").unwrap();
+    let manifest = b"package_api_version = 1\nname = 'trap'\nversion = '1.0'\nartifact_format = 'wasm-core-v1'\nrequested_grants = []\n";
+    write_private(&package_dir.join("manifest.toml"), manifest);
+    write_private(&package_dir.join("module.wasm"), &module);
+    let config = format!(
+        "[[native_plugin_packages]]\nname = 'trap'\nmanifest_sha256 = '{:x}'\nmodule_sha256 = '{:x}'\ngrants = []\n",
+        Sha256::digest(manifest), Sha256::digest(&module));
+    write_private(&home.path().join("config.toml"), config.as_bytes());
+    let review = super::super::packages::preflight(home.path(), "trap").unwrap();
+    let start = Instant::now();
+    let outcome = supervise_reviewed(home.path(), &review, &worker, &AtomicBool::new(false),
+        start + Duration::from_secs(5)).expect("trapping worker failed before result classification");
+    assert_eq!(outcome, IsolatedOutcome::ModuleFailure(super::super::runner::WorkerFailure::Trap));
+    assert_eq!(plugin_cgroups(parent).unwrap(), 0, "trapping worker cgroup survived cleanup");
+    eprintln!("plugin-acceptance case=module-error outcome=ModuleFailure(Trap) elapsed_ms={} cleanup=removed",
+        start.elapsed().as_millis());
+
+    let start = Instant::now();
+    let mut budget = CgroupBudget::create().expect("error case requires a delegated worker cgroup");
+    let path = budget.path.clone();
+    let missing = home.path().join("missing-worker");
+    assert!(command_impl(&missing, &[], Some(&budget)).is_err(),
+        "missing worker unexpectedly admitted after cgroup allocation");
+    budget.stop().expect("launch error must remove its allocated cgroup");
+    assert!(!path.exists() && plugin_cgroups(parent).unwrap() == 0,
+        "launch-error cgroup survived cleanup");
+    eprintln!("plugin-acceptance case=launch-error outcome=Refused elapsed_ms={} cleanup=removed",
+        start.elapsed().as_millis());
+}
+
 struct Case {
     capture: Capture,
     counters: Counters,
@@ -347,4 +386,18 @@ fn delegated_cgroup_containment_acceptance() {
             wait_for("timeout worker membership", || members(budget).ok().filter(|pids| !pids.is_empty()));
         });
     assert_eq!(timeout.capture.outcome, Outcome::Timeout);
+}
+
+/// Installed-host review uses the existing seven containment cases against
+/// the installed worker inode, then exercises worker and launcher error
+/// cleanup. It never issues TUI execution authority.
+#[test]
+#[ignore = "requires explicit installed-host delegated-cgroup acceptance"]
+fn installed_host_lifecycle_acceptance() {
+    assert_eq!(std::env::var("DOXA_PLUGIN_INSTALLED_ACCEPTANCE").ok().as_deref(), Some("1"),
+        "set DOXA_PLUGIN_INSTALLED_ACCEPTANCE=1 only in the reviewed operator proof");
+    delegated_cgroup_containment_acceptance();
+    let parent = delegated_cgroup_parent().expect("installed proof lost delegated parent");
+    installed_error_cases(&parent);
+    assert_eq!(plugin_cgroups(&parent).unwrap(), 0, "installed proof retained worker cgroups");
 }

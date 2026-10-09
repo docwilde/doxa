@@ -299,7 +299,7 @@ def descriptor_sha256(fd: int, label: str) -> str:
 
 def run_bounded(args: list[str], *, cwd: Path, environment: dict[str, str],
                 limit: int, timeout: float, executable: str | None = None,
-                pass_fds: tuple[int, ...] = ()) -> tuple[int, bytes]:
+                pass_fds: tuple[int, ...] = (), process_started=None) -> tuple[int, bytes]:
     """Bound output as it arrives; kill the new process group on failure."""
     process = subprocess.Popen(args, cwd=cwd, env=environment, executable=executable,
                                pass_fds=pass_fds, stdout=subprocess.PIPE,
@@ -308,6 +308,8 @@ def run_bounded(args: list[str], *, cwd: Path, environment: dict[str, str],
     output = bytearray()
     deadline = time.monotonic() + timeout
     try:
+        if process_started is not None:
+            process_started(process.pid)
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
             while True:
@@ -436,9 +438,9 @@ def require_no_plugin_cgroups(parent: Path) -> None:
             "private plugin worker cgroup remains in delegated parent")
 
 
-def stop_plugin_cgroups(parent: Path) -> None:
+def stop_plugin_cgroups(parent: Path, prefix: str = "doxa-plugin-") -> None:
     """Emergency cleanup if the proof test is killed before Rust Drop runs."""
-    groups = [entry for entry in parent.iterdir() if entry.name.startswith("doxa-plugin-")]
+    groups = [entry for entry in parent.iterdir() if entry.name.startswith(prefix)]
     require(len(groups) <= 64, "too many plugin cgroups for bounded emergency cleanup")
     for group in groups:
         require(group.is_dir() and not group.is_symlink(), "plugin cleanup saw a non-directory")
@@ -465,7 +467,9 @@ def proof_cases(output: bytes) -> dict[str, dict[str, str]]:
         if marker not in line:
             continue
         prefix, _, suffix = line.partition(marker)
-        require(not prefix or prefix.startswith("test native_plugins::runner_sandbox::acceptance::delegated_cgroup_containment_acceptance ... "),
+        require(not prefix or any(prefix.startswith(
+            f"test native_plugins::runner_sandbox::acceptance::{name} ... ") for name in (
+                "delegated_cgroup_containment_acceptance", "installed_host_lifecycle_acceptance")),
                 "plugin proof case has unexpected test-runner prefix")
         line = marker + suffix
         fields: dict[str, str] = {}

@@ -23,11 +23,12 @@
 #include <unistd.h>
 
 #define ROOT "/quota/session-1"
-#define POLICY "/etc/doxa/session-1.json"
+#define POLICY "/etc/doxa/quota/session-1.json"
 #define SOCK "/run/doxa/quota/session-1.sock"
 #define OTHER_SOCK "/run/doxa/quota/other.sock"
 #define PROJECT 1002
 #define LIMIT (32ULL * 1024 * 1024)
+static char reviewed_helper_digest[65];
 #define OWNER 2002
 #define CALLER 2001
 
@@ -282,10 +283,51 @@ static void expect_client(const char *label, const char *session, const char *ro
     }
     printf("GUEST_CASE %s accepted=%d response=%s", label, accepted, response);
 }
+static void expect_preflight(const char *label, uid_t uid, bool accepted) {
+    int output[2]; if (pipe(output)) die("preflight pipe");
+    pid_t child = fork(); if (child < 0) die("fork preflight");
+    if (child == 0) {
+        close(output[0]);
+        if (dup2(output[1], STDOUT_FILENO) < 0 || dup2(output[1], STDERR_FILENO) < 0)
+            die("redirect preflight");
+        close(output[1]);
+        if (uid && (setresgid(uid, uid, uid) || setresuid(uid, uid, uid))) die("drop preflight UID");
+        execl("/doxa-quota-install-preflight", "/doxa-quota-install-preflight", "session-1",
+            "--reviewed-helper-sha256", reviewed_helper_digest, NULL);
+        die("exec preflight");
+    }
+    close(output[1]);
+    char response[2048]; size_t used = 0;
+    while (used < sizeof(response) - 1) {
+        ssize_t count = read(output[0], response + used, sizeof(response) - 1 - used);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) die("read preflight");
+        if (count == 0) break;
+        used += (size_t)count;
+    }
+    response[used] = 0; close(output[0]);
+    int status = 0;
+    require(waitpid(child, &status, 0) == child && WIFEXITED(status), "preflight process failed");
+    if ((WEXITSTATUS(status) == 0) != accepted)
+        fprintf(stderr, "GUEST_DIAG %s status=%d response=%s\n", label, WEXITSTATUS(status), response);
+    require((WEXITSTATUS(status) == 0) == accepted, label);
+    if (accepted) {
+        require(strstr(response, "\"staged_files_verified\":true") != NULL, label);
+        require(strstr(response, "\"effective_unit_verified\":false") != NULL, label);
+        require(strstr(response, "\"socket_inactive\":true") != NULL, label);
+        require(strstr(response, "\"admissible_as_hard_quota\":false") != NULL, label);
+    }
+    printf("GUEST_CASE %s accepted=%d response=%s", label, accepted, response);
+}
 int main(void) {
+    FILE *reviewed = fopen("/reviewed-helper.sha256", "r");
+    if (!reviewed || !fgets(reviewed_helper_digest, sizeof(reviewed_helper_digest), reviewed))
+        die("read reviewed helper digest");
+    fclose(reviewed);
+    require(strlen(reviewed_helper_digest) == 64, "invalid reviewed helper digest fixture");
     make_dir("/quota", 0755); make_dir("/alias", 0755);
     make_dir("/alias/session-1", 0700);
-    make_dir("/etc/doxa", 0755); make_dir("/run/doxa", 0755);
+    make_dir("/etc/doxa", 0755); make_dir("/etc/doxa/quota", 0755); make_dir("/run/doxa", 0755);
     make_dir("/run/doxa/quota", 0755);
     if (mount("/dev/vda", "/quota", "ext4", 0, "prjquota")) die("mount private ext4 fixture");
     printf("GUEST_MOUNT ext4 prjquota\n");
@@ -314,6 +356,31 @@ int main(void) {
     expect_query("wrong_caller", helper, 2003, CALLER, false, -1);
     expect_query("tree_owner_caller", helper, OWNER, CALLER, false, -1);
     stop_helper(helper, SOCK);
+
+    expect_preflight("install_exact_inactive", 0, true);
+    char original_digest = reviewed_helper_digest[0];
+    reviewed_helper_digest[0] = original_digest == 'a' ? 'b' : 'a';
+    expect_preflight("install_wrong_helper_digest_refused", 0, false);
+    reviewed_helper_digest[0] = original_digest;
+    expect_preflight("install_nonroot_refused", CALLER, false);
+    const char *service_unit = "/etc/systemd/system/doxa-quota-helper@.service";
+    if (rename(service_unit, "/etc/systemd/system/doxa-quota-helper@.service.saved")) die("save unit");
+    int altered_unit = open(service_unit, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (altered_unit < 0 || write(altered_unit, "[Service]\n", 10) != 10) die("tamper unit");
+    close(altered_unit);
+    expect_preflight("install_tampered_unit_refused", 0, false);
+    if (unlink(service_unit) || rename("/etc/systemd/system/doxa-quota-helper@.service.saved", service_unit)) die("restore unit");
+    const char *installed_helper = "/usr/libexec/doxa/doxa-quota-helper";
+    if (rename(installed_helper, "/usr/libexec/doxa/doxa-quota-helper.saved")) die("save helper");
+    if (symlink("/usr/libexec/doxa/doxa-quota-helper.saved", installed_helper)) die("symlink helper");
+    expect_preflight("install_symlink_helper_refused", 0, false);
+    if (unlink(installed_helper) || rename("/usr/libexec/doxa/doxa-quota-helper.saved", installed_helper)) die("restore helper");
+    int inactive = listener(SOCK);
+    expect_preflight("install_live_socket_refused", 0, false);
+    close(inactive); unlink(SOCK);
+    make_dir("/etc/systemd/system/doxa-quota-helper@.service.d", 0755);
+    expect_preflight("install_override_refused", 0, false);
+    if (rmdir("/etc/systemd/system/doxa-quota-helper@.service.d")) die("remove override");
 
     int activation = listener(SOCK);
     int substituted = open("/quota", O_RDONLY | O_DIRECTORY);
@@ -438,6 +505,6 @@ int main(void) {
     expect_query("replaced_bind_directory", helper, CALLER, CALLER, false, -1);
     stop_helper(helper, SOCK);
 
-    printf("DOXA_QUOTA_HELPER_GUEST_PASS cases=25 admission=false\n");
+    printf("DOXA_QUOTA_HELPER_GUEST_PASS cases=32 admission=false\n");
     return 0;
 }

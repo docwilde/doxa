@@ -148,6 +148,53 @@ an authority issuer can be implemented. The existing proof command builds a
 worker from a clean checkout and records review evidence; neither its receipt
 nor a successful `host-check` activates the TUI.
 
+### Installed-host proof (review only)
+
+The installed-host proof is an explicit operator command. Its `--check` mode
+observes the current delegated cgroup, runs a private Bubblewrap namespace
+smoke probe, executes the installed frontend's `host-check` through its opened
+descriptor, and compares that report with independently opened frontend,
+worker and Bubblewrap identities. It makes no cgroup changes:
+
+```sh
+export TMPDIR="$HOME/t"
+python3 scripts/plugin-installed-host-proof.py --check --frontend /absolute/path/to/doxa-rs
+```
+
+Keep the three reported SHA-256 digests for independent review. After the
+owner approves an acceptance exercise on a delegated host, `--run` requires
+those exact expected digests, an absolute real-disk `CARGO_TARGET_DIR`, a
+clean source checkout, and both explicit operator switches. It builds only
+the proof test executable and launches the installed worker through the normal
+opened-inode sandbox path. The fixture
+checks the existing seven containment cases, then an approved Wasm trap and
+a launch failure after cgroup allocation. Each case must remove its worker
+cgroup. The harness bounds build output and time, proof output and time, and
+emergency cleanup to groups named for its proof process. It writes an
+exclusive private receipt only after all nine cases pass:
+
+```sh
+export TMPDIR="$HOME/t"
+export CARGO_TARGET_DIR="$HOME/ssd-cache/doxa-plugin-installed-target"
+DOXA_PLUGIN_INSTALLED_HOST_ACCEPTANCE=1 DOXA_PLUGIN_OPERATOR_GO=1 \
+  python3 scripts/plugin-installed-host-proof.py --run \
+    --frontend /absolute/path/to/doxa-rs \
+    --expected-frontend-sha256 <reviewed-frontend-sha256> \
+    --expected-worker-sha256 <reviewed-worker-sha256> \
+    --expected-bwrap-sha256 <reviewed-bwrap-sha256> \
+    --receipt installed-plugin-proof.json
+```
+
+The run creates and removes only per-worker children of an already delegated
+cgroup parent. It does not configure delegation or systemd. The memory, PID
+and CPU cases deliberately exhaust their worker budgets, so run them only on
+an owner-approved acceptance host with spare capacity. A receipt records
+sampled executable identities, cgroup identity and clean source identity.
+The pathname checks before and after the exercise are sequential, not an
+atomic snapshot or a promise that a binary cannot be replaced between cases.
+The nine-case installed-host run has not been performed. It remains
+non-authorizing; TUI requests still return `HostUnverified`.
+
 After reviewing both files and the requested grant, the owner can record the
 exact identity in private `$DOXA_HOME/config.toml`:
 
