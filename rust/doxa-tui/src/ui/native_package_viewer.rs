@@ -145,6 +145,7 @@ mod tests {
     fn exact_zero_grant_review_shows_cli_gate_without_running_worker() {
         let home = fixture(true, &[]);
         let mut app = App::default();
+        app.handle(crossterm::event::Event::Resize(100, 30));
         app.open_native_package_review_at(home.path(), "demo");
         assert_eq!(app.chip_info.as_ref().unwrap().kind, "native_package_review");
         let lines = finished(&mut app);
@@ -159,6 +160,7 @@ mod tests {
         for (approved, grants) in [(false, &[][..]), (true, &["render-local-panel-v1"][..])] {
             let home = fixture(approved, grants);
             let mut app = App::default();
+            app.handle(crossterm::event::Event::Resize(100, 30));
             app.open_native_package_review_at(home.path(), "demo");
             let lines = finished(&mut app);
             assert!(!lines.iter().any(|line| line.starts_with("doxa native-plugin run ")));
@@ -177,5 +179,17 @@ mod tests {
             assert!(app.native_package_pending.is_none());
             assert!(app.pending_prompts.is_empty() && app.local_shell_jobs.is_empty());
         }
+    }
+
+    #[test]
+    fn changed_approved_bytes_fail_review_and_never_offer_run() {
+        let home = fixture(true, &[]);
+        write(&home.path().join("native-plugin-packages/demo/module.wasm"), b"\0asm\x01\0\0\0");
+        let mut app = App::default();
+        app.handle(crossterm::event::Event::Resize(100, 30));
+        app.open_native_package_review_at(home.path(), "demo");
+        let lines = finished(&mut app);
+        assert!(lines.iter().any(|line| line.contains("review failed")));
+        assert!(!lines.iter().any(|line| line.starts_with("doxa native-plugin run ")));
     }
 }

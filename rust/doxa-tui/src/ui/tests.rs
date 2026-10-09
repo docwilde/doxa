@@ -3117,14 +3117,14 @@ for line in sys.stdin:
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
         app.handle(Event::Resize(100, 30));
-        assert_eq!(COMMANDS.len(), 49);
+        assert_eq!(COMMANDS.len(), 50);
         let mut names = std::collections::HashSet::new();
         for row in COMMANDS { assert!(names.insert(row.name)); }
         app.open_help();
         let info = app.chip_info.as_ref().unwrap();
         assert_eq!(info.kind, "help");
         for form in ["/collection [action] [name]", "/codegraph [stored] file|symbol|imports|calls|modules VALUE", "/usage", "/context", "/compact",
-            "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|dependency-review [RUN] SLOT|mesh [RUN]|start OPTIONS|resume RUN]", "/help"] {
+            "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|dependency-review [RUN] SLOT|mesh [RUN]|start OPTIONS|resume RUN]", "/native-plugin preflight NAME", "/help"] {
             assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
         }
         assert!(info.lines.iter().any(|line| line.contains("unavailable in Rust")));
