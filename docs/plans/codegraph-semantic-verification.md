@@ -19,16 +19,25 @@ read-only worktree and root filesystem, dropped capabilities, no-new-privileges,
 64 MiB temporary filesystem. Its LSP initialization disables build scripts,
 proc macros, automatic Cargo reload, and check-on-save. LSP frame parsing caps
 headers at 1 KiB and bodies at 32 KiB. The Docker command clears the inherited
-environment. **The plan has no spawn method or runtime attestation.** Neither
-it nor an LSP JSON object proves the server actually used those settings.
+environment. The plan has no public spawn method. An internal, disabled
+launcher seam uses a fresh container ID file to tie `docker run` to Docker
+info, image inspect, and container inspect observations. It checks reported
+rootless mode, the pinned image reference and local image ID, one read-only
+worktree mount, no reported network attachments, the requested container
+policy, and cgroup v2 memory, swap, CPU, and PID files for the inspected PID.
+It repeats the container and cgroup checks after the definition reply, while
+the container is still running.
+Its probe subprocesses have a two-second deadline and bounded output. Fake
+Docker, inspect, and cgroup fixtures exercise rejection of mismatches. The
+CLI still reports `binding: unknown` and does not call this launcher.
 
 The library-only LSP driver exercises a bounded initialize, quiescence,
 definition, and shutdown exchange against a fixture server. It caps messages
 and output, enforces a 20-second maximum deadline, and kills the process group
 on failure. On Linux it also observes a successful server exit without first
 reaping the group leader, then kills any descendants before reaping it. A
-fixture verifies this path. The fake attestation gate used by these tests is
-not a production Docker attester.
+fixture verifies this path. The fake and observation gates used by these tests
+do not constitute live rootless Docker proof.
 
 This checker and plan are deliberately not wired to `/codegraph calls` or
 persisted snapshots. No rust-analyzer binary or reviewed, pinned image is
@@ -39,11 +48,11 @@ documents the settings. Its
 project configuration can execute code, so disabling two features is not a
 substitute for enforcing the container boundary.
 
-Before promoting any LSP result to a binding, verify the rootless Engine and
-effective cgroup v2 memory/CPU/PID controls, pinned image bytes, exact mount
-set, offline network namespace, process limits, disk quota, and absence of host
-secrets at runtime. Connect the bounded process supervisor to an attested
-runtime. It must complete the LSP initialize/initialized exchange,
+Before promoting any LSP result to a binding, review the pinned image and
+verify its bytes, the effective rootless Engine and cgroup v2 controls, the
+mount set and offline network namespace, disk quota, and absence of host
+secrets on a live rootless host. Connect the bounded process supervisor to
+that proven runtime. It must complete the LSP initialize/initialized exchange,
 observe successful workspace indexing and a quiescent diagnostic state, and
 attest the exact server binary/configuration, request and response, source and
 target hashes, and container policy. Treat missing, timed-out, conditional,
