@@ -156,6 +156,12 @@ boundary and cleanup. TUI execution, nonempty grants, native shared
 libraries, scripts, provider backends, hooks and
 automatic startup remain unsupported.
 
+Cleanup treats `cgroup.events` as bounded evidence: it requires exactly one
+valid `populated` value before removing a worker cgroup. Missing, duplicated,
+malformed, linked or oversized event data fails closed instead of reporting
+cleanup success. This strengthens the CLI cleanup path but is not an
+installed-host acceptance receipt or TUI execution authorization.
+
 Before broader activation, a delegated-host acceptance run must verify the
 installed memory, swap, CPU and PID limits; worker membership before exec;
 aggregate limits under fork and process-group escape attempts; no host file or
