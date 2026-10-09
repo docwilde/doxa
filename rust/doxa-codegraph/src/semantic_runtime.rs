@@ -6,7 +6,7 @@ use super::semantic_evidence::{inspect_definition_reply, DefinitionEvidence};
 use super::semantic_producer::{encode_lsp_frame, read_lsp_frame, ProducerPlan};
 use super::{file_bytes, CallCandidate, CallEdge};
 use serde_json::{json, Value};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::os::fd::AsRawFd;
@@ -31,6 +31,7 @@ const MAX_PIDS: u64 = 64;
 #[allow(dead_code)]
 trait RuntimeAttestation {
     fn before_launch(&self, plan: &ProducerPlan) -> Result<(), String>;
+    fn launching(&self) {}
     fn after_launch(&self, plan: &ProducerPlan, child: &Child) -> Result<(), String>;
 }
 
@@ -45,6 +46,17 @@ struct DockerObservationGate {
     cgroup_root: PathBuf,
     image_id: RefCell<Option<String>>,
     cid: RefCell<Option<String>>,
+    name: String,
+    attempted: Cell<bool>,
+}
+
+fn random_container_name() -> Result<String, String> {
+    let mut nonce = [0u8; 16];
+    fs::File::open("/dev/urandom").map_err(|_| "cannot open random source")?
+        .read_exact(&mut nonce).map_err(|_| "cannot read random source")?;
+    let mut name = String::from("doxa-semantic-");
+    for byte in nonce { name.push_str(&format!("{byte:02x}")); }
+    Ok(name)
 }
 
 fn sha256_id(value: &str) -> bool {
@@ -53,6 +65,13 @@ fn sha256_id(value: &str) -> bool {
 }
 
 fn json_probe(binary: &Path, docker_host: &str, args: &[&str]) -> Result<Value, String> {
+    let output = text_probe(binary, docker_host, args)?;
+    let value: Value = serde_json::from_str(&output).map_err(|_| "invalid Docker probe JSON")?;
+    if !value.is_object() { return Err("Docker probe result must be an object".into()); }
+    Ok(value)
+}
+
+fn text_probe(binary: &Path, docker_host: &str, args: &[&str]) -> Result<String, String> {
     if !binary.is_absolute() { return Err("Docker probe binary must be absolute".into()); }
     let mut command = Command::new(binary);
     command.env_clear().env("DOCKER_HOST", docker_host).args(args)
@@ -60,9 +79,7 @@ fn json_probe(binary: &Path, docker_host: &str, args: &[&str]) -> Result<Value, 
         .stderr(std::process::Stdio::piped());
     let mut session = Session::start(command, PROBE_TIMEOUT)?;
     let output = session.capture_probe_output()?;
-    let value: Value = serde_json::from_slice(&output).map_err(|_| "invalid Docker probe JSON")?;
-    if !value.is_object() { return Err("Docker probe result must be an object".into()); }
-    Ok(value)
+    String::from_utf8(output).map_err(|_| "Docker probe output is not UTF-8".into())
 }
 
 fn bounded_file(path: &Path, cap: u64) -> Result<String, String> {
@@ -133,10 +150,11 @@ fn exact_tmpfs(value: &Value) -> bool {
         && value.pointer("/HostConfig/Tmpfs").and_then(Value::as_object).is_some_and(|map| map.len() == 1)
 }
 
-fn verify_container(value: &Value, plan: &ProducerPlan, cid: &str, image_id: &str) -> Result<u64, String> {
+fn verify_container(value: &Value, plan: &ProducerPlan, cid: &str, image_id: &str, name: &str) -> Result<u64, String> {
     let required_env = ["HOME=/tmp", "TMPDIR=/tmp", "CARGO_HOME=/tmp/cargo",
         "RUSTUP_HOME=/tmp/rustup", "CARGO_NET_OFFLINE=true"];
     let matches = value.pointer("/Id").and_then(Value::as_str) == Some(cid)
+        && value.pointer("/Name").and_then(Value::as_str) == Some(format!("/{name}").as_str())
         && value.pointer("/Image").and_then(Value::as_str) == Some(image_id)
         && value.pointer("/Config/Image").and_then(Value::as_str) == Some(plan.image.as_str())
         && value.pointer("/Config/User").and_then(Value::as_str) == Some("0:0")
@@ -162,6 +180,14 @@ fn verify_container(value: &Value, plan: &ProducerPlan, cid: &str, image_id: &st
         && value.pointer("/HostConfig/CgroupnsMode").and_then(Value::as_str) == Some("private")
         && value.pointer("/HostConfig/CapDrop").and_then(Value::as_array).is_some_and(|items|
             items.len() == 1 && items[0].as_str().is_some_and(|s| s.eq_ignore_ascii_case("all")))
+        && value.pointer("/HostConfig/CapAdd").is_some_and(|items|
+            items.is_null() || items.as_array().is_some_and(|items| items.is_empty()))
+        && value.pointer("/HostConfig/Devices").is_some_and(|items|
+            items.is_null() || items.as_array().is_some_and(|items| items.is_empty()))
+        && value.pointer("/HostConfig/DeviceRequests").is_some_and(|items|
+            items.is_null() || items.as_array().is_some_and(|items| items.is_empty()))
+        && value.pointer("/HostConfig/PidMode").and_then(Value::as_str)
+            .is_some_and(|mode| mode.is_empty() || mode == "private")
         && value.pointer("/HostConfig/SecurityOpt").and_then(Value::as_array).is_some_and(|items|
             items.len() == 1 && items[0].as_str() == Some("no-new-privileges:true"))
         && value.pointer("/HostConfig/Ulimits").and_then(Value::as_array).is_some_and(|items|
@@ -200,7 +226,11 @@ impl RuntimeAttestation for DockerObservationGate {
         Ok(())
     }
 
+    fn launching(&self) { self.attempted.set(true); }
+
     fn after_launch(&self, plan: &ProducerPlan, _: &Child) -> Result<(), String> {
+        // This observes daemon records, not the Child's attached stdio origin.
+        // A reviewed client/socket and stream-to-CID proof are still required.
         let deadline = Instant::now() + Duration::from_millis(500);
         while !self.cidfile.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
@@ -217,9 +247,37 @@ impl RuntimeAttestation for DockerObservationGate {
             &["container", "inspect", cid, "--format", "{{json .}}"]) ?;
         let image_id = self.image_id.borrow();
         let image_id = image_id.as_deref().ok_or("missing prelaunch image identity")?;
-        let pid = verify_container(&container, plan, cid, image_id)?;
+        let pid = verify_container(&container, plan, cid, image_id, &self.name)?;
         verify_cgroup(&self.proc_root, &self.cgroup_root, pid)?;
         self.cid.replace(Some(cid.into()));
+        Ok(())
+    }
+}
+
+impl DockerObservationGate {
+    /// Force removal by the observed CID when available, then by the private
+    /// random name. A successful bounded full daemon listing must prove absence;
+    /// a timed-out or failed `rm` alone never counts as cleanup.
+    fn cleanup(&self, plan: &ProducerPlan) -> Result<(), String> {
+        if !self.attempted.get() { return Ok(()); }
+        let cid = self.cid.borrow().clone();
+        if let Some(cid) = cid.as_deref() {
+            let _ = text_probe(&self.binary, &plan.docker_host, &["rm", "-f", cid]);
+        }
+        let _ = text_probe(&self.binary, &plan.docker_host, &["rm", "-f", &self.name]);
+        let listed = text_probe(&self.binary, &plan.docker_host,
+            &["ps", "-a", "--no-trunc", "--format", "{{json .}}"])?;
+        for line in listed.lines() {
+            let row: Value = serde_json::from_str(line).map_err(|_| "invalid Docker cleanup listing")?;
+            let id = row.get("ID").and_then(Value::as_str).ok_or("missing Docker listing ID")?;
+            let names = row.get("Names").and_then(Value::as_str).ok_or("missing Docker listing names")?;
+            if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err("invalid Docker listing ID".into());
+            }
+            if cid.as_deref() == Some(id) || names.split(',').any(|name| name.trim().trim_start_matches('/') == self.name) {
+                return Err("Docker container survived forced removal".into());
+            }
+        }
         Ok(())
     }
 }
@@ -527,6 +585,7 @@ fn run_definition(
     let request = json!({"jsonrpc":"2.0","id":7,"method":"textDocument/definition",
         "params":{"textDocument":{"uri":format!("file://{}/{}", plan.root.display(), edge.file)},
             "position":{"line":edge.line.checked_sub(1).ok_or("invalid source line")?,"character":edge.column}}});
+    attestation.launching();
     let mut session = Session::start(command, timeout.min(SESSION_TIMEOUT))?;
     attestation.after_launch(plan, &session.child)?;
     session.send(&plan.initialize)?;
@@ -563,13 +622,17 @@ fn run_observed_definition(
     docker_binary: &Path, cidfile: &Path, proc_root: &Path, cgroup_root: &Path,
     timeout: Duration,
 ) -> Result<DefinitionEvidence, String> {
+    let name = random_container_name()?;
     let gate = DockerObservationGate {
         binary: docker_binary.to_path_buf(), cidfile: cidfile.to_path_buf(),
         proc_root: proc_root.to_path_buf(), cgroup_root: cgroup_root.to_path_buf(),
         image_id: RefCell::new(None), cid: RefCell::new(None),
+        name, attempted: Cell::new(false),
     };
-    let command = plan.observed_docker_command(docker_binary, cidfile)?;
-    run_definition(plan, edge, candidate, command, &gate, timeout)
+    let command = plan.observed_docker_command(docker_binary, cidfile, &gate.name)?;
+    let result = run_definition(plan, edge, candidate, command, &gate, timeout);
+    gate.cleanup(plan).map_err(|error| format!("Docker cleanup unconfirmed: {error}"))?;
+    result
 }
 
 /// Public CLI status while an effective rootless Docker attester is absent.
@@ -667,22 +730,41 @@ if args[:1] == ['info']:
 elif args[:2] == ['image', 'inspect']:
     print((root / 'image.json').read_text())
 elif args[:2] == ['container', 'inspect']:
+    if not (root / 'container-active').exists(): raise SystemExit(1)
     count_file = root / 'inspect-count'
     count = int(count_file.read_text()) + 1 if count_file.exists() else 1
     count_file.write_text(str(count))
     result = json.loads((root / 'container.json').read_text())
+    result['Name'] = '/' + (root / 'run-name').read_text()
+    if (root / 'probe-mode').read_text() == 'wrong_name': result['Name'] = '/unrelated'
     if (root / 'probe-mode').read_text() == 'drift_after_definition' and count > 1:
         result['HostConfig']['NetworkMode'] = 'bridge'
     print(json.dumps(result))
 elif args[:1] == ['run']:
     cidfile = pathlib.Path(args[args.index('--cidfile') + 1])
-    cidfile.write_text((root / 'run-cid').read_text())
+    mode = (root / 'probe-mode').read_text()
+    if mode != 'no_cid': cidfile.write_text((root / 'run-cid').read_text())
+    (root / 'run-name').write_text(args[args.index('--name') + 1])
+    (root / 'container-active').write_text((root / 'run-cid').read_text())
     (root / 'child.pid.cidpath').write_text(str(cidfile))
     target_uri = 'file://' + str(root / 'b.rs')
-    mode = (root / 'probe-mode').read_text()
-    lsp_mode = mode if mode == 'change_cid' else 'ok'
+    lsp_mode = mode if mode in ['change_cid', 'lsp_hang'] else 'ok'
+    if lsp_mode == 'lsp_hang': lsp_mode = 'hang'
     os.execv('/usr/bin/python3', ['/usr/bin/python3', '-u', str(root / 'fake_lsp.py'),
         lsp_mode, target_uri, str(root / 'b.rs'), str(root / 'child.pid')])
+elif args[:1] == ['rm']:
+    if (root / 'probe-mode').read_text() == 'cleanup_fail': raise SystemExit(3)
+    active = root / 'container-active'
+    if not active.exists(): raise SystemExit(1)
+    if args[-1] not in [active.read_text().strip(), (root / 'run-name').read_text()]: raise SystemExit(2)
+    active.unlink()
+    print(args[-1])
+elif args[:1] == ['ps']:
+    active = root / 'container-active'
+    if active.exists():
+        cid = active.read_text().strip()
+        name = (root / 'run-name').read_text()
+        print(json.dumps({'ID':cid,'Names':name}))
 else:
     raise SystemExit(2)
 "#;
@@ -763,7 +845,8 @@ else:
                 "Init":true,"AutoRemove":true,
                 "Memory":MEMORY_BYTES,"MemorySwap":MEMORY_BYTES,"NanoCpus":1000000000_u64,
                 "PidsLimit":MAX_PIDS,"IpcMode":"private","CgroupnsMode":"private",
-                "CapDrop":["ALL"],"SecurityOpt":["no-new-privileges:true"],
+                "CapDrop":["ALL"],"CapAdd":null,"Devices":[],"DeviceRequests":[],
+                "PidMode":"","SecurityOpt":["no-new-privileges:true"],
                 "Ulimits":[{"Name":"nofile","Soft":64,"Hard":64}],
                 "Tmpfs":{"/tmp":"rw,noexec,nosuid,nodev,size=67108864,mode=1777"}
             },
@@ -786,9 +869,13 @@ else:
     }
 
     fn run_observed(fixture: &ObservedFixture) -> Result<DefinitionEvidence, String> {
+        run_observed_timeout(fixture, Duration::from_secs(4))
+    }
+
+    fn run_observed_timeout(fixture: &ObservedFixture, timeout: Duration) -> Result<DefinitionEvidence, String> {
         run_observed_definition(&fixture.plan, &fixture.edge, &fixture.candidate,
             &fixture.binary, &fixture.cidfile, &fixture.proc_root, &fixture.cgroup_root,
-            Duration::from_secs(4))
+            timeout)
     }
 
     #[test]
@@ -801,6 +888,10 @@ else:
         assert!(invocations.contains("image"));
         assert!(invocations.contains("container"));
         assert!(invocations.contains("--cidfile"));
+        assert!(invocations.contains("--name"));
+        assert!(invocations.contains("\"rm\""));
+        assert!(invocations.contains("\"ps\""));
+        assert!(!fixture.root.path().join("container-active").exists());
         assert_reaped(&fixture.root.path().join("child.pid"));
     }
 
@@ -851,6 +942,19 @@ else:
         value["Config"]["Cmd"] = json!(["--help"]);
         write_json(&file, &value);
         assert!(run_observed(&fixture).is_err(), "accepted unexpected analyzer arguments");
+        for (path, replacement) in [
+            ("/HostConfig/CapAdd", json!(["SYS_ADMIN"])),
+            ("/HostConfig/Devices", json!([{"PathOnHost":"/dev/kvm"}])),
+            ("/HostConfig/DeviceRequests", json!([{"Driver":"nvidia","Count":1}])),
+            ("/HostConfig/PidMode", json!("host")),
+        ] {
+            let fixture = observed_fixture();
+            let file = fixture.root.path().join("container.json");
+            let mut value: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+            *value.pointer_mut(path).unwrap() = replacement;
+            write_json(&file, &value);
+            assert!(run_observed(&fixture).is_err(), "accepted privilege drift at {path}");
+        }
     }
 
     #[test]
@@ -860,9 +964,36 @@ else:
         assert!(run_observed(&fixture).unwrap_err().contains("policy differs"));
         assert_eq!(fs::read_to_string(fixture.root.path().join("inspect-count")).unwrap(), "2");
         assert_reaped(&fixture.root.path().join("child.pid"));
+        assert!(!fixture.root.path().join("container-active").exists());
         let fixture = observed_fixture();
         fs::write(fixture.root.path().join("probe-mode"), "change_cid").unwrap();
         assert!(run_observed(&fixture).unwrap_err().contains("CID changed"));
+        assert_reaped(&fixture.root.path().join("child.pid"));
+        assert!(!fixture.root.path().join("container-active").exists());
+    }
+
+    #[test]
+    fn fake_daemon_container_is_removed_after_timeout_or_missing_cid() {
+        let fixture = observed_fixture();
+        fs::write(fixture.root.path().join("probe-mode"), "lsp_hang").unwrap();
+        assert!(run_observed_timeout(&fixture, Duration::from_millis(250))
+            .unwrap_err().contains("deadline"));
+        assert!(!fixture.root.path().join("container-active").exists());
+        assert_reaped(&fixture.root.path().join("child.pid"));
+        let fixture = observed_fixture();
+        fs::write(fixture.root.path().join("probe-mode"), "no_cid").unwrap();
+        assert!(run_observed(&fixture).is_err());
+        assert!(!fixture.cidfile.exists());
+        assert!(!fixture.root.path().join("container-active").exists());
+        assert_reaped(&fixture.root.path().join("child.pid"));
+    }
+
+    #[test]
+    fn fake_daemon_cleanup_failure_overrides_protocol_match() {
+        let fixture = observed_fixture();
+        fs::write(fixture.root.path().join("probe-mode"), "cleanup_fail").unwrap();
+        assert!(run_observed(&fixture).unwrap_err().contains("Docker cleanup unconfirmed"));
+        assert!(fixture.root.path().join("container-active").exists());
         assert_reaped(&fixture.root.path().join("child.pid"));
     }
 
@@ -895,15 +1026,20 @@ else:
         fs::write(&fixture.cidfile, "stale").unwrap();
         assert!(run_observed(&fixture).is_err());
         assert!(!fixture.root.path().join("docker-invocations").exists());
+        let fixture = observed_fixture();
+        fs::write(fixture.root.path().join("probe-mode"), "wrong_name").unwrap();
+        assert!(run_observed(&fixture).is_err());
+        assert!(!fixture.root.path().join("container-active").exists());
     }
 
     #[test]
     fn observed_launcher_requires_private_cid_directory_outside_source() {
         let fixture = observed_fixture();
         assert!(fixture.plan.observed_docker_command(&fixture.binary,
-            &fixture.root.path().join("inside.cid")).is_err());
+            &fixture.root.path().join("inside.cid"), "doxa-semantic-11111111111111111111111111111111").is_err());
         fs::set_permissions(fixture.cidfile.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(fixture.plan.observed_docker_command(&fixture.binary, &fixture.cidfile).is_err());
+        assert!(fixture.plan.observed_docker_command(&fixture.binary, &fixture.cidfile,
+            "doxa-semantic-11111111111111111111111111111111").is_err());
     }
 
     #[test]

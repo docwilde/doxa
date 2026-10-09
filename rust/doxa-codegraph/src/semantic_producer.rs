@@ -106,9 +106,13 @@ impl ProducerPlan {
     /// Internal launcher seam. The caller owns a fresh, private CID path and
     /// must attest that the observed container ID and policy match this run.
     /// No CLI path calls this method while production attestation is disabled.
-    pub(crate) fn observed_docker_command(&self, docker_binary: &Path, cidfile: &Path) -> Result<Command, String> {
+    pub(crate) fn observed_docker_command(&self, docker_binary: &Path, cidfile: &Path, name: &str) -> Result<Command, String> {
         if !docker_binary.is_absolute() || !cidfile.is_absolute() || cidfile.symlink_metadata().is_ok() {
             return Err("Docker binary and fresh CID file must be absolute paths".into());
+        }
+        let suffix = name.strip_prefix("doxa-semantic-").ok_or("invalid Docker container name")?;
+        if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) {
+            return Err("invalid Docker container name".into());
         }
         // ProducerPlan's fields are public for inspection, so rederive the
         // complete profile before granting a launch. A caller must not be
@@ -127,7 +131,8 @@ impl ProducerPlan {
         }
         let mut command = Command::new(docker_binary);
         command.env_clear().env("DOCKER_HOST", &self.docker_host)
-            .args(&self.args[..self.args.len() - 1]).arg("--cidfile").arg(cidfile)
+            .args(&self.args[..self.args.len() - 1]).arg("--name").arg(name)
+            .arg("--cidfile").arg(cidfile)
             .arg(&self.image).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         Ok(command)
     }

@@ -26,10 +26,19 @@ rootless mode, the pinned image reference and local image ID, one read-only
 worktree mount, no reported network attachments, the requested container
 policy, and cgroup v2 memory, swap, CPU, and PID files for the inspected PID.
 It repeats the container and cgroup checks after the definition reply, while
-the container is still running.
+the container is still running. The seam also rejects added capabilities,
+devices, device requests, and host PID mode. Each attempted run has a random
+container name as well as a private CID file. On success, failure, or timeout,
+it forces removal and requires a bounded daemon listing to show that both
+identities are absent.
 Its probe subprocesses have a two-second deadline and bounded output. Fake
 Docker, inspect, and cgroup fixtures exercise rejection of mismatches. The
-CLI still reports `binding: unknown` and does not call this launcher.
+CLI still reports `binding: unknown` and does not call this launcher. In
+particular, the current seam trusts the executable and Docker socket supplied
+by its caller: a fake wrapper can run an LSP server outside Docker while
+returning unrelated inspect and cgroup records. A production caller must
+establish that the reviewed Docker client/socket and attached LSP stream refer
+to the same attested container before this path can be enabled.
 
 The library-only LSP driver exercises a bounded initialize, quiescence,
 definition, and shutdown exchange against a fixture server. It caps messages
