@@ -12,6 +12,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -35,6 +36,7 @@ const MAX_PYTHON_SCOPE_DEPTH: usize = 128;
 const MAX_PYTHON_PARSE_TIME: Duration = Duration::from_secs(2);
 const MAX_PYTHON_SCAN_TIME: Duration = Duration::from_secs(10);
 const MAX_FINAL_REHASH_TIME: Duration = Duration::from_secs(10);
+const MAX_SOURCE_READ_TIME: Duration = Duration::from_secs(2);
 const MAX_PYTHON_MODULE_IMPORTS: usize = 10_000;
 const MAX_PYTHON_CALL_TARGET_BYTES: usize = 4 * 1024;
 const MAX_PYTHON_RETAINED_CALL_TEXT_BYTES: usize = 32 * 1024;
@@ -400,7 +402,94 @@ fn verify_parsed_source_hashes<'a>(root: &Path, language: &str, started: Instant
     Ok(())
 }
 
-fn file_bytes(root: &Path, relative: &str) -> Result<(String, String, u128), String> {
+type SourceBytes = (String, String, u128);
+
+struct SourceReadRequest {
+    root: PathBuf,
+    relative: String,
+    reply: mpsc::Sender<Result<SourceBytes, String>>,
+    pause: Option<Duration>,
+}
+
+// A regular-file open/read can block inside the kernel (notably on a remote or
+// userspace filesystem). O_NONBLOCK and the scan's between-file clock checks
+// do not bound that call. One process-local worker prevents a timed-out read
+// from spawning an unbounded number of stranded threads. After a timeout the
+// worker is permanently disabled: its outstanding read may still be blocked.
+struct SourceReader {
+    requests: mpsc::SyncSender<SourceReadRequest>,
+    disabled: bool,
+}
+
+impl SourceReader {
+    fn new() -> Result<Self, String> {
+        let (requests, incoming) = mpsc::sync_channel::<SourceReadRequest>(1);
+        std::thread::Builder::new().name("doxa-codegraph-source-reader".into())
+            .spawn(move || {
+                for request in incoming {
+                    if let Some(pause) = request.pause { std::thread::sleep(pause); }
+                    let result = read_file_bytes(&request.root, &request.relative);
+                    let _ = request.reply.send(result);
+                }
+            }).map_err(|e| format!("source reader start: {e}"))?;
+        Ok(Self { requests, disabled: false })
+    }
+
+    fn read(&mut self, root: &Path, relative: &str, deadline: Duration) -> Result<SourceBytes, String> {
+        self.read_request(root, relative, deadline, None)
+    }
+
+    fn read_request(&mut self, root: &Path, relative: &str, deadline: Duration,
+        pause: Option<Duration>) -> Result<SourceBytes, String> {
+        if self.disabled { return Err("source reader disabled after a failed or timed-out read".into()); }
+        let (reply, received) = mpsc::channel();
+        let request = SourceReadRequest { root: root.to_path_buf(), relative: relative.into(), reply, pause };
+        if self.requests.try_send(request).is_err() {
+            self.disabled = true;
+            return Err("source reader unavailable; subsequent source reads disabled".into());
+        }
+        match received.recv_timeout(deadline) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.disabled = true;
+                Err("source open/read exceeded two-second deadline; subsequent source reads disabled".into())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.disabled = true;
+                Err("source reader stopped; subsequent source reads disabled".into())
+            }
+        }
+    }
+}
+
+static SOURCE_READER: OnceLock<Result<Mutex<SourceReader>, String>> = OnceLock::new();
+
+fn file_bytes(root: &Path, relative: &str) -> Result<SourceBytes, String> {
+    let deadline = Instant::now() + MAX_SOURCE_READ_TIME;
+    let reader = SOURCE_READER.get_or_init(|| SourceReader::new().map(Mutex::new))
+        .as_ref().map_err(Clone::clone)?;
+    let mut reader = loop {
+        match reader.try_lock() {
+            Ok(reader) => break reader,
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err("source reader lock poisoned".into());
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err("source reader busy for two seconds; no partial source read".into());
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err("source reader wait exceeded two-second deadline; no partial source read".into());
+    }
+    reader.read(root, relative, remaining)
+}
+
+fn read_file_bytes(root: &Path, relative: &str) -> Result<SourceBytes, String> {
     // Anchor each component to an opened worktree descriptor. A repository
     // writer may replace a symlink between path validation and File::open;
     // canonicalize + symlink_metadata followed by a pathname open leaks the
@@ -1998,6 +2087,25 @@ mod tests {
         fs::create_dir(root.path().join("safe")).unwrap();
         fs::write(root.path().join("safe/real.rs"), "fn visible() {}\n").unwrap();
         assert!(file_bytes(root.path(), "safe/real.rs").unwrap().0.contains("visible"));
+    }
+
+    #[test]
+    fn timed_out_source_read_fails_closed_for_the_rest_of_the_process() {
+        let root = worktree();
+        fs::write(root.path().join("lib.rs"), "fn visible() {}\n").unwrap();
+        let mut reader = SourceReader::new().unwrap();
+        assert_eq!(reader.read(root.path(), "lib.rs", Duration::from_secs(1)).unwrap().0,
+            "fn visible() {}\n");
+        let started = Instant::now();
+        let error = reader.read_request(root.path(), "lib.rs", Duration::from_millis(30),
+            Some(Duration::from_millis(150))).unwrap_err();
+        assert!(error.contains("deadline"), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        // The worker may eventually finish its in-flight read, but the
+        // process cannot silently reuse it after the timeout.
+        std::thread::sleep(Duration::from_millis(170));
+        let error = reader.read(root.path(), "lib.rs", Duration::from_secs(1)).unwrap_err();
+        assert!(error.contains("disabled"), "{error}");
     }
 
     #[test]
