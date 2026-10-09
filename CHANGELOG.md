@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.31 — 2026-10-09
+
+**Isolation proof**
+
+- Audit the fourth broker bind and add read-only ext4 project-quota checks. A disposable four-bind run retained `EDQUOT` after Engine restart and remount; hardened admission stays closed.
+- Constrain **HookBroker** peer identity and `PreCompact` frames. A same-UID bearer client still passes; broker origin and provider egress need proof.
+
+**Trust and plugin preflight**
+
+- Add a disabled root-owned code-graph broker handshake, proved across UIDs in an offline guest. Semantic binding remains `unknown` until the analyzer stream and container are verified.
+- Tighten plugin host preflight to distinct namespaces and loopback-only routes. It passed in a fresh guest; installed-host TUI execution remains disabled.
+
 ## 2.0.0-beta.30 — 2026-10-09
 
 **Fleet handoff**
