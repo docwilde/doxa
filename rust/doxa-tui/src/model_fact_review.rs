@@ -56,6 +56,7 @@ pub fn report(engine: &str, model: &str, review_before: Option<&str>) -> Result<
     let mut lines = vec![
         format!("Model facts · {engine}/{model}"),
         "Static evidence only; the live provider catalog controls availability and effort choices.".into(),
+        "An API model context window does not establish this session's effective context allocation.".into(),
         "A checked date does not verify current availability, price, billing tier, or provider charge.".into(),
     ];
     if let Some(date) = review_before {
@@ -64,7 +65,7 @@ pub fn report(engine: &str, model: &str, review_before: Option<&str>) -> Result<
     lines.push(String::new());
     let mut review_count = 0;
     let mut unknown_count = 0;
-    row(&mut lines, "Context window", value(facts.context_window).map(|v| format!("{v} tokens")),
+    row(&mut lines, "API model context window", value(facts.context_window).map(|v| format!("{v} tokens")),
         facts.context_window.provenance, before, &mut review_count, &mut unknown_count);
     let thinking = facts.thinking.value.map(|v| match v {
         Thinking::Unsupported => "unsupported", Thinking::Optional => "optional", Thinking::Mandatory => "mandatory",
@@ -92,7 +93,8 @@ mod tests {
     #[test]
     fn review_is_field_level_and_operator_selected() {
         let marked = report("deepseek", "deepseek-flash", Some("2026-10-09")).unwrap();
-        assert!(marked.contains("Context window: 1048576 tokens · checked 2026-10-08 · REVIEW"));
+        assert!(marked.contains("API model context window: 1048576 tokens · checked 2026-10-08 · REVIEW"));
+        assert!(marked.contains("does not establish this session's effective context allocation"));
         assert!(marked.contains("source: https://api-docs.deepseek.com/api/list-models/"));
         assert!(marked.contains("Standard API input: $0.3/million tokens · checked 2026-09-30 · REVIEW"));
         assert!(marked.contains("6 review candidates · 0 unknown fields"));
