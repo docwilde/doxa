@@ -151,10 +151,12 @@ fn dependent_worker_waits_for_host_dispatch_and_human_released_handoff() {
     context.validate().unwrap();
     let early=Envelope::issue(&context,"b","c",Kind::Status,"Start now".into(),None).unwrap();
     assert!(!admit(&context,&early,"c",102,None).unwrap().delivered);
+    let turn_hash=hash(&json!({"done":true})).unwrap();
     transaction(&context,|state|{
         state.artifacts.insert("host-checkpoint".into(),json!({"kind":"host_checkpoint",
             "assignment_id":"predecessor","session_id":"b","git_observation_available":true,
-            "changed_paths":"src/parser.rs\n","last_turn":{"done":true},"running":false,"queued":0,"tests_verified":false}));Ok(())
+            "changed_paths":"src/parser.rs\n","last_turn":{"done":true},"last_turn_kind":"turn_done",
+            "turn_serial":1,"last_turn_sha256":turn_hash,"running":false,"queued":0,"tests_verified":false}));Ok(())
     }).unwrap();
     let mut handoff=Envelope::issue(&context,"b","a",Kind::Handoff,"Ready for review".into(),None).unwrap();
     handoff.artifact_refs=vec!["host-checkpoint".into()];
@@ -168,14 +170,35 @@ fn dependent_worker_waits_for_host_dispatch_and_human_released_handoff() {
     let state=transaction(&context,|state|Ok(state.clone())).unwrap();
     let accepted=accepted_handoff(&context,&state,"predecessor").unwrap();
     assert_eq!(accepted.handoff_id,handoff.message_id);
-    assert!(!predecessor_released(&context,&state,"predecessor","turn-hash"));
+    assert_eq!(accepted.checkpoint_turn_serial,1);
+    assert_eq!(accepted.checkpoint_turn_sha256,turn_hash);
+    let mut legacy_checkpoint=state.clone();
+    legacy_checkpoint.artifacts.get_mut("host-checkpoint").unwrap().as_object_mut().unwrap().remove("turn_serial");
+    assert!(accepted_handoff(&context,&legacy_checkpoint,"predecessor").is_none());
+    let mut tampered_checkpoint=state.clone();
+    tampered_checkpoint.artifacts.get_mut("host-checkpoint").unwrap()["last_turn_sha256"]=json!("wrong digest");
+    assert!(accepted_handoff(&context,&tampered_checkpoint,"predecessor").is_none());
+    let handoff_turn_hash=hash(&json!({"handoff":true})).unwrap();
+    assert!(!predecessor_released(&context,&state,"predecessor",2,&handoff_turn_hash));
     transaction(&context,|state|{state.dependency_releases.insert("predecessor".into(),
         DependencyRelease{assignment_id:"predecessor".into(),handoff_id:handoff.message_id.clone(),
-            artifact_refs:handoff.artifact_refs.clone(),last_turn_sha256:"turn-hash".into(),at:unix_now()});
+            artifact_refs:handoff.artifact_refs.clone(),checkpoint_id:"host-checkpoint".into(),
+            checkpoint_turn_serial:1,checkpoint_turn_sha256:turn_hash.clone(),
+            turn_serial:2,last_turn_sha256:handoff_turn_hash.clone(),at:unix_now()});
         state.dispatched_assignments.insert("dependent".into(),true);Ok(())}).unwrap();
     let state=transaction(&context,|state|Ok(state.clone())).unwrap();
-    assert!(predecessor_released(&context,&state,"predecessor","turn-hash"));
-    assert!(!predecessor_released(&context,&state,"predecessor","later-turn"));
+    assert!(predecessor_released(&context,&state,"predecessor",2,&handoff_turn_hash));
+    assert!(!predecessor_released(&context,&state,"predecessor",3,&handoff_turn_hash));
+    assert!(!predecessor_released(&context,&state,"predecessor",2,"later-turn"));
+    let mut wrong_checkpoint=state.clone();
+    wrong_checkpoint.dependency_releases.get_mut("predecessor").unwrap().checkpoint_id="other".into();
+    assert!(!predecessor_released(&context,&wrong_checkpoint,"predecessor",2,&handoff_turn_hash));
+    let mut legacy_release=state.clone();
+    legacy_release.dependency_releases.insert("predecessor".into(),serde_json::from_value(json!({
+        "assignment_id":"predecessor","handoff_id":handoff.message_id,
+        "artifact_refs":handoff.artifact_refs,"last_turn_sha256":handoff_turn_hash,"at":unix_now()
+    })).unwrap());
+    assert!(!predecessor_released(&context,&legacy_release,"predecessor",2,&hash(&json!({"handoff":true})).unwrap()));
     let admitted=Envelope::issue(&context,"b","c",Kind::Status,"Ready now".into(),None).unwrap();
     assert!(admit(&context,&admitted,"c",102,None).unwrap().delivered);
 }

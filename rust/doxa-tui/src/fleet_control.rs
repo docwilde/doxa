@@ -740,8 +740,9 @@ fn dependencies_released(context:&doxa_fleet::Context,state:&doxa_fleet::State,v
         let Some(prior)=context.assignments.iter().position(|row|&row.id==predecessor) else{return Err(invalid("dependency assignment disappeared"));};
         if value["slots"][prior]["phase"]!="dispatched"||value["slots"][prior]["last_turn_kind"]!="turn_done"
             ||busy.get(prior).copied().unwrap_or(true){return Ok(false);}
+        let Some(turn_serial)=value["slots"][prior]["turn_serial"].as_u64().filter(|serial|*serial>0) else{return Ok(false);};
         let turn_hash=doxa_fleet::hash(&value["slots"][prior]["last_turn"])?;
-        if !doxa_fleet::predecessor_released(context,state,predecessor,&turn_hash){return Ok(false);}
+        if !doxa_fleet::predecessor_released(context,state,predecessor,turn_serial,&turn_hash){return Ok(false);}
     }
     Ok(true)
 }
@@ -822,14 +823,24 @@ pub fn dependency_review(root:&Path,id:&str,worker:usize)->io::Result<Review>{
     let state=doxa_fleet::transaction(&context,|state|Ok(state.clone()))?;
     if state.paused{return Err(invalid("fleet is paused; review before releasing dependencies"));}
     let handoff=doxa_fleet::accepted_handoff(&context,&state,&assignment.id).ok_or_else(||invalid("no coordinator-accepted handoff with host checkpoint"))?;
+    let turn_serial=value["slots"][worker]["turn_serial"].as_u64().filter(|serial|*serial>0)
+        .ok_or_else(||invalid("predecessor turn serial unavailable"))?;
+    let turn_hash=doxa_fleet::hash(&value["slots"][worker]["last_turn"])?;
+    // The worker receives a checkpoint after work turn N and sends the typed
+    // handoff during turn N+1. A later turn, even with identical output, cannot
+    // inherit that handoff.
+    if handoff.checkpoint_turn_serial.checked_add(1)!=Some(turn_serial){
+        return Err(invalid("accepted handoff does not belong to the current successor turn"));
+    }
     let checkpoint=&state.artifacts[&handoff.checkpoint_id];
     let dependents=context.assignments.iter().enumerate().filter(|(_,row)|row.depends_on.contains(&assignment.id)).map(|(index,_)|index).collect::<Vec<_>>();
     let request=json!({"run_id":id,"charter_sha256":context.charter_sha256,"worker_index":worker,"assignment_id":assignment.id,
         "task_sha256":format!("{:x}",Sha256::digest(assignment.task.as_bytes())),"handoff_id":handoff.handoff_id,
         "artifact_refs":handoff.artifact_refs,"checkpoint_id":handoff.checkpoint_id,
+        "checkpoint_turn_serial":handoff.checkpoint_turn_serial,
+        "checkpoint_turn_sha256":handoff.checkpoint_turn_sha256,
         "changed_paths":checkpoint["changed_paths"],"git_observation_available":true,
-        "last_turn_sha256":doxa_fleet::hash(&value["slots"][worker]["last_turn"] )?,
-        "turn_serial":value["slots"][worker]["turn_serial"].as_u64().unwrap_or(0),
+        "last_turn_sha256":turn_hash,"turn_serial":turn_serial,
         "tests_verified":false,"approval":"explicit human dependency release","dependent_workers":dependents});
     let token=doxa_fleet::hash(&request)?;
     Ok(Review{request,token})
@@ -989,14 +1000,28 @@ pub fn release_dependency(root:&Path,id:&str,worker:usize,token:&str)->io::Resul
     let context:doxa_fleet::Context=serde_json::from_value(value["supervision"]["context"].clone()).map_err(|_|invalid("fleet charter unavailable"))?;
     let assignment=context.assignments.get(worker).ok_or_else(||invalid("worker index is outside the fleet"))?;
     let handoff_id=review.request["handoff_id"].as_str().unwrap().to_owned();
+    let checkpoint_id=review.request["checkpoint_id"].as_str().unwrap().to_owned();
+    let checkpoint_turn_serial=review.request["checkpoint_turn_serial"].as_u64().ok_or_else(||invalid("dependency checkpoint serial unavailable"))?;
+    let checkpoint_turn_sha256=review.request["checkpoint_turn_sha256"].as_str().ok_or_else(||invalid("dependency checkpoint digest unavailable"))?.to_owned();
     let artifact_refs:Vec<String>=serde_json::from_value(review.request["artifact_refs"].clone())?;
+    let turn_serial=review.request["turn_serial"].as_u64().ok_or_else(||invalid("dependency review turn serial unavailable"))?;
     let last_turn_sha256=review.request["last_turn_sha256"].as_str().unwrap().to_owned();
+    if value["slots"][worker]["last_turn_kind"]!="turn_done"
+        ||value["slots"][worker]["turn_serial"].as_u64()!=Some(turn_serial)
+        ||doxa_fleet::hash(&value["slots"][worker]["last_turn"])?!=last_turn_sha256{
+        return Err(invalid("predecessor turn changed before release"));
+    }
     doxa_fleet::transaction(&context,|state|{
         if state.paused||!doxa_fleet::accepted_handoff(&context,state,&assignment.id).is_some_and(|handoff|
-            handoff.handoff_id==handoff_id&&handoff.artifact_refs==artifact_refs){return Err(invalid("dependency evidence changed before release"));}
+            handoff.handoff_id==handoff_id&&handoff.artifact_refs==artifact_refs
+            &&handoff.checkpoint_id==checkpoint_id
+            &&handoff.checkpoint_turn_serial==checkpoint_turn_serial
+            &&handoff.checkpoint_turn_sha256==checkpoint_turn_sha256
+            &&handoff.checkpoint_turn_serial.checked_add(1)==Some(turn_serial)){return Err(invalid("dependency evidence changed before release"));}
         state.dependency_releases.insert(assignment.id.clone(),doxa_fleet::DependencyRelease{
             assignment_id:assignment.id.clone(),handoff_id:handoff_id.clone(),artifact_refs:artifact_refs.clone(),
-            last_turn_sha256:last_turn_sha256.clone(),at:doxa_fleet::unix_now()});
+            checkpoint_id:checkpoint_id.clone(),checkpoint_turn_serial,checkpoint_turn_sha256:checkpoint_turn_sha256.clone(),
+            turn_serial,last_turn_sha256:last_turn_sha256.clone(),at:doxa_fleet::unix_now()});
         Ok(())
     })?;
     Ok(json!({"released_assignment":assignment.id,"worker_index":worker,"approval":"human","tests_verified":false,"handoff_id":handoff_id}))
@@ -1061,7 +1086,9 @@ fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io:
         let changed=match (&paths,&untracked){(Ok(paths),Ok(untracked))=>Some(format!("{paths}{untracked}")),_=>None};
         missing_git_evidence |= changed.is_none();
         if let Some(changed)=&changed{for path in changed.lines(){if !context.assignments[index].permits(&context.charter,path){out_of_scope=true;}}}
-        let artifact=json!({"kind":"host_checkpoint","session_id":slot.session.id,"assignment_id":context.assignments[index].id,"changed_paths":changed,"git_observation_available":paths.is_ok()&&untracked.is_ok(),"running":state["running"],"queued":state["queued"],"last_turn":value["slots"][index]["last_turn"],"tests_verified":false});
+        let turn=&value["slots"][index]["last_turn"];
+        let turn_digest=if turn.is_null(){None}else{Some(doxa_fleet::hash(turn)?)};
+        let artifact=json!({"kind":"host_checkpoint","session_id":slot.session.id,"assignment_id":context.assignments[index].id,"changed_paths":changed,"git_observation_available":paths.is_ok()&&untracked.is_ok(),"running":state["running"],"queued":state["queued"],"last_turn":turn,"last_turn_kind":value["slots"][index]["last_turn_kind"],"turn_serial":value["slots"][index]["turn_serial"],"last_turn_sha256":turn_digest,"tests_verified":false});
         let id=doxa_fleet::evidence_id(&artifact)?;artifacts.push((id,artifact));
     }
     let snapshot=doxa_fleet::transaction(&context,|state|{
@@ -1646,7 +1673,7 @@ mod tests {
         fs::set_permissions(&socket,fs::Permissions::from_mode(0o600)).unwrap();
         let worker_pid=std::process::id() as i32;
         let server=std::thread::spawn(move||{
-            for _ in 0..3 {
+            for _ in 0..5 {
                 let (mut stream,_)=listener.accept().unwrap();
                 writeln!(stream,"{}",json!({"type":"hello","proto":1,"session_id":"worker","cwd":"/repo","next_seq":0})).unwrap();
                 let mut reader=BufReader::new(stream.try_clone().unwrap());let mut line=String::new();
@@ -1669,7 +1696,7 @@ mod tests {
                 doxa_fleet::Assignment{id:"child-id".into(),session_id:"child".into(),pid:3,role:"worker".into(),task:"Consume".into(),cwd:"/repo".into(),base_commit:None,allowed_paths:vec![],depends_on:vec!["worker-id".into()]},
             ],review:Default::default(),state_path:store.run.join("guard-state.json")};
         context.validate().unwrap();
-        let checkpoint=json!({"kind":"host_checkpoint","assignment_id":"worker-id","session_id":"worker","git_observation_available":true,"changed_paths":"src/lib.rs\n","last_turn":{"ok":true},"running":false,"queued":0,"tests_verified":false});
+        let checkpoint=json!({"kind":"host_checkpoint","assignment_id":"worker-id","session_id":"worker","git_observation_available":true,"changed_paths":"src/lib.rs\n","last_turn":{"ok":true},"last_turn_kind":"turn_done","turn_serial":1,"last_turn_sha256":doxa_fleet::hash(&json!({"ok":true})).unwrap(),"running":false,"queued":0,"tests_verified":false});
         let evidence=doxa_fleet::evidence_id(&checkpoint).unwrap();
         doxa_fleet::transaction(&context,|state|{
             state.artifacts.insert(evidence.clone(),checkpoint.clone());
@@ -1682,7 +1709,7 @@ mod tests {
         }).unwrap();
         let manifest=json!({"native_version":1,"run_id":"dependency-test","phase":"monitoring","live":true,"mode":"supervisor",
             "supervision":{"context":context},"slots":[{"index":0,"phase":"dispatched"},
-            {"index":1,"session_id":"worker","socket_path":socket,"phase":"dispatched","last_turn_kind":"turn_done","last_turn":{"ok":true}},
+            {"index":1,"session_id":"worker","socket_path":socket,"phase":"dispatched","last_turn_kind":"turn_done","last_turn":{"handoff":true},"turn_serial":2},
             {"index":2,"phase":"dependency_waiting","depends_on":[1]}]});
         store.save(&manifest).unwrap();
         let initial_state=doxa_fleet::transaction(&context,|state|Ok(state.clone())).unwrap();
@@ -1694,13 +1721,21 @@ mod tests {
         let reviewed=dependency_review(root.path(),"dependency-test",1).unwrap();
         assert_eq!(reviewed.request["tests_verified"],false);
         assert_eq!(reviewed.request["checkpoint_id"],evidence);
+        assert_eq!(reviewed.request["checkpoint_turn_serial"],1);
+        assert_eq!(reviewed.request["turn_serial"],2);
         assert!(release_dependency(root.path(),"dependency-test",1,"wrong-token").is_err());
+        let mut newer_turn=manifest.clone();newer_turn["slots"][1]["turn_serial"]=json!(3);
+        store.save(&newer_turn).unwrap();
+        assert!(dependency_review(root.path(),"dependency-test",1).is_err());
+        assert!(release_dependency(root.path(),"dependency-test",1,&reviewed.token).is_err());
+        store.save(&manifest).unwrap();
         let release=release_dependency(root.path(),"dependency-test",1,&reviewed.token).unwrap();
         assert_eq!(release["approval"],"human");
         let state=doxa_fleet::transaction(&context,|state|Ok(state.clone())).unwrap();
-        assert!(doxa_fleet::predecessor_released(&context,&state,"worker-id",&doxa_fleet::hash(&json!({"ok":true})).unwrap()));
+        assert!(doxa_fleet::predecessor_released(&context,&state,"worker-id",2,&doxa_fleet::hash(&json!({"handoff":true})).unwrap()));
         assert!(dependencies_released(&context,&state,&manifest,2,&[false;3]).unwrap());
         assert!(!dependencies_released(&context,&state,&manifest,2,&[false,true,false]).unwrap());
+        assert!(!dependencies_released(&context,&state,&newer_turn,2,&[false;3]).unwrap());
         let mut changed_turn=manifest.clone();changed_turn["slots"][1]["last_turn"]=json!({"ok":true,"new_turn":true});
         assert!(!dependencies_released(&context,&state,&changed_turn,2,&[false;3]).unwrap());
         let mut uncertain=manifest.clone();uncertain["slots"][2]["phase"]=json!("dispatch_pending");
@@ -1726,7 +1761,7 @@ mod tests {
                 doxa_fleet::Assignment{id:"second-id".into(),session_id:"second".into(),pid:3,role:"worker".into(),task:"Consume".into(),cwd:"/repo".into(),base_commit:None,allowed_paths:vec![],depends_on:vec!["first-id".into()]},
             ],review:Default::default(),state_path:store.run.join("guard-state.json")};
         context.validate().unwrap();
-        let checkpoint=json!({"kind":"host_checkpoint","assignment_id":"first-id","session_id":"first","git_observation_available":true,"changed_paths":"src/lib.rs\n","last_turn":{"ok":true},"running":false,"queued":0});
+        let checkpoint=json!({"kind":"host_checkpoint","assignment_id":"first-id","session_id":"first","git_observation_available":true,"changed_paths":"src/lib.rs\n","last_turn":{"ok":true},"last_turn_kind":"turn_done","turn_serial":1,"last_turn_sha256":doxa_fleet::hash(&json!({"ok":true})).unwrap(),"running":false,"queued":0});
         let evidence=doxa_fleet::evidence_id(&checkpoint).unwrap();
         let turn_hash=doxa_fleet::hash(&json!({"ok":true})).unwrap();
         doxa_fleet::transaction(&context,|state|{
@@ -1740,7 +1775,7 @@ mod tests {
         }).unwrap();
         let mut manifest=json!({"native_version":1,"run_id":"dispatch-dependency","phase":"monitoring","live":true,"mode":"supervisor",
             "supervision":{"context":context},"slots":[{"index":0,"phase":"dispatched"},
-            {"index":1,"phase":"dispatched","last_turn_kind":"turn_done","last_turn":{"ok":true}},
+            {"index":1,"phase":"dispatched","last_turn_kind":"turn_done","last_turn":{"handoff":true},"turn_serial":2},
             {"index":2,"phase":"dependency_waiting","depends_on":[1]}]});
         store.save(&manifest).unwrap();
         let mut slots=Vec::new();let mut servers=Vec::new();
@@ -1769,7 +1804,9 @@ mod tests {
         assert_eq!(manifest["slots"][2]["phase"],"dependency_waiting");
         doxa_fleet::transaction(&context,|state|{
             state.dependency_releases.insert("first-id".into(),doxa_fleet::DependencyRelease{
-                assignment_id:"first-id".into(),handoff_id:"handoff".into(),artifact_refs:vec![evidence.clone()],last_turn_sha256:turn_hash.clone(),at:doxa_fleet::unix_now()});Ok(())
+                assignment_id:"first-id".into(),handoff_id:"handoff".into(),artifact_refs:vec![evidence.clone()],checkpoint_id:evidence.clone(),
+                checkpoint_turn_serial:1,checkpoint_turn_sha256:turn_hash.clone(),turn_serial:2,
+                last_turn_sha256:doxa_fleet::hash(&json!({"handoff":true})).unwrap(),at:doxa_fleet::unix_now()});Ok(())
         }).unwrap();
         assert!(dispatch_released(&store,&mut manifest,&mut slots).unwrap());
         assert_eq!(store.load().unwrap()["slots"][2]["phase"],"dispatched");

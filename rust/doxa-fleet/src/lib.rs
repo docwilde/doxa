@@ -130,15 +130,16 @@ pub struct State {
 pub struct MessageTrace {pub from:String,pub to:String,pub hop:u8,#[serde(default)] pub kind:Kind,#[serde(default)] pub artifact_refs:Vec<String>,#[serde(default,skip_serializing_if="Option::is_none")] pub in_reply_to:Option<String>}
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DependencyRelease {pub assignment_id:String,pub handoff_id:String,pub artifact_refs:Vec<String>,pub last_turn_sha256:String,pub at:u64}
+pub struct DependencyRelease {pub assignment_id:String,pub handoff_id:String,pub artifact_refs:Vec<String>,#[serde(default)] pub checkpoint_id:String,#[serde(default)] pub checkpoint_turn_serial:u64,#[serde(default)] pub checkpoint_turn_sha256:String,#[serde(default)] pub turn_serial:u64,pub last_turn_sha256:String,pub at:u64}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
-pub struct AcceptedHandoff {pub handoff_id:String,pub artifact_refs:Vec<String>,pub checkpoint_id:String}
+pub struct AcceptedHandoff {pub handoff_id:String,pub artifact_refs:Vec<String>,pub checkpoint_id:String,pub checkpoint_turn_serial:u64,pub checkpoint_turn_sha256:String}
 
 /// A coordinator's ACK and the sender's confirmation must echo the same
 /// host-owned checkpoint. This is provenance, not a model judgment of quality.
 pub fn accepted_handoff(context:&Context,state:&State,predecessor:&str)->Option<AcceptedHandoff>{
     let worker=context.assignments.iter().find(|row|row.id==predecessor&&row.role=="worker")?;
     let coordinator=context.assignments.iter().find(|row|row.role=="coordinator")?;
+    let mut newest=None;
     for confirm in state.traces.values().filter(|row|row.kind==Kind::Confirm&&row.from==worker.session_id&&row.to==coordinator.session_id){
         let Some(ack)=confirm.in_reply_to.as_deref().and_then(|id|state.traces.get(id)) else {continue;};
         let Some(handoff_id)=ack.in_reply_to.as_deref() else {continue;};
@@ -146,21 +147,32 @@ pub fn accepted_handoff(context:&Context,state:&State,predecessor:&str)->Option<
         if ack.kind!=Kind::Ack||ack.from!=coordinator.session_id||ack.to!=worker.session_id
             ||handoff.kind!=Kind::Handoff||handoff.from!=worker.session_id||handoff.to!=coordinator.session_id
             ||handoff.artifact_refs.is_empty()||ack.artifact_refs!=handoff.artifact_refs||confirm.artifact_refs!=handoff.artifact_refs {continue;}
-        let Some(checkpoint)=handoff.artifact_refs.iter().find(|id|state.artifacts.get(*id).is_some_and(|row|
-            row["kind"]=="host_checkpoint"&&row["assignment_id"]==worker.id
-            &&row["session_id"]==worker.session_id&&row["git_observation_available"]==true
-            &&row["changed_paths"].is_string()&&!row["last_turn"].is_null()
-            &&row["running"]==false&&row["queued"].as_u64()==Some(0))) else {continue;};
-        return Some(AcceptedHandoff{handoff_id:handoff_id.into(),artifact_refs:handoff.artifact_refs.clone(),checkpoint_id:checkpoint.clone()});
+        let Some((checkpoint_id,turn_serial,last_turn_sha256))=handoff.artifact_refs.iter().find_map(|id|{
+            let row=state.artifacts.get(id)?;
+            if row["kind"]!="host_checkpoint"||row["assignment_id"]!=worker.id
+                ||row["session_id"]!=worker.session_id||row["git_observation_available"]!=true
+                ||!row["changed_paths"].is_string()||row["last_turn_kind"]!="turn_done"
+                ||row["last_turn"].is_null()||row["running"]!=false||row["queued"].as_u64()!=Some(0){return None;}
+            let serial=row["turn_serial"].as_u64().filter(|serial|*serial>0)?;
+            let digest=row["last_turn_sha256"].as_str()?;
+            if digest!=hash(&row["last_turn"]).ok()? {return None;}
+            Some((id.clone(),serial,digest.to_owned()))
+        }) else {continue;};
+        let accepted=AcceptedHandoff{handoff_id:handoff_id.into(),artifact_refs:handoff.artifact_refs.clone(),checkpoint_id,checkpoint_turn_serial:turn_serial,checkpoint_turn_sha256:last_turn_sha256};
+        if newest.as_ref().is_none_or(|prior:&AcceptedHandoff|accepted.checkpoint_turn_serial>prior.checkpoint_turn_serial){newest=Some(accepted);}
     }
-    None
+    newest
 }
 
-pub fn predecessor_released(context:&Context,state:&State,predecessor:&str,last_turn_sha256:&str)->bool{
+pub fn predecessor_released(context:&Context,state:&State,predecessor:&str,turn_serial:u64,last_turn_sha256:&str)->bool{
     let Some(release)=state.dependency_releases.get(predecessor) else{return false;};
-    release.assignment_id==predecessor && release.last_turn_sha256==last_turn_sha256
+    turn_serial>0&&release.assignment_id==predecessor&&release.turn_serial==turn_serial&&release.last_turn_sha256==last_turn_sha256
         && accepted_handoff(context,state,predecessor).is_some_and(|handoff|
-            handoff.handoff_id==release.handoff_id&&handoff.artifact_refs==release.artifact_refs)
+            handoff.handoff_id==release.handoff_id&&handoff.artifact_refs==release.artifact_refs
+            &&handoff.checkpoint_id==release.checkpoint_id
+            &&handoff.checkpoint_turn_serial==release.checkpoint_turn_serial
+            &&handoff.checkpoint_turn_sha256==release.checkpoint_turn_sha256
+            &&handoff.checkpoint_turn_serial.checked_add(1)==Some(turn_serial))
 }
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]

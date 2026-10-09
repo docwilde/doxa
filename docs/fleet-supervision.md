@@ -153,7 +153,12 @@ token through the same `release_dependency` call and refreshes fleet status.
 The CLI equivalent is `doxa fleet dependency-release RUN SLOT REVIEW_TOKEN`
 after reading its review. A changed token,
 active predecessor, missing accepted handoff, pause, or changed turn keeps the
-dependency blocked. Each predecessor needs its own release. The host then
+dependency blocked. The referenced checkpoint must identify the immediately
+preceding completed worker turn. The release binds both that checkpoint and
+the following handoff turn's serial and digest, so another worker turn
+invalidates it even when the turn output is identical. Older checkpoints
+without a turn serial and digest need a fresh checkpoint and handoff.
+Each predecessor needs its own release. The host then
 dispatches ready workers once and journals `dispatch_pending` before prompt
 admission. Human release accepts scheduling evidence; it does not certify
 test quality or grant new scope. If a predecessor starts another turn after
