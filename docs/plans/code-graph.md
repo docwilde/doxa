@@ -166,8 +166,10 @@ digests, DOXA also re-enumerates and rehashes every listed Rust and Python
 input at read time. An edit, addition, or removal makes that language's
 inventory stale; an unreadable or symlinked source makes it unknown. Older
 snapshots without the matching digest stay unknown. Each readback checks the
-full source set twice, with a 64 MiB cap and ten-second limit per pass, then
-checks the Git path list again. An early file that remains changed during the
+full source set twice, with a 64 MiB cap and elapsed-time checks before and
+after file reads, then checks the Git path list again. Blocking Git enumeration
+or a source read may exceed ten seconds before the check can refuse the result.
+An early file that remains changed during the
 second pass makes the inventory unknown instead of falsely verified. Edits
 after a file's second read, or an edit restored between reads, can still escape
 detection; this is not an atomic repository snapshot. Omitted result rows and
