@@ -1,6 +1,6 @@
 # Rust gallery
 
-The current terminal images show the **DOXA 2.0.0-beta.27** production Ratatui `App` fed deterministic example events through its `TestBackend`. A fixed DejaVu Sans Mono font rasterizes the styled cell buffer at **3068 × 1734**. The capture script gives each run isolated DOXA, LORE and home directories. No provider, daemon, Docker Engine, network request, or private user session is opened. The examples include a checked-in image, synthetic turns, memory, fleet status, project triage, and isolation status passed through the same policy validator used for host reports. They demonstrate rendering and review layout; they do not verify a live provider, container, or fleet run.
+The current terminal images show the **DOXA 2.0.0-beta.30** production Ratatui `App` fed deterministic example events through its `TestBackend`. A fixed DejaVu Sans Mono font rasterizes the styled cell buffer at **3068 × 1734**. The capture script gives each run isolated DOXA, LORE and home directories. No provider, daemon, Docker Engine, network request, or private user session is opened. The examples include a checked-in image, synthetic turns, memory, fleet status, project triage, and isolation status passed through the same policy validator used for host reports. They demonstrate rendering and review layout; they do not verify a live provider, container, or fleet run.
 
 ## Contents
 
@@ -13,22 +13,22 @@ The current terminal images show the **DOXA 2.0.0-beta.27** production Ratatui `
 
 | Scene | Image | What the fixture exercises |
 | --- | --- | --- |
-| Workspace | [hero](../assets/shots/rust-2.0.0-beta.27-hero.png) | Tabs, project rail, Markdown answer, and version line |
-| Project triage | [triage](../assets/shots/rust-2.0.0-beta.27-triage.png) | Verified-root hue and a pane badge pointing to a hidden tab that needs input |
-| Pane rail | [pane-triage](../assets/shots/rust-2.0.0-beta.27-pane-triage.png) | One navigable row for the pane with three tabs; hidden-tab urgency remains visible |
-| Project label | [project-label](../assets/shots/rust-2.0.0-beta.27-project-label.png) | An explicit label on a verified project heading, kept in fixture memory without writing owner config |
-| Image preview | [image-preview](../assets/shots/rust-2.0.0-beta.27-image-preview.png) | A checked-in local image rendered inside the transcript using the halfblock fallback |
-| Isolation | [isolation](../assets/shots/rust-2.0.0-beta.27-isolation.png) | The Docker policy chip and details from a synthetic rootless worker status |
-| Fleet review | [fleet-review](../assets/shots/rust-2.0.0-beta.27-fleet-review.png) | A supervised plan with spending limits, independent reviewer, and message judge; launch is disabled |
-| Dependency plan | [fleet-dependency](../assets/shots/rust-2.0.0-beta.27-fleet-dependency.png) | Frozen tasks, predecessor edge, and explicit human-release warning in a disabled plan |
-| Dependency release | [fleet-release-review](../assets/shots/rust-2.0.0-beta.27-fleet-release-review.png) | Synthetic host checkpoint and accepted handoff in the real review modal; release is disabled |
-| Code graph | [codegraph](../assets/shots/rust-2.0.0-beta.27-codegraph.png) | A synthetic, read-only module query in the production modal, with source hashes and an explicitly unknown conditional edge |
-| Fleet status | [fleet-view](../assets/shots/rust-2.0.0-beta.27-fleet-view.png) | A synthetic worker waiting for its predecessor; no controller starts |
-| Beliefs | [beliefs](../assets/shots/rust-2.0.0-beta.27-beliefs.png) | Belief selection and review actions; writes are disabled |
-| Tool details | [tool-entries](../assets/shots/rust-2.0.0-beta.27-tool-entries.png) | Expanded normalized tool event with synthetic input and output |
-| Memory | [memory-management](../assets/shots/rust-2.0.0-beta.27-memory-management.png) | Curated project memory controls; writes are disabled |
-| Commands | [commands](../assets/shots/rust-2.0.0-beta.27-commands.png) | Slash-command completion |
-| Help | [help](../assets/shots/rust-2.0.0-beta.27-help.png) | Built-in command help |
+| Workspace | [hero](../assets/shots/rust-2.0.0-beta.30-hero.png) | Tabs, project rail, Markdown answer, and version line |
+| Project triage | [triage](../assets/shots/rust-2.0.0-beta.30-triage.png) | Verified-root hue and a pane badge pointing to a hidden tab that needs input |
+| Pane rail | [pane-triage](../assets/shots/rust-2.0.0-beta.30-pane-triage.png) | One navigable row for the pane with three tabs; hidden-tab urgency remains visible |
+| Project label | [project-label](../assets/shots/rust-2.0.0-beta.30-project-label.png) | An explicit label on a verified project heading, kept in fixture memory without writing owner config |
+| Image preview | [image-preview](../assets/shots/rust-2.0.0-beta.30-image-preview.png) | A checked-in local image rendered inside the transcript using the halfblock fallback |
+| Isolation | [isolation](../assets/shots/rust-2.0.0-beta.30-isolation.png) | The Docker policy chip and details from a synthetic rootless worker status |
+| Fleet review | [fleet-review](../assets/shots/rust-2.0.0-beta.30-fleet-review.png) | A supervised plan with spending limits, independent reviewer, and message judge; launch is disabled |
+| Dependency plan | [fleet-dependency](../assets/shots/rust-2.0.0-beta.30-fleet-dependency.png) | Frozen tasks, predecessor edge, and explicit human-release warning in a disabled plan |
+| Dependency release | [fleet-release-review](../assets/shots/rust-2.0.0-beta.30-fleet-release-review.png) | Synthetic host checkpoint, receiver read-back and sender agreement in the real review modal; release is disabled |
+| Code graph | [codegraph](../assets/shots/rust-2.0.0-beta.30-codegraph.png) | A synthetic, read-only module query in the production modal, with source hashes and an explicitly unknown conditional edge |
+| Fleet status | [fleet-view](../assets/shots/rust-2.0.0-beta.30-fleet-view.png) | A synthetic worker waiting for its predecessor; no controller starts |
+| Beliefs | [beliefs](../assets/shots/rust-2.0.0-beta.30-beliefs.png) | Belief selection and review actions; writes are disabled |
+| Tool details | [tool-entries](../assets/shots/rust-2.0.0-beta.30-tool-entries.png) | Expanded normalized tool event with synthetic input and output |
+| Memory | [memory-management](../assets/shots/rust-2.0.0-beta.30-memory-management.png) | Curated project memory controls; writes are disabled |
+| Commands | [commands](../assets/shots/rust-2.0.0-beta.30-commands.png) | Slash-command completion |
+| Help | [help](../assets/shots/rust-2.0.0-beta.30-help.png) | Built-in command help |
 
 The `image-preview` scene exercises the portable halfblock path. A terminal with Kitty or Sixel graphics may use another backend; this capture is not evidence of either terminal protocol. Fleet and isolation values are synthetic and labeled as fixtures in the UI. The dependency-release fixture cannot release a worker. Project-label state is held in memory; the live command writes owner config only after verifying the root. Paths under `/demo` are example data.
 
@@ -42,7 +42,7 @@ cargo build --locked -j 2 -p doxa-tui --example gallery
 python3 scripts/render_rust_gallery.py --binary target/debug/examples/gallery
 ```
 
-The script requires `TMPDIR` on real disk, checks that the hero frame visibly reports the version from `rust/doxa-tui/Cargo.toml`, writes `rust-2.0.0-beta.27-*.png` under `assets/shots`, and verifies every image is 3068 × 1734. Pass scene names after the options to render a subset. The Rust example uses the production `App` reducer and widgets; the Python step only paints Ratatui cells. The captures are deterministic fixture views, not screenshots of a terminal emulator or authenticated account.
+The script requires `TMPDIR` on real disk, checks that the hero frame visibly reports the version from `rust/doxa-tui/Cargo.toml`, writes `rust-2.0.0-beta.30-*.png` under `assets/shots`, and verifies every image is 3068 × 1734. Pass scene names after the options to render a subset. The Rust example uses the production `App` reducer and widgets; the Python step only paints Ratatui cells. The captures are deterministic fixture views, not screenshots of a terminal emulator or authenticated account.
 
 ## Earlier live terminal captures
 
@@ -60,7 +60,7 @@ These unprefixed files remain historical **2.0.0-alpha.68** live captures from 2
 | `rust-help.png` | Command help |
 | `rust-settings.png` | Key settings |
 
-They were captured in a real GTK3/VTE terminal on private Xvfb with FFmpeg. That run used authenticated Codex CLI 0.156.1 through DOXA's protected app server and isolated LORE 0.62.11 data. The provider read only synthetic Harbour notes files. These files document the older live build; they do not show beta.27 features. The original recorder remains at `scripts/live_rust_gallery.py` for an operator who explicitly chooses an authenticated capture.
+They were captured in a real GTK3/VTE terminal on private Xvfb with FFmpeg. That run used authenticated Codex CLI 0.156.1 through DOXA's protected app server and isolated LORE 0.62.11 data. The provider read only synthetic Harbour notes files. These files document the older live build; they do not show beta.30 features. The original recorder remains at `scripts/live_rust_gallery.py` for an operator who explicitly chooses an authenticated capture.
 
 ## Remote browser captures
 

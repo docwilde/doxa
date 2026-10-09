@@ -405,7 +405,9 @@ impl App {
                 info.scroll = info.scroll.saturating_add(if key.code == KeyCode::Down { 1 } else { 8 });
             }
             KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => {
-                if review.complete.get() {
+                if !review.releasable {
+                    self.notice = "Read-back has open questions or a correction; request a fresh handoff".into();
+                } else if review.complete.get() {
                     review.armed = true;
                     self.notice = "Dependency release armed · Shift+Y confirms".into();
                 } else {

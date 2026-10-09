@@ -127,11 +127,18 @@ fn handoff_requires_host_artifact_echo_and_sender_confirmation() {
     handoff.artifact_refs=vec!["host-output".into()];
     assert!(admit(&context,&handoff,"b",101,None).unwrap().delivered);
     let mut ack=Envelope::issue(&context,"b","a",Kind::Ack,"I will check the output".into(),Some(handoff.message_id.clone())).unwrap();
-    assert!(!admit(&context,&ack,"a",102,None).unwrap().delivered,"receipt alone is not a matching artifact acknowledgment");
     ack.artifact_refs=handoff.artifact_refs.clone();
+    assert!(!admit(&context,&ack,"a",102,None).unwrap().delivered,"legacy ACK without read-back fails closed");
+    ack.readback=Some(HandoffReadback{next_action:"Check host output".into(),assumptions:vec!["Output is complete".into()],open_questions:vec![]});
+    let mut wrong_artifacts=ack.clone();wrong_artifacts.artifact_refs.clear();
+    assert!(!admit(&context,&wrong_artifacts,"a",102,None).unwrap().delivered,"read-back alone cannot replace artifact echo");
+    let mut oversized=ack.clone();oversized.readback.as_mut().unwrap().next_action="x".repeat(321);
+    assert!(!admit(&context,&oversized,"a",102,None).unwrap().delivered);
     assert!(admit(&context,&ack,"a",102,None).unwrap().delivered);
     let mut confirm=Envelope::issue(&context,"a","b",Kind::Confirm,"Confirmed".into(),Some(ack.message_id.clone())).unwrap();
     confirm.artifact_refs=ack.artifact_refs.clone();
+    assert!(!admit(&context,&confirm,"b",101,None).unwrap().delivered,"legacy confirmation without response fails closed");
+    confirm.handoff_response=Some(HandoffResponse{agrees:true,correction:None});
     assert!(admit(&context,&confirm,"b",101,None).unwrap().delivered);
     let mut forged=Envelope::issue(&context,"b","a",Kind::Ack,"Fake follow-up".into(),Some(confirm.message_id)).unwrap();
     forged.artifact_refs=vec!["host-output".into()];
@@ -151,31 +158,82 @@ fn dependent_worker_waits_for_host_dispatch_and_human_released_handoff() {
     context.validate().unwrap();
     let early=Envelope::issue(&context,"b","c",Kind::Status,"Start now".into(),None).unwrap();
     assert!(!admit(&context,&early,"c",102,None).unwrap().delivered);
+    let turn_hash=hash(&json!({"done":true})).unwrap();
     transaction(&context,|state|{
         state.artifacts.insert("host-checkpoint".into(),json!({"kind":"host_checkpoint",
             "assignment_id":"predecessor","session_id":"b","git_observation_available":true,
-            "changed_paths":"src/parser.rs\n","last_turn":{"done":true},"running":false,"queued":0,"tests_verified":false}));Ok(())
+            "changed_paths":"src/parser.rs\n","last_turn":{"done":true},"last_turn_kind":"turn_done",
+            "turn_serial":1,"last_turn_sha256":turn_hash,"running":false,"queued":0,"tests_verified":false}));Ok(())
     }).unwrap();
     let mut handoff=Envelope::issue(&context,"b","a",Kind::Handoff,"Ready for review".into(),None).unwrap();
     handoff.artifact_refs=vec!["host-checkpoint".into()];
     assert!(admit(&context,&handoff,"a",102,None).unwrap().delivered);
     let mut ack=Envelope::issue(&context,"a","b",Kind::Ack,"Accepted for owner review".into(),Some(handoff.message_id.clone())).unwrap();
     ack.artifact_refs=handoff.artifact_refs.clone();
+    ack.readback=Some(HandoffReadback{next_action:"Review changed parser".into(),assumptions:vec![],open_questions:vec![]});
     assert!(admit(&context,&ack,"b",101,None).unwrap().delivered);
     let mut confirm=Envelope::issue(&context,"b","a",Kind::Confirm,"Confirmed".into(),Some(ack.message_id.clone())).unwrap();
     confirm.artifact_refs=handoff.artifact_refs.clone();
+    confirm.handoff_response=Some(HandoffResponse{agrees:true,correction:None});
     assert!(admit(&context,&confirm,"a",102,None).unwrap().delivered);
     let state=transaction(&context,|state|Ok(state.clone())).unwrap();
     let accepted=accepted_handoff(&context,&state,"predecessor").unwrap();
     assert_eq!(accepted.handoff_id,handoff.message_id);
-    assert!(!predecessor_released(&context,&state,"predecessor","turn-hash"));
+    assert!(accepted.resolved());
+    assert_eq!(accepted.checkpoint_turn_serial,1);
+    assert_eq!(accepted.checkpoint_turn_sha256,turn_hash);
+    let mut legacy_checkpoint=state.clone();
+    legacy_checkpoint.artifacts.get_mut("host-checkpoint").unwrap().as_object_mut().unwrap().remove("turn_serial");
+    assert!(accepted_handoff(&context,&legacy_checkpoint,"predecessor").is_none());
+    let mut tampered_checkpoint=state.clone();
+    tampered_checkpoint.artifacts.get_mut("host-checkpoint").unwrap()["last_turn_sha256"]=json!("wrong digest");
+    assert!(accepted_handoff(&context,&tampered_checkpoint,"predecessor").is_none());
+    let handoff_turn_hash=hash(&json!({"handoff":true})).unwrap();
+    assert!(!predecessor_released(&context,&state,"predecessor",2,&handoff_turn_hash));
     transaction(&context,|state|{state.dependency_releases.insert("predecessor".into(),
         DependencyRelease{assignment_id:"predecessor".into(),handoff_id:handoff.message_id.clone(),
-            artifact_refs:handoff.artifact_refs.clone(),last_turn_sha256:"turn-hash".into(),at:unix_now()});
+            artifact_refs:handoff.artifact_refs.clone(),checkpoint_id:"host-checkpoint".into(),
+            checkpoint_turn_serial:1,checkpoint_turn_sha256:turn_hash.clone(),
+            turn_serial:2,last_turn_sha256:handoff_turn_hash.clone(),at:unix_now()});
         state.dispatched_assignments.insert("dependent".into(),true);Ok(())}).unwrap();
     let state=transaction(&context,|state|Ok(state.clone())).unwrap();
-    assert!(predecessor_released(&context,&state,"predecessor","turn-hash"));
-    assert!(!predecessor_released(&context,&state,"predecessor","later-turn"));
+    assert!(predecessor_released(&context,&state,"predecessor",2,&handoff_turn_hash));
+    assert!(!predecessor_released(&context,&state,"predecessor",3,&handoff_turn_hash));
+    assert!(!predecessor_released(&context,&state,"predecessor",2,"later-turn"));
+    let mut wrong_checkpoint=state.clone();
+    wrong_checkpoint.dependency_releases.get_mut("predecessor").unwrap().checkpoint_id="other".into();
+    assert!(!predecessor_released(&context,&wrong_checkpoint,"predecessor",2,&handoff_turn_hash));
+    let mut legacy_release=state.clone();
+    legacy_release.dependency_releases.insert("predecessor".into(),serde_json::from_value(json!({
+        "assignment_id":"predecessor","handoff_id":handoff.message_id,
+        "artifact_refs":handoff.artifact_refs,"last_turn_sha256":handoff_turn_hash,"at":unix_now()
+    })).unwrap());
+    assert!(!predecessor_released(&context,&legacy_release,"predecessor",2,&hash(&json!({"handoff":true})).unwrap()));
+    let mut unresolved=state.clone();
+    unresolved.traces.get_mut(&ack.message_id).unwrap().readback.as_mut().unwrap().open_questions.push("Which parser version?".into());
+    assert!(!accepted_handoff(&context,&unresolved,"predecessor").unwrap().resolved());
+    assert!(!predecessor_released(&context,&unresolved,"predecessor",2,&handoff_turn_hash));
+    let mut corrected=state.clone();
+    corrected.traces.get_mut(&confirm.message_id).unwrap().handoff_response=Some(HandoffResponse{agrees:false,correction:Some("Use the reviewed parser branch".into())});
+    assert!(!accepted_handoff(&context,&corrected,"predecessor").unwrap().resolved());
+    assert!(!predecessor_released(&context,&corrected,"predecessor",2,&handoff_turn_hash));
     let admitted=Envelope::issue(&context,"b","c",Kind::Status,"Ready now".into(),None).unwrap();
     assert!(admit(&context,&admitted,"c",102,None).unwrap().delivered);
+    let mut revised=Envelope::issue(&context,"b","a",Kind::Handoff,"Revised handoff".into(),None).unwrap();
+    revised.artifact_refs=vec!["host-checkpoint".into()];
+    assert!(admit(&context,&revised,"a",102,None).unwrap().delivered);
+    let pending=transaction(&context,|state|Ok(state.clone())).unwrap();
+    assert!(accepted_handoff(&context,&pending,"predecessor").is_none(),"new handoff supersedes old agreement before ACK");
+    assert!(!predecessor_released(&context,&pending,"predecessor",2,&handoff_turn_hash));
+    let mut revised_ack=Envelope::issue(&context,"a","b",Kind::Ack,"Read-back".into(),Some(revised.message_id.clone())).unwrap();
+    revised_ack.artifact_refs=revised.artifact_refs.clone();
+    revised_ack.readback=Some(HandoffReadback{next_action:"Review revised parser".into(),assumptions:vec![],open_questions:vec![]});
+    assert!(admit(&context,&revised_ack,"b",101,None).unwrap().delivered);
+    let mut revised_confirm=Envelope::issue(&context,"b","a",Kind::Confirm,"Confirmed".into(),Some(revised_ack.message_id.clone())).unwrap();
+    revised_confirm.artifact_refs=revised.artifact_refs.clone();
+    revised_confirm.handoff_response=Some(HandoffResponse{agrees:true,correction:None});
+    assert!(admit(&context,&revised_confirm,"a",102,None).unwrap().delivered);
+    let resolved=transaction(&context,|state|Ok(state.clone())).unwrap();
+    assert_eq!(accepted_handoff(&context,&resolved,"predecessor").unwrap().handoff_id,revised.message_id);
+    assert!(!predecessor_released(&context,&resolved,"predecessor",2,&handoff_turn_hash),"old human release cannot authorize a later handoff");
 }

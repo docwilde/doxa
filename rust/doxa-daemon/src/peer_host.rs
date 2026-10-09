@@ -230,6 +230,9 @@ impl PeerHost {
         // Fleet identities and envelopes are host-owned. Ordinary peer prose
         // cannot be forwarded into a supervised fleet or over a remote bridge.
         let fleet_context = self.fleet.lock().map_err(|_| "Fleet guard unavailable")?.clone();
+        if fleet_context.is_none() && (params.get("readback").is_some() || params.get("handoff_response").is_some()) {
+            return Err("Handoff read-back fields require a supervised fleet".into());
+        }
         if fleet_context.is_some() && broadcast { return Err("Supervised fleet broadcasts require host fanout review".into()); }
         let fleet_wire = if let Some(context) = &fleet_context {
             let recipients: Vec<_> = roster.iter().filter(|peer| target_matches(&peer.session_id,target,exact)).collect();
@@ -239,6 +242,16 @@ impl PeerHost {
             let kind=doxa_fleet::Kind::parse(params["fleet_kind"].as_str().unwrap_or("status")).map_err(|error|error.to_string())?;
             let mut envelope=doxa_fleet::Envelope::issue(context,&self.session_id,recipient,kind,clean_body.clone(),in_reply_to.map(str::to_owned)).map_err(|error|error.to_string())?;
             if let Some(refs)=params.get("artifact_refs"){envelope.artifact_refs=serde_json::from_value(refs.clone()).map_err(|_|"Invalid host artifact references")?;}
+            // Structured peer text receives the same LORE scrub as the body.
+            // A scrub that breaks the strict JSON schema fails closed.
+            if let Some(raw)=params.get("readback") {
+                let clean=self.with_lore(|lore|lore.scrub(&raw.to_string()).map_err(|_|"LORE scrub unavailable".into()))?;
+                envelope.readback=Some(serde_json::from_str(&clean).map_err(|_|"Invalid scrubbed handoff read-back")?);
+            }
+            if let Some(raw)=params.get("handoff_response") {
+                let clean=self.with_lore(|lore|lore.scrub(&raw.to_string()).map_err(|_|"LORE scrub unavailable".into()))?;
+                envelope.handoff_response=Some(serde_json::from_str(&clean).map_err(|_|"Invalid scrubbed handoff response")?);
+            }
             doxa_fleet::validate_before_review(context,&envelope,recipient,std::process::id() as i32).map_err(|error|error.to_string())?;
             if context.review.message_mode!=doxa_fleet::Mode::Off {
                 let recent=doxa_fleet::transaction(context,|state|Ok(state.recent_messages.clone())).map_err(|error|error.to_string())?;

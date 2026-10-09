@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.30 — 2026-10-09
+
+**Fleet handoff**
+
+- Bind dependency release to the work checkpoint, its successor handoff turn, and the latest typed handoff. A later turn or handoff invalidates the earlier human review.
+- Require a receiver read-back and sender agreement before release. Show open questions and corrections to the supervisor and owner; unresolved handoffs cannot release dependents.
+
+**Code graph and plugins**
+
+- Recheck Git inventory and parsed Rust/Python bytes before fresh scan results. Edits after the final read remain possible; semantic Rust binding still reports unknown.
+- Add read-only TUI `/native-plugin preflight NAME` with exact package approval and zero-grant CLI guidance. TUI plugin execution remains disabled.
+
 ## 2.0.0-beta.29 — 2026-10-09
 
 **Runtime proof**
