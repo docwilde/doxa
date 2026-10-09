@@ -15,6 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
+pub mod semantic_evidence;
+
 const MAX_FILES: usize = 20_000;
 const MAX_PATH_BYTES: usize = 4_096;
 const MAX_LIST_BYTES: usize = 4 * 1024 * 1024;
