@@ -34,6 +34,7 @@ enum LocalCommand {
     Setup,
     Doctor,
     Plugins,
+    NativePlugin,
     ReloadPlugins,
     Model,
     Engine,
@@ -136,6 +137,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
     CommandHelp { kind: LocalCommand::Setup, name: "/setup", form: "/setup", summary: "Setup checks", support: "local · auth checks, LORE store, defaults" },
     CommandHelp { kind: LocalCommand::Doctor, name: "/doctor", form: "/doctor", summary: "Health checks", support: "local · selected provider" },
     CommandHelp { kind: LocalCommand::Plugins, name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "local · selectable operations menu" },
+    CommandHelp { kind: LocalCommand::NativePlugin, name: "/native-plugin", form: "/native-plugin preflight NAME", summary: "Review one executable package", support: "local · read-only; grantless execution stays in explicit Linux CLI" },
     CommandHelp { kind: LocalCommand::ReloadPlugins, name: "/reload-plugins", form: "/reload-plugins", summary: "Refresh plugins", support: "local · selectable operations menu" },
     CommandHelp { kind: LocalCommand::Model, name: "/model", form: "/model [name]", summary: "Select session model", support: "local · reported choices or new-session form" },
     CommandHelp { kind: LocalCommand::Engine, name: "/engine", form: "/engine [name]", summary: "Engine for new sessions", support: "local · new-session engine form" },
@@ -566,6 +568,10 @@ impl App {
         }
         let args = parsed.args;
         match command {
+            LocalCommand::NativePlugin => {
+                self.open_native_package_review(args);
+                true
+            }
             LocalCommand::Codegraph => {
                 self.open_codegraph(args);
                 true
@@ -1124,6 +1130,7 @@ impl App {
                                 | "/remote-connect"
                                 | "/remote-control"
                                 | "/img"
+                                | "/native-plugin"
                         ) {
                             self.action_draft = Some((
                                 (

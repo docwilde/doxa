@@ -101,6 +101,13 @@ refused until a runner explicitly supports them. Modules that contain memory
 or tables must declare maxima no greater than 16 MiB and 1,024 entries. Those
 static bounds do not enforce runtime use.
 
+In the Rust TUI, `/native-plugin preflight demo` opens the same read-only,
+explicit-name review in a local panel. Package validation runs in a background
+thread so it cannot stall terminal input. A matching zero-grant review displays
+the exact CLI command below; the panel is a snapshot, and the CLI rechecks
+approval, bytes and inodes before its cgroup/Bubblewrap admission. The TUI
+consumes other `/native-plugin` forms locally and never runs package code.
+
 After reviewing both files and the requested grant, the owner can record the
 exact identity in private `$DOXA_HOME/config.toml`:
 

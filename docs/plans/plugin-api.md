@@ -1,6 +1,6 @@
 # Native DOXA plugin API
 
-Status: **data-only TUI v1; explicit Linux grantless CLI prototype; disposable delegated-host proof passed; broader activation open**.
+Status: **data-only TUI v1 plus read-only package review; explicit Linux grantless CLI prototype; disposable delegated-host proof passed; broader activation open**.
 This plan supersedes the Python/Textual `Plugin` and `PANE_COMMANDS` draft. The
 Rust frontend uses its own command registry, palette and help panel. Claude Code
 plugin adoption through `/plugins` is a separate provider feature.
@@ -65,13 +65,18 @@ provider passthrough and cannot override a native command name.
 
 ### Executable package preflight
 
-`doxa native-plugin preflight NAME` now opens only the explicitly named,
+`doxa native-plugin preflight NAME` and the Rust TUI's
+`/native-plugin preflight NAME` now open only the explicitly named,
 owner-private `$DOXA_HOME/native-plugin-packages/NAME` package. It binds a
 versioned manifest and bounded WebAssembly 1.0 core-module file to their SHA-256
 digests and opened inodes. The optional owner-private config entry must match
 both digests and the requested grants exactly. A mismatch rejects the package;
 an absent entry yields a review-required result. No package is loaded at TUI
 startup, and neither preflight nor a matching config entry executes code. The
+TUI validates in a background worker and displays a read-only snapshot with
+an explicit CLI run command only for an exactly approved zero-grant package;
+all other `/native-plugin` forms remain local and cannot reach a provider.
+The CLI repeats the approval, byte and inode check at execution. The
 only reserved grant name is `render-local-panel-v1`; no runtime capability is
 implemented. See [Native text plugins](../native-plugins.md#executable-package-identity-review)
 for the concrete format and owner review flow.
