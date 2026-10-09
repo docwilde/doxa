@@ -8,7 +8,9 @@ with the worktree-anchored, no-symlink reader, checks their SHA-256 hashes,
 reparses the call and target function, and requires the LSP range to select the
 declaration identifier exactly. It rejects ambiguous replies, mismatched IDs,
 external or encoded URIs, changed files, unsupported UTF-16 lines, and oversized
-messages. A matching exchange returns `protocol_match_untrusted` and
+messages. After inspection it rehashes both source files and rechecks the Git
+path list, so a persistent edit or path addition during inspection fails.
+These checks are still non-atomic. A matching exchange returns `protocol_match_untrusted` and
 `binding: unknown`.
 
 `semantic_producer::plan_rust_analyzer` is a separate opt-in, data-only launch

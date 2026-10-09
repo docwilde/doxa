@@ -105,8 +105,19 @@ In the Rust TUI, `/native-plugin preflight demo` opens the same read-only,
 explicit-name review in a local panel. Package validation runs in a background
 thread so it cannot stall terminal input. A matching zero-grant review displays
 the exact CLI command below; the panel is a snapshot, and the CLI rechecks
-approval, bytes and inodes before its cgroup/Bubblewrap admission. The TUI
-consumes other `/native-plugin` forms locally and never runs package code.
+approval, bytes and inodes before its cgroup/Bubblewrap admission.
+
+`/native-plugin run demo` now opens a local lifecycle panel. Its background
+task validates exact owner approval, refuses every requested grant, and rechecks
+the reviewed bytes and inodes. The installed-host admission gate is closed, so
+this request reports why execution is unavailable and never starts the worker.
+Closing the panel or its tab, changing tabs, or exiting the window cancels the
+task and drops late results. A future installed-host acceptance policy must
+authenticate the current TUI/worker/Bubblewrap identities, delegated cgroup
+parent and membership, kernel namespace/egress enforcement, current-host proof
+freshness, and revocation independently of owner-editable config or a
+disposable-guest receipt. Until then, the explicit Linux CLI is the only
+grantless execution route; TUI execution stays disabled.
 
 After reviewing both files and the requested grant, the owner can record the
 exact identity in private `$DOXA_HOME/config.toml`:
@@ -144,6 +155,12 @@ fixture, including the approved Wasm worker, aggregate limits, namespace
 boundary and cleanup. TUI execution, nonempty grants, native shared
 libraries, scripts, provider backends, hooks and
 automatic startup remain unsupported.
+
+Cleanup treats `cgroup.events` as bounded evidence: it requires exactly one
+valid `populated` value before removing a worker cgroup. Missing, duplicated,
+malformed, linked or oversized event data fails closed instead of reporting
+cleanup success. This strengthens the CLI cleanup path but is not an
+installed-host acceptance receipt or TUI execution authorization.
 
 Before broader activation, a delegated-host acceptance run must verify the
 installed memory, swap, CPU and PID limits; worker membership before exec;

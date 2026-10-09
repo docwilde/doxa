@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.35 — 2026-10-09
+
+**Plugin lifecycle**
+
+- Add an owner-bound, cancellable TUI `/native-plugin run NAME` review path. It rechecks approved zero-grant package identity, then reports `HostUnverified` without dispatching a worker.
+- Require bounded, unambiguous `cgroup.events` evidence before the isolated CLI runner reports cleanup. Installed-host TUI delegation and executable grants remain disabled.
+
+**Docker and code-graph verification**
+
+- Pin guarded gateway connectors to the inspected container init, UID, PID namespace and cgroup before CONNECT or DNS. Mocked allow/deny tests pass; hardened admission remains closed.
+- Recheck whole Rust and Python scans twice and definition source, target and listing before return. The mutable worktree is still non-atomic; semantic binding stays `unknown`.
+
 ## 2.0.0-beta.34 — 2026-10-09
 
 **Trust boundary probes**

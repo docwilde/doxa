@@ -1,6 +1,6 @@
-//! Disabled Linux broker-origin probe. A pidfd pins the connector's process,
-//! but a connected Unix descriptor can later be sent to a different writer.
-//! Even a matching namespace/cgroup observation is therefore not admission.
+//! Linux broker-origin probe. A pidfd pins the connector's process, but a
+//! connected Unix descriptor can later be sent to a different writer. A
+//! matching namespace/cgroup observation is therefore not hardened admission.
 #![allow(dead_code)]
 
 use crate::error;
@@ -15,6 +15,53 @@ struct ProcessScope { pid_namespace: PathBuf, cgroup: String }
 
 #[derive(Debug)]
 struct ConnectorObservation { pid: libc::pid_t, uid: libc::uid_t, scope: ProcessScope }
+
+/// Pins the Engine-reported container init while a guarded gateway is live.
+/// This excludes ordinary host and sibling connectors at connection time;
+/// per-message writer and Engine authenticity remain separate requirements.
+pub(crate) struct ContainerOriginPin {
+    init_pid: libc::pid_t,
+    init_pin: File,
+    init_scope: ProcessScope,
+    host_scope: ProcessScope,
+}
+
+impl ContainerOriginPin {
+    pub(crate) fn new(init_pid: libc::pid_t) -> io::Result<Self> {
+        let init_pin = open_pidfd(init_pid)?;
+        pidfd_alive(&init_pin)?;
+        let init_scope = scope(init_pid)?;
+        if !same_pidfd(&init_pin, &open_pidfd(init_pid)?)? {
+            return Err(error("inspected container init PID changed"));
+        }
+        let host_scope = scope(unsafe { libc::getpid() })?;
+        if init_scope.pid_namespace == host_scope.pid_namespace
+            || init_scope.cgroup == "/" || init_scope.cgroup.is_empty() {
+            return Err(error("inspected container init is outside a private scope"));
+        }
+        Ok(Self { init_pid, init_pin, init_scope, host_scope })
+    }
+
+    pub(crate) fn require_connector(&self, stream: &UnixStream) -> io::Result<()> {
+        pidfd_alive(&self.init_pin)?;
+        if !same_pidfd(&self.init_pin, &open_pidfd(self.init_pid)?)?
+            || scope(self.init_pid)? != self.init_scope {
+            return Err(error("inspected container init changed during gateway lifetime"));
+        }
+        let peer = observe_connector(stream)?;
+        if peer.uid != unsafe { libc::geteuid() } {
+            return Err(error("broker connector is not the rootless Engine owner"));
+        }
+        if !candidate_matches(&peer.scope, &self.init_scope, &self.host_scope) {
+            return Err(error("broker connector is outside the inspected container scope"));
+        }
+        pidfd_alive(&self.init_pin)?;
+        if !same_pidfd(&self.init_pin, &open_pidfd(self.init_pid)?)? {
+            return Err(error("inspected container init changed during connector check"));
+        }
+        Ok(())
+    }
+}
 
 fn peer_cred(stream: &UnixStream) -> io::Result<libc::ucred> {
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
@@ -165,6 +212,12 @@ mod tests {
         assert_eq!(observed.uid, unsafe { libc::geteuid() });
         let refusal = require_hardened_origin(&server, observed.pid).unwrap_err();
         assert!(refusal.to_string().contains("outside the inspected container scope"));
+    }
+
+    #[test]
+    fn host_process_cannot_be_pinned_as_container_init() {
+        let refusal = ContainerOriginPin::new(unsafe { libc::getpid() }).err().unwrap();
+        assert!(refusal.to_string().contains("outside a private scope"));
     }
 
     #[test]

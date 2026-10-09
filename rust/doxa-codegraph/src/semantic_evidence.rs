@@ -105,6 +105,17 @@ pub fn inspect_definition_reply(
     request: &Value,
     response: &Value,
 ) -> Result<DefinitionEvidence, String> {
+    inspect_definition_reply_with_pre_final_rehash(root, edge, candidate, request, response, |_| {})
+}
+
+fn inspect_definition_reply_with_pre_final_rehash(
+    root: &Path,
+    edge: &CallEdge,
+    candidate: &CallCandidate,
+    request: &Value,
+    response: &Value,
+    before_final_rehash: impl FnOnce(&Path),
+) -> Result<DefinitionEvidence, String> {
     limited(request)?;
     limited(response)?;
     let root = worktree_root(root)?;
@@ -185,6 +196,20 @@ pub fn inspect_definition_reply(
     if !declaration_at(&target, &edge.target, start_line, start_col)? {
         return Err("LSP range does not select the declaration identifier".into());
     }
+    // The source was read before parsing the target. Check both names and
+    // hashes once more, after all protocol and syntax work, to avoid returning
+    // an apparently current match if either file changed during inspection.
+    // This still cannot make a mutable worktree an atomic snapshot.
+    before_final_rehash(&root);
+    if super::source_sha256(&root, &edge.file)? != source_hash {
+        return Err("call source changed during definition inspection".into());
+    }
+    if super::source_sha256(&root, &target_file)? != target_hash {
+        return Err("definition source changed during inspection".into());
+    }
+    if listed_files(&root)? != listed {
+        return Err("Git worktree listing changed during definition inspection".into());
+    }
     Ok(DefinitionEvidence {
         status: "protocol_match_untrusted",
         binding: "unknown",
@@ -239,6 +264,30 @@ mod tests {
         fs::write(root.path().join("a.rs"), "fn caller() { target(); }\n").unwrap();
         fs::write(root.path().join("b.rs"), "fn target() {}\n// edit\n").unwrap();
         assert!(inspect_definition_reply(root.path(), &edge, &candidate, &request, &response).is_err());
+    }
+
+    #[test]
+    fn source_target_and_listing_changes_during_inspection_fail_closed() {
+        let (root, edge, candidate, request, response) = fixture();
+        let error = inspect_definition_reply_with_pre_final_rehash(root.path(), &edge, &candidate,
+            &request, &response, |root| {
+                fs::write(root.join("a.rs"), "fn caller() { target(); }\n// late\n").unwrap();
+            }).unwrap_err();
+        assert_eq!(error, "call source changed during definition inspection");
+
+        fs::write(root.path().join("a.rs"), "fn caller() { target(); }\n").unwrap();
+        let error = inspect_definition_reply_with_pre_final_rehash(root.path(), &edge, &candidate,
+            &request, &response, |root| {
+                fs::write(root.join("b.rs"), "fn target() {}\n// late\n").unwrap();
+            }).unwrap_err();
+        assert_eq!(error, "definition source changed during inspection");
+
+        fs::write(root.path().join("b.rs"), "fn target() {}\n").unwrap();
+        let error = inspect_definition_reply_with_pre_final_rehash(root.path(), &edge, &candidate,
+            &request, &response, |root| {
+                fs::write(root.join("new.rs"), "fn new() {}\n").unwrap();
+            }).unwrap_err();
+        assert_eq!(error, "Git worktree listing changed during definition inspection");
     }
 
     #[test]

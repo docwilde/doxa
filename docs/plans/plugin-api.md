@@ -1,6 +1,6 @@
 # Native DOXA plugin API
 
-Status: **data-only TUI v1 plus read-only package review; explicit Linux grantless CLI prototype; disposable delegated-host proof passed; broader activation open**.
+Status: **data-only TUI v1 plus package review and a closed run-request lifecycle; explicit Linux grantless CLI prototype; disposable delegated-host proof passed; installed-host activation open**.
 This plan supersedes the Python/Textual `Plugin` and `PANE_COMMANDS` draft. The
 Rust frontend uses its own command registry, palette and help panel. Claude Code
 plugin adoption through `/plugins` is a separate provider feature.
@@ -74,8 +74,10 @@ both digests and the requested grants exactly. A mismatch rejects the package;
 an absent entry yields a review-required result. No package is loaded at TUI
 startup, and neither preflight nor a matching config entry executes code. The
 TUI validates in a background worker and displays a read-only snapshot with
-an explicit CLI run command only for an exactly approved zero-grant package;
-all other `/native-plugin` forms remain local and cannot reach a provider.
+an explicit CLI run command only for an exactly approved zero-grant package.
+`/native-plugin run NAME` starts a cancellable local admission request that
+rechecks exact approval and identity, then stops at a closed installed-host
+gate. No native slash command can execute a package or reach a provider.
 The CLI repeats the approval, byte and inode check at execution. The
 only reserved grant name is `render-local-panel-v1`; no runtime capability is
 implemented. See [Native text plugins](../native-plugins.md#executable-package-identity-review)
@@ -174,9 +176,10 @@ separate result classes. Bubblewrap cannot distinguish a signalled child from
 a deliberate nonzero exit, so those remain one abnormal-worker class. A
 setup failure and a worker failure before its entry marker remain one
 conservative class. The explicit CLI command now calls this seam with a
-five-second deadline and signal-driven cancellation. There is still no
-installed-host acceptance or TUI execution path, so TUI execution stays
-disabled. Do not treat owner approval,
+five-second deadline and signal-driven cancellation. The TUI run request has
+background ownership, bounded result classes and cancellation on panel, tab,
+owner and window exit. There is still no authenticated installed-host
+admission, so TUI execution stays disabled. Do not treat owner approval,
 the request frame, fuel or store limits as an execution switch. The handoff is
 `recheck_approved(home, review) -> RecheckedPackage`: it returns the exact,
 revalidated bytes and fails if either owner file, inode, digest, approval, or
@@ -199,10 +202,11 @@ The seven-case fixture passed on a disposable host with delegated
 controllers. It covered aggregate memory/CPU/PID enforcement, cancellation,
 network and host-file denial, stale approval, and cgroup cleanup. A separate
 review-only receipt workflow now binds an exact test executable and clean
-source tree, but has not yet supplied a fresh guest receipt. Installed-host
-acceptance, TUI cancellation and exit lifecycle, and an operator activation
-policy remain open. Parent deadlines and module maxima are not hard resource
-guarantees; other platforms need equivalent isolation proof.
+source tree. Installed-host acceptance and an operator activation policy
+remain open. The current TUI request can abandon a stalled private-file read
+after setting cancellation; before activation, worker cleanup on window exit
+must also be accepted on the installed host. Parent deadlines and module maxima
+are not hard resource guarantees; other platforms need equivalent isolation proof.
 
 ### Other extensions
 

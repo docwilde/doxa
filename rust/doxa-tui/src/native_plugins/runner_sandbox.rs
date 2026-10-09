@@ -4,6 +4,7 @@
 //! installed-host acceptance remains required before broader activation.
 #![cfg(target_os = "linux")]
 
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -26,6 +27,7 @@ const CPU_MAX: &str = "100000 100000"; // at most one CPU of aggregate bandwidth
 const PROCESS_AS_BYTES: libc::rlim_t = 256 * 1024 * 1024;
 const PROCESS_CPU_SECONDS: libc::rlim_t = 4;
 const PROCESS_FDS: libc::rlim_t = 64;
+const CGROUP_EVENTS_MAX_BYTES: u64 = 4_096;
 
 fn unavailable(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message.into())
@@ -100,6 +102,45 @@ fn write_and_check(path: &Path, value: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// A successful cleanup requires one unambiguous kernel `populated` value.
+/// A missing, duplicated, malformed, linked or oversized events file cannot
+/// be used as evidence that all worker descendants have exited.
+fn cgroup_populated(events_path: &Path) -> io::Result<bool> {
+    let file = OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(events_path)?;
+    if !file.metadata()?.is_file() {
+        return Err(unavailable("plugin cgroup events is not a regular control file"));
+    }
+    let mut bytes = Vec::new();
+    file.take(CGROUP_EVENTS_MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > CGROUP_EVENTS_MAX_BYTES {
+        return Err(unavailable("plugin cgroup events exceeded read limit"));
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| unavailable("plugin cgroup events is not UTF-8"))?;
+    let mut populated = None;
+    let mut seen = HashSet::new();
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let key = fields.next().ok_or_else(|| unavailable("empty plugin cgroup events row"))?;
+        let value = fields.next().ok_or_else(|| unavailable("missing plugin cgroup events value"))?;
+        if fields.next().is_some() || !key.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            || !seen.insert(key) || !value.bytes().all(|byte| byte.is_ascii_digit())
+            || value.parse::<u64>().is_err() {
+            return Err(unavailable("malformed or duplicate plugin cgroup events row"));
+        }
+        if key == "populated" {
+            populated = Some(match value {
+                "0" => false,
+                "1" => true,
+                _ => return Err(unavailable("invalid plugin cgroup populated value")),
+            });
+        }
+    }
+    populated.ok_or_else(|| unavailable("missing plugin cgroup populated value"))
+}
+
 /// The cgroup owns all descendants, including a compromised child that calls
 /// setsid() to escape the supervisor's process group. Drop kills the entire
 /// cgroup before attempting to remove it.
@@ -124,8 +165,7 @@ impl CgroupBudget {
         fs::write(self.path.join("cgroup.kill"), "1")?;
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let events = fs::read_to_string(self.path.join("cgroup.events"))?;
-            if events.lines().any(|line| line == "populated 0") { break; }
+            if !cgroup_populated(&self.path.join("cgroup.events"))? { break; }
             if Instant::now() >= deadline {
                 return Err(unavailable("plugin cgroup retained live descendants after kill"));
             }
@@ -423,6 +463,45 @@ mod tests {
         fs::write(parent.join("cgroup.subtree_control"), "cpu memory pids\n").unwrap();
         fs::write(leaf.join("cgroup.procs"), "4242\n").unwrap();
         (dir, root, parent)
+    }
+
+    #[test]
+    fn cleanup_events_require_one_bounded_unambiguous_populated_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("cgroup.events");
+        fs::write(&events, "populated 0\nfrozen 0\n").unwrap();
+        assert_eq!(cgroup_populated(&events).unwrap(), false);
+        fs::write(&events, "populated 1\nfrozen 0\n").unwrap();
+        assert_eq!(cgroup_populated(&events).unwrap(), true);
+        for invalid in [
+            "", "frozen 0\n", "populated 00\n", "populated 2\n",
+            "populated 0 1\n", "populated 0\npopulated 0\n",
+            "populated 0\npopulated 1\n", "populated \u{0}0\n",
+            "populated 0\nfrozen nope\n", "populated 0\nfrozen 0\nfrozen 0\n",
+            "populated 0\n\n",
+        ] {
+            fs::write(&events, invalid).unwrap();
+            assert!(cgroup_populated(&events).is_err(), "accepted {invalid:?}");
+        }
+        fs::write(&events, vec![b'x'; CGROUP_EVENTS_MAX_BYTES as usize + 1]).unwrap();
+        assert!(cgroup_populated(&events).is_err());
+        let link = dir.path().join("events-link");
+        std::os::unix::fs::symlink(&events, &link).unwrap();
+        assert!(cgroup_populated(&link).is_err());
+        assert!(cgroup_populated(dir.path()).is_err());
+    }
+
+    #[test]
+    fn malformed_cleanup_evidence_does_not_mark_budget_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker-cgroup");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("cgroup.kill"), "").unwrap();
+        fs::write(path.join("cgroup.events"), "populated 0\npopulated 1\n").unwrap();
+        let mut budget = CgroupBudget { path: path.clone(), stopped: false };
+        assert!(budget.stop().is_err());
+        assert!(!budget.stopped && path.exists());
+        budget.stopped = true; // The fake regular-file tree is not a cgroupfs mount.
     }
 
     #[test]

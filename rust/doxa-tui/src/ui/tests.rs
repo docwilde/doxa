@@ -3124,7 +3124,7 @@ for line in sys.stdin:
         let info = app.chip_info.as_ref().unwrap();
         assert_eq!(info.kind, "help");
         for form in ["/collection [action] [name]", "/codegraph [stored] file|symbol|imports|calls|modules VALUE", "/usage", "/context", "/compact",
-            "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|dependency-review [RUN] SLOT|mesh [RUN]|start OPTIONS|resume RUN]", "/native-plugin preflight NAME", "/help"] {
+            "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|dependency-review [RUN] SLOT|mesh [RUN]|start OPTIONS|resume RUN]", "/native-plugin preflight|run NAME", "/help"] {
             assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
         }
         assert!(info.lines.iter().any(|line| line.contains("unavailable in Rust")));

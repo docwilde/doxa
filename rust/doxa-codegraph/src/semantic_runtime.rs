@@ -1275,13 +1275,20 @@ else:
         assert!(run_observed_timeout(&fixture, Duration::from_millis(250))
             .unwrap_err().contains("deadline"));
         assert!(!fixture.root.path().join("container-active").exists());
-        assert_reaped(&fixture.root.path().join("child.pid"));
+        // The deadline may fire before the fake child writes its PID file.
+        // When it did start, verify that cleanup reaped it.
+        if fixture.root.path().join("child.pid").exists() {
+            assert_reaped(&fixture.root.path().join("child.pid"));
+        }
         let fixture = observed_fixture();
         fs::write(fixture.root.path().join("probe-mode"), "no_cid").unwrap();
         assert!(run_observed(&fixture).is_err());
         assert!(!fixture.cidfile.exists());
         assert!(!fixture.root.path().join("container-active").exists());
-        assert_reaped(&fixture.root.path().join("child.pid"));
+        // Missing CID can also stop the child before its first instruction.
+        if fixture.root.path().join("child.pid").exists() {
+            assert_reaped(&fixture.root.path().join("child.pid"));
+        }
     }
 
     #[test]
