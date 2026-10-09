@@ -7,11 +7,36 @@ must be an `https://*.ts.net/` origin reachable from a user-owned Tailscale
 device. The app supplies no Tailscale identity header: Serve authenticates the
 device and forwards its attested login to the hub.
 
-![DOXA Remote disconnected setup screen on an offline Android emulator](../assets/shots/android-remote-beta17-offline.png)
+<img src="../assets/shots/android-remote-beta30-home-offline.png" alt="DOXA Remote connection screen on an offline Android emulator" width="320">
 
-This capture uses an unconfigured debug APK on an offline Android 36 emulator;
-no Tailscale account, hub, or shared key was entered. A connected session view
-requires a user-owned device and private hub.
+The normal connection screen above comes from a clean, unconfigured debug APK
+on an offline Android 36 emulator. The hub URL is empty, and no Tailscale
+account or shared key was entered. The [recovery-fence screen](../assets/shots/android-remote-beta28-recovery-fence-offline.png)
+uses a synthetic `owner.tailnet.ts.net` URL and shows how an uncertain write
+blocks acknowledgment until the app loads a fresh snapshot. A connected session
+view requires a user-owned device and private hub.
+
+<img src="../assets/shots/android-remote-beta28-recovery-fence-offline.png" alt="Synthetic uncertain-write recovery fence with acknowledgment disabled" width="320">
+
+To reproduce the home capture, install the Android 36 default x86_64 system
+image, build the unconfigured APK, and start a fresh Pixel 6 emulator. The
+capture script turns on airplane mode, disables Wi-Fi and mobile data, clears
+app storage, verifies the empty URL field, and checks the PNG dimensions. It
+refuses a physical device.
+
+```bash
+export TMPDIR="$HOME/t" ANDROID_HOME=/path/to/android-sdk
+export ANDROID_AVD_HOME="$HOME/.cache/doxa-android-capture/avd"
+mkdir -p "$TMPDIR" "$ANDROID_AVD_HOME"
+./gradlew :app:assembleDebug
+"$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd \
+  -n doxa-home-offline -k 'system-images;android-36;default;x86_64' \
+  -p "$ANDROID_AVD_HOME/doxa-home-offline.avd" --device pixel_6 --force
+"$ANDROID_HOME/emulator/emulator" -avd doxa-home-offline -port 5580 \
+  -no-window -no-snapshot -no-audio -no-boot-anim -gpu swiftshader_indirect &
+# Wait for emulator-5580 to report sys.boot_completed=1.
+ANDROID_SERIAL=emulator-5580 ../scripts/capture_android_home.sh
+```
 
 ## Build and connect
 
@@ -129,8 +154,8 @@ endpoint in this client. Protocol and hub tests cover registration scope,
 rotation, expiry, and generic payloads. An unconfigured debug APK was assembled
 locally on 2026-10-09 with Temurin JDK 21.0.12.1, Android SDK 37.0, and Gradle
 9.3.1; `:protocol:test` and `:app:lintDebug` passed in the same run. The
-disconnected screen was captured and inspected in an offline Android 36
-emulator, including system-bar clearance. It has not been installed on a
+connection and recovery screens were captured and inspected in offline Android
+36 emulators, including system-bar clearance. It has not been installed on a
 Firebase-enabled device or exercised against a provisioned FCM project and
 two-host tailnet. A separate offline Android 36 emulator smoke installed this
 debug APK, injected a synthetic body-free marker, force-stopped and relaunched
