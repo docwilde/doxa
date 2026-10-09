@@ -64,16 +64,28 @@ fn native_memory_fixture(runtime:&Path,body:&str) {
 fn native_role_count(path:&Path,role:&str)->usize {
     fs::read_to_string(path).unwrap_or_default().lines().filter_map(|line|serde_json::from_str::<Value>(line).ok()).filter(|row|row["type"]==role).count()
 }
-fn native_db_rows(runtime:&Path)->usize {
+// A deliberately held writer may also block sqlite_master reads. None means
+// the index was unreadable under that lock, not that it contained zero rows.
+fn native_db_rows_maybe_busy(runtime:&Path)->Option<usize> {
     let path=runtime.join("native-lore/state.db");
-    if !path.exists() { return 0; }
+    if !path.exists() { return Some(0); }
     let output=Command::new("python3").args(["-c",r#"import sqlite3,sys
-c=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True,timeout=.2)
-table=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='msg'").fetchone()
-print(c.execute('SELECT count(*) FROM msg').fetchone()[0] if table else 0)
+try:
+    c=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True,timeout=.2)
+    table=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='msg'").fetchone()
+    print(c.execute('SELECT count(*) FROM msg').fetchone()[0] if table else 0)
+except sqlite3.OperationalError as exc:
+    if exc.sqlite_errorcode in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        print('BUSY')
+    else:
+        raise
 "#]).arg(&path).output().unwrap();
     assert!(output.status.success(),"SQLite index query at {} failed: {}",path.display(),String::from_utf8_lossy(&output.stderr));
-    String::from_utf8(output.stdout).unwrap().trim().parse().unwrap()
+    let value=String::from_utf8(output.stdout).unwrap();
+    if value.trim()=="BUSY" { None } else { Some(value.trim().parse().unwrap()) }
+}
+fn native_db_rows(runtime:&Path)->usize {
+    native_db_rows_maybe_busy(runtime).expect("SQLite index remains locked")
 }
 struct NativeWriterLock(Child);
 impl NativeWriterLock {
@@ -1074,8 +1086,9 @@ fn codex_host_indexes_completed_turn_and_finalized_transcript() {
     loop {let frame=receive(&mut reader);if frame["event"]["type"]=="turn_done" {assert_eq!(frame["event"]["data"]["is_error"],false);break;}}
     send(&mut socket,json!({"type":"call","id":3,"method":"status","params":{}}));
     assert_eq!(receive(&mut reader)["status"]["running"],false);
-    assert_eq!(native_db_rows(dir.path()),0,"held native writer must block indexing, not turn completion");
-    lock.release();wait_until(||native_db_rows(dir.path())==2);
+    assert!(matches!(native_db_rows_maybe_busy(dir.path()),None|Some(0)),
+        "held native writer must block indexing, not turn completion");
+    lock.release();wait_until(||native_db_rows_maybe_busy(dir.path())==Some(2));
     send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());
     assert_eq!(native_db_rows(dir.path()),2,"finalization must not duplicate native indexed messages");
 }
@@ -1107,11 +1120,11 @@ fn blocked_codex_index_does_not_delay_scrubbing_or_disable_later_turns() {
         loop {let frame=receive(&mut reader);assert!(!frame.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));if frame["event"]["type"]=="turn_done" {assert_eq!(frame["event"]["data"]["is_error"],false,"{frame}");break;}}
         assert!(start.elapsed()<Duration::from_secs(2),"optional native indexing delayed mandatory scrub");
     };
-    turn(1);turn(2);assert_eq!(native_db_rows(dir.path()),0);
+    turn(1);turn(2);assert!(matches!(native_db_rows_maybe_busy(dir.path()),None|Some(0)));
     // The native SQLite busy deadline must expire while the provider/scrub
     // paths remain available; there is no Python child to kill anymore.
     thread::sleep(Duration::from_secs(6));turn(3);drop(turn);
-    lock.release();wait_until(||native_db_rows(dir.path())==6);
+    lock.release();wait_until(||native_db_rows_maybe_busy(dir.path())==Some(6));
     let transcript=fs::read_to_string(native_transcript(dir.path(),"codex-session.jsonl")).unwrap();
     assert!(!transcript.contains("sk-ownedCanonicalFixtureSecret1234567890"));assert_eq!(native_role_count(&native_transcript(dir.path(),"codex-session.jsonl"),"user"),3);
     send(&mut socket,json!({"type":"call","id":4,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());

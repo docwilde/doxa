@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.25 — 2026-10-09
+
+**Code graph operations**
+
+- Add a bounded, read-only full-scan benchmark with Git provenance, output and time limits, and verified no-hit queries. Ten warm-cache samples measured 371 ms median on DOXA and 1,641 ms on a 6,944-file checkout.
+- Keep automatic turn-path indexing disabled; cold-cache, larger Rust and repeated-query budgets remain open.
+
 ## 2.0.0-beta.24 — 2026-10-09
 
 **Fleet supervision**
