@@ -15,7 +15,9 @@ cells), `probe` (detect Kitty, Sixel or iTerm2 graphics), a forced protocol
 that implements it. `probe` asks the terminal for capabilities after entering
 the alternate screen and can pause briefly. Text mode shows the alt label.
 
-The TUI reserves four transcript rows per preview so scrolling and pane
+The TUI reserves four transcript rows per preview, with at most 32 previews
+and 128 reserved image rows per transcript render. Later image tokens show
+their alt text through normal Markdown rendering. This keeps scrolling and pane
 resizing retain stable positions. It draws pixels only when all four rows are
 visible; a clipped preview shows an alt-text hint until scrolled fully into
 view. Images are decoded and encoded on bounded workers from a checked
