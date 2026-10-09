@@ -214,9 +214,12 @@ def staged_worker(source: Path, scratch: Path):
                 and stat.S_IMODE(metadata.st_mode) == 0o700
                 and metadata.st_size == before.st_size,
                 "staged plugin worker lacks a private executable identity")
+        check = hashlib.sha256()
         with worker.open("rb") as staged:
-            require(hashlib.file_digest(staged, "sha256").digest() == digest.digest(),
-                    "staged plugin worker differs from the built executable")
+            while chunk := staged.read(1024 * 1024):
+                check.update(chunk)
+        require(check.digest() == digest.digest(),
+                "staged plugin worker differs from the built executable")
         yield worker
 
 
