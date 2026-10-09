@@ -2,6 +2,33 @@ use doxa_claude::{Cli, CliOptions, Error};
 use serde_json::json;
 use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 const SESSION: &str = "5b9aac56-c75e-4b93-ab07-c59f1c5a0b39";
+
+#[cfg(target_os = "linux")]
+#[test]
+fn briefly_busy_executable_recovers_with_bounded_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claude");
+    fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    let writer = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        drop(writer);
+    });
+    let cli = Cli::spawn(CliOptions {
+        executable: &path,
+        cwd: dir.path(),
+        session_id: SESSION,
+        resume: false,
+        model: None,
+        effort: None,
+        permission_mode: "manual",
+        config_dir: dir.path(),
+        plugins: &[],
+    }).unwrap();
+    release.join().unwrap();
+    drop(cli);
+}
 fn fake(body: &str) -> (tempfile::TempDir, Cli) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("claude");

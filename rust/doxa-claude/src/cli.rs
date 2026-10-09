@@ -97,7 +97,20 @@ impl Cli {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut child = command.spawn()?;
+        // A CLI update may briefly leave the executable open for writing.
+        // Retry only Linux's transient text-file-busy error, with a small
+        // fixed bound; all other spawn failures remain immediate.
+        let mut busy_retries = 0;
+        let mut child = loop {
+            match command.spawn() {
+                Ok(child) => break child,
+                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && busy_retries < 3 => {
+                    busy_retries += 1;
+                    thread::sleep(Duration::from_millis(30));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
         let stdin = child.stdin.take().ok_or(Error::Closed)?;
         let flags = unsafe { libc::fcntl(stdin.as_raw_fd(), libc::F_GETFL) };
         if flags < 0
