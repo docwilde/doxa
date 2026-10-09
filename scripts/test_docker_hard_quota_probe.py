@@ -74,6 +74,7 @@ class HardQuotaProbeTests(unittest.TestCase):
         with (mock.patch.object(quota, "_checked_socket"),
               mock.patch.object(quota, "_checked_fixture", return_value=(self.root, self.candidate)),
               mock.patch.object(quota, "_checked_engine"),
+              mock.patch.object(quota, "_owned_container_id", return_value="b" * 64),
               mock.patch.object(quota, "_docker", side_effect=fake_docker)):
             receipt = quota.probe(self.root, "unix:///run/user/1000/fixture.sock",
                                   "sha256:" + "a" * 64, 1)
@@ -102,11 +103,125 @@ class HardQuotaProbeTests(unittest.TestCase):
         with (mock.patch.object(quota, "_checked_socket"),
               mock.patch.object(quota, "_checked_fixture", return_value=(self.root, self.candidate)),
               mock.patch.object(quota, "_checked_engine"),
+              mock.patch.object(quota, "_owned_container_id", return_value="b" * 64),
               mock.patch.object(quota, "_docker", side_effect=fake_docker)):
             with self.assertRaisesRegex(ValueError, "did not prove bounded EDQUOT"):
                 quota.probe(self.root, "unix:///run/user/1000/fixture.sock",
                             "sha256:" + "a" * 64, 1)
         self.assertEqual([args[0] for args in invocations], ["run", "rm"])
+
+    def test_aggregate_restart_retains_three_binds_and_checks_edquot_again(self) -> None:
+        token = "a" * 32
+        name = "doxa-quota-probe-" + token
+        prefix = 4 * 1024 * 1024
+        third = 8 * 1024 * 1024
+        invocations = []
+
+        def fake_docker(_endpoint, args, _config, timeout=30, max_output=8192):
+            invocations.append(args[0])
+            if args[0] == "create":
+                self.assertEqual(args.count("--mount"), 3)
+                self.assertIn("none", args)
+                return "b" * 64
+            if args[0] in {"start", "stop"}:
+                if args[0] == "stop":
+                    self.assertEqual(args[1:3], ["--timeout", "2"])
+                return ""
+            self.assertEqual(args[0], "exec")
+            mode, source, _cap, worker_token = args[-4:]
+            self.assertEqual(worker_token, token)
+            if mode == "check":
+                return json.dumps({"sizes": {"checkout": prefix, "home": prefix,
+                                                  "cache": third}})
+            size = prefix if source != "cache" else (third if mode == "create" else 0)
+            if mode == "create":
+                marker = self.root / source / (".doxa-quota-probe-" + token)
+                marker.write_bytes(b"")
+                os.truncate(marker, size)
+            return json.dumps({"source": source, "bytes_written": size,
+                               "errno": errno.EDQUOT if source == "cache" else None})
+
+        with (mock.patch.object(quota, "_docker", side_effect=fake_docker),
+              mock.patch.object(quota, "_inspect_fixture_container") as inspect):
+            result = quota._aggregate_restart_probe(
+                self.root, "unix:///run/user/1000/fixture.sock", "sha256:" + "a" * 64,
+                name, self.root, token, 32 * 1024 * 1024,
+                {"checkout": 16 * 1024 * 1024, "home": 16 * 1024 * 1024,
+                 "cache": 16 * 1024 * 1024})
+        self.assertEqual(result["prefix_bytes_each"], prefix)
+        self.assertEqual(result["third_bind_bytes_before_edquot"], third)
+        self.assertEqual(result["additional_bytes_before_edquot_after_restart"], 0)
+        self.assertEqual(invocations, ["create", "start", "exec", "exec", "exec",
+                                       "stop", "start", "exec", "exec"])
+        self.assertEqual(inspect.call_count, 2)
+
+    def test_opt_in_aggregate_result_keeps_production_admission_closed(self) -> None:
+        def fake_docker(_endpoint, args, _config, timeout=30):
+            if args[0] == "rm":
+                return ""
+            self.assertEqual(args[0], "run")
+            return json.dumps({"source": args[-3], "bytes_written": 1024,
+                               "errno": errno.EDQUOT, "edquot": True})
+
+        aggregate = {"prefix_bytes_each": 1024 * 1024,
+                     "third_bind_bytes_before_edquot": 2048,
+                     "additional_bytes_before_edquot_after_restart": 0,
+                     "container_id": "b" * 64}
+        with (mock.patch.object(quota, "_checked_socket"),
+              mock.patch.object(quota, "_checked_fixture", return_value=(self.root, self.candidate)),
+              mock.patch.object(quota, "_checked_engine"),
+              mock.patch.object(quota, "_owned_container_id", return_value="b" * 64),
+              mock.patch.object(quota, "_aggregate_restart_probe", return_value=aggregate) as run,
+              mock.patch.object(quota, "_docker", side_effect=fake_docker)):
+            receipt = quota.probe(self.root, "unix:///run/user/1000/fixture.sock",
+                                  "sha256:" + "a" * 64, 16, aggregate_restart=True)
+        run.assert_called_once()
+        self.assertTrue(receipt["aggregate_restart_verified_for_fixture"])
+        self.assertEqual(receipt["aggregate_restart_evidence"], aggregate)
+        self.assertFalse(receipt["admissible_as_hard_quota"])
+
+    def test_aggregate_receipts_refuse_per_bind_limit_and_enospc(self) -> None:
+        good = {"source": "cache", "bytes_written": 4096, "errno": errno.EDQUOT}
+        self.assertEqual(quota.validate_aggregate_receipt(good, "cache", 8192, True), 4096)
+        for changed in ({"errno": errno.ENOSPC}, {"bytes_written": 8192},
+                        {"bytes_written": -1}, {"bytes_written": True},
+                        {"source": "home"}, {"extra": 1}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                quota.validate_aggregate_receipt(good | changed, "cache", 8192, True)
+
+    def test_inspect_refuses_extra_or_changed_bind_and_open_network(self) -> None:
+        image = "sha256:" + "a" * 64
+        name = "doxa-quota-probe-test"
+        mounts = [{"Source": str(self.root / source), "Destination": "/fixture/" + source,
+                   "Type": "bind", "RW": True} for source in ("checkout", "home", "cache")]
+        row = {"Id": "b" * 64, "Name": "/" + name, "Config": {"Image": image},
+               "State": {"Running": True},
+               "HostConfig": {"NetworkMode": "none", "ReadonlyRootfs": True,
+                              "Privileged": False, "CapDrop": ["ALL"]},
+               "Mounts": mounts}
+        row["Config"]["Labels"] = {"org.doxa.quota-probe": "token"}
+        with mock.patch.object(quota, "_docker", return_value=json.dumps([row])):
+            quota._inspect_fixture_container("fixture", name, self.root, image,
+                                             "token", "b" * 64, self.root)
+        for changed in ({"Mounts": mounts + [mounts[0]]},
+                        {"Mounts": [mounts[0] | {"RW": False}, *mounts[1:]]},
+                        {"HostConfig": row["HostConfig"] | {"NetworkMode": "bridge"}}):
+            with (self.subTest(changed=changed),
+                  mock.patch.object(quota, "_docker", return_value=json.dumps([row | changed])),
+                  self.assertRaisesRegex(ValueError, "differ")):
+                quota._inspect_fixture_container("fixture", name, self.root, image,
+                                                 "token", "b" * 64, self.root)
+
+    def test_cleanup_identity_refuses_name_collision(self) -> None:
+        name = "doxa-quota-probe-owner"
+        row = {"Id": "a" * 64, "Name": "/" + name,
+               "Config": {"Labels": {"org.doxa.quota-probe": "other-token"}}}
+        with mock.patch.object(quota, "_docker", side_effect=lambda *a, **k: json.dumps([row])):
+            with self.assertRaisesRegex(ValueError, "refusing to remove"):
+                quota._owned_container_id("fixture", name, "my-token", self.root)
+            row["Config"]["Labels"]["org.doxa.quota-probe"] = "my-token"
+            self.assertEqual(quota._owned_container_id("fixture", name, "my-token", self.root),
+                             "a" * 64)
 
     def test_rootful_endpoint_and_unpinned_image_refuse_before_docker(self) -> None:
         with self.assertRaisesRegex(ValueError, "task-local rootless"):

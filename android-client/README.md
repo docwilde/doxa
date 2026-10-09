@@ -29,22 +29,48 @@ is decoded for this app run and cleared on disconnect or process exit. An
 encrypted session cannot be opened without it. Plaintext sessions can be
 opened without a key. The app does not store a provider token or host lease.
 
-The app stores the hub URL, selected session ID, last event cursor, and one
-unsent draft in app-private preferences. It does not store transcript content,
-approval answers, the shared key, or uncertain request bodies. A process
-restart reloads an authoritative snapshot before following events again.
+The app stores the hub URL, selected session ID, last event cursor, one unsent
+draft, and a versioned, size-bounded marker for an uncertain write in app-private
+preferences. The marker holds only the hub origin, target and incarnation,
+operation, request ID, and creation time. It is committed synchronously before
+the POST; a failed commit prevents submission. It holds no prompt, approval
+answer, shared key, encrypted envelope, or submitted request body. A process restart
+reloads an authoritative snapshot before following events again.
 
 ## Write and reconnect behavior
 
-Each prompt or answer has a random `request_id`; an uncertain retry sends the
-exact same JSON body, including the original encrypted envelope. After the
-host's two-minute freshness window, **Retry same request** first reloads the
-transcript. The user can review it before choosing **Send new request** and
-confirming the new submission.
+Each prompt or answer has a random `request_id`. While the process is alive,
+an uncertain retry sends the exact same JSON body, including the original
+encrypted envelope. After the host's two-minute freshness window, **Retry same
+request** first reloads the transcript. The user can review it before choosing
+**Send new request** and confirming the new submission.
+
+After process death, the body is gone and the app never replays the write. The
+app first asks the hub to fence the saved request ID. Each Android write carries
+a hub-boot-scoped ID and exact session incarnation, so a delayed POST cannot
+arrive after a successful fence or cross a hub restart. A queued request is
+cancelled; an already delivered request stays blocked until the host reports a
+terminal result. Only then does the app load a fresh authoritative snapshot of
+the saved hub and session incarnation, checks the host's transcript incarnation
+receipt against inventory on both sides of the read, includes complete pending
+inputs, and offers explicit acknowledgment. A safe fence for a retired boot in
+the same hub process also permits review when the current inventory boot stays
+stable across the read. New prompts and answers remain blocked across hub or
+session changes. If that exact scope is unavailable, or the hub restarted before
+it could fence the request, the readable marker stays blocked.
+An unreadable marker stays blocked because its request ID and scope cannot be
+fenced or verified. The app offers no in-app bypass; clearing app storage is a
+last resort after independent outcome review and also removes local settings
+and drafts. A terminal host response clears
+the marker; a failed local clear keeps writes blocked for review. A corrupted
+marker also fails closed. The app cannot establish from a lost response alone
+whether the earlier write ran.
 A new prompt may repeat an action that succeeded before the connection failed;
 review the refreshed transcript before confirming. Pending inputs are
-refreshed and compared immediately before sending an answer, and the host
-checks them again.
+refreshed and compared immediately before sending an answer. The exact reviewed
+pending input travels with the answer, and the host compares it to its current
+pending input before acting. A fresh answer after an uncertain outcome repeats
+that comparison against the original reviewed input.
 
 The app reconnects SSE from the last processed sequence. A `replay_gap`
 reloads the host transcript and pending inputs. Transcript and event text are
@@ -106,7 +132,11 @@ locally on 2026-10-09 with Temurin JDK 21.0.12.1, Android SDK 37.0, and Gradle
 disconnected screen was captured and inspected in an offline Android 36
 emulator, including system-bar clearance. It has not been installed on a
 Firebase-enabled device or exercised against a provisioned FCM project and
-two-host tailnet. Device QA must cover token issuance and rotation,
+two-host tailnet. A separate offline Android 36 emulator smoke installed this
+debug APK, injected a synthetic body-free marker, force-stopped and relaunched
+the app, and confirmed the recovery warning and disabled acknowledgment before
+a snapshot. Device QA must cover a real process-kill write and review flow,
+token issuance and rotation,
 background delivery after process
 restart, opt-out while offline, Android notification permission, Tailscale
 reconnect, encrypted/plaintext sessions, duplicate request, stale approval,

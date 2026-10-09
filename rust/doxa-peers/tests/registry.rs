@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use doxa_peers::{now, PeerRecord, Registry, MAX_ENTRY_BYTES};
+use doxa_peers::{new_incarnation, now, valid_incarnation, PeerRecord, Registry, MAX_ENTRY_BYTES};
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::UnixListener;
@@ -9,13 +9,14 @@ fn scrub(s: &str) -> String { s.replace("SECRET", "[REDACTED]") }
 fn record(id: &str, socket: &Path) -> PeerRecord {
     PeerRecord { session_id:id.into(), pid:std::process::id() as i32,
         socket_path:socket.to_string_lossy().into_owned(), cwd:"/work/project".into(), repo_root:Some("/work".into()),
-        title:"SECRET title".into(), started_at:now(), heartbeat_at:now(), daemon_socket:None,
+        title:"SECRET title".into(), started_at:now(), incarnation:None, heartbeat_at:now(), daemon_socket:None,
         clients:Some(0), usage_tokens:Some(17), provider:Some("claude".into()), model:None, engine:Some("doxa".into()), parent_session_id:None }
 }
 #[test]
 fn python_schema_fixture_and_unknown_fields() {
     let fixture = include_str!("fixtures/python_peer.json");
     let p: PeerRecord = serde_json::from_str(fixture).unwrap();
+    assert_eq!(p.incarnation, None);
     assert_eq!(p.scope_key(), "/work/project");
     assert_eq!(p.clients, Some(0));
     assert_eq!(p.usage_tokens, Some(1234));
@@ -24,8 +25,28 @@ fn python_schema_fixture_and_unknown_fields() {
     v["future_field"] = true.into();
     assert_eq!(serde_json::from_value::<PeerRecord>(v).unwrap(), p);
     let old = serde_json::json!({"session_id":"old","pid":1,"socket_path":"/x","cwd":"/work","repo_root":null,"title":"old","started_at":"2026-09-24T10:00:00.000000Z","heartbeat_at":"2026-09-24T10:00:01.000000Z"});
-    assert_eq!(serde_json::from_value::<PeerRecord>(old).unwrap().provider, None);
+    let old = serde_json::from_value::<PeerRecord>(old).unwrap();
+    assert_eq!(old.provider, None);
+    assert_eq!(old.incarnation, None);
     assert!(serde_json::to_value(&p).unwrap().get("origin").is_none());
+}
+#[test]
+fn incarnation_is_random_and_survives_registry_heartbeat() {
+    let first = new_incarnation();
+    let second = new_incarnation();
+    assert!(valid_incarnation(&first));
+    assert!(valid_incarnation(&second));
+    assert_ne!(first, second);
+    assert!(!valid_incarnation("2026-10-09T00:00:00.000000Z"));
+    let tmp = tempfile::tempdir().unwrap();
+    let reg = Registry::open(tmp.path().join("runtime")).unwrap();
+    let mut peer = record("nonce", &tmp.path().join("missing.sock"));
+    peer.incarnation = Some(first.clone());
+    reg.write(&peer).unwrap();
+    reg.heartbeat(&mut peer).unwrap();
+    let read = reg.read(&scrub, false, false).unwrap();
+    assert_eq!(read[0].incarnation.as_deref(), Some(first.as_str()));
+    assert_eq!(read[0].started_at, peer.started_at);
 }
 #[test]
 fn private_atomic_records_scope_and_scrub() {

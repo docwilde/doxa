@@ -118,6 +118,9 @@ async fn handle_inner(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:b
         (Method::POST|Method::DELETE,["api","push","subscriptions"]|["api","push","android"])=>"read_status",
         (Method::GET,["api","commands",_]|["api","sessions",_,"events"])=>"read_transcript",
         (Method::POST,["api","sessions",_,"transcript"])=>"read_transcript",
+        (Method::POST,["api","android","requests",_,"fence"])=>"read_transcript",
+        (Method::POST,["api","android","sessions",_,"prompt"])=>"send_prompt",
+        (Method::POST,["api","android","sessions",_,"answer"])=>"approve_tool",
         (Method::POST,["api","host","register"]|["api","host",_,"result"]|["api","host",_,"event"]|["api","host",_,"events"]|["api","host",_,"commands"]|["api","sessions",_,"prompt"])=>"send_prompt",
         (Method::POST,["api","sessions",_,"answer"])=>"approve_tool",
         _=>return reply(StatusCode::NOT_FOUND,json!({"error":"unknown hub route"})),
@@ -174,7 +177,7 @@ async fn handle_inner(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:b
         (Method::GET,["remote.js"])=>return response(StatusCode::OK,"text/javascript; charset=utf-8",include_str!("../../doxa-remote/assets/remote.js")),
         (Method::GET,["remote.css"])=>return response(StatusCode::OK,"text/css; charset=utf-8",include_str!("../../doxa-remote/assets/remote.css")),
         (Method::GET,["remote-sw.js"])=>return response(StatusCode::OK,"text/javascript; charset=utf-8",include_str!("../../doxa-remote/assets/remote-sw.js")),
-        (Method::GET,["api","sessions"])=>Ok(state.list(&owner)),
+        (Method::GET,["api","sessions"])=>Ok(state.inventory(&owner)),
         (Method::GET,["api","push","config"])=>Ok(match push.as_ref(){
             Some(push)=>json!({"enabled":true,"public_key":push.public_key()}),
             None=>json!({"enabled":false}),
@@ -245,6 +248,21 @@ async fn handle_inner(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:b
             if !encrypted && *op=="prompt"&&!body["text"].as_str().is_some_and(|text|!text.trim().is_empty()&&text.len()<=58_000){return bad("invalid prompt");}
             if !encrypted && *op=="answer"&&(!body["id"].as_str().is_some_and(valid_id)||!body["answer"].is_object()){return bad("invalid answer");}
             state.enqueue(&owner,host,session,op,body)
+        },
+        (Method::POST,["api","android","requests",request_id,"fence"])=>{
+            match (body["target"].as_str(),body["operation"].as_str(),body["incarnation"].as_str()) {
+                (Some(target),Some(op),Some(incarnation))=>state.fence_android(&owner,request_id,target,op,incarnation),
+                _=>Err("Android fence scope required"),
+            }
+        },
+        (Method::POST,["api","android","sessions",id,op @ ("prompt"|"answer")])=>{
+            let Some((host,session))=id.split_once('~').filter(|(h,s)|valid_id(h)&&valid_id(s)) else{return bad("invalid session target")};
+            let encrypted=state.list(&owner)["sessions"].as_array().is_some_and(|rows|rows.iter().any(|row|row["id"]==*id&&row["encrypted"]==true));
+            if encrypted && !body["sealed"].is_object() { return bad("encrypted command required"); }
+            if !encrypted && body.get("sealed").is_some(){return bad("unexpected sealed command");}
+            if !encrypted && *op=="prompt"&&!body["text"].as_str().is_some_and(|text|!text.trim().is_empty()&&text.len()<=58_000){return bad("invalid prompt");}
+            if !encrypted && *op=="answer"&&(!body["id"].as_str().is_some_and(valid_id)||!body["answer"].is_object()){return bad("invalid answer");}
+            state.enqueue_android(&owner,host,session,op,body)
         },
         _=>Err("unknown hub route"),
     };
@@ -418,6 +436,34 @@ async fn main()->io::Result<()> {
         assert_eq!(json_body(&result)["commands"][0]["command_id"],id);
         assert_eq!(json_body(&result)["commands"][1]["command_id"],snapshot_id);
         assert_eq!(json_body(&result)["commands"][1]["op"],"transcript");
+        if let Some(value)=old_enabled{std::env::set_var("DOXA_REMOTE_ENABLED",value)}else{std::env::remove_var("DOXA_REMOTE_ENABLED")};
+        if let Some(value)=old_logins{std::env::set_var("DOXA_REMOTE_ALLOWED_LOGINS",value)}else{std::env::remove_var("DOXA_REMOTE_ALLOWED_LOGINS")};
+    }
+    #[tokio::test]async fn android_routes_require_scoped_boot_and_fence_before_host_take(){
+        let _guard=ENV.lock().unwrap();
+        let old_enabled=std::env::var_os("DOXA_REMOTE_ENABLED");
+        let old_logins=std::env::var_os("DOXA_REMOTE_ALLOWED_LOGINS");
+        std::env::set_var("DOXA_REMOTE_ENABLED","1");
+        std::env::set_var("DOXA_REMOTE_ALLOWED_LOGINS","owner@example.com");
+        let state=Arc::new(Mutex::new(Hub::new()));
+        let register=request("/api/host/register",r#"{"host_id":"host","sessions":[{"id":"session","incarnation":"v1"}]}"#,"owner@example.com","");
+        let registered=wire(state.clone(),true,register).await;
+        let lease=json_body(&registered)["lease"].as_str().unwrap().to_owned();
+        let inventory=wire(state.clone(),true,"GET /api/sessions HTTP/1.1\r\nHost: hub.test\r\nTailscale-User-Login: owner@example.com\r\n\r\n".into()).await;
+        let boot=json_body(&inventory)["hub_boot"].as_str().unwrap().to_owned();
+        assert_eq!(boot.len(),32);
+        let id=format!("{}-{}",boot,uuid::Uuid::new_v4());
+        let fence=json!({"target":"host~session","operation":"prompt","incarnation":"v1"}).to_string();
+        let path=format!("/api/android/requests/{id}/fence");
+        let fenced=wire(state.clone(),true,request(&path,&fence,"owner@example.com","")).await;
+        assert_eq!(json_body(&fenced),json!({"status":"absent_fenced","safe_to_clear":true}));
+        let body=json!({"text":"late","request_id":id,"hub_boot":boot,"incarnation":"v1","issued_at":1}).to_string();
+        assert!(wire(state.clone(),true,request("/api/android/sessions/host~session/prompt",&body,"owner@example.com","")).await.starts_with("HTTP/1.1 409"));
+        assert!(wire(state.clone(),true,request("/api/sessions/host~session/prompt",&body,"owner@example.com","")).await.starts_with("HTTP/1.1 409"));
+        let taken=wire(state.clone(),true,request("/api/host/host/commands","{}","owner@example.com",&format!("X-DOXA-Host-Lease: {lease}\r\n"))).await;
+        assert!(json_body(&taken)["commands"].as_array().unwrap().is_empty());
+        let invalid=json!({"text":"invalid","request_id":format!("{}-{}",boot,uuid::Uuid::new_v4()),"incarnation":"v1"}).to_string();
+        assert!(wire(state,true,request("/api/android/sessions/host~session/prompt",&invalid,"owner@example.com","")).await.starts_with("HTTP/1.1 409"));
         if let Some(value)=old_enabled{std::env::set_var("DOXA_REMOTE_ENABLED",value)}else{std::env::remove_var("DOXA_REMOTE_ENABLED")};
         if let Some(value)=old_logins{std::env::set_var("DOXA_REMOTE_ALLOWED_LOGINS",value)}else{std::env::remove_var("DOXA_REMOTE_ALLOWED_LOGINS")};
     }

@@ -79,7 +79,7 @@ jobs:
           cargo +stable build --locked --package lore-core --bin lore-rs
       - name: Test native runtime, providers and interaction
         run: cargo +stable test --locked --workspace --features doxa-daemon/local-test-server,doxa-vendors/local-test-server
-      - name: Check task and release installer
+      - name: Check task, quota fixture and release installer
         run: |
           sh -n scripts/install.sh task
           ./task help
@@ -92,6 +92,8 @@ jobs:
             -s scripts/tests -p test_lore_bump.py -v
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_session_image_package.py -v
+          python3 -W error::ResourceWarning scripts/test_docker_quota_preflight.py -v
+          python3 -W error::ResourceWarning scripts/test_docker_hard_quota_probe.py -v
       - name: Smoke installed Rust launcher without a Python environment
         run: |
           smoke_dir=$(mktemp -d "$TMPDIR/install-XXXXXXXX")

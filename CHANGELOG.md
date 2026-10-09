@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.28 — 2026-10-09
+
+**Android remote recovery**
+
+- Save a body-free write marker before Android prompts and answers. After process death, fence the request at the hub and require a complete, incarnation-matched snapshot plus explicit review before another write.
+- Bind approvals to the exact reviewed pending input and a random session incarnation. Reject changed questions, stale sessions, and late marker clears from an older Activity.
+- Keep a bounded Hub fence ledger. Same-process nonce rotation can prove absent requests safe; delivered or post-restart uncertainty stays blocked. Live device and Tailscale QA remains open.
+
+**Docker hard quota**
+
+- Add an opt-in rootless XFS fixture for aggregate `EDQUOT` across checkout, home, and cache binds and after container restart. Production hardened admission still needs host proof.
+
 ## 2.0.0-beta.27 — 2026-10-09
 
 **Code graph**

@@ -40,6 +40,9 @@ pub struct PeerRecord {
     pub repo_root: Option<String>,
     pub title: String,
     pub started_at: String,
+    /// Random identity of this daemon process/session; absent in older registry entries.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub incarnation: Option<String>,
     pub heartbeat_at: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub daemon_socket: Option<String>,
@@ -234,5 +237,10 @@ pub(crate) fn stale(s: &str) -> bool {
 pub fn now() -> String {
     let t = OffsetDateTime::now_utc();
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z", t.year(), t.month() as u8, t.day(), t.hour(), t.minute(), t.second(), t.microsecond())
+}
+/// A fresh, collision-resistant identity for one daemon process/session lifetime.
+pub fn new_incarnation() -> String { uuid::Uuid::new_v4().simple().to_string() }
+pub fn valid_incarnation(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 pub fn heartbeat_interval() -> Duration { Duration::from_secs(HEARTBEAT_SECS) }

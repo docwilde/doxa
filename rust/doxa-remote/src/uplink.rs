@@ -137,26 +137,62 @@ async fn publish_batch(http:&Client,base:&Url,host:&str,lease:&str,session:&str,
     if let Some(next)=last{cursors.insert(session.to_owned(),next);}
     true
 }
-async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payload:&Value,key:Option<&[u8;32]>)->Value{
-    let target=format!("{host}~{session_id}");
+fn decode_command(target:&str,op:&str,payload:&Value,key:Option<&[u8;32]>)->Result<Value,&'static str>{
+    let android=payload["android_fence_v1"]==true;
+    if android && (!matches!(op,"prompt"|"answer")
+        || !payload["request_id"].as_str().is_some_and(super::valid_id)
+        || !payload["hub_boot"].as_str().is_some_and(|boot|boot.len()==32 && boot.bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()))
+        || !payload["incarnation"].as_str().is_some_and(|value|!value.is_empty()&&value.len()<=64)
+        || !payload["request_id"].as_str().unwrap_or("").starts_with(&format!("{}-",payload["hub_boot"].as_str().unwrap_or("")))) {
+        return Err("Android command scope invalid");
+    }
     if key.is_some() && !payload["request_id"].as_str().is_some_and(super::valid_id){
-        return json!({"ok":false,"error":"encrypted request ID required"});
+        return Err("encrypted request ID required");
     }
     let payload=match key {
         Some(key)=>match wire::open(key,&format!("{target}|command|{op}"),&payload["sealed"]){
-            Ok(value) if value["request_id"]==payload["request_id"] && wire::command_is_fresh(&value)=>value,
-            Ok(_)=>return json!({"ok":false,"error":"encrypted command expired or request ID changed"}),
-            Err(_)=>return json!({"ok":false,"error":"encrypted command authentication failed"}),
+            Ok(value) if value["request_id"]==payload["request_id"] && wire::command_is_fresh(&value)
+                && (!android || (value["hub_boot"]==payload["hub_boot"] && value["incarnation"]==payload["incarnation"]))=>value,
+            Ok(_)=>return Err("encrypted command expired or request ID changed"),
+            Err(_)=>return Err("encrypted command authentication failed"),
         },
-        None if payload.get("sealed").is_some()=>return json!({"ok":false,"error":"encrypted command requires host key"}),
+        None if payload.get("sealed").is_some()=>return Err("encrypted command requires host key"),
         None=>payload.clone(),
     };
+    if android && !wire::command_is_fresh(&payload) {
+        return Err("Android command expired");
+    }
+    if android && op=="answer" && !payload["reviewed_request"].is_object() {
+        return Err("Android reviewed input required");
+    }
+    Ok(payload)
+}
+fn reviewed_android_input_is_current(payload:&Value,current:&Value)->bool {
+    payload.get("reviewed_request")==Some(current)
+}
+fn strict_incarnation(entry:&doxa_peers::PeerRecord)->Option<&str>{
+    entry.incarnation.as_deref().filter(|value|doxa_peers::valid_incarnation(value))
+}
+fn remote_incarnation(entry:&doxa_peers::PeerRecord)->&str{
+    strict_incarnation(entry).unwrap_or(&entry.started_at)
+}
+fn android_incarnation_matches(entry:&doxa_peers::PeerRecord,payload:&Value)->bool{
+    strict_incarnation(entry).is_some_and(|value|payload["incarnation"].as_str()==Some(value))
+}
+async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payload:&Value,key:Option<&[u8;32]>)->Value{
+    let target=format!("{host}~{session_id}");
+    let android=payload["android_fence_v1"]==true;
+    let payload=match decode_command(&target,op,payload,key){Ok(payload)=>payload,Err(error)=>return json!({"ok":false,"error":error})};
     let kind=match op{"prompt"=>"send_prompt","answer"=>"approve_tool","transcript"=>"read_transcript",_=>return json!({"ok":false,"error":"unsupported remote command"})};
     if !doxa_peers::remote_policy::evaluate(kind,Some(owner),true,None).allowed{
         return json!({"ok":false,"error":"remote policy refused command"});
     }
     let entry=match app.session(session_id){Ok(Some(entry))=>entry,_=>return json!({"ok":false,"error":"session offline"})};
+    if android && !android_incarnation_matches(&entry,&payload) {
+        return json!({"ok":false,"error":"Android session incarnation changed"});
+    }
     let client=match connect(app,&entry,None,None).await{Ok(client)=>client,Err(_)=>return json!({"ok":false,"error":"session unavailable"})};
+    let transcript_identity=(entry.session_id.clone(),entry.started_at.clone(),entry.incarnation.clone(),entry.pid,entry.daemon_socket.clone());
     let op=op.to_owned();let app=app.clone();
     match tokio::task::spawn_blocking(move||->io::Result<Value>{
         let mut client=client;
@@ -176,6 +212,9 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
                 if state["pending_inputs_complete"]!=true{return Err(invalid("pending review incomplete"));}
                 let reviewed=state["pending_inputs"].as_array().and_then(|items|items.iter().find(|item|item["id"]==id))
                     .ok_or_else(||invalid("input request changed or expired"))?;
+                if android && !reviewed_android_input_is_current(&payload,reviewed) {
+                    return Err(invalid("Android reviewed input changed"));
+                }
                 client.call("answer_needs_input",json!({"id":id,"answer":payload["answer"],"reviewed_request":reviewed}))
             },
             "transcript"=>{
@@ -185,6 +224,13 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
                 history["pending_inputs"]=client.hello["pending_inputs"].clone();
                 history["pending_inputs_complete"]=client.hello["pending_inputs_complete"].clone();
                 scrub_data(&mut history,&app.lore)?;
+                let current=app.session(&transcript_identity.0)?
+                    .ok_or_else(||invalid("transcript session went offline"))?;
+                if current.started_at!=transcript_identity.1 || current.incarnation!=transcript_identity.2
+                    || current.pid!=transcript_identity.3 || current.daemon_socket!=transcript_identity.4 {
+                    return Err(invalid("transcript session incarnation changed"));
+                }
+                history["incarnation"]=json!(remote_incarnation(&current));
                 Ok(bounded_history(history))
             },
             _=>Err(invalid("unsupported remote command")),
@@ -196,10 +242,10 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
 }
 async fn forward_events(app:&Arc<App>,http:&Client,base:&Url,host:&str,lease:&str,cursors:&mut HashMap<String,u64>,key:Option<&[u8;32]>){
     let entries=match app.sessions(){Ok(entries)=>entries,Err(_)=>return};
-    let live=entries.iter().map(|entry|format!("{}~{}",entry.session_id,entry.started_at)).collect::<Vec<_>>();
+    let live=entries.iter().map(|entry|format!("{}~{}",entry.session_id,remote_incarnation(entry))).collect::<Vec<_>>();
     cursors.retain(|key,_|live.contains(key));
     for entry in entries{
-        let cursor_key=format!("{}~{}",entry.session_id,entry.started_at);
+        let cursor_key=format!("{}~{}",entry.session_id,remote_incarnation(&entry));
         let cursor=cursors.get(&cursor_key).copied();
         let client=match connect(app,&entry,None,cursor).await{Ok(client)=>client,Err(_)=>continue};
         if cursor.is_none(){
@@ -251,7 +297,7 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
                 "title":if key.is_some(){"Encrypted session"}else{&entry.title},
                 "engine":if key.is_some(){""}else{entry.engine.as_deref().unwrap_or("")},
                 "model":if key.is_some(){""}else{entry.model.as_deref().unwrap_or("")},
-                "incarnation":entry.started_at,"encrypted":key.is_some()})).collect::<Vec<_>>();
+                "incarnation":remote_incarnation(&entry),"encrypted":key.is_some()})).collect::<Vec<_>>();
             let registration=post(&http,&base,"api/host/register",json!({"host_id":host,"sessions":sessions}),lease.as_deref()).await;
             match registration{
                 Ok(value)=>{
@@ -300,6 +346,24 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
 
 #[cfg(test)]mod tests{
     use super::*;
+    #[test]fn android_requires_random_registry_incarnation_while_legacy_remote_identity_remains_available(){
+        let mut entry:doxa_peers::PeerRecord=serde_json::from_value(json!({
+            "session_id":"session","pid":1,"socket_path":"/private/socket",
+            "cwd":"/work","repo_root":null,"title":"session",
+            "started_at":"2026-10-09T00:00:00.000000Z","heartbeat_at":"2026-10-09T00:00:00.000000Z"
+        })).unwrap();
+        let old=entry.started_at.clone();
+        assert_eq!(remote_incarnation(&entry),old);
+        assert!(!android_incarnation_matches(&entry,&json!({"incarnation":old})));
+        let nonce=doxa_peers::new_incarnation();
+        entry.incarnation=Some(nonce.clone());
+        assert_eq!(remote_incarnation(&entry),nonce);
+        assert!(android_incarnation_matches(&entry,&json!({"incarnation":nonce})));
+        assert!(!android_incarnation_matches(&entry,&json!({"incarnation":old})));
+        entry.incarnation=Some("invalid".into());
+        assert_eq!(remote_incarnation(&entry),old);
+        assert!(!android_incarnation_matches(&entry,&json!({"incarnation":"invalid"})));
+    }
     #[test]fn only_private_tailscale_https_origins(){
         assert!(hub_url("https://host.tail.ts.net/").is_ok());
         for url in ["http://host.tail.ts.net/","https://evil.example.com/","https://user@host.tail.ts.net/","https://host.tail.ts.net/other"]{assert!(hub_url(url).is_err(),"{url}");}
@@ -323,5 +387,49 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
         assert!(history["before"].as_u64().unwrap()>0);
         assert_eq!(history["has_more"],true);
         assert!(history["turns"].as_array().unwrap().iter().all(|turn|turn.get("_offset").is_none()));
+    }
+    #[test]fn android_plain_and_sealed_scope_fail_closed(){
+        let boot="a".repeat(32);
+        let id=format!("{boot}-11111111-1111-4111-8111-111111111111");
+        let mut inner=json!({"text":"once","request_id":id,"hub_boot":boot,"incarnation":"v1"});
+        wire::issue_command(&mut inner).unwrap();
+        let mut plain=inner.clone();plain["android_fence_v1"]=json!(true);
+        assert_eq!(decode_command("host~session","prompt",&plain,None).unwrap()["text"],"once");
+        plain["hub_boot"]=json!("b".repeat(32));
+        assert!(decode_command("host~session","prompt",&plain,None).is_err());
+        plain=inner.clone();plain["android_fence_v1"]=json!(true);plain["issued_at"]=json!(1);
+        assert!(decode_command("host~session","prompt",&plain,None).is_err());
+        let key=[7u8;32];
+        let sealed=wire::seal(&key,"host~session|command|prompt",&inner).unwrap();
+        let mut outer=json!({"request_id":id,"hub_boot":boot,"incarnation":"v1","sealed":sealed,"android_fence_v1":true});
+        assert_eq!(decode_command("host~session","prompt",&outer,Some(&key)).unwrap()["text"],"once");
+        outer["incarnation"]=json!("v2");
+        assert!(decode_command("host~session","prompt",&outer,Some(&key)).is_err());
+        outer["incarnation"]=json!("v1");outer["request_id"]=json!(format!("{boot}-22222222-2222-4222-8222-222222222222"));
+        assert!(decode_command("host~session","prompt",&outer,Some(&key)).is_err());
+        outer["request_id"]=json!(id);outer["hub_boot"]=json!("b".repeat(32));
+        assert!(decode_command("host~session","prompt",&outer,Some(&key)).is_err());
+    }
+    #[test]fn android_answer_requires_the_exact_reviewed_input(){
+        let boot="a".repeat(32);
+        let id=format!("{boot}-11111111-1111-4111-8111-111111111111");
+        let current=json!({"id":"input-1","question":"Approve deletion?","options":["yes","no"]});
+        let mut inner=json!({"id":"input-1","answer":{"choice":"no"},
+            "request_id":id,"hub_boot":boot,"incarnation":"v1"});
+        wire::issue_command(&mut inner).unwrap();
+        let mut plain=inner.clone();plain["android_fence_v1"]=json!(true);
+        assert!(decode_command("host~session","answer",&plain,None).is_err());
+        inner["reviewed_request"]=current.clone();
+        plain=inner.clone();plain["android_fence_v1"]=json!(true);
+        let decoded=decode_command("host~session","answer",&plain,None).unwrap();
+        assert!(reviewed_android_input_is_current(&decoded,&current));
+        assert!(!reviewed_android_input_is_current(&decoded,
+            &json!({"id":"input-1","question":"Approve deletion?","options":["yes","always"]})));
+        let key=[7u8;32];
+        let sealed=wire::seal(&key,"host~session|command|answer",&inner).unwrap();
+        let outer=json!({"request_id":id,"hub_boot":boot,"incarnation":"v1",
+            "sealed":sealed,"android_fence_v1":true});
+        assert!(reviewed_android_input_is_current(
+            &decode_command("host~session","answer",&outer,Some(&key)).unwrap(),&current));
     }
 }

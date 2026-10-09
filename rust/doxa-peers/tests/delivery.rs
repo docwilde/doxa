@@ -15,6 +15,7 @@ fn peer(id: &str, socket: &Path, scope: &str) -> PeerRecord {
     PeerRecord { session_id: id.into(), pid: std::process::id() as i32,
         socket_path: socket.display().to_string(), cwd: scope.into(), repo_root: None,
         title: format!("title-{id}"), started_at: now(), heartbeat_at: now(),
+        incarnation: None,
         daemon_socket: None, clients: None, usage_tokens: None, provider: None,
         model: Some("test".into()), engine: Some("fake".into()), parent_session_id: None }
 }

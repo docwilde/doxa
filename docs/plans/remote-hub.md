@@ -164,11 +164,40 @@ the private hub URL, and Serve supplies the user identity for that device. The
 app lists sessions, requests the bounded recent snapshot, follows SSE with its
 last sequence, and sends prompts and pending-input decisions through the same
 command-result API as the browser. It retains a stable `request_id` while a
-submission is uncertain and shows an explicit confirmation before retrying an
-expired write. The host lease never leaves the connector.
+submission is uncertain in the live process and shows an explicit confirmation
+before retrying an expired write. Before each POST, it synchronously saves a
+versioned, bounded marker containing only hub origin, target/incarnation,
+operation, request ID, and creation time. A failed save prevents submission.
+After process death or a scope change, it never replays a lost body. Android
+writes use a hub-boot-scoped request ID and exact incarnation. New native
+sessions publish a random registry incarnation; older entries keep
+their timestamp for existing remote clients but cannot pass Android's strict
+write check. The timestamp remains available for ordering and diagnostics.
+Before review, the client fences that ID at the hub; a queued command is cancelled, while an
+already delivered command remains blocked until a terminal host result. Only a
+safe fence followed by an authoritative snapshot of the original incarnation
+with a matching host incarnation receipt, a stable current inventory boot before
+and after the read, complete pending inputs, and explicit user acknowledgment permits new
+writes. Answers carry the exact reviewed pending input; the host rejects a
+same-ID changed question or options before acting.
+A retired boot may be reviewed after a safe fence from the same hub process. A
+hub restart before the fence, or an unreadable marker, remains blocked because
+the earlier delivery outcome cannot be proven from the volatile hub state.
+An inventory read may issue a new boot nonce once the bounded Hub ledger is
+three-quarters full and at least one-quarter can be safely reclaimed. It
+discards only terminal or proven-undelivered records. Strict POST and fence
+handling do not rotate the nonce. Late POSTs carrying an older nonce are
+rejected. The Hub remembers up to 16 retired nonces in the same process. An
+absent record under a remembered nonce has a safe fence because every unsettled
+delivery was retained; compact terminal ID entries keep completed writes from
+being mistaken for absence after their scope is discarded. Older nonces and
+nonces from a previous process remain unsafe and require out-of-app review.
+The host lease never leaves the connector.
 
-Keep session IDs, cursors, unsent drafts, and the opt-in FCM token and random
-routing tag in Android's app-private storage. On reconnect, refresh the inventory and pending inputs
+Keep session IDs, cursors, unsent drafts, the body-free uncertain-write marker,
+and the opt-in FCM token and random routing tag in Android's app-private storage.
+Never persist a submitted request body, approval answer, or shared key in the
+uncertain-write marker. On reconnect, refresh the inventory and pending inputs
 before offering an approval. The push token registers for the selected session and owner; the notification
 opens the app, which fetches current state through the authenticated hub. Tailscale Serve login headers are absent for tagged
 source devices, so the initial Android path assumes a user-owned device.

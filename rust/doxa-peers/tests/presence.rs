@@ -14,6 +14,7 @@ fn record(id: &str, socket: &Path, scope: &str, title: &str) -> PeerRecord {
         repo_root: None,
         title: title.into(),
         started_at: now(),
+        incarnation: None,
         heartbeat_at: now(),
         daemon_socket: None,
         clients: Some(0),
