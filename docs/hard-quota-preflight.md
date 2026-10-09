@@ -85,10 +85,17 @@ configured or changed by the probe. The host's ordinary Docker context and
 credential helpers are not used.
 
 The Rust hardened-admission seam reads a bounded receipt and checks the saved
-session profile and exact tree. It refuses a receipt for another tree and also
-refuses a hand-edited `admissible_as_hard_quota=true`: no per-session kernel
-limit and restart verifier exists yet. Selecting `docker-hardened` reports this
-gate instead of silently using open or offline mode.
+session profile and exact tree. Its read-only Linux XFS verifier can inspect
+the exact session root and three bind-source directory descriptors: project
+ID and inheritance, filesystem and mount identity, and the effective project
+hard block limit with accounting and enforcement enabled. It requires an
+explicit exact limit; the fixture's maximum write size is **not** that limit.
+Unsupported filesystems, unavailable `quotactl_fd`, and any mismatch refuse
+verification. This is a point-in-time snapshot of four directories, not a
+complete descendant audit or an EDQUOT/restart proof. The receipt is not an
+owner-controlled policy, and the admission seam still refuses even a
+hand-edited `admissible_as_hard_quota=true`. Selecting `docker-hardened` remains
+unavailable.
 
 For the focused refusal-path tests:
 

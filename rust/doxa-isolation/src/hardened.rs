@@ -3,7 +3,7 @@
 //! A bounded EDQUOT receipt from an administrator's fixture is useful evidence,
 //! but cannot authorize a different session tree or survive a restart without
 //! an on-session kernel verifier. This seam keeps that distinction executable.
-use crate::{error, Manifest, Profile};
+use crate::{error, quota_verify::{inspect_session_hard_quota, QuotaExpectation}, Manifest, Profile};
 use serde::Deserialize;
 use std::{collections::BTreeMap, io, path::PathBuf};
 
@@ -15,6 +15,8 @@ struct FixtureReceipt {
     version: u32,
     fixture: PathBuf,
     project_id: u32,
+    #[serde(default)]
+    expected_hard_limit_bytes: Option<u64>,
     max_write_mib: u32,
     bytes_before_edquot: BTreeMap<String, u64>,
     hard_enforcement_verified_for_fixture: bool,
@@ -51,10 +53,16 @@ pub(crate) fn require_session_hard_quota(manifest: &Manifest, receipt: &[u8]) ->
     if !proof.admissible_as_hard_quota {
         return Err(error("quota fixture proof does not authorize hard-quota admission"));
     }
-    // A Boolean in JSON, even if the exact path matches, is not an attestation
-    // of the current kernel limit. This must be replaced by descriptor-anchored
-    // project-ID, hard-limit, EDQUOT and restart verification on this session.
-    Err(error("per-session kernel hard-quota and restart verification is unavailable"))
+    // The fixture's write cap is not its hard quota. A future owner policy must
+    // supply an exact limit; no inference from the receipt is admissible.
+    let hard_limit_bytes = proof.expected_hard_limit_bytes
+        .ok_or_else(|| error("hardened admission lacks an exact hard block limit"))?;
+    let _current_snapshot = inspect_session_hard_quota(manifest, QuotaExpectation {
+        project_id: proof.project_id, hard_limit_bytes,
+    })?;
+    // A read-only inode/quota snapshot and forgeable JSON cannot attest
+    // descendant IDs, EDQUOT through bind mounts, or restart/remount behavior.
+    Err(error("per-session EDQUOT, descendant and restart verification is unavailable"))
 }
 
 #[cfg(test)]
@@ -90,7 +98,7 @@ mod tests {
             .unwrap_err().to_string().contains("does not authorize"));
         assert!(require_session_hard_quota(&manifest,
             &receipt("/owner-private/isolation/session", true))
-            .unwrap_err().to_string().contains("kernel hard-quota"));
+            .unwrap_err().to_string().contains("exact hard block limit"));
     }
     #[test]
     fn malformed_missing_or_incomplete_proof_fails_closed() {

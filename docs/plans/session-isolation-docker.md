@@ -213,7 +213,10 @@ No production profile starts the gateway or injects proxy variables yet.
 The reserved hardened gateway entry point requires a ready offline manifest
 and an exact per-session hard-quota proof. Current fixture receipts cannot
 authorize it; even a changed receipt flag is refused until a live kernel
-limit/restart verifier exists. `docker-hardened` is explicitly refused at
+limit/restart verifier exists. A Linux XFS read-only verifier now checks the
+four exact session directories and effective project hard limit through open
+descriptors, but descendant, EDQUOT and restart/remount proof remains open.
+`docker-hardened` is explicitly refused at
 profile parsing, with no fallback. A credential-free rootless smoke can test
 Python `HTTPS_PROXY` streaming, denied second-host access and failed direct
 fallback for one selected upstream; it does not prove real provider behavior.
