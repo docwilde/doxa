@@ -9,6 +9,7 @@ import hashlib
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -28,6 +29,9 @@ BWRAP_FLAGS = (
     "--die-with-parent", "--disable-userns", "--cap-drop", "--clearenv",
     "--ro-bind", "--tmpfs", "--size",
 )
+NAMESPACES = ("net", "mnt", "user", "pid")
+IPV4_ROUTE_POLICY = 'NR == 1 { if (NF != 11 || $1 != "Iface") exit 1; next } { if (NF != 11 || $1 != "lo") exit 1 } END { if (NR == 0) exit 1 }'
+IPV6_ROUTE_POLICY = 'NF { if (NF != 10 || $10 != "lo") exit 1 }'
 
 
 class ProofError(Exception):
@@ -139,6 +143,26 @@ def check_target_dir(raw: str) -> Path:
     return target
 
 
+def check_namespace_receipt(stdout: bytes, host: dict[str, str]) -> None:
+    """Reject partial, duplicated or host-identical sandbox namespace evidence."""
+    require(len(stdout) <= 1024, "Bubblewrap namespace receipt exceeds 1 KiB")
+    try:
+        rows = stdout.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ProofError("Bubblewrap namespace receipt is not ASCII") from exc
+    require(len(rows) == len(NAMESPACES),
+            "Bubblewrap namespace receipt is missing or has extra rows")
+    for name, row in zip(NAMESPACES, rows):
+        expected_prefix = name + "="
+        require(row.startswith(expected_prefix),
+                f"Bubblewrap namespace receipt is missing {name}")
+        identity = row[len(expected_prefix):]
+        require(re.fullmatch(re.escape(name) + r":\[[0-9]+\]", identity) is not None,
+                f"Bubblewrap {name} namespace identity is malformed")
+        require(identity != host[name],
+                f"Bubblewrap reused host {name} namespace")
+
+
 def check_bwrap() -> str:
     meta = BWRAP.lstat()
     require(stat.S_ISREG(meta.st_mode) and meta.st_uid in (0, os.geteuid())
@@ -151,6 +175,7 @@ def check_bwrap() -> str:
             "Bubblewrap lacks a launcher flag (especially --ro-bind-fd or --json-status-fd)")
     version = subprocess.run([str(BWRAP), "--version"], capture_output=True,
                              text=True, timeout=5, check=True).stdout.strip()
+    host_namespaces = {name: os.readlink(f"/proc/self/ns/{name}") for name in NAMESPACES}
     smoke = subprocess.run([
         str(BWRAP), "--unshare-all", "--unshare-user", "--die-with-parent",
         "--disable-userns", "--cap-drop", "ALL", "--clearenv",
@@ -162,12 +187,23 @@ def check_bwrap() -> str:
         "/usr/bin/readlink /usr/bin/seq /usr/bin/setsid; do "
         "test -x \"$tool\" || { echo \"sandbox tool missing: $tool\" >&2; exit 1; }; done\n"
         "/bin/bash -c :\n/bin/sleep 0\n/usr/bin/awk 'BEGIN { exit 0 }' /dev/null\n"
-        "/usr/bin/python3 -c pass\n/usr/bin/readlink /proc/self/ns/net >/dev/null\n"
-        "/usr/bin/seq 1 1 >/dev/null\n/usr/bin/setsid /bin/true",
+        "/usr/bin/python3 -c pass\n/usr/bin/seq 1 1 >/dev/null\n"
+        "/usr/bin/setsid /bin/true\n"
+        "/usr/bin/awk 'NR > 2 { split($0, a, \":\"); gsub(/[[:space:]]/, \"\", a[1]); "
+        "if (a[1] != \"lo\") exit 1 }' /proc/net/dev\n"
+        f"/usr/bin/awk '{IPV4_ROUTE_POLICY}' /proc/net/route\n"
+        "if test -f /proc/net/ipv6_route; then "
+        f"/usr/bin/awk '{IPV6_ROUTE_POLICY}' /proc/net/ipv6_route; fi\n"
+        "printf 'net=%s\\nmnt=%s\\nuser=%s\\npid=%s\\n' "
+        "\"$(/usr/bin/readlink /proc/self/ns/net)\" "
+        "\"$(/usr/bin/readlink /proc/self/ns/mnt)\" "
+        "\"$(/usr/bin/readlink /proc/self/ns/user)\" "
+        "\"$(/usr/bin/readlink /proc/self/ns/pid)\"",
     ], capture_output=True, timeout=5, check=False)
     require(smoke.returncode == 0,
             "Bubblewrap cannot create the required private namespaces: "
             + smoke.stderr[:300].decode("utf-8", errors="replace").strip())
+    check_namespace_receipt(smoke.stdout, host_namespaces)
     return version
 
 
@@ -241,7 +277,8 @@ def main() -> int:
                 "--run requires both DOXA_PLUGIN_CGROUP_ACCEPTANCE=1 and DOXA_PLUGIN_DISPOSABLE_HOST=1")
         target = check_target_dir(os.environ.get("CARGO_TARGET_DIR", ""))
     parent, scratch, version = preflight()
-    print(f"plugin-proof host-ready kernel={platform.release()} bwrap={version} "
+    print(f"plugin-proof host-ready namespace=isolated net=loopback-only routes=loopback-only "
+          f"kernel={platform.release()} bwrap={version} "
           f"uid={os.geteuid()} cpus={len(os.sched_getaffinity(0))} "
           f"parent={parent} scratch={scratch}", flush=True)
     if options.check:

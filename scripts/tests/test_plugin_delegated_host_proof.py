@@ -6,6 +6,7 @@ import importlib.util
 import os
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -133,6 +134,73 @@ class DelegatedShapeTests(unittest.TestCase):
         with self.assertRaises(OSError):
             with proof.staged_worker(alias, Path(self.temp.name)):
                 pass
+
+    def test_namespace_receipt_requires_four_distinct_private_identities(self) -> None:
+        host = {name: f"{name}:[100]" for name in proof.NAMESPACES}
+        child = {name: f"{name}:[{number}]" for name, number in
+                 zip(proof.NAMESPACES, (201, 202, 203, 204))}
+        receipt = b"net=net:[201]\nmnt=mnt:[202]\nuser=user:[203]\npid=pid:[204]\n"
+        proof.check_namespace_receipt(receipt, host)
+        for name in proof.NAMESPACES:
+            with self.subTest(reused=name), self.assertRaises(proof.ProofError):
+                proof.check_namespace_receipt(receipt, {**host, name: child[name]})
+        for bad in (
+            b"net=net:[201]\nmnt=mnt:[202]\nuser=user:[203]\n",
+            receipt + b"net=net:[205]\n",
+            b"mnt=mnt:[202]\nnet=net:[201]\nuser=user:[203]\npid=pid:[204]\n",
+            b"net=net:[x]\nmnt=mnt:[202]\nuser=user:[203]\npid=pid:[204]\n",
+            receipt + b"\xff",
+            b"x" * 1025,
+        ):
+            with self.subTest(bad=bad[:40]), self.assertRaises(proof.ProofError):
+                proof.check_namespace_receipt(bad, host)
+
+    def test_bwrap_smoke_requires_receipt_and_egress_checks(self) -> None:
+        fake_bwrap = Path(self.temp.name) / "bwrap"
+        fake_bwrap.write_bytes(b"#!/bin/sh\nexit 0\n")
+        fake_bwrap.chmod(0o700)
+        smoke_script = []
+        receipt = "".join(f"{name}={name}:[999999999999]\n" for name in proof.NAMESPACES).encode()
+
+        def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+            if args[1] == "--help":
+                return subprocess.CompletedProcess(args, 0, stdout=" ".join(proof.BWRAP_FLAGS))
+            if args[1] == "--version":
+                return subprocess.CompletedProcess(args, 0, stdout="bwrap fixture")
+            smoke_script.append(args[-1])
+            return subprocess.CompletedProcess(args, 0, stdout=receipt, stderr=b"")
+
+        with mock.patch.object(proof, "BWRAP", fake_bwrap), mock.patch.object(
+            proof.subprocess, "run", side_effect=fake_run
+        ):
+            self.assertEqual(proof.check_bwrap(), "bwrap fixture")
+        self.assertEqual(len(smoke_script), 1)
+        self.assertEqual(subprocess.run(["/bin/sh", "-n", "-c", smoke_script[0]]).returncode, 0)
+        for source in ("/proc/net/dev", "/proc/net/route", "/proc/net/ipv6_route",
+                       "/proc/self/ns/net", "/proc/self/ns/mnt", "/proc/self/ns/user",
+                       "/proc/self/ns/pid"):
+            self.assertIn(source, smoke_script[0])
+
+    def test_route_policy_allows_loopback_and_denies_egress(self) -> None:
+        ipv4_header = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n"
+        ipv4_loopback = "lo 0000007F 00000000 0001 0 0 0 000000FF 0 0 0\n"
+        ipv6_loopback = ("0" * 32 + " 00 " + "0" * 32 + " 00 " + "0" * 32
+                         + " ffffffff 00000001 00000000 00200200 lo\n")
+        route_file = Path(self.temp.name) / "routes"
+
+        def accepted(policy: str, contents: str) -> bool:
+            route_file.write_text(contents)
+            return subprocess.run(["/usr/bin/awk", policy, str(route_file)],
+                                  capture_output=True, check=False).returncode == 0
+
+        self.assertTrue(accepted(proof.IPV4_ROUTE_POLICY, ipv4_header + ipv4_loopback))
+        self.assertTrue(accepted(proof.IPV6_ROUTE_POLICY, ipv6_loopback))
+        self.assertFalse(accepted(proof.IPV4_ROUTE_POLICY,
+                                  ipv4_header + ipv4_loopback.replace("lo ", "eth0 ")))
+        self.assertFalse(accepted(proof.IPV6_ROUTE_POLICY,
+                                  ipv6_loopback.replace(" lo\n", " eth0\n")))
+        self.assertFalse(accepted(proof.IPV4_ROUTE_POLICY, ipv4_header + "eth0\n"))
+        self.assertFalse(accepted(proof.IPV6_ROUTE_POLICY, "malformed lo\n"))
 
 
 if __name__ == "__main__":

@@ -217,13 +217,34 @@ No production profile starts the gateway or injects proxy variables yet.
 The reserved hardened gateway entry point requires a ready offline manifest
 and an exact per-session hard-quota proof. Current fixture receipts cannot
 authorize it; even a changed receipt flag is refused until a live kernel
-limit/restart verifier exists. A Linux XFS read-only verifier checks the four
+limit/restart verifier exists. A Linux XFS/ext4 read-only verifier checks the four
 exact session directories, bounded existing descendants in the three data
-binds, and the effective project hard limit through open descriptors. A live
-broker-path audit and production EDQUOT/restart/remount proof remain open. The
-opt-in disposable quota fixture can compare aggregate writes through all three
-binds and recheck EDQUOT after restarting the same container; it does not
-restart the Engine, remount the source or produce a production admission token.
+binds, only the expected owner-private broker sockets, and the effective
+project hard limit through open descriptors. A rootless controller can be
+denied the XFS/ext4 project-limit query (`EPERM`/`EACCES`); hardened admission
+then refuses. A narrowly privileged read-only helper bound to the exact
+session descriptor and owner-controlled policy is still required. The socket
+inventory also permits zero sockets and does not tie a visible socket inode
+to the live host listener. Exact live endpoint identity, broker peer/protocol
+attestation, and production EDQUOT/restart/remount proof remain open. The
+Codex compaction hook broker now checks the connecting Unix peer's rootless
+owner UID, accepts one bounded `PreCompact` frame with a session-private
+transcript path, and bounds its response. A disposable local Unix-socket test
+also demonstrates the remaining gap: a same-UID host client with the bearer
+capability passes those checks. Before hardened admission, bind every broker
+connection to the exact inspected container and live process namespace using
+a kernel-stable peer handle (for example `SO_PEERPIDFD` where supported),
+reject host/sibling/changed-container peers, and rerun the protocol tests
+after worker, daemon and Engine restart. If the kernel or Engine cannot
+provide that origin evidence, startup must refuse hardened mode.
+The opt-in disposable quota fixture can compare aggregate writes through all
+three data binds and recheck EDQUOT after restarting the same container. A
+separate disposable four-bind guest proof retained EDQUOT on ext4 after an
+Engine restart and source remount, with a working read-only broker socket;
+an XFS control returned ENOSPC instead. The ext4 descriptor-bound syscall
+branch is source-reviewed and unit-tested but still needs a live read-only
+probe against a project-quota mount. These fixture observations do not
+produce a production admission token.
 `docker-hardened` is explicitly refused at
 profile parsing, with no fallback. A credential-free rootless smoke can test
 Python `HTTPS_PROXY` streaming, denied second-host access and failed direct

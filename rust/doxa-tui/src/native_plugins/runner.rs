@@ -1,6 +1,7 @@
 //! Grantless WebAssembly worker contract and dedicated child entrypoint.
 //! Only the explicit Linux CLI prototype launches it through the sandbox;
-//! TUI activation and delegated-host cgroup proof remain open.
+//! Disposable delegated-host proof passed; installed-host acceptance and TUI
+//! execution remain open.
 use super::packages::{self, RecheckedPackage, MAX_MODULE};
 use sha2::{Digest, Sha256};
 use std::io::{self, IsTerminal, Read, Write};
