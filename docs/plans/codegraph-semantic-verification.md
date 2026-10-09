@@ -175,6 +175,29 @@ definition evidence checker validates the response against the current
 source and displayed candidate. The only result is
 `one_sender_stream_untrusted` with `binding: unknown`. No CLI path calls it.
 
+The disabled stream challenge also includes a `whole_worktree_input_sha256`
+observation. Before and after the packet exchange, a bounded walker reads every
+regular file under the worktree root, including ignored files, manifests,
+binary assets, and Git control files, and records directory names and modes
+including empty directories. Each observation makes two complete passes; an
+added, removed, changed, unreadable, symlinked, or other nonregular entry
+rejects it. Files use descriptor-anchored, no-symlink reads with a two-second
+deadline. The walker caps each file at 8 MiB, the tree at 128 MiB and 20,000
+entries, and the whole observation at 20 seconds. A blocked directory read can
+leave one disabled worker until process exit. This catches durable changes to
+inputs previously omitted by the Rust-only digest, including edits to ignored
+binary data or `Cargo.toml` during an exchange. A checkout whose `.git`
+directory exceeds the bounds simply cannot supply the observation.
+
+This digest is a repeated local file-byte observation. Directory traversal and
+file reads are sequential, so an edit restored between passes, a change after
+the final pass, or a swap during pathname enumeration can escape it. It does
+not identify the bytes mounted into a container or consumed by an analyzer.
+The challenge still accepts a synthetic root-sender LSP frame and the result
+still reports `binding: unknown`. An activatable path needs a broker-created
+immutable source snapshot whose exact mount bytes and Engine attachment are
+attested together; rehashing a mutable worktree is not that proof.
+
 The [six-case offline guest](../../scripts/semantic-broker-proof/README.md)
 measures a root sender and rejects a UID-1000 listener handoff, midstream UID
 drop, different root sender PID, changed container ID, and extra packet.
@@ -186,10 +209,10 @@ the broker executable. The caller-supplied in-process answer is not a
 cryptographic proof of query origin. Same-UID replacement of the DOXA client and
 namespace-relative UID observations remain unresolved. The claimed image
 ID and container ID are syntax-checked, not verified against image bytes or
-Engine state. The Rust digest covers Git-listed, nonignored `.rs` files at
-separate read times; it excludes ignored files, manifests, configuration, and
-other bytes visible to a whole-worktree mount. Edits restored between reads
-can escape it. The [corrected six-case offline guest receipt](../../scripts/semantic-broker-proof/evidence/stream-complete-answer-2026-10-09/RUN.md)
+Engine state. The originating Rust digest covers Git-listed, nonignored `.rs`
+files at separate read times; the additional whole-worktree digest above
+covers the other local entries but is still non-atomic and does not prove the
+container's mounted bytes. The [corrected six-case offline guest receipt](../../scripts/semantic-broker-proof/evidence/stream-complete-answer-2026-10-09/RUN.md)
 covers the added packet field but still uses a synthetic LSP frame. PID
 continuity alone does not pin an executable or exclude PID reuse after process
 exit.
