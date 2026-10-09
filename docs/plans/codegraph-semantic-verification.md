@@ -64,8 +64,8 @@ socket would remove the caller-supplied Docker CLI from the LSP byte path. It
 would **not** establish that the peer is Docker: a process running as the same
 user can own a private socket, satisfy `SO_PEERCRED`, return a plausible
 container ID and inspect JSON, and send fabricated LSP frames. The current
-machine has no rootless socket at `/run/user/1000/docker.sock`, so it cannot
-provide a reviewed live fixture for this boundary. Fake Engine tests alone
+development host has no reviewed rootless Engine socket, so it cannot provide
+a live fixture for this boundary. Fake Engine tests alone
 would verify protocol parsing, not daemon identity or containment.
 
 Before implementing an activatable path, supply an owner-reviewed rootless
