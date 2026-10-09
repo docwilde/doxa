@@ -48,7 +48,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
-#[cfg(test)]
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -1515,6 +1514,7 @@ pub struct App {
     pending_open_urls: Vec<String>,
     chip_info: Option<ChipInfo>,
     codegraph_pending: Option<(String, PathBuf, Receiver<Result<Vec<String>, String>>)>,
+    codegraph_cache: Arc<Mutex<doxa_codegraph::cache::ReadOnlyQueryCache>>,
     native_package_pending: Option<(String, Receiver<Result<crate::native_plugins::packages::Review, String>>)>,
     native_package_run: Option<native_package_run::PendingRun>,
     native_package_run_display_owner: Option<(usize, String)>,
@@ -1802,6 +1802,7 @@ impl Default for App {
             pending_open_urls: Vec::new(),
             chip_info: None,
             codegraph_pending: None,
+            codegraph_cache: Arc::new(Mutex::new(doxa_codegraph::cache::ReadOnlyQueryCache::default())),
             native_package_pending: None,
             native_package_run: None,
             native_package_run_display_owner: None,

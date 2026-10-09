@@ -18,6 +18,7 @@ use syn::visit::{self, Visit};
 pub mod semantic_evidence;
 pub mod semantic_producer;
 pub mod semantic_runtime;
+pub mod cache;
 #[cfg(target_os = "linux")]
 mod semantic_broker;
 
@@ -41,6 +42,7 @@ const MAX_CALL_SITES: usize = 10_000;
 const MAX_CANDIDATE_SYMBOLS: usize = 100_000;
 const MAX_EDGE_CANDIDATES: usize = 8;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Query { File(String), Symbol(String), Imports(String), Calls(String), Modules(String) }
 
 impl Query {
@@ -76,7 +78,7 @@ pub fn query_cli(args: &[String]) -> Result<Answer, String> {
     query(&root, request)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Answer {
     pub scope: String,
     pub query: &'static str,
@@ -106,7 +108,7 @@ pub struct Answer {
     pub fallback: Option<&'static str>,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Coverage {
     pub enumerated_files: usize,
     pub parsed_rust_files: usize,
@@ -123,9 +125,9 @@ pub struct Coverage {
     pub unsupported_syntax: usize,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Issues { pub count: usize, pub examples: Vec<Issue> }
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Issue { pub file: String, pub reason: String }
 impl Issues {
     fn add(&mut self, file: &str, reason: impl Into<String>) {

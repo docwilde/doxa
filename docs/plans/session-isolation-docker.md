@@ -263,6 +263,11 @@ Engine or a later writer. An authenticated exact-container Engine observation,
 per-message writer provenance, process-movement proof and real provider hook
 compatibility remain necessary; startup must refuse hardened mode without
 them.
+
+The [disposable egress-origin guest](../../scripts/egress-origin-guest/README.md)
+exercises the production connector pidfd check across real guest PID
+namespaces, cgroups and init replacement. It does not run Docker or
+authenticate an Engine-reported PID, so the hardened gate stays closed.
 The opt-in disposable quota fixture can compare aggregate writes through all
 three data binds and recheck EDQUOT after restarting the same container. A
 separate disposable four-bind guest proof retained EDQUOT on ext4 after an

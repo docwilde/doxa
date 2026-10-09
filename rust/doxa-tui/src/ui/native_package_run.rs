@@ -4,13 +4,17 @@ use super::{App, ChipInfo};
 use crate::native_plugins::packages;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{mpsc::{self, Receiver, TryRecvError}, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const RUN_KIND: &str = "native_package_run";
 const CANCEL_JOIN_BUDGET: Duration = Duration::from_millis(100);
+const CHECKING: u8 = 0;
+const CANCELLED_BEFORE_DISPATCH: u8 = 1;
+const DISPATCH_ADMITTED: u8 = 2;
+const FINISHED: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunOutcome {
@@ -62,9 +66,20 @@ where G: FnOnce() -> Result<(), RunOutcome>
     Ok(())
 }
 
-fn check_and_dispatch<G, F>(home: &Path, name: &str, cancel: &AtomicBool, gate: G, dispatch: F) -> RunOutcome
+fn check_and_dispatch<G, F>(home: &Path, name: &str, cancel: &AtomicBool,
+    phase: &AtomicU8, gate: G, dispatch: F) -> RunOutcome
 where
     G: FnOnce() -> Result<(), RunOutcome>,
+    F: FnOnce(&Path, &packages::Review, &AtomicBool) -> io::Result<i32>,
+{
+    check_and_dispatch_with(home, name, cancel, phase, gate, || {}, dispatch)
+}
+
+fn check_and_dispatch_with<G, H, F>(home: &Path, name: &str, cancel: &AtomicBool,
+    phase: &AtomicU8, gate: G, before_claim: H, dispatch: F) -> RunOutcome
+where
+    G: FnOnce() -> Result<(), RunOutcome>,
+    H: FnOnce(),
     F: FnOnce(&Path, &packages::Review, &AtomicBool) -> io::Result<i32>,
 {
     if cancel.load(Ordering::Acquire) { return RunOutcome::Cancelled; }
@@ -73,6 +88,15 @@ where
         Err(_) => return RunOutcome::PackageInvalid,
     };
     if let Err(error) = recheck_and_admit(home, &review, cancel, gate) { return error; }
+    before_claim();
+    // Cancellation races with the last admission check. Only this atomic
+    // transition may start a sandbox worker; a closed owner wins by changing
+    // CHECKING to CANCELLED_BEFORE_DISPATCH.
+    if phase.compare_exchange(CHECKING, DISPATCH_ADMITTED,
+        Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return RunOutcome::Cancelled;
+    }
+    if cancel.load(Ordering::Acquire) { return RunOutcome::Cancelled; }
     match dispatch(home, &review, cancel) {
         Ok(value) if !cancel.load(Ordering::Acquire) => RunOutcome::Returned(value),
         Ok(_) => RunOutcome::Cancelled,
@@ -86,6 +110,7 @@ pub(super) struct PendingRun {
     owner: (usize, String),
     name: String,
     cancel: Arc<AtomicBool>,
+    phase: Arc<AtomicU8>,
     receiver: Receiver<RunOutcome>,
     thread: Option<JoinHandle<()>>,
 }
@@ -97,27 +122,40 @@ impl PendingRun {
         F: FnOnce(&Path, &packages::Review, &AtomicBool) -> io::Result<i32> + Send + 'static,
     {
         let cancel = Arc::new(AtomicBool::new(false));
+        let phase = Arc::new(AtomicU8::new(CHECKING));
         let (sender, receiver) = mpsc::channel();
         let task_cancel = Arc::clone(&cancel);
+        let task_phase = Arc::clone(&phase);
         let task_name = name.clone();
         let thread = thread::Builder::new().name("doxa-native-package-request".into()).spawn(move || {
-            let outcome = check_and_dispatch(&home, &task_name, &task_cancel, gate, dispatch);
+            let outcome = check_and_dispatch(&home, &task_name, &task_cancel,
+                &task_phase, gate, dispatch);
+            task_phase.store(FINISHED, Ordering::Release);
             let _ = sender.send(outcome);
         })?;
-        Ok(Self { owner, name, cancel, receiver, thread: Some(thread) })
+        Ok(Self { owner, name, cancel, phase, receiver, thread: Some(thread) })
     }
 }
 
 impl Drop for PendingRun {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Release);
+        let phase = self.phase.compare_exchange(CHECKING, CANCELLED_BEFORE_DISPATCH,
+            Ordering::AcqRel, Ordering::Acquire).unwrap_or_else(|phase| phase);
         if let Some(thread) = self.thread.take() {
+            if phase == DISPATCH_ADMITTED {
+                // Once dispatch crossed the fence, the TUI cannot exit or
+                // exec until the sandbox supervisor's cleanup attempt returns.
+                // Installed-host proof must still establish cleanup success.
+                let _ = thread.join();
+                return;
+            }
             let deadline = Instant::now() + CANCEL_JOIN_BUDGET;
             while !thread.is_finished() && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(1));
             }
-            // A stuck private-file read may outlive panel close. Detach only
-            // after cancellation; the production gate forbids worker spawn.
+            // A stuck private-file read may outlive panel close. Its failed
+            // admission CAS forbids worker spawn after this controller drops.
             if thread.is_finished() { let _ = thread.join(); }
         }
     }
@@ -247,7 +285,7 @@ mod tests {
     fn production_admission_never_dispatches_even_exact_approved_package() {
         let home = fixture(true, &[]);
         let cancel = AtomicBool::new(false);
-        let outcome = check_and_dispatch(home.path(), "demo", &cancel,
+        let outcome = check_and_dispatch(home.path(), "demo", &cancel, &AtomicU8::new(CHECKING),
             installed_host_admission, |_, _, _| panic!("worker dispatch must stay closed"));
         assert_eq!(outcome, RunOutcome::HostUnverified);
         assert_eq!(outcome.lines().len(), 1);
@@ -261,13 +299,14 @@ mod tests {
         ] {
             let home = fixture(approved, grants);
             let cancel = AtomicBool::new(false);
-            let result = check_and_dispatch(home.path(), "demo", &cancel,
+            let result = check_and_dispatch(home.path(), "demo", &cancel, &AtomicU8::new(CHECKING),
                 || panic!("gate must not see rejected package"),
                 |_, _, _| panic!("worker must not start"));
             assert_eq!(result, expected);
         }
         let home = fixture(true, &[]);
         let result = check_and_dispatch(home.path(), "demo", &AtomicBool::new(true),
+            &AtomicU8::new(CHECKING),
             || panic!("gate must not see cancelled request"),
             |_, _, _| panic!("worker must not start"));
         assert_eq!(result, RunOutcome::Cancelled);
@@ -407,15 +446,97 @@ mod tests {
         let (started, started_rx) = mpsc::channel();
         let (release, release_rx) = mpsc::channel();
         let run = PendingRun::spawn((0, "session-one".into()), home.path().to_owned(),
-            "demo".into(), || Ok(()), move |_, _, _| {
+            "demo".into(), move || {
                 started.send(()).unwrap();
                 release_rx.recv().unwrap();
-                Ok(1)
-            }).unwrap();
+                Ok(())
+            }, |_, _, _| panic!("cancelled request must not dispatch")).unwrap();
         started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let started = Instant::now();
         drop(run);
         assert!(started.elapsed() < Duration::from_secs(1));
         release.send(()).unwrap();
+    }
+
+    #[test]
+    fn close_wins_race_after_host_gate_but_before_worker_admission() {
+        let home = fixture(true, &[]);
+        let home_path = home.path().to_owned();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let phase = Arc::new(AtomicU8::new(CHECKING));
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let (at_claim, at_claim_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let task_cancel = Arc::clone(&cancel);
+        let task_phase = Arc::clone(&phase);
+        let task_dispatched = Arc::clone(&dispatched);
+        let task = thread::spawn(move || check_and_dispatch_with(&home_path, "demo",
+            &task_cancel, &task_phase,
+            || Ok(()),
+            move || { at_claim.send(()).unwrap(); release_rx.recv().unwrap(); },
+            move |_, _, _| { task_dispatched.fetch_add(1, Ordering::SeqCst); Ok(17) }));
+        at_claim_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        cancel.store(true, Ordering::Release);
+        assert_eq!(phase.compare_exchange(CHECKING, CANCELLED_BEFORE_DISPATCH,
+            Ordering::AcqRel, Ordering::Acquire), Ok(CHECKING));
+        release.send(()).unwrap();
+        assert_eq!(task.join().unwrap(), RunOutcome::Cancelled);
+        assert_eq!(dispatched.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn admitted_dispatch_blocks_owner_exit_until_supervisor_finishes() {
+        let home = fixture(true, &[]);
+        let (started, started_rx) = mpsc::channel();
+        let (cancel_seen, cancel_seen_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let run = PendingRun::spawn((0, "session-one".into()), home.path().to_owned(),
+            "demo".into(), || Ok(()), move |_, _, cancel| {
+                started.send(()).unwrap();
+                while !cancel.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                cancel_seen.send(()).unwrap();
+                release_rx.recv().unwrap(); // model slow supervisor finalization
+                Ok(17)
+            }).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(run.phase.load(Ordering::Acquire), DISPATCH_ADMITTED);
+        let (owner_exited, owner_exited_rx) = mpsc::channel();
+        let closer = thread::spawn(move || { drop(run); owner_exited.send(()).unwrap(); });
+        cancel_seen_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(owner_exited_rx.recv_timeout(Duration::from_millis(150)).is_err(),
+            "owner exited before admitted supervisor finished");
+        release.send(()).unwrap();
+        owner_exited_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        closer.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owner_close_waits_for_real_process_group_cancellation_and_reap() {
+        let home = fixture(true, &[]);
+        let marker = home.path().join("worker-started");
+        let child_marker = marker.clone();
+        let (cleaned, cleaned_rx) = mpsc::channel();
+        let run = PendingRun::spawn((0, "session-one".into()), home.path().to_owned(),
+            "demo".into(), || Ok(()), move |_, _, cancel| {
+                let mut command = std::process::Command::new("/bin/sh");
+                command.arg("-c").arg("printf ready > \"$1\"; exec /bin/sleep 30")
+                    .arg("sh").arg(&child_marker);
+                let capture = crate::native_plugins::runner_process::supervise(
+                    &mut command, cancel, Instant::now() + Duration::from_secs(5))?;
+                cleaned.send((capture.group_id, capture.outcome)).unwrap();
+                Ok(0)
+            }).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(marker.exists(), "test child never started");
+        drop(run);
+        let (group_id, outcome) = cleaned_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(outcome, crate::native_plugins::runner_process::Outcome::Cancelled);
+        assert_eq!(unsafe { libc::kill(group_id as i32, 0) }, -1);
     }
 }
