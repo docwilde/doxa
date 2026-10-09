@@ -211,8 +211,10 @@ gateway death/restart and resume across container lifecycle transitions.
 Because TLS is not intercepted, the gateway cannot check the encrypted HTTP
 authority or detect every form of domain fronting. Known ECH extensions are
 refused, but provider-specific destination behavior and future TLS extensions
-must be reviewed before claiming a hardened boundary. Live rootless proof
-remains open.
+must be reviewed before claiming a hardened boundary. An opt-in, credential-free
+rootless fixture now checks the network-none worker's loopback adapter, a
+disallowed CONNECT, direct-IP failure and gateway-loss behavior. Permitted
+upstream traffic and provider flows still need live rootless proof.
 
 API vendor keys stay in the host supervisor; it performs provider HTTP calls
 or grants a narrowly scoped per-session provider proxy. Claude and Codex may

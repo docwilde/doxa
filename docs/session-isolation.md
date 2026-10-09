@@ -142,3 +142,17 @@ and Engine socket:
     DOXA_ISOLATION_TEST_IMAGE=sha256:CONTENT_ID \
     DOXA_ISOLATION_TEST_HOST=unix:///run/user/UID/doxa-test-docker.sock \
     cargo test -p doxa-isolation --test docker -- --ignored
+
+The opt-in restricted-egress transport smoke uses a pinned, credential-free
+fixture image with the current isolation worker and Python 3. It starts a
+`docker-offline` session, checks a disallowed `CONNECT`, verifies that direct
+public-IP access fails, and checks that gateway loss returns 502 rather than
+falling back to direct access:
+
+    DOXA_ISOLATION_TEST_IMAGE=sha256:CONTENT_ID \
+    DOXA_ISOLATION_TEST_HOST=unix:///run/user/UID/doxa-test-docker.sock \
+    cargo test -p doxa-isolation --test egress_docker -- --ignored
+
+Use a task-local rootless Engine and a real-disk `TMPDIR` for the fixture. It
+does not exercise an allowed upstream, provider streaming, login or refresh,
+and it does not enable a production restricted-egress profile.
