@@ -57,6 +57,29 @@ one reviewed Engine endpoint, bind the attach request to the inspected CID,
 and preserve cleanup and resource checks across that exchange. Until then,
 the CLI never opens this seam and keeps `binding: unknown`.
 
+### Direct Engine launch blocker
+
+Moving `create`, `start`, `inspect`, and `attach` to HTTP on the same Unix
+socket would remove the caller-supplied Docker CLI from the LSP byte path. It
+would **not** establish that the peer is Docker: a process running as the same
+user can own a private socket, satisfy `SO_PEERCRED`, return a plausible
+container ID and inspect JSON, and send fabricated LSP frames. The current
+machine has no rootless socket at `/run/user/1000/docker.sock`, so it cannot
+provide a reviewed live fixture for this boundary. Fake Engine tests alone
+would verify protocol parsing, not daemon identity or containment.
+
+Before implementing an activatable path, supply an owner-reviewed rootless
+Engine fixture or a trusted broker that passes an authenticated connected
+socket/daemon identity to DOXA. The launcher must pin that identity across
+every Engine request, use the `create` response's full ID for `start`,
+`inspect`, and `attach`, and carry every LSP byte on that exact upgraded
+connection. It must check non-TTY multiplexing, effective mounts, namespaces,
+cgroup limits, no egress, disk quota, and image bytes, then force-remove the
+same ID and prove absence after every outcome. The live fixture must exercise
+daemon restart, socket replacement, late output, timeouts, and cleanup
+failure. Until those checks pass, direct Engine replies remain untrusted and
+the CLI's `binding` claim stays `unknown`.
+
 The library-only LSP driver exercises a bounded initialize, quiescence,
 definition, and shutdown exchange against a fixture server. It caps messages
 and output, enforces a 20-second maximum deadline, and kills the process group
