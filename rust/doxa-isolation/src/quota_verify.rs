@@ -152,10 +152,62 @@ fn audit_descendants(directory: &File, reader: &impl QuotaReader, project_id: u3
 }
 
 fn open_entry(parent: &File, name: &CStr) -> io::Result<File> {
-    let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(),
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) };
-    if fd < 0 { return Err(io::Error::last_os_error()); }
-    Ok(unsafe { File::from_raw_fd(fd) })
+    let mut before: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(parent.as_raw_fd(), name.as_ptr(), &mut before, libc::AT_SYMLINK_NOFOLLOW) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let kind = before.st_mode as u32 & libc::S_IFMT as u32;
+    if kind != libc::S_IFREG as u32 && kind != libc::S_IFDIR as u32 {
+        return Err(error("quota data bind contains a symlink or special entry"));
+    }
+    // O_PATH pins a Linux inode without opening a device, FIFO or socket. If
+    // the name changes after fstatat, the pinned descriptor is reclassified
+    // before any read-capable descriptor is obtained.
+    #[cfg(target_os = "linux")]
+    let pinned = {
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        unsafe { File::from_raw_fd(fd) }
+    };
+    #[cfg(target_os = "linux")]
+    {
+        let meta = pinned.metadata()?;
+        if !same_entry(&before, &meta) { return Err(error("quota descendant changed before open")); }
+        // The procfd names the pinned inode, not the mutable directory entry.
+        // The kernel quota ioctl needs a read-capable descriptor; an absent
+        // procfs or refused reopen fails this snapshot closed.
+        let path = CString::new(format!("/proc/self/fd/{}", pinned.as_raw_fd())).unwrap();
+        let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK
+            | if meta.is_dir() { libc::O_DIRECTORY } else { 0 };
+        let fd = unsafe { libc::open(path.as_ptr(), flags) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        let opened = unsafe { File::from_raw_fd(fd) };
+        if !same_entry(&before, &opened.metadata()?) {
+            return Err(error("quota pinned descendant changed before ioctl"));
+        }
+        return Ok(opened);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Non-Linux uses only fake quota readers in tests; the kernel reader
+        // refuses inspection. O_DIRECTORY excludes device replacement for a
+        // directory entry, and identity comparison rejects other changes.
+        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK
+            | if kind == libc::S_IFDIR as u32 { libc::O_DIRECTORY } else { 0 };
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        let opened = unsafe { File::from_raw_fd(fd) };
+        if !same_entry(&before, &opened.metadata()?) {
+            return Err(error("quota descendant changed before open"));
+        }
+        Ok(opened)
+    }
+}
+
+fn same_entry(before: &libc::stat, meta: &std::fs::Metadata) -> bool {
+    before.st_dev as u64 == meta.dev() && before.st_ino as u64 == meta.ino()
+        && before.st_mode as u32 == meta.mode()
 }
 
 fn private_metadata(directory: &File) -> io::Result<std::fs::Metadata> {
@@ -366,14 +418,23 @@ mod tests {
     #[test]
     fn symlink_and_special_data_bind_entries_refuse_snapshot() {
         let (_temp, manifest, reader, expected) = fixture();
+        let cache = File::open(&manifest.cache).unwrap();
         let shortcut = manifest.cache.join("shortcut");
         symlink(&manifest.private_home, &shortcut).unwrap();
+        assert!(open_entry(&cache, c"shortcut").unwrap_err().to_string()
+            .contains("symlink or special"));
         assert!(inspect_with(&manifest, expected, &reader).is_err());
         fs::remove_file(&shortcut).unwrap();
         let fifo = manifest.cache.join("pipe");
         let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(open_entry(&cache, c"pipe").unwrap_err().to_string()
+            .contains("symlink or special"));
         assert!(inspect_with(&manifest, expected, &reader).is_err());
+        fs::remove_file(&fifo).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(manifest.cache.join("socket")).unwrap();
+        assert!(open_entry(&cache, c"socket").unwrap_err().to_string()
+            .contains("symlink or special"));
     }
     #[test]
     fn descendant_count_and_depth_are_bounded() {

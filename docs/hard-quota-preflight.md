@@ -90,7 +90,10 @@ the exact session root and three bind-source directory descriptors, then walk
 up to 4,096 existing entries and 64 directory levels within checkout, home
 and cache. It checks project ID, directory inheritance, filesystem and mount
 identity, rejects symlinks and special entries, and compares entry identities
-again after inspection. The verifier also reads the effective project hard
+again after inspection. On Linux it classifies each entry without following a
+link, pins it with `O_PATH`, then reopens the pinned regular file or directory
+through procfs for quota metadata. Missing procfs refuses the snapshot. The
+verifier also reads the effective project hard
 block limit with accounting and enforcement enabled. It requires an explicit
 exact limit; the fixture's maximum write size is **not** that limit.
 Unsupported filesystems, unavailable `quotactl_fd`, and any mismatch refuse
