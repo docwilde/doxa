@@ -80,7 +80,7 @@ pub fn plan_rust_analyzer(
         "params": {
             "processId": null, "rootUri": uri,
             "workspaceFolders": [{"uri": uri, "name": "doxa-semantic"}],
-            "capabilities": {},
+            "capabilities": {"experimental": {"serverStatusNotification": true}},
             "initializationOptions": {
                 "cargo": {"buildScripts": {"enable": false}, "autoreload": false, "noDeps": true},
                 "procMacro": {"enable": false}, "checkOnSave": false,
