@@ -147,8 +147,11 @@ The CLI still never calls either socket seam.
 
 `semantic_broker::observe_stream_definition` rederives the restrictive
 producer plan, rehashes the call and target sources before and after the
-exchange, and requires the complete Git-listed Rust scan digest from the
-originating syntax query. It re-enumerates and rehashes those Rust files before
+exchange, and accepts a Rust `calls` answer with a complete scan digest, zero
+skipped or unparseable Rust inputs, and a source hash matching the selected
+displayed edge. It selects that edge and candidate from the answer by index;
+a separately recomputed digest or stale candidate cannot be passed to this
+entry point. It re-enumerates and rehashes those Rust files before
 and after the stream, and includes the digest in the challenge and opening and
 closing receipts. A changed third Rust file or added Rust path fails the
 observation. It passes a fresh nonce, source-bound query digest, and both hashes to a
@@ -168,7 +171,8 @@ This proves packet-origin and transcript consistency only in that guest.
 Its root fixture sends a synthetic LSP frame. It does **not** inspect a
 rootless Engine, launch rust-analyzer, establish a complete workspace
 snapshot, prove that the inspected container produced the frame, or attest
-the broker executable. Same-UID replacement of the DOXA client and
+the broker executable. The caller-supplied in-process answer is not a
+cryptographic proof of query origin. Same-UID replacement of the DOXA client and
 namespace-relative UID observations remain unresolved. The claimed image
 ID and container ID are syntax-checked, not verified against image bytes or
 Engine state. The Rust digest covers Git-listed, nonignored `.rs` files at

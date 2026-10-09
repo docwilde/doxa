@@ -8,7 +8,7 @@
 use super::semantic_evidence::inspect_definition_reply;
 use super::semantic_producer::{plan_rust_analyzer, read_lsp_frame, ProducerPlan};
 use super::semantic_runtime::bounded_unix_connect;
-use super::{current_scan_input_sha256, file_bytes, CallCandidate, CallEdge};
+use super::{current_scan_input_sha256, file_bytes, source_language, Answer, CallCandidate, CallEdge};
 use serde::de::{MapAccess, Visitor};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -74,6 +74,30 @@ fn with_rust_scan_basis<T>(root: &Path, expected: &str,
         return Err("Rust source inventory changed during stream observation".into());
     }
     Ok((result, before))
+}
+
+// The stream must start from a complete calls answer, not a digest recomputed
+// by the caller after an unrelated file changed or failed to parse. Selecting
+// by index also keeps the edge and candidate tied to displayed query rows.
+fn complete_call_basis<'a>(plan: &ProducerPlan, answer: &'a Answer,
+    edge_index: usize, candidate_index: usize)
+    -> Result<(&'a CallEdge, &'a CallCandidate, &'a str), String> {
+    let root = plan.root.to_str().ok_or("non-UTF-8 semantic worktree")?;
+    if answer.scope != root || answer.query != "calls" || answer.status != "ok"
+        || source_language(&answer.value) != Some("rust")
+        || answer.coverage.rust_skipped_files != 0
+        || answer.coverage.rust_unparseable_files != 0 {
+        return Err("semantic stream requires an originating complete Rust calls answer".into());
+    }
+    let scan = answer.scan_input_sha256.as_deref()
+        .ok_or("semantic stream requires a complete Rust scan input digest")?;
+    let edge = answer.edges.get(edge_index).ok_or("call edge was not displayed in answer")?;
+    let candidate = edge.candidates.get(candidate_index)
+        .ok_or("call candidate was not displayed in answer")?;
+    if answer.value != edge.file || answer.requested_source_sha256.as_deref() != Some(edge.sha256.as_str()) {
+        return Err("call edge differs from originating answer source".into());
+    }
+    Ok((edge, candidate, scan))
 }
 
 /// Require UID-zero ownership as seen in the caller's namespace. This is a
@@ -466,13 +490,14 @@ fn observe_stream_packets(path: &Path, nonce: &str, digest: &str,
 /// is absent. The CLI has no call to this function.
 #[allow(dead_code)]
 pub(crate) fn observe_stream_definition(path: &Path, plan: &ProducerPlan,
-    edge: &CallEdge, candidate: &CallCandidate,
-    rust_scan_input_sha256: &str) -> Result<Value, String> {
+    answer: &Answer, edge_index: usize, candidate_index: usize) -> Result<Value, String> {
     let expected = plan_rust_analyzer(&plan.root, &plan.image, &plan.docker_host, true)?;
     if plan.root != expected.root || plan.args != expected.args
         || plan.initialize != expected.initialize || plan.attestation != expected.attestation {
         return Err("semantic producer plan changed before stream challenge".into());
     }
+    let (edge, candidate, rust_scan_input_sha256) = complete_call_basis(plan, answer,
+        edge_index, candidate_index)?;
     let (_, source, _) = file_bytes(&plan.root, &edge.file)?;
     let (_, target, _) = file_bytes(&plan.root, &candidate.file)?;
     if source != edge.sha256 || target != candidate.sha256 {
@@ -785,25 +810,23 @@ mod tests {
         fs::write(root.path().join("third.rs"), "fn unrelated() {}\n").unwrap();
         assert!(Command::new("git").arg("add").arg("a.rs").current_dir(root.path()).status().unwrap().success());
         let answer = query(root.path(), Query::Calls("a.rs".into())).unwrap();
-        let rust_scan = answer.scan_input_sha256.clone().unwrap();
-        let edge = answer.edges.iter().find(|row| row.target == "target").unwrap();
-        let candidate = edge.candidates.first().unwrap();
+        let edge_index = answer.edges.iter().position(|row| row.target == "target").unwrap();
         let mut plan = plan_rust_analyzer(root.path(), IMAGE,
             "unix:///run/user/1000/docker.sock", true).unwrap();
         let same_uid_socket = root.path().join("fake.sock");
         plan.args.push("--privileged".into());
-        let error = observe_stream_definition(&same_uid_socket, &plan, edge, candidate,
-            &rust_scan).unwrap_err();
+        let error = observe_stream_definition(&same_uid_socket, &plan, &answer,
+            edge_index, 0).unwrap_err();
         assert!(error.contains("plan changed"), "{error}");
         plan.args.pop();
         fs::write(root.path().join("third.rs"), "fn changed() {}\n").unwrap();
-        let error = observe_stream_definition(&same_uid_socket, &plan, edge, candidate,
-            &rust_scan).unwrap_err();
+        let error = observe_stream_definition(&same_uid_socket, &plan, &answer,
+            edge_index, 0).unwrap_err();
         assert!(error.contains("source inventory changed since syntax query"), "{error}");
         fs::write(root.path().join("third.rs"), "fn unrelated() {}\n").unwrap();
         fs::write(root.path().join("a.rs"), "fn caller() { target(); }\nfn target() {}\n// changed\n").unwrap();
-        let error = observe_stream_definition(&same_uid_socket, &plan, edge, candidate,
-            &rust_scan).unwrap_err();
+        let error = observe_stream_definition(&same_uid_socket, &plan, &answer,
+            edge_index, 0).unwrap_err();
         assert!(error.contains("source changed"), "{error}");
     }
 
@@ -835,6 +858,48 @@ mod tests {
             Ok(())
         }).unwrap_err();
         assert!(error.contains("during stream observation"), "{error}");
+    }
+
+    #[test]
+    fn stream_definition_rejects_incomplete_originating_answer_even_with_recomputed_digest() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(Command::new("git").arg("init").arg("-q").arg(root.path()).status().unwrap().success());
+        fs::write(root.path().join("a.rs"), "fn caller() { target(); }\n").unwrap();
+        fs::write(root.path().join("b.rs"), "fn target() {}\n").unwrap();
+        fs::write(root.path().join("third.rs"), "fn unrelated() {}\n").unwrap();
+        let original = query(root.path(), Query::Calls("a.rs".into())).unwrap();
+        assert!(original.scan_input_sha256.is_some());
+        let plan = plan_rust_analyzer(root.path(), IMAGE,
+            "unix:///run/user/1000/docker.sock", true).unwrap();
+        let socket = root.path().join("fake.sock");
+        assert!(complete_call_basis(&plan, &original, 100, 0).unwrap_err()
+            .contains("not displayed"));
+        let mut wrong_source = original.clone();
+        wrong_source.value = "b.rs".into();
+        assert!(complete_call_basis(&plan, &wrong_source, 0, 0).unwrap_err()
+            .contains("differs from originating answer"));
+
+        fs::write(root.path().join("third.rs"), "fn broken(\n").unwrap();
+        let stale_error = observe_stream_definition(&socket, &plan, &original, 0, 0).unwrap_err();
+        assert!(stale_error.contains("source inventory changed since syntax query"), "{stale_error}");
+
+        let mut incomplete = query(root.path(), Query::Calls("a.rs".into())).unwrap();
+        assert!(incomplete.scan_input_sha256.is_none());
+        assert_eq!(incomplete.coverage.rust_unparseable_files, 1);
+        assert!(!incomplete.edges.is_empty());
+        let error = observe_stream_definition(&socket, &plan, &incomplete, 0, 0).unwrap_err();
+        assert!(error.contains("originating complete Rust calls answer"), "{error}");
+
+        // A caller cannot turn that incomplete answer into a complete one by
+        // filling its public digest field from a later byte-only rehash.
+        incomplete.scan_input_sha256 = Some(current_scan_input_sha256(root.path()).unwrap().0);
+        let error = observe_stream_definition(&socket, &plan, &incomplete, 0, 0).unwrap_err();
+        assert!(error.contains("originating complete Rust calls answer"), "{error}");
+
+        let mut missing = original;
+        missing.scan_input_sha256 = None;
+        let error = observe_stream_definition(&socket, &plan, &missing, 0, 0).unwrap_err();
+        assert!(error.contains("complete Rust scan input digest"), "{error}");
     }
 
     #[test]
