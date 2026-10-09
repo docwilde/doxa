@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.29 — 2026-10-09
+
+**Runtime proof**
+
+- Add an opt-in disposable-host plugin proof for the approved Wasm worker, aggregate cgroup limits, namespaces, egress and cleanup. The cgroup-writing run and broader TUI activation remain open.
+- Test that the restricted-egress gateway dials its checked DNS address and rejects a later private answer. Production hardened Docker admission still needs live host and provider proof.
+- Add a disabled direct Engine attach probe and document the same-user daemon spoofing gap. Code-graph semantic binding still reports unknown.
+
+**Model facts**
+
+- Add explicit `doxa model-facts codex MODEL --check-catalog` for a bounded read-only OpenAI model listing. It reports listed, unlisted or unknown; inference access, billed tier and latency remain unverified.
+
 ## 2.0.0-beta.28 — 2026-10-09
 
 **Android remote recovery**
