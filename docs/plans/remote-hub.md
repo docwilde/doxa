@@ -169,7 +169,9 @@ before retrying an expired write. Before each POST, it synchronously saves a
 versioned, bounded marker containing only hub origin, target/incarnation,
 operation, request ID, and creation time. A failed save prevents submission.
 After process death or a scope change, it never replays a lost body and blocks
-new writes until an authoritative snapshot and explicit user acknowledgment.
+new writes until an authoritative snapshot of the saved hub/session incarnation
+with complete pending inputs and explicit user acknowledgment. An unreadable marker needs a fresh snapshot
+and acknowledgment, because its original scope cannot be recovered.
 The host lease never leaves the connector.
 
 Keep session IDs, cursors, unsent drafts, the body-free uncertain-write marker,
