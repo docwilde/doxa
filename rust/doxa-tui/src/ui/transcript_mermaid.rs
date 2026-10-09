@@ -238,6 +238,20 @@ fn renderer_identity(renderer: &str, root: &str) -> Option<String> {
             hash.update(value.to_be_bytes());
         }
     }
+    // Package installs normally replace a manifest, lockfile or node_modules
+    // directory. Track those without traversing a potentially huge package on
+    // every transcript frame.
+    for name in ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "node_modules"] {
+        hash.update(name.as_bytes());
+        if let Ok(meta) = fs::metadata(root.join(name)) {
+            for value in [meta.dev(), meta.ino(), meta.len(), meta.mtime() as u64, meta.mtime_nsec() as u64,
+                meta.ctime() as u64, meta.ctime_nsec() as u64] {
+                hash.update(value.to_be_bytes());
+            }
+        } else {
+            hash.update([0u8]);
+        }
+    }
     Some(format!("{:x}", hash.finalize()))
 }
 
@@ -674,6 +688,31 @@ mod tests {
         let after_binary = renderer_identity(&renderer, root).unwrap();
         fs::write(package.path().join("new-package-entry"), "data").unwrap();
         assert_ne!(renderer_identity(&renderer, root).unwrap(), after_binary);
+        let after_entry = renderer_identity(&renderer, root).unwrap();
+        fs::write(package.path().join("package.json"), "{\"version\":\"1\"}").unwrap();
+        assert_ne!(renderer_identity(&renderer, root).unwrap(), after_entry);
+        let after_manifest = renderer_identity(&renderer, root).unwrap();
+        fs::write(package.path().join("package.json"), "{\"version\":\"2\"}").unwrap();
+        assert_ne!(renderer_identity(&renderer, root).unwrap(), after_manifest);
+    }
+
+    #[test]
+    fn workspace_change_discards_private_cache_and_ready_layout() {
+        let (package, renderer) = fixture("exit 7");
+        let root = package.path().to_str().unwrap();
+        let cache = Arc::new(Mutex::new(PngCache::new().unwrap()));
+        let cache_path = cache.lock().unwrap().dir.path().to_path_buf();
+        let mut store = Store { renderer: renderer.clone(), root: root.to_owned(),
+            identity: renderer_identity(&renderer, root), workspace: vec![PathBuf::from("/old")],
+            previews: vec![Preview { key: "old".into(), width: 24,
+                cancel: Arc::new(AtomicBool::new(false)), state: State::Unavailable }],
+            cache: Some(cache.clone()), revision: 0 };
+        drop(cache);
+        store.observe("", 24, &renderer, root, &[PathBuf::from("/new")], None);
+        assert!(store.previews.is_empty());
+        assert!(store.cache.is_none());
+        assert!(!cache_path.exists());
+        assert!(store.revision() > 0);
     }
 
     #[test]
