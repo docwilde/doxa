@@ -117,14 +117,15 @@ through procfs for quota metadata. Missing procfs refuses the snapshot. The
 broker directory must share the private owner, project ID, inheritance and
 mount identity. Its bounded direct-entry audit allows only owner-private
 `hook.sock` and `egress.sock` Unix sockets on that mount; any other entry or
-replacement during inspection refuses the snapshot. The verifier also reads the effective project hard
-block limit with accounting and enforcement enabled. It requires an explicit
+replacement during inspection refuses the snapshot. The verifier also reads
+the effective project hard block limit with accounting and enforcement enabled.
+It requires an explicit
 exact limit; the fixture's maximum write size is **not** that limit.
 Unsupported filesystems, unavailable `quotactl_fd`, and any mismatch refuse
 verification. The descendant walk covers the three data bind sources; it does
 not establish an immutable tree or authenticate the live broker peer and
-protocol. This is a
-point-in-time snapshot, not an EDQUOT/restart proof. The receipt is not an
+protocol. This is a point-in-time snapshot, not an EDQUOT/restart proof. The
+receipt is not an
 owner-controlled policy, and the admission seam still refuses even a
 hand-edited `admissible_as_hard_quota=true`. Selecting `docker-hardened` remains
 unavailable.

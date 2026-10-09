@@ -518,6 +518,9 @@ mod tests {
         assert!(inspect_with(&manifest, expected, &reader).unwrap_err().to_string()
             .contains("unexpected entry"));
         fs::remove_file(manifest.broker.join("unexpected")).unwrap();
+        fs::write(manifest.broker.join("hook.sock"), b"not a socket").unwrap();
+        assert!(inspect_with(&manifest, expected, &reader).is_err());
+        fs::remove_file(manifest.broker.join("hook.sock")).unwrap();
         symlink("/dev/null", manifest.broker.join("hook.sock")).unwrap();
         assert!(inspect_with(&manifest, expected, &reader).is_err());
         fs::remove_file(manifest.broker.join("hook.sock")).unwrap();
@@ -543,6 +546,10 @@ mod tests {
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o666)).unwrap();
         assert!(inspect_with(&manifest, expected, &reader).unwrap_err().to_string()
             .contains("unsafe identity or permissions"));
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o600)).unwrap();
+        for state in reader.states.values_mut() { state.mount_id = mount_id + 1; }
+        assert!(inspect_with(&manifest, expected, &reader).unwrap_err().to_string()
+            .contains("socket crosses a mount boundary"));
     }
     #[test]
     fn existing_data_bind_descendants_require_matching_project_and_inheritance() {
