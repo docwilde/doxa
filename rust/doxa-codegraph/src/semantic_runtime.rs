@@ -44,6 +44,67 @@ struct AttachTransport {
     socket_inode: u64,
 }
 
+#[cfg(target_os = "linux")]
+fn read_until(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant) -> Result<(), String> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err("Engine exchange deadline exceeded".into()); }
+        stream.set_read_timeout(Some(remaining)).map_err(|_| "cannot set Engine read deadline")?;
+        let count = stream.read(&mut bytes[offset..]).map_err(|_| "Engine read failed")?;
+        if count == 0 { return Err("Engine closed exchange".into()); }
+        offset += count;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn write_until(stream: &mut UnixStream, bytes: &[u8], deadline: Instant) -> Result<(), String> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err("Engine exchange deadline exceeded".into()); }
+        stream.set_write_timeout(Some(remaining)).map_err(|_| "cannot set Engine write deadline")?;
+        let count = stream.write(&bytes[offset..]).map_err(|_| "Engine write failed")?;
+        if count == 0 { return Err("Engine closed exchange".into()); }
+        offset += count;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_http_header(stream: &mut UnixStream, deadline: Instant) -> Result<String, String> {
+    let mut header = Vec::new();
+    while !header.ends_with(b"\r\n\r\n") {
+        if header.len() >= 4096 { return Err("Engine header exceeds 4 KiB".into()); }
+        let mut byte = [0];
+        read_until(stream, &mut byte, deadline)?;
+        header.push(byte[0]);
+    }
+    String::from_utf8(header).map_err(|_| "invalid Engine header".into())
+}
+
+#[cfg(target_os = "linux")]
+fn engine_socket(docker_host: &str, deadline: Instant) -> Result<(UnixStream, libc::pid_t, u64), String> {
+    let socket = docker_host.strip_prefix("unix://").ok_or("Docker attach requires a Unix socket")?;
+    let path = Path::new(socket);
+    if !path.is_absolute() || matches!(socket, "/var/run/docker.sock" | "/run/docker.sock") {
+        return Err("Docker attach requires a local rootless socket".into());
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| "missing Docker socket")?;
+    if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0 || path.canonicalize().ok().as_deref() != Some(path) {
+        return Err("Docker socket must be private, owned, and unsymlinked".into());
+    }
+    let stream = bounded_unix_connect(path, deadline)?;
+    let peer_pid = socket_peer_pid(&stream)?;
+    let after = fs::symlink_metadata(path).map_err(|_| "Docker socket disappeared")?;
+    if after.dev() != metadata.dev() || after.ino() != metadata.ino() {
+        return Err("Docker socket changed during connection".into());
+    }
+    Ok((stream, peer_pid, metadata.ino()))
+}
+
 /// Connect with a wall-clock bound; UnixStream::connect alone has no timeout.
 #[cfg(target_os = "linux")]
 pub(crate) fn bounded_unix_connect(path: &Path, deadline: Instant) -> Result<UnixStream, String> {
@@ -109,40 +170,17 @@ fn open_disabled_attach_transport(docker_host: &str, cid: &str) -> Result<Attach
     if cid.len() != 64 || !cid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid container ID for attach".into());
     }
-    let socket = docker_host.strip_prefix("unix://").ok_or("Docker attach requires a Unix socket")?;
-    let path = Path::new(socket);
-    if !path.is_absolute() || matches!(socket, "/var/run/docker.sock" | "/run/docker.sock") {
-        return Err("Docker attach requires a local rootless socket".into());
-    }
-    let metadata = fs::symlink_metadata(path).map_err(|_| "missing Docker socket")?;
-    if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0 || path.canonicalize().ok().as_deref() != Some(path) {
-        return Err("Docker socket must be private, owned, and unsymlinked".into());
-    }
     let deadline = Instant::now() + ATTACH_TIMEOUT;
-    let mut stream = bounded_unix_connect(path, deadline)?;
-    let peer_pid = socket_peer_pid(&stream)?;
-    let after = fs::symlink_metadata(path).map_err(|_| "Docker socket disappeared")?;
-    if after.dev() != metadata.dev() || after.ino() != metadata.ino() {
-        return Err("Docker socket changed during connection".into());
-    }
+    let (stream, peer_pid, socket_inode) = engine_socket(docker_host, deadline)?;
+    attach_on_stream(stream, cid, peer_pid, socket_inode, deadline)
+}
+
+#[cfg(target_os = "linux")]
+fn attach_on_stream(mut stream: UnixStream, cid: &str, peer_pid: libc::pid_t,
+    socket_inode: u64, deadline: Instant) -> Result<AttachTransport, String> {
     let request = format!("POST /v1.51/containers/{cid}/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n");
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() { return Err("Docker attach deadline exceeded".into()); }
-    stream.set_write_timeout(Some(remaining))
-        .map_err(|_| "cannot set Docker attach write deadline")?;
-    stream.write_all(request.as_bytes()).map_err(|_| "Docker attach request failed")?;
-    let mut header = Vec::new();
-    while !header.ends_with(b"\r\n\r\n") {
-        if header.len() >= 4096 { return Err("Docker attach header exceeds 4 KiB".into()); }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() { return Err("Docker attach deadline exceeded".into()); }
-        stream.set_read_timeout(Some(remaining)).map_err(|_| "cannot set Docker attach read deadline")?;
-        let mut byte = [0];
-        stream.read_exact(&mut byte).map_err(|_| "Docker attach header read failed")?;
-        header.push(byte[0]);
-    }
-    let header = std::str::from_utf8(&header).map_err(|_| "invalid Docker attach header")?;
+    write_until(&mut stream, request.as_bytes(), deadline)?;
+    let header = read_http_header(&mut stream, deadline)?;
     let mut lines = header.split("\r\n");
     let status = lines.next().ok_or("missing Docker attach status")?;
     if !status.starts_with("HTTP/1.1 101 ") { return Err("Docker attach did not upgrade".into()); }
@@ -170,23 +208,113 @@ fn open_disabled_attach_transport(docker_host: &str, cid: &str) -> Result<Attach
     if !upgrade || !connection || !multiplexed {
         return Err("Docker attach is not a multiplexed upgraded stream".into());
     }
-    Ok(AttachTransport { stream, cid: cid.into(), peer_pid, socket_inode: metadata.ino() })
+    Ok(AttachTransport { stream, cid: cid.into(), peer_pid, socket_inode })
+}
+
+/// Disabled one-connection observation: the inspected ID and the upgraded
+/// attach path must be identical, and the same Unix FD carries both HTTP
+/// exchanges. A same-UID fake daemon can still forge every reply.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn open_disabled_inspected_attach_transport(docker_host: &str, cid: &str) -> Result<AttachTransport, String> {
+    if cid.len() != 64 || !cid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("invalid container ID for inspect".into());
+    }
+    let deadline = Instant::now() + ATTACH_TIMEOUT;
+    let (mut stream, peer_pid, socket_inode) = engine_socket(docker_host, deadline)?;
+    let request = format!("GET /v1.51/containers/{cid}/json HTTP/1.1\r\nHost: docker\r\nConnection: keep-alive\r\n\r\n");
+    write_until(&mut stream, request.as_bytes(), deadline)?;
+    let header = read_http_header(&mut stream, deadline)?;
+    let mut lines = header.split("\r\n");
+    if !lines.next().is_some_and(|line| line.starts_with("HTTP/1.1 200 ")) {
+        return Err("Docker inspect did not return 200".into());
+    }
+    let mut length = None;
+    let mut content_type = false;
+    for line in lines.take_while(|line| !line.is_empty()) {
+        let (key, value) = line.split_once(':').ok_or("invalid Docker inspect header field")?;
+        let value = value.trim();
+        if key.eq_ignore_ascii_case("content-length") {
+            if length.is_some() || value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err("invalid Docker inspect length".into());
+            }
+            let parsed: usize = value.parse().map_err(|_| "invalid Docker inspect length")?;
+            if parsed == 0 || parsed > MAX_PROBE_OUTPUT { return Err("Docker inspect body exceeds 64 KiB".into()); }
+            length = Some(parsed);
+        } else if key.eq_ignore_ascii_case("content-type") {
+            if content_type || !value.eq_ignore_ascii_case("application/json") {
+                return Err("invalid Docker inspect content type".into());
+            }
+            content_type = true;
+        } else if key.eq_ignore_ascii_case("transfer-encoding")
+            || key.eq_ignore_ascii_case("connection") && value.eq_ignore_ascii_case("close") {
+            return Err("Docker inspect connection is not reusable".into());
+        }
+    }
+    if !content_type { return Err("missing Docker inspect content type".into()); }
+    let mut body = vec![0; length.ok_or("missing Docker inspect length")?];
+    read_until(&mut stream, &mut body, deadline)?;
+    let inspect: Value = serde_json::from_slice(&body).map_err(|_| "invalid Docker inspect JSON")?;
+    if inspect.as_object().and_then(|value| value.get("Id")).and_then(Value::as_str) != Some(cid) {
+        return Err("Docker inspect ID differs from requested attach CID".into());
+    }
+    attach_on_stream(stream, cid, peer_pid, socket_inode, deadline)
 }
 
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 impl AttachTransport {
     fn read_frame(&mut self) -> Result<(u8, Vec<u8>), String> {
+        self.read_frame_until(Instant::now() + ATTACH_TIMEOUT)
+    }
+
+    fn read_frame_until(&mut self, deadline: Instant) -> Result<(u8, Vec<u8>), String> {
         let mut header = [0u8; 8];
-        self.stream.read_exact(&mut header).map_err(|_| "Docker attach frame header read failed")?;
+        read_until(&mut self.stream, &mut header, deadline)?;
         if !matches!(header[0], 1 | 2) || header[1..4] != [0, 0, 0] {
             return Err("invalid Docker attach stream selector".into());
         }
         let length = u32::from_be_bytes(header[4..8].try_into().unwrap()) as usize;
         if length == 0 || length > MAX_FRAME { return Err("Docker attach frame exceeds 32 KiB".into()); }
         let mut body = vec![0; length];
-        self.stream.read_exact(&mut body).map_err(|_| "Docker attach frame body read failed")?;
+        read_until(&mut self.stream, &mut body, deadline)?;
         Ok((header[0], body))
+    }
+
+    /// Carries one framed request and one framed reply over the upgraded
+    /// attach FD. Notifications and stderr fail closed; this is a byte-path
+    /// fixture, not a full analyzer session or semantic verification.
+    fn exchange_lsp_frame(&mut self, request: &Value, timeout: Duration) -> Result<Value, String> {
+        let deadline = Instant::now() + timeout.min(SESSION_TIMEOUT);
+        let frame = encode_lsp_frame(request)?;
+        write_until(&mut self.stream, &frame, deadline)?;
+        let mut bytes = Vec::new();
+        loop {
+            let (selector, part) = self.read_frame_until(deadline)?;
+            if selector != 1 { return Err("Docker attach returned stderr instead of LSP stdout".into()); }
+            if bytes.len().saturating_add(part.len()) > MAX_HEADER + MAX_FRAME {
+                return Err("LSP reply exceeds bound".into());
+            }
+            bytes.extend_from_slice(&part);
+            if let Some(split) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                let header_end = split + 4;
+                if header_end > MAX_HEADER { return Err("invalid or oversized LSP header".into()); }
+                let header = std::str::from_utf8(&bytes[..split]).map_err(|_| "invalid LSP header")?;
+                let lengths = header.split("\r\n")
+                    .filter_map(|line| line.strip_prefix("Content-Length: ")).collect::<Vec<_>>();
+                if lengths.len() != 1 || lengths[0].starts_with('0')
+                    || !lengths[0].bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("invalid LSP Content-Length".into());
+                }
+                let size: usize = lengths[0].parse().map_err(|_| "LSP length overflow")?;
+                if size == 0 || size > MAX_FRAME { return Err("LSP body exceeds 32 KiB".into()); }
+                let total = header_end + size;
+                if bytes.len() > total { return Err("extra bytes after LSP reply".into()); }
+                if bytes.len() == total { return read_lsp_frame(&mut Cursor::new(bytes)); }
+            } else if bytes.len() > MAX_HEADER {
+                return Err("invalid or oversized LSP header".into());
+            }
+        }
     }
 }
 
@@ -851,6 +979,43 @@ mod tests {
     const ATTACH_101: &str = "HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n\r\n";
 
     #[cfg(target_os = "linux")]
+    fn fake_engine_header(stream: &mut UnixStream) -> String {
+        let mut bytes = Vec::new();
+        while !bytes.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            bytes.push(byte[0]);
+            assert!(bytes.len() < 4096);
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fake_engine_inspect(response: Vec<u8>) -> (TempDir, String, thread::JoinHandle<(String, bool)>) {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("engine.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let request = fake_engine_header(&mut stream);
+            stream.write_all(&response).unwrap();
+            let mut byte = [0];
+            let followed_by_attach = stream.read(&mut byte).unwrap_or(0) != 0;
+            (request, followed_by_attach)
+        });
+        (directory, format!("unix://{}", socket.display()), handle)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn inspected_reply(cid: &str) -> Vec<u8> {
+        let body = serde_json::to_vec(&json!({"Id":cid})).unwrap();
+        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()).bytes().chain(body).collect()
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn direct_attach_seam_targets_exact_cid_and_parses_multiplexed_stdout() {
         let cid = "c".repeat(64);
@@ -866,6 +1031,135 @@ mod tests {
         let request = server.join().unwrap();
         assert!(request.starts_with(&format!("POST /v1.51/containers/{cid}/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\n")));
         assert!(request.contains("Connection: Upgrade\r\n"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inspected_attach_uses_one_fd_for_exact_cid_and_lsp_bytes() {
+        let cid = "a".repeat(64);
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("engine.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let expected = json!({"jsonrpc":"2.0","id":7,"method":"textDocument/definition"});
+        let reply = json!({"jsonrpc":"2.0","id":7,"result":[]});
+        let server_cid = cid.clone();
+        let server_reply = reply.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let inspect_request = fake_engine_header(&mut stream);
+            stream.write_all(&inspected_reply(&server_cid)).unwrap();
+            let attach_request = fake_engine_header(&mut stream);
+            stream.write_all(ATTACH_101.as_bytes()).unwrap();
+            let lsp_request = read_lsp_frame(&mut std::io::BufReader::new(&mut stream)).unwrap();
+            let framed = encode_lsp_frame(&server_reply).unwrap();
+            for chunk in framed.chunks(17) {
+                let mut docker_frame = vec![1, 0, 0, 0];
+                docker_frame.extend((chunk.len() as u32).to_be_bytes());
+                docker_frame.extend(chunk);
+                stream.write_all(&docker_frame).unwrap();
+            }
+            (inspect_request, attach_request, lsp_request)
+        });
+        let host = format!("unix://{}", socket.display());
+        let mut transport = open_disabled_inspected_attach_transport(&host, &cid).unwrap();
+        assert_eq!(transport.cid, cid);
+        assert_eq!(transport.peer_pid, unsafe { libc::getpid() });
+        assert_eq!(transport.exchange_lsp_frame(&expected, Duration::from_secs(2)).unwrap(), reply);
+        let (inspect, attach, observed) = server.join().unwrap();
+        assert!(inspect.starts_with(&format!("GET /v1.51/containers/{cid}/json HTTP/1.1\r\n")));
+        assert!(attach.starts_with(&format!("POST /v1.51/containers/{cid}/attach?")));
+        assert_eq!(observed, expected);
+        // Even a complete same-UID fake Engine exchange never promotes the CLI.
+        let (root, plan, _, _, _) = fixture("ok");
+        assert_eq!(unavailable_status(&plan)["binding"], "unknown");
+        drop(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inspected_attach_rejects_cid_and_http_spoofs_before_upgrade() {
+        let cid = "a".repeat(64);
+        let other = "b".repeat(64);
+        let body = format!("{{\"Id\":\"{cid}\"}}x");
+        let malformed = vec![
+            inspected_reply(&other),
+            format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).into_bytes(),
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 65537\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+        ];
+        for response in malformed {
+            let (_dir, host, server) = fake_engine_inspect(response);
+            assert!(open_disabled_inspected_attach_transport(&host, &cid).is_err());
+            let (request, followed_by_attach) = server.join().unwrap();
+            assert!(request.starts_with(&format!("GET /v1.51/containers/{cid}/json HTTP/1.1\r\n")));
+            assert!(!followed_by_attach, "attach followed a rejected inspect reply");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inspected_attach_lsp_exchange_rejects_stderr_overflow_trailing_and_stall() {
+        let cid = "a".repeat(64);
+        let lsp = encode_lsp_frame(&json!({"jsonrpc":"2.0","id":7,"result":[]})).unwrap();
+        let mut trailing = lsp.clone();
+        trailing.extend(b"extra");
+        let cases = [
+            ("stderr", 2, lsp, false),
+            ("trailing", 1, trailing, false),
+            ("stall", 1, b"short".to_vec(), true),
+        ];
+        for (name, selector, payload, stall) in cases {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("engine.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+            let server_cid = cid.clone();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                fake_engine_header(&mut stream);
+                stream.write_all(&inspected_reply(&server_cid)).unwrap();
+                fake_engine_header(&mut stream);
+                stream.write_all(ATTACH_101.as_bytes()).unwrap();
+                read_lsp_frame(&mut std::io::BufReader::new(&mut stream)).unwrap();
+                if stall { thread::sleep(Duration::from_millis(100)); }
+                let mut frame = vec![selector, 0, 0, 0];
+                frame.extend((payload.len() as u32).to_be_bytes());
+                frame.extend(payload);
+                let _ = stream.write_all(&frame);
+            });
+            let host = format!("unix://{}", socket.display());
+            let mut transport = open_disabled_inspected_attach_transport(&host, &cid).unwrap();
+            let result = transport.exchange_lsp_frame(&json!({"jsonrpc":"2.0","id":7,"method":"test"}),
+                if stall { Duration::from_millis(20) } else { Duration::from_secs(2) });
+            assert!(result.is_err(), "accepted {name} LSP bytes");
+            server.join().unwrap();
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("engine.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let server_cid = cid.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            fake_engine_header(&mut stream);
+            stream.write_all(&inspected_reply(&server_cid)).unwrap();
+            fake_engine_header(&mut stream);
+            stream.write_all(ATTACH_101.as_bytes()).unwrap();
+            read_lsp_frame(&mut std::io::BufReader::new(&mut stream)).unwrap();
+            let _ = stream.write_all(&[1, 0, 0, 0, 0, 0, 128, 1]);
+        });
+        let host = format!("unix://{}", socket.display());
+        let mut transport = open_disabled_inspected_attach_transport(&host, &cid).unwrap();
+        assert!(transport.exchange_lsp_frame(&json!({"jsonrpc":"2.0","id":7,"method":"test"}),
+            Duration::from_secs(2)).unwrap_err().contains("32 KiB"));
+        server.join().unwrap();
     }
 
     #[cfg(target_os = "linux")]
