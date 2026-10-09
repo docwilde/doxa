@@ -9,12 +9,12 @@ the stable 2.0 release has not been cut.
 
 **Isolation proof**
 
-- Audit the fourth broker bind and add read-only ext4 project-quota checks. A disposable four-bind run retained `EDQUOT` after Engine restart and remount; hardened admission stays closed.
-- Constrain **HookBroker** peer identity and `PreCompact` frames. A same-UID bearer client still passes; broker origin and provider egress need proof.
+- Audit the fourth broker bind and add read-only ext4 project-quota checks. A disposable four-bind run retained `EDQUOT` after Engine restart and remount; a privileged verifier is still required.
+- Constrain **HookBroker** peer identity and `PreCompact` frames. A same-UID bearer client still passes; broker origin and provider egress need proof. Hardened admission stays closed.
 
 **Trust and plugin preflight**
 
-- Add a disabled root-owned code-graph broker handshake, proved across UIDs in an offline guest. Semantic binding remains `unknown` until the analyzer stream and container are verified.
+- Add a disabled, bounded code-graph socket observation. An offline guest reproduced a root listener handed to a lower-UID process; peer UID is untrusted and semantic binding stays `unknown`.
 - Tighten plugin host preflight to distinct namespaces and loopback-only routes. It passed in a fresh guest; installed-host TUI execution remains disabled.
 
 ## 2.0.0-beta.30 — 2026-10-09
