@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -106,6 +107,32 @@ class DelegatedShapeTests(unittest.TestCase):
             proof.check_target_dir("/tmp/doxa-plugin-target")
         target = Path(self.temp.name) / "target"
         self.assertEqual(proof.check_target_dir(str(target)), target)
+
+    def test_stages_independent_private_worker_from_hardlinked_cargo_output(self) -> None:
+        source = Path(self.temp.name) / "doxa-plugin-worker"
+        source.write_bytes(b"#!/bin/sh\nexit 0\n")
+        source.chmod(0o755)
+        os.link(source, Path(self.temp.name) / "cargo-hardlink")
+        self.assertEqual(source.stat().st_nlink, 2)
+        with proof.staged_worker(source, Path(self.temp.name)) as staged:
+            metadata = staged.stat()
+            self.assertEqual(metadata.st_nlink, 1)
+            self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o700)
+            self.assertEqual(metadata.st_uid, os.geteuid())
+            self.assertNotEqual(metadata.st_ino, source.stat().st_ino)
+            self.assertEqual(staged.read_bytes(), source.read_bytes())
+        self.assertFalse(staged.exists())
+        self.assertEqual(source.stat().st_nlink, 2)
+
+    def test_staging_rejects_symlinked_worker(self) -> None:
+        source = Path(self.temp.name) / "worker"
+        source.write_bytes(b"worker")
+        source.chmod(0o700)
+        alias = Path(self.temp.name) / "alias"
+        alias.symlink_to(source)
+        with self.assertRaises(OSError):
+            with proof.staged_worker(alias, Path(self.temp.name)):
+                pass
 
 
 if __name__ == "__main__":

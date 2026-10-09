@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import hashlib
 import os
 from pathlib import Path
 import platform
@@ -11,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 BWRAP = Path("/usr/bin/bwrap")
@@ -182,6 +185,41 @@ def preflight() -> tuple[Path, Path, str]:
     return parent, scratch, version
 
 
+@contextmanager
+def staged_worker(source: Path, scratch: Path):
+    """Give the acceptance test a private inode, even when Cargo hardlinks its output."""
+    with tempfile.TemporaryDirectory(prefix="doxa-plugin-worker-", dir=scratch) as directory:
+        worker = Path(directory) / "doxa-plugin-worker"
+        with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC), "rb") as reader:
+            before = os.fstat(reader.fileno())
+            require(stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid()
+                    and before.st_mode & 0o111 != 0 and before.st_mode & 0o022 == 0,
+                    "built plugin worker is not an owner-controlled executable")
+            digest = hashlib.sha256()
+            fd = os.open(worker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o700)
+            with os.fdopen(fd, "wb") as writer:
+                os.fchmod(writer.fileno(), 0o700)
+                while chunk := reader.read(1024 * 1024):
+                    writer.write(chunk)
+                    digest.update(chunk)
+                writer.flush()
+                os.fsync(writer.fileno())
+            after = os.fstat(reader.fileno())
+            require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                    == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+                    "built plugin worker changed while staging")
+        metadata = worker.stat()
+        require(metadata.st_uid == os.geteuid() and metadata.st_nlink == 1
+                and stat.S_IMODE(metadata.st_mode) == 0o700
+                and metadata.st_size == before.st_size,
+                "staged plugin worker lacks a private executable identity")
+        with worker.open("rb") as staged:
+            require(hashlib.file_digest(staged, "sha256").digest() == digest.digest(),
+                    "staged plugin worker differs from the built executable")
+        yield worker
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
@@ -204,13 +242,13 @@ def main() -> int:
     if subprocess.run(build, cwd=root, check=False).returncode != 0:
         return 1
     worker = target / "debug" / "doxa-plugin-worker"
-    require(worker.is_file(), "cargo build did not produce the plugin worker")
     command = ["cargo", "test", "--locked", "-p", "doxa-tui", "--lib",
                "delegated_cgroup_containment_acceptance", "--", "--ignored", "--nocapture"]
     environment = os.environ.copy()
     environment["RUST_TEST_THREADS"] = "1"
-    environment["DOXA_PLUGIN_ACCEPTANCE_WORKER"] = str(worker)
-    return subprocess.run(command, cwd=root, env=environment, check=False).returncode
+    with staged_worker(worker, scratch) as private_worker:
+        environment["DOXA_PLUGIN_ACCEPTANCE_WORKER"] = str(private_worker)
+        return subprocess.run(command, cwd=root, env=environment, check=False).returncode
 
 
 if __name__ == "__main__":
