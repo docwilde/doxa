@@ -4,7 +4,7 @@
 //! Docker bind behavior, EDQUOT, and restart/remount still need independent
 //! verification before a hardened profile may be enabled.
 use crate::{error, Manifest, Profile};
-use std::{ffi::{CStr, CString}, fs::File, io, os::fd::{AsRawFd, FromRawFd},
+use std::{ffi::{CStr, CString}, fs::File, io, os::fd::{AsRawFd, BorrowedFd, FromRawFd},
     os::unix::{ffi::OsStrExt, fs::MetadataExt}, path::{Component, Path}};
 
 const MAX_HARD_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
@@ -38,7 +38,23 @@ pub fn inspect_session_hard_quota(manifest: &Manifest, expected: QuotaExpectatio
     inspect_with(manifest, expected, &KernelQuotaReader)
 }
 
+/// Fixture-only read-only probe. The caller supplies a pinned session-root
+/// descriptor and expected owner UID. This API does not authenticate those
+/// inputs: it provides a snapshot, never an admission token.
+pub fn inspect_disposable_fixture_from_fd(manifest: &Manifest, expected: QuotaExpectation,
+    owner_uid: u32, root_fd: BorrowedFd<'_>) -> io::Result<QuotaSnapshot> {
+    let root: File = root_fd.try_clone_to_owned()?.into();
+    inspect_with_root(manifest, expected, owner_uid, root, &KernelQuotaReader)
+}
+
 fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl QuotaReader) -> io::Result<QuotaSnapshot> {
+    let root_path = manifest.checkout.parent().ok_or_else(|| error("session root missing"))?;
+    let root = open_absolute_directory(root_path)?;
+    inspect_with_root(manifest, expected, unsafe { libc::geteuid() }, root, reader)
+}
+
+fn inspect_with_root(manifest: &Manifest, expected: QuotaExpectation, owner_uid: u32,
+    root: File, reader: &impl QuotaReader) -> io::Result<QuotaSnapshot> {
     if manifest.profile != Profile::DockerOffline || manifest.state != "ready" {
         return Err(error("hard-quota inspection requires a ready network-none Docker session"));
     }
@@ -53,8 +69,16 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
         || manifest.cache != root_path.join("cache") || manifest.broker != root_path.join("broker") {
         return Err(error("quota inspection paths escape the session root"));
     }
-    let root = open_absolute_directory(root_path)?;
-    let root_meta = private_metadata(&root)?;
+    let root_meta = private_metadata(&root, owner_uid)?;
+    let visible_root = open_absolute_directory(root_path)?;
+    let visible_root_meta = visible_root.metadata()?;
+    if (root_meta.dev(), root_meta.ino()) != (visible_root_meta.dev(), visible_root_meta.ino()) {
+        return Err(error("supplied root descriptor differs from the session root path"));
+    }
+    #[cfg(target_os = "linux")]
+    if entry_mount_id(&root)? != entry_mount_id(&visible_root)? {
+        return Err(error("supplied root descriptor differs from the session root mount"));
+    }
     let root_state = reader.project(&root).map_err(|_| error("session project metadata unavailable"))?;
     if root_state.id != expected.project_id || !root_state.inherits || root_state.mount_id == 0 {
         return Err(error("session root has wrong project ID, inheritance, or mount identity"));
@@ -62,7 +86,7 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
     let mut descendants = 0;
     for (name, path) in [("checkout", &manifest.checkout), ("home", &manifest.private_home), ("cache", &manifest.cache)] {
         let directory = open_child(&root, name)?;
-        let meta = private_metadata(&directory)?;
+        let meta = private_metadata(&directory, owner_uid)?;
         if meta.dev() != root_meta.dev() { return Err(error("session bind source crosses a filesystem boundary")); }
         if name == "checkout" && (meta.dev(), meta.ino()) != (manifest.checkout_device, manifest.checkout_inode) {
             return Err(error("isolated checkout identity changed"));
@@ -80,9 +104,13 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
         if (meta.dev(), meta.ino()) != (visible_meta.dev(), visible_meta.ino()) {
             return Err(error("session bind source changed during quota inspection"));
         }
+        #[cfg(target_os = "linux")]
+        if entry_mount_id(&directory)? != entry_mount_id(&visible)? {
+            return Err(error("session bind source mount changed during quota inspection"));
+        }
     }
     let broker = open_child(&root, "broker")?;
-    let broker_meta = private_metadata(&broker)?;
+    let broker_meta = private_metadata(&broker, owner_uid)?;
     if broker_meta.dev() != root_meta.dev() {
         return Err(error("session broker crosses a filesystem boundary"));
     }
@@ -92,11 +120,15 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
         || broker_state.mount_id != root_state.mount_id {
         return Err(error("session broker has wrong project ID, inheritance, or mount"));
     }
-    let broker_entries = audit_broker_entries(&broker, root_state.mount_id, root_meta.dev())?;
+    let broker_entries = audit_broker_entries(&broker, root_state.mount_id, root_meta.dev(), owner_uid)?;
     let visible_broker = open_absolute_directory(&manifest.broker)?;
     let visible_meta = visible_broker.metadata()?;
     if (broker_meta.dev(), broker_meta.ino()) != (visible_meta.dev(), visible_meta.ino()) {
         return Err(error("session broker changed during quota inspection"));
+    }
+    #[cfg(target_os = "linux")]
+    if entry_mount_id(&broker)? != entry_mount_id(&visible_broker)? {
+        return Err(error("session broker mount changed during quota inspection"));
     }
     let limit = reader.limit(&root, expected.project_id).map_err(|cause| {
         if cause.kind() == io::ErrorKind::PermissionDenied {
@@ -123,7 +155,7 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
 // broker bind. This checks visible inode identities, ownership, permissions
 // and mount identity at one instant; it does not prove the peer or quota on
 // future socket writes. A live transport attestation is still required.
-fn audit_broker_entries(directory: &File, mount_id: u64, device: u64) -> io::Result<usize> {
+fn audit_broker_entries(directory: &File, mount_id: u64, device: u64, owner_uid: u32) -> io::Result<usize> {
     let before = directory.metadata()?;
     let duplicate = directory.try_clone()?;
     let stream = unsafe { libc::fdopendir(duplicate.as_raw_fd()) };
@@ -165,7 +197,7 @@ fn audit_broker_entries(directory: &File, mount_id: u64, device: u64) -> io::Res
             use std::os::unix::fs::FileTypeExt;
             let meta = pinned.metadata()?;
             if !same_entry(&stat, &meta) || !meta.file_type().is_socket()
-                || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1
+                || meta.uid() != owner_uid || meta.nlink() != 1
                 || meta.mode() & 0o777 != 0o600 || meta.dev() != device {
                 return Err(error("session broker socket has unsafe identity or permissions"));
             }
@@ -197,7 +229,7 @@ fn entry_mount_id(file: &File) -> io::Result<u64> {
         return Err(io::Error::last_os_error());
     }
     if statx.stx_mask & libc::STATX_MNT_ID == 0 {
-        return Err(error("kernel did not report broker socket mount identity"));
+        return Err(error("kernel did not report entry mount identity"));
     }
     Ok(statx.stx_mnt_id)
 }
@@ -318,9 +350,9 @@ fn same_entry(before: &libc::stat, meta: &std::fs::Metadata) -> bool {
         && before.st_mode as u32 == meta.mode()
 }
 
-fn private_metadata(directory: &File) -> io::Result<std::fs::Metadata> {
+fn private_metadata(directory: &File, owner_uid: u32) -> io::Result<std::fs::Metadata> {
     let meta = directory.metadata()?;
-    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+    if !meta.is_dir() || meta.uid() != owner_uid || meta.mode() & 0o077 != 0 {
         return Err(error("quota directory must be private and owner-owned"));
     }
     Ok(meta)
@@ -520,6 +552,27 @@ mod tests {
         assert_eq!(snapshot.hard_limit_bytes, expected.hard_limit_bytes);
         assert_eq!(snapshot.descendants_checked, 0);
         assert_eq!(snapshot.broker_entries_checked, 0);
+    }
+    #[test]
+    fn supplied_root_fd_substitution_and_wrong_policy_refuse() {
+        let (temp, manifest, mut reader, expected) = fixture();
+        let owner_uid = unsafe { libc::geteuid() };
+        let root = File::open(temp.path()).unwrap();
+        assert_eq!(inspect_with_root(&manifest, expected, owner_uid,
+            root.try_clone().unwrap(), &reader).unwrap().project_id, expected.project_id);
+        let substituted = File::open(&manifest.private_home).unwrap();
+        assert!(inspect_with_root(&manifest, expected, owner_uid, substituted, &reader)
+            .unwrap_err().to_string().contains("supplied root descriptor differs"));
+        let unrelated = temp.path().parent().unwrap();
+        assert!(inspect_with_root(&manifest, expected, owner_uid, File::open(unrelated).unwrap(), &reader).is_err());
+        assert!(inspect_with_root(&manifest, QuotaExpectation { project_id: expected.project_id + 1,
+            ..expected }, owner_uid, root.try_clone().unwrap(), &reader).is_err());
+        assert!(inspect_with_root(&manifest, QuotaExpectation { hard_limit_bytes: expected.hard_limit_bytes + 512,
+            ..expected }, owner_uid, root.try_clone().unwrap(), &reader).is_err());
+        let broker_ino = fs::metadata(&manifest.broker).unwrap().ino();
+        reader.states.get_mut(&broker_ino).unwrap().id += 1;
+        assert!(inspect_with_root(&manifest, expected, owner_uid, root, &reader)
+            .unwrap_err().to_string().contains("session broker has wrong project"));
     }
     #[test]
     fn broker_root_requires_same_private_project_and_mount() {

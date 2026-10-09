@@ -244,9 +244,13 @@ three data binds and recheck EDQUOT after restarting the same container. A
 separate disposable four-bind guest proof retained EDQUOT on ext4 after an
 Engine restart and source remount, with a working read-only broker socket;
 an XFS control returned ENOSPC instead. The ext4 descriptor-bound syscall
-branch is source-reviewed and unit-tested but still needs a live read-only
-probe against a project-quota mount. These fixture observations do not
-produce a production admission token.
+branch passed a privileged read-only query against the disposable ext4
+project-quota mount, while a rootless query, substituted root descriptor
+(including the same inode through a different bind mount), wrong project/limit,
+changed broker project and disabled enforcement all
+refused. The [fixture procedure](../hard-quota-preflight.md#disposable-read-only-kernel-query)
+is executable; it accepts caller-supplied policy and cannot serve as a
+production privileged helper or admission token.
 `docker-hardened` is explicitly refused at
 profile parsing, with no fallback. A credential-free rootless smoke can test
 Python `HTTPS_PROXY` streaming, denied second-host access and failed direct
