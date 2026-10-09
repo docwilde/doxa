@@ -811,7 +811,7 @@ mod tests {
         let cache = Arc::new(Mutex::new(PngCache::new().unwrap()));
         let source = "graph TD\nA-->B";
         let key = transcript_tools::mermaid_cache_key(&transcript_tools::mermaid_key(source),
-            &renderer_identity(&renderer, root).unwrap(), 24);
+            &cache_identity(&renderer, package.path(), &AtomicBool::new(false)).unwrap(), 24);
         let fixture = tempfile::tempdir_in(private_temp_root().unwrap()).unwrap();
         let png = fixture.path().join("pixel.png");
         image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 20, 30, 255]))
