@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.22 — 2026-10-09
+
+**Remote workspace**
+
+- Add opt-in mixed local/remote pane layout restore with owner, hub, local tabset, and remote incarnation checks. Saved state contains layout only; live two-host verification remains open.
+
+**Code graph**
+
+- Parse bounded Python definitions and imports with source hashes and coverage. Python calls and modules remain unsupported, semantic binding unknown, and the complete input digest Rust-only.
+
+**Terminal diagrams**
+
+- Cache up to eight sandboxed Mermaid PNGs in a private session directory, keyed by source, width, and checked renderer package tree. Corrupt or uncheckable entries fall back to source.
+
 ## 2.0.0-beta.21 — 2026-10-09
 
 **Docker isolation**

@@ -1,7 +1,8 @@
-//! Opt-in, owner-scoped remote-only pane persistence. No transcript, draft,
+//! Opt-in, owner-scoped remote and mixed pane persistence. No transcript, draft,
 //! approval, retry ID or event cursor is ever stored here.
 use crate::remote_client::valid_target;
 use crate::ui::{panes::{Tree, MAX_DEPTH, MAX_PANES}, App, PaneGroup, Split};
+use doxa_state::valid_session_id;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -98,6 +99,10 @@ struct Layout {
     version: u8,
     hub: String,
     owner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    locals: Vec<String>,
     sessions: Vec<Identity>,
     groups: Vec<Group>,
     tree: Option<SavedTree>,
@@ -108,8 +113,10 @@ struct Layout {
     rail_width: u16,
 }
 impl Layout {
-    fn validate(&self, hub: &str, owner: &str) -> io::Result<()> {
-        if self.version != 1 || self.hub != hub || self.owner != owner
+    fn validate(&self, hub: &str, owner: &str, local_scope: Option<&str>) -> io::Result<()> {
+        if self.version != if local_scope.is_some() { 2 } else { 1 }
+            || self.hub != hub || self.owner != owner
+            || self.local_scope.as_deref() != local_scope
             || self.sessions.len() > MAX_REMOTE_TABS || self.groups.is_empty()
             || self.groups.len() > MAX_PANES || self.active_group >= self.groups.len()
             || split_value(&self.split).is_none() || !(20..=80).contains(&self.split_percent)
@@ -122,6 +129,12 @@ impl Layout {
                 || row.incarnation.chars().any(char::is_control)) {
             return Err(invalid("remote layout identity invalid"));
         }
+        let locals = self.locals.iter().map(String::as_str).collect::<HashSet<_>>();
+        if locals.len() != self.locals.len() || self.locals.len() > crate::ui::panes::MAX_TABS
+            || self.locals.iter().any(|id| !valid_session_id(id) || valid_target(id))
+            || (local_scope.is_none() && !self.locals.is_empty()) {
+            return Err(invalid("mixed layout local identity invalid"));
+        }
         let mut tabs = HashSet::new();
         for group in &self.groups {
             if group.active.as_ref().is_some_and(|active| !group.tabs.contains(active))
@@ -129,12 +142,16 @@ impl Layout {
                 return Err(invalid("remote layout active tab invalid"));
             }
             for id in &group.tabs {
-                if !identities.contains_key(id.as_str()) || !tabs.insert(id.as_str()) {
+                if !(identities.contains_key(id.as_str()) || locals.contains(id.as_str()))
+                    || !tabs.insert(id.as_str()) {
                     return Err(invalid("remote layout tab identity invalid"));
                 }
             }
         }
-        if tabs.len() > MAX_REMOTE_TABS { return Err(invalid("remote layout exceeds tab bound")); }
+        if tabs.len() > MAX_REMOTE_TABS + crate::ui::panes::MAX_TABS
+            || self.locals.iter().any(|id| !tabs.contains(id.as_str())) {
+            return Err(invalid("remote layout exceeds tab bound"));
+        }
         if let Some(tree) = &self.tree {
             let mut seen = HashSet::new();
             tree.decode(self.groups.len(), 0, &mut seen)
@@ -145,29 +162,41 @@ impl Layout {
         }
         Ok(())
     }
-    fn capture(app: &App, hub: &str, inventory: &Inventory) -> io::Result<Self> {
+    fn capture(app: &App, hub: &str, inventory: &Inventory, local_scope: Option<&str>) -> io::Result<Self> {
         let live = inventory.keys();
         let groups = app.groups.iter().map(|group| {
-            if group.tabs.iter().any(|id| !live.contains_key(id.as_str())) {
+            if group.tabs.iter().any(|id| valid_target(id) && !live.contains_key(id.as_str())) {
                 return Err(invalid("remote layout has an unverified tab"));
             }
             Ok(Group { tabs: group.tabs.clone(), active: group.tabs.get(group.active).cloned() })
         }).collect::<io::Result<Vec<_>>>()?;
         let open = groups.iter().flat_map(|group| group.tabs.iter()).collect::<HashSet<_>>();
-        let layout = Self { version: 1, hub: hub.into(), owner: inventory.owner.clone(),
+        let locals = groups.iter().flat_map(|group| group.tabs.iter())
+            .filter(|id| !valid_target(id)).cloned().collect();
+        let layout = Self { version: if local_scope.is_some() { 2 } else { 1 }, hub: hub.into(), owner: inventory.owner.clone(),
+            local_scope: local_scope.map(str::to_owned), locals,
             sessions: inventory.sessions.iter().filter(|row| open.contains(&row.id)).cloned().collect(), groups,
             tree: app.pane_tree.as_ref().map(SavedTree::capture), active_group: app.active_group,
             split: split_name(app.split).into(), split_percent: app.split_percent,
             rail_visible: app.rail_visible, rail_width: app.rail_width };
-        layout.validate(hub, &inventory.owner)?;
+        layout.validate(hub, &inventory.owner, local_scope)?;
         Ok(layout)
     }
     fn project(&self, app: &mut App, inventory: &Inventory) -> bool {
+        if self.local_scope.is_some() {
+            let current = app.groups.iter().flat_map(|group| group.tabs.iter())
+                .filter(|id| !valid_target(id)).map(String::as_str).collect::<HashSet<_>>();
+            let saved = self.locals.iter().map(String::as_str).collect::<HashSet<_>>();
+            // Local tabsets own their roster. An overlay from an older local
+            // window must not reorder, invent or discard a changed local view.
+            if current != saved { return false; }
+        }
         let live = inventory.keys();
         let saved = self.sessions.iter().map(|row| (row.id.as_str(), row.incarnation.as_str()))
             .collect::<HashMap<_, _>>();
         let mut groups = self.groups.iter().map(|group| {
-            let tabs = group.tabs.iter().filter(|id| live.get(id.as_str()) == saved.get(id.as_str()))
+            let tabs = group.tabs.iter().filter(|id| !valid_target(id)
+                || live.get(id.as_str()) == saved.get(id.as_str()))
                 .cloned().collect::<Vec<_>>();
             let active = group.active.as_ref().and_then(|id| tabs.iter().position(|tab| tab == id)).unwrap_or(0);
             PaneGroup { tabs, active, scroll: 0 }
@@ -204,6 +233,7 @@ impl Layout {
 
 pub(crate) struct Store {
     hub: String,
+    local_scope: Option<String>,
     initial: Inventory,
     path: PathBuf,
     loaded_bytes: Option<Vec<u8>>,
@@ -212,18 +242,32 @@ pub(crate) struct Store {
 }
 impl Store {
     pub(crate) fn open(home: &Path, hub: &str, initial: Inventory) -> io::Result<Self> {
+        Self::open_inner(home, hub, initial, None)
+    }
+    pub(crate) fn open_mixed(home: &Path, hub: &str, initial: Inventory, local_scope: &str) -> io::Result<Self> {
+        if local_scope.is_empty() { return Err(invalid("mixed layout local scope missing")); }
+        let digest = format!("{:x}", Sha256::digest(local_scope.as_bytes()));
+        Self::open_inner(home, hub, initial, Some(digest))
+    }
+    fn open_inner(home: &Path, hub: &str, initial: Inventory, local_scope: Option<String>) -> io::Result<Self> {
         let base = crate::remote_client::hub_url(hub)?;
         let hub = base.as_str().to_owned();
-        let digest = Sha256::digest(format!("{hub}\0{}", initial.owner).as_bytes());
+        let key = if let Some(scope) = &local_scope {
+            format!("{hub}\0{}\0mixed\0{scope}", initial.owner)
+        } else {
+            // Keep the remote-only filename from version 1.
+            format!("{hub}\0{}", initial.owner)
+        };
+        let digest = Sha256::digest(key.as_bytes());
         let directory = home.join("remote-layouts");
         fs::DirBuilder::new().recursive(true).mode(0o700).create(&directory)?;
         let path = directory.join(format!("{:x}.json", digest));
-        let mut store = Self { hub, initial, path, loaded_bytes: None, layout: None, restored: false };
+        let mut store = Self { hub, local_scope, initial, path, loaded_bytes: None, layout: None, restored: false };
         Self::with_lock(&store.path, || {
             store.loaded_bytes = Self::read_checked(&store.path)?;
             if let Some(bytes) = &store.loaded_bytes {
                 let layout: Layout = serde_json::from_slice(bytes).map_err(|_| invalid("remote layout JSON invalid"))?;
-                layout.validate(&store.hub, &store.initial.owner)?;
+                layout.validate(&store.hub, &store.initial.owner, store.local_scope.as_deref())?;
                 store.layout = Some(layout);
             }
             Ok(())
@@ -233,23 +277,38 @@ impl Store {
     pub(crate) fn ready(&self, app: &App) -> bool {
         self.initial.sessions.iter().all(|row| app.sessions.iter().any(|session| session.id == row.id))
     }
+    #[cfg(test)]
     pub(crate) fn restore_if_ready(&mut self, app: &mut App) -> bool {
+        self.restore_if_ready_with_local(app, true)
+    }
+    pub(crate) fn restore_if_ready_with_local(&mut self, app: &mut App, local_complete: bool) -> bool {
+        if self.local_scope.is_some() && !local_complete { return false; }
         if self.restored || !self.ready(app) { return false; }
         self.restored = true;
         self.layout.as_ref().is_some_and(|layout| layout.project(app, &self.initial))
     }
+    #[cfg(test)]
     pub(crate) fn save_checked(&mut self, app: &App, fresh: Inventory) -> io::Result<()> {
+        self.save_checked_with_local(app, fresh, true)
+    }
+    pub(crate) fn save_checked_with_local(&mut self, app: &App, fresh: Inventory, local_complete: bool) -> io::Result<()> {
+        if self.local_scope.is_some() && (!local_complete || app.has_unverified_archived_tabs()
+            || app.groups.iter().flat_map(|group| group.tabs.iter())
+                .filter(|id| !valid_target(id))
+                .any(|id| !app.sessions.iter().any(|session| session.id == *id))) {
+            return Err(invalid("mixed layout local roster incomplete"));
+        }
         if !self.restored || !self.ready(app) || fresh.owner != self.initial.owner {
             return Err(invalid("remote layout roster incomplete"));
         }
         let current = fresh.keys();
         let initial = self.initial.keys();
-        if app.groups.iter().flat_map(|group| group.tabs.iter()).any(|id|
+        if app.groups.iter().flat_map(|group| group.tabs.iter()).filter(|id| valid_target(id)).any(|id|
             current.get(id.as_str()).is_none() || initial.get(id.as_str()).is_some_and(|old|
                 current.get(id.as_str()) != Some(old))) {
             return Err(invalid("remote layout session identity changed"));
         }
-        let next = Layout::capture(app, &self.hub, &fresh)?;
+        let next = Layout::capture(app, &self.hub, &fresh, self.local_scope.as_deref())?;
         let bytes = serde_json::to_vec(&next).map_err(io::Error::other)?;
         if bytes.len() as u64 > MAX_FILE { return Err(invalid("remote layout exceeds file bound")); }
         let path = self.path.clone();
@@ -311,6 +370,96 @@ mod tests {
         app.apply_worker_frame(crate::worker_frames::WorkerFrame::Daemon { session_id: id.into(),
             frame: json!({"type":"hello","session_id":id,"title":id,"remote":true}) });
     }
+    fn local(app: &mut App, id: &str) {
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::Daemon { session_id: id.into(),
+            frame: json!({"type":"hello","session_id":id,"title":id}) });
+    }
+    #[test]
+    fn mixed_layout_round_trips_only_after_both_rosters_and_prunes_replaced_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = "https://hub.tail.ts.net/";
+        let initial = inventory("one@example.com", "first");
+        let mut store = Store::open_mixed(dir.path(), hub, initial.clone(), "local-tabset-one").unwrap();
+        let mut app = App::default();
+        local(&mut app, "local-one"); hello(&mut app, "host~a"); hello(&mut app, "host~b");
+        app.groups[0].tabs = vec!["host~b".into(), "local-one".into()];
+        app.groups[0].active = 0;
+        app.groups[1].tabs = vec!["host~a".into()];
+        app.active_group = 1; app.split = Split::Horizontal; app.split_percent = 37;
+        assert!(!store.restore_if_ready_with_local(&mut app, false));
+        assert!(store.save_checked_with_local(&app, initial.clone(), false).is_err());
+        assert!(!store.restore_if_ready_with_local(&mut app, true));
+        store.save_checked_with_local(&app, initial.clone(), true).unwrap();
+        let raw = fs::read_to_string(&store.path).unwrap();
+        for private in ["draft", "transcript", "approval", "cursor", "pending_input", "retry_id"] {
+            assert!(!raw.contains(private), "persisted {private}");
+        }
+        assert_ne!(store.path, Store::open(dir.path(), hub, initial.clone()).unwrap().path);
+        let mut reopened = Store::open_mixed(dir.path(), hub, initial.clone(), "local-tabset-one").unwrap();
+        let mut restored = App::default();
+        local(&mut restored, "local-one"); hello(&mut restored, "host~a");
+        assert!(!reopened.restore_if_ready_with_local(&mut restored, true));
+        hello(&mut restored, "host~b");
+        assert!(reopened.restore_if_ready_with_local(&mut restored, true));
+        assert_eq!(restored.groups[0].tabs, ["host~b", "local-one"]);
+        assert_eq!(restored.groups[0].active, 0);
+        assert_eq!(restored.groups[1].tabs, ["host~a"]);
+        assert_eq!(restored.active_group, 1);
+        assert_eq!((restored.split, restored.split_percent), (Split::Horizontal, 37));
+        let mut replaced = Store::open_mixed(dir.path(), hub,
+            inventory("one@example.com", "replaced"), "local-tabset-one").unwrap();
+        let mut projected = App::default();
+        local(&mut projected, "local-one"); hello(&mut projected, "host~a"); hello(&mut projected, "host~b");
+        assert!(replaced.restore_if_ready_with_local(&mut projected, true));
+        assert_eq!(projected.groups[0].tabs, ["host~b", "local-one"]);
+        assert!(projected.groups[1].tabs.is_empty());
+    }
+    #[test]
+    fn mixed_scope_and_changed_local_tabset_cannot_replay_or_clobber() {
+        let dir = tempfile::tempdir().unwrap(); let hub = "https://hub.tail.ts.net/";
+        let inventory = inventory("one@example.com", "first");
+        let mut first = Store::open_mixed(dir.path(), hub, inventory.clone(), "scope-a").unwrap();
+        let mut second = Store::open_mixed(dir.path(), hub, inventory.clone(), "scope-a").unwrap();
+        let mut app = App::default();
+        local(&mut app, "local-one"); hello(&mut app, "host~a"); hello(&mut app, "host~b");
+        app.groups[0].tabs = vec!["local-one".into(), "host~a".into()];
+        first.restore_if_ready_with_local(&mut app, true);
+        second.restore_if_ready_with_local(&mut app, true);
+        first.save_checked_with_local(&app, inventory.clone(), true).unwrap();
+        assert_eq!(second.save_checked_with_local(&app, inventory.clone(), true).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert!(Store::open_mixed(dir.path(), hub, inventory.clone(), "scope-b").unwrap().layout.is_none());
+        assert!(Store::open_mixed(dir.path(), hub, inventory.clone(), "scope-a").unwrap().layout.is_some());
+        let mut changed = App::default();
+        local(&mut changed, "different-local"); hello(&mut changed, "host~a"); hello(&mut changed, "host~b");
+        let mut reopened = Store::open_mixed(dir.path(), hub, inventory, "scope-a").unwrap();
+        assert!(!reopened.restore_if_ready_with_local(&mut changed, true));
+        assert_eq!(changed.groups[0].tabs, ["different-local"]);
+    }
+    #[test]
+    fn mixed_nested_panes_and_untrusted_file_are_bounded() {
+        let hub = "https://hub.tail.ts.net/";
+        let inventory = inventory("one@example.com", "first");
+        let mut app = App::default();
+        local(&mut app, "local-one"); hello(&mut app, "host~a"); hello(&mut app, "host~b");
+        app.groups[0].tabs = vec!["local-one".into()];
+        app.groups[1].tabs = vec!["host~a".into()];
+        app.groups.push(PaneGroup { tabs: vec!["host~b".into()], active: 0, scroll: 0 });
+        app.active_group = 2;
+        let mut tree = Tree::pair(Split::Vertical, 42);
+        assert!(tree.split(1, 2, Split::Horizontal, 0));
+        app.pane_tree = Some(tree.clone());
+        let saved = Layout::capture(&app, hub, &inventory, Some("scope")).unwrap();
+        let mut restored = App::default();
+        local(&mut restored, "local-one"); hello(&mut restored, "host~a"); hello(&mut restored, "host~b");
+        assert!(saved.project(&mut restored, &inventory));
+        assert_eq!(restored.pane_tree, Some(tree));
+        assert_eq!(restored.active_group, 2);
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_mixed(dir.path(), hub, inventory.clone(), "scope").unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", &store.path).unwrap();
+        assert!(Store::open_mixed(dir.path(), hub, inventory, "scope").is_err());
+    }
     #[test]
     fn owner_incarnation_and_live_inventory_gate_restore_without_cursor() {
         let dir = tempfile::tempdir().unwrap();
@@ -367,7 +516,7 @@ mod tests {
         let mut tree = Tree::pair(Split::Vertical, 40);
         assert!(tree.split(1, 2, Split::Horizontal, 0));
         app.pane_tree = Some(tree.clone());
-        let layout = Layout::capture(&app, hub, &initial).unwrap();
+        let layout = Layout::capture(&app, hub, &initial, None).unwrap();
         let mut restored = App::default();
         assert!(layout.project(&mut restored, &initial));
         assert_eq!(restored.groups.len(), 3);

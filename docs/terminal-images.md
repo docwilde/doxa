@@ -45,7 +45,17 @@ access removed. It sees only its package, system runtime files, and its input
 and output. A failed or timed-out render leaves the original fence in place;
 no hosted renderer is called. Completed PNGs use the same 8 MiB and 8 million
 pixel decoder limits as local images. At most two renders run at a time, with
-eight results cached in the TUI process. A resized pane may render again.
+eight results cached in the TUI process. The same session also keeps up to
+eight PNGs or 32 MiB in a private `0700` temporary directory; each PNG is
+`0600`. Its key includes the source hash, renderer/package identity and output
+width. Resizing back to a prior width can reuse its PNG. Each disk reuse
+checks a bounded fingerprint of the reviewed package tree, including nested
+files and symlink text without following links. A package too large or slow to
+scan still renders, without disk caching. Changing renderer settings or
+workspace discards the cache. A corrupt or
+missing cache file is removed and rendered again; the source fence remains
+visible until a valid preview is ready. The directory is removed at session
+end.
 `image_mode=text` always shows source. This path has stub-renderer coverage;
 full Mermaid CLI and a graphics terminal have not been validated here.
 

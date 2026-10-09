@@ -105,13 +105,37 @@ impl ScanInputFreshness {
                 reason: "invalid_scan_input_digest" };
         }
         let coverage = &graph["coverage"];
-        let complete = coverage["skipped"]["count"].as_u64() == Some(0)
-            && coverage["unparseable"]["count"].as_u64() == Some(0);
+        let (Some(total_skipped), Some(total_unparseable)) = (
+            coverage["skipped"]["count"].as_u64(), coverage["unparseable"]["count"].as_u64()
+        ) else {
+            return Self { status: "unknown", checked_files: 0,
+                reason: "scan_coverage_uncheckable" };
+        };
+        // New producers separate Rust input errors from Python query errors.
+        // Older snapshots have only aggregate issue counts, so retain their
+        // conservative rule without downgrading new Rust-only digests.
+        let rust_issues = match (coverage.get("rust_skipped_files"),
+            coverage.get("rust_unparseable_files")) {
+            (None, None) => (total_skipped, total_unparseable),
+            (Some(skipped), Some(unparseable)) => {
+                let (Some(skipped), Some(unparseable)) = (skipped.as_u64(), unparseable.as_u64()) else {
+                    return Self { status: "unknown", checked_files: 0,
+                        reason: "scan_coverage_uncheckable" };
+                };
+                if skipped > total_skipped || unparseable > total_unparseable {
+                    return Self { status: "unknown", checked_files: 0,
+                        reason: "scan_coverage_uncheckable" };
+                }
+                (skipped, unparseable)
+            }
+            _ => return Self { status: "unknown", checked_files: 0,
+                reason: "scan_coverage_uncheckable" },
+        };
         let Some(expected_files) = coverage["parsed_rust_files"].as_u64() else {
             return Self { status: "unknown", checked_files: 0,
                 reason: "scan_coverage_uncheckable" };
         };
-        if !complete {
+        if rust_issues != (0, 0) {
             return Self { status: "unknown", checked_files: 0,
                 reason: "scan_incomplete" };
         }
@@ -1750,8 +1774,20 @@ mod codegraph_snapshot_tests {
         let CodegraphSnapshot::Current(current) = read(response.clone()) else { panic!("missing") };
         assert_eq!(current.scan_inputs.status, "verified");
         assert_eq!(current.scan_inputs.checked_files, 1);
+        std::fs::write(owned.path().join("broken.py"), "def broken(:\n").unwrap();
+        let with_python_issue = doxa_codegraph::query(owned.path(),
+            doxa_codegraph::Query::File("lib.rs".into())).unwrap();
+        assert_eq!(with_python_issue.coverage.unparseable.count, 1);
+        assert_eq!(with_python_issue.coverage.rust_unparseable_files, 0);
+        assert_eq!(ScanInputFreshness::check(cwd, &serde_json::to_value(with_python_issue).unwrap()).status,
+            "verified");
+        std::fs::remove_file(owned.path().join("broken.py")).unwrap();
         let mut incomplete = response["graph"].clone();
         incomplete["coverage"]["skipped"]["count"] = json!(1);
+        incomplete["coverage"]["rust_skipped_files"] = json!(1);
+        assert_eq!(ScanInputFreshness::check(cwd, &incomplete).status, "unknown");
+        incomplete["coverage"].as_object_mut().unwrap().remove("rust_skipped_files");
+        incomplete["coverage"].as_object_mut().unwrap().remove("rust_unparseable_files");
         assert_eq!(ScanInputFreshness::check(cwd, &incomplete).status, "unknown");
         incomplete["coverage"]["skipped"]["count"] = json!(0);
         incomplete["coverage"]["parsed_rust_files"] = json!(2);

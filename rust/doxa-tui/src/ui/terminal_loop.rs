@@ -276,6 +276,26 @@ fn run_loop(
     run_loop_with_remote(receiver, prompt_sender, state, None)
 }
 
+pub(super) fn remote_handoff_args(url: &str, save_layout: bool) -> Vec<&str> {
+    let mut args = vec!["remote", "tui", url];
+    if save_layout { args.push("--save-layout"); }
+    args
+}
+
+fn open_mixed_layout(
+    local: &crate::ui_state::UiStateStore,
+    worker: &crate::remote_client::RemoteWorker,
+    hub: &str,
+) -> io::Result<crate::remote_layout::Store> {
+    if local.path().as_os_str().is_empty() {
+        return Err(io::Error::other("persistent local tabset unavailable"));
+    }
+    let inventory = crate::remote_layout::Inventory::parse(&worker.initial_inventory)?;
+    let home = crate::operations::doxa_home()?;
+    let scope = format!("{}\0{}", local.scope_key(), local.path().display());
+    crate::remote_layout::Store::open_mixed(&home, hub, inventory, &scope)
+}
+
 fn run_loop_with_remote(
     receiver: FrameSource,
     mut prompt_sender: Option<SyncSender<crate::bridge::WorkerCommand>>,
@@ -361,7 +381,8 @@ fn run_loop_with_remote(
     let mut pointer_on_link = false;
     let mut remote_connector: Option<RemoteConnector> = None;
     let mut remote_worker:Option<crate::remote_client::RemoteWorker>=None;
-    let mut remote_start:Option<Receiver<io::Result<crate::remote_client::RemoteWorker>>>=None;
+    let mut remote_start:Option<(Receiver<io::Result<crate::remote_client::RemoteWorker>>, String, bool)>=None;
+    let mut active_remote_hub:Option<String>=None;
     let mut auto_open_remote=false;
     let mut first_run_pending = crate::first_run::needed();
     let mut installation_worker = crate::installation::Worker::start().ok();
@@ -390,7 +411,9 @@ fn run_loop_with_remote(
             }
         }
         if let Some(store) = remote_layout.as_mut() {
-            changed |= store.restore_if_ready(&mut app);
+            let local_complete = app.remote_mode || state.as_ref().is_some_and(|(_, _, complete)|
+                complete.lock().is_ok_and(|ready| *ready));
+            changed |= store.restore_if_ready_with_local(&mut app, local_complete);
         }
         if let Some(router)=command_router.as_ref(){
             for _ in 0..32 {match router.errors.try_recv(){
@@ -419,14 +442,29 @@ fn run_loop_with_remote(
                 Err(TryRecvError::Empty|TryRecvError::Disconnected)=>break,
             }}
         }
-        if let Some(start)=remote_start.as_ref(){
+        if let Some((start, hub, save_layout))=remote_start.as_ref(){
             match start.try_recv(){
                 Ok(Ok(worker))=>{
-                    if let Some(router)=command_router.as_ref(){
-                        if let Ok(mut destination)=router.remote.lock(){*destination=Some(worker.commands.clone());}
+                    let layout = if *save_layout {
+                        state.as_ref().ok_or_else(|| io::Error::other("local tabset unavailable"))
+                            .and_then(|(local, _, _)| open_mixed_layout(local, &worker, hub))
+                            .map(Some)
+                    } else { Ok(None) };
+                    match layout {
+                        Ok(store) => {
+                            remote_layout = store;
+                            if let Some(router)=command_router.as_ref(){
+                                if let Ok(mut destination)=router.remote.lock(){*destination=Some(worker.commands.clone());}
+                            }
+                            active_remote_hub=crate::remote_client::hub_url(hub).ok().map(|url|url.to_string());
+                            remote_worker=Some(worker);remote_start=None;auto_open_remote=true;
+                            app.notice="Remote hub connected · opening first tab".into();changed=true;
+                        }
+                        Err(error) => {
+                            worker.shutdown();remote_start=None;
+                            app.notice=format!("Mixed layout unavailable: {error}");changed=true;
+                        }
                     }
-                    remote_worker=Some(worker);remote_start=None;auto_open_remote=true;
-                    app.notice="Remote hub connected · opening first tab".into();changed=true;
                 },
                 Ok(Err(error))=>{remote_start=None;app.notice=format!("Remote hub: {error}");changed=true;},
                 Err(TryRecvError::Disconnected)=>{remote_start=None;app.notice="Remote hub startup worker stopped".into();changed=true;},
@@ -447,12 +485,22 @@ fn run_loop_with_remote(
             changed |= app.handle(event::read()?);
         }
         if !app.remote_mode {
-            if let Some(RemoteHandoff::Hub(url))=app.remote_handoff.take(){
+            if let Some(RemoteHandoff::Hub { url, save_layout })=app.remote_handoff.take(){
                 app.should_quit=false;
                 if command_router.is_none(){
                     app.notice="Mixed remote tabs require the native worker transport".into();
                 }else if remote_worker.is_some()||remote_start.is_some(){
-                    if let Some(id)=app.sessions.iter().find(|session|crate::remote_client::valid_target(&session.id)).map(|session|session.id.clone()){
+                    let requested_hub=crate::remote_client::hub_url(&url).map(|hub|hub.to_string()).unwrap_or_default();
+                    if active_remote_hub.as_deref().is_some_and(|active| active != requested_hub) {
+                        app.notice="A different remote hub is already connected in this window".into();
+                    }else if save_layout && remote_layout.is_none() && remote_worker.is_some() {
+                        let result=state.as_ref().ok_or_else(||io::Error::other("local tabset unavailable"))
+                            .and_then(|(local,_,_)|open_mixed_layout(local,remote_worker.as_ref().unwrap(),&url));
+                        match result {
+                            Ok(store)=>{remote_layout=Some(store);app.notice="Mixed layout saving enabled".into();},
+                            Err(error)=>{app.notice=format!("Mixed layout unavailable: {error}");}
+                        }
+                    }else if let Some(id)=app.sessions.iter().find(|session|crate::remote_client::valid_target(&session.id)).map(|session|session.id.clone()){
                         let group=&mut app.groups[app.active_group];
                         if !group.tabs.contains(&id){group.tabs.push(id.clone());}
                         group.active=group.tabs.iter().position(|tab|tab==&id).unwrap();
@@ -461,7 +509,7 @@ fn run_loop_with_remote(
                     }else{app.notice="Remote hub is still connecting".into();}
                 }else{
                     let (tx,rx)=mpsc::sync_channel(1);
-                    remote_start=Some(rx);
+                    remote_start=Some((rx,url.clone(),save_layout));
                     std::thread::spawn(move||{
                         let result=crate::remote_client::start(&url);
                         if let Err(error)=tx.send(result){
@@ -691,7 +739,9 @@ fn run_loop_with_remote(
     drop(guard);
     if let Some(mut store) = remote_layout {
         let inventory = crate::remote_client::fresh_inventory(store.hub())?;
-        store.save_checked(&app, crate::remote_layout::Inventory::parse(&inventory)?)?;
+        let local_complete = app.remote_mode || state.as_ref().is_some_and(|(_, _, complete)|
+            complete.lock().is_ok_and(|ready| *ready));
+        store.save_checked_with_local(&app, crate::remote_layout::Inventory::parse(&inventory)?, local_complete)?;
     }
     if app.restart_after_update {
         if let Some(executable) = app.restart_executable.take() {
@@ -707,7 +757,8 @@ fn run_loop_with_remote(
         use std::os::unix::process::CommandExt;
         let executable = std::env::current_exe()?;
         return Err(match handoff {
-            RemoteHandoff::Hub(url) => Command::new(executable).args(["remote", "tui", &url]).exec(),
+            RemoteHandoff::Hub { url, save_layout } =>
+                Command::new(executable).args(remote_handoff_args(&url, save_layout)).exec(),
             RemoteHandoff::Local => Command::new(executable).exec(),
         });
     }

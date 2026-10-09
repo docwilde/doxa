@@ -13,14 +13,19 @@ pane persistence on this client. It restores tabs only when the authenticated
 owner, session IDs and session incarnations match a fresh hub inventory. The
 layout file contains pane geometry and tab IDs, never transcript, input or
 event cursors; each restored stream obtains a new host snapshot and cursor.
+In a local native window, `/remote-control HUB_URL --save-layout` opts into a
+separate mixed pane layout for that local tabset scope, hub and owner. Repeating
+the command after reopening the local window reconnects the hub and restores
+the mixed pane order, geometry and focus once both rosters are complete. Local
+tabs still belong to the local tabset; if its open tab set changed, the older
+mixed overlay is skipped. Missing or replaced remote sessions are pruned.
 `/local` selects an open local tab. Remote tabs use an `◎` marker.
 The browser can receive encrypted background Web Push after explicit opt-in.
 An Android Kotlin/Compose client project is in `android-client/`. Its FCM
 background-push source and protocol tests exist, with owner- and
-incarnation-scoped registration and generic tagged notifications. This host
-cannot build the APK because its JDK compiler and Android SDK 37 are absent;
-provisioned-device, FCM and private-tailnet QA remain open, so Android is not
-yet shipped.
+incarnation-scoped registration and generic tagged notifications. The debug
+APK builds and opens in an offline emulator. Provisioned-device, FCM and
+private-tailnet QA remain open, so Android is not yet shipped.
 
 ## User journey
 
@@ -178,8 +183,9 @@ source devices, so the initial Android path assumes a user-owned device.
 3. **Remote DOXA client:** mixed local/remote tabs, bounded snapshot replay,
    scrollable history pages, stable retry IDs, pending-input review and optional
    compressed end-to-end encryption are implemented. Opt-in remote-only tab
-   layout persistence is implemented; mixed local/remote layout persistence
-   remains open.
+   and mixed local/remote pane layout persistence are implemented. Mixed
+   persistence requires explicit `/remote-control HUB_URL --save-layout` on
+   each window opening and fresh owner, session and incarnation inventory.
 4. **Background delivery:** private browser Web Push with service worker is
    implemented. The Android client project renders transcript and events,
    sends prompts and answers, and uses the existing Serve sign-in. Android SDK

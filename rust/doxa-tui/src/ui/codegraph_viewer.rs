@@ -35,12 +35,13 @@ fn answer_lines(answer: &Answer) -> Vec<String> {
         format!("{} {} · {}", answer.query, display(&answer.value), display(&answer.status)),
         format!("Worktree: {}", display(&answer.scope)),
         format!("Observed: {} Unix ms · live source bytes at query time", answer.observed_unix_ms),
-        format!("Coverage: {} listed · {} parsed Rust · {} skipped · {} unparseable",
+        format!("Coverage: {} listed · {} parsed Rust · {} parsed Python · {} skipped · {} unparseable",
             answer.coverage.enumerated_files, answer.coverage.parsed_rust_files,
+            answer.coverage.parsed_python_files,
             answer.coverage.skipped.count, answer.coverage.unparseable.count),
         format!("Rust scan inputs: {}", answer.scan_input_sha256.as_deref()
             .unwrap_or("unknown (skipped or unparseable input)")),
-        "Syntax only · declarations and call candidates are not resolved Rust bindings".into(),
+        "Syntax only · semantic bindings are unknown; Python calls and modules are unsupported".into(),
     ];
     for (language, count) in &answer.coverage.unsupported_languages {
         lines.push(format!("Unsupported {language}: {count} file(s)"));

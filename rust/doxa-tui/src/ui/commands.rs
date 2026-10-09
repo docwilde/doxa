@@ -127,7 +127,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
     CommandHelp { kind: LocalCommand::Mesh, name: "/mesh", form: "/mesh [RUN|stop]", summary: "Browser peer graph", support: "local · private loopback ledger" },
     CommandHelp { kind: LocalCommand::RemoteConnect, name: "/remote-connect", form: "/remote-connect HUB_URL HOST_ID", summary: "Share local sessions with a private hub", support: "local · active while this window is open" },
     CommandHelp { kind: LocalCommand::RemoteDisconnect, name: "/remote-disconnect", form: "/remote-disconnect", summary: "Stop sharing local sessions", support: "local · hub presence expires after its lease" },
-    CommandHelp { kind: LocalCommand::RemoteControl, name: "/remote-control", form: "/remote-control HUB_URL", summary: "Switch this terminal to remote tabs", support: "private hub · local sessions stay detached" },
+    CommandHelp { kind: LocalCommand::RemoteControl, name: "/remote-control", form: "/remote-control HUB_URL [--save-layout]", summary: "Open remote tabs in this terminal", support: "private hub · optional mixed pane restore" },
     CommandHelp { kind: LocalCommand::Local, name: "/local", form: "/local", summary: "Return to local sessions", support: "remote view · restores saved local tabs" },
     CommandHelp { kind: LocalCommand::Img, name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
     CommandHelp { kind: LocalCommand::Login, name: "/login", form: "/login [claude|codex] [--device-auth]", summary: "Provider login", support: "local · selectable operations menu" },
@@ -602,15 +602,19 @@ impl App {
             }
             LocalCommand::RemoteControl => {
                 let words = args.split_whitespace().collect::<Vec<_>>();
-                let [url] = words.as_slice() else {
-                    self.notice = "Usage: /remote-control HUB_URL".into();
-                    return true;
+                let (url, save_layout) = match words.as_slice() {
+                    [url] => (*url, false),
+                    [url, "--save-layout"] => (*url, true),
+                    _ => {
+                        self.notice = "Usage: /remote-control HUB_URL [--save-layout]".into();
+                        return true;
+                    }
                 };
                 if let Err(error) = crate::remote_client::hub_url(url) {
                     self.notice = format!("Remote control: {error}");
                     return true;
                 }
-                self.remote_handoff = Some(super::RemoteHandoff::Hub((*url).into()));
+                self.remote_handoff = Some(super::RemoteHandoff::Hub { url: url.into(), save_layout });
                 self.input.clear();
                 self.input_cursor = 0;
                 self.should_quit = true;

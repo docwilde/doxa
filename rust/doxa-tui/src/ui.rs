@@ -1374,7 +1374,7 @@ struct LorePendingBatch {
 
 #[derive(Debug)]
 enum RemoteHandoff {
-    Hub(String),
+    Hub { url: String, save_layout: bool },
     Local,
 }
 
