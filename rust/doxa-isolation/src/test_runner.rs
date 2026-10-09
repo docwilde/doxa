@@ -3,7 +3,7 @@
 //! launched on the host.
 use crate::{error, workspace, Manifest, Profile};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, ffi::CString, fs::{self, File}, io::{self, Read, Write}, os::{fd::{AsRawFd, FromRawFd}, unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, unix::process::CommandExt}, path::Path, process::{Command, Stdio}, sync::mpsc, time::{Duration, Instant}};
+use std::{collections::BTreeSet, ffi::CString, fs::{self, File}, io::{self, Read, Write}, os::{fd::{AsRawFd, FromRawFd}, unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, unix::process::CommandExt}, path::Path, process::{Command, Stdio}, sync::{atomic::{AtomicBool, Ordering}, mpsc}, time::{Duration, Instant}};
 
 const MAX_PATHS: usize = 4096;
 const MAX_LIST_BYTES: usize = 512 * 1024;
@@ -16,6 +16,16 @@ pub struct Capture { pub sha256: String, pub files: usize, pub bytes: u64 }
 
 #[derive(Debug, Clone)]
 pub struct RunResult { pub exit_code: i32, pub duration_ms: u64, pub output_sha256: String, pub output_bytes: u64, pub passed: bool }
+
+#[derive(Debug)]
+struct CleanupUnconfirmed(String);
+impl std::fmt::Display for CleanupUnconfirmed {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{write!(f,"fleet test Docker cleanup unconfirmed: {}",self.0)}
+}
+impl std::error::Error for CleanupUnconfirmed {}
+pub fn cleanup_unconfirmed(error:&io::Error)->bool {
+    error.get_ref().is_some_and(|source|source.is::<CleanupUnconfirmed>())
+}
 
 fn command_for(manifest: &Manifest, snapshot: &Path, argv: &[String], cwd_relative: &str, name: &str) -> io::Result<Command> {
     let policy = manifest.policy.as_ref().ok_or_else(|| error("offline Docker test policy unavailable"))?;
@@ -71,14 +81,31 @@ fn read_output(mut input: impl Read + Send + 'static, stream: usize, tx: mpsc::S
 /// Run only from a host-owned copied snapshot. No provider home, broker,
 /// credential or worker container is mounted into this ephemeral container.
 pub fn run_offline(manifest: &Manifest, snapshot: &Path, argv: &[String], cwd_relative: &str, timeout_s: u64) -> io::Result<RunResult> {
-    if !(1..=300).contains(&timeout_s) || !snapshot.is_dir() { return Err(error("invalid fleet test snapshot or timeout")); }
-    crate::preflight(manifest.policy.as_ref().ok_or_else(|| error("offline Docker policy unavailable"))?)?;
-    let name = format!("doxa-test-{}-{}", &format!("{:x}", Sha256::digest(manifest.session_id.as_bytes()))[..12], std::process::id());
-    let command = command_for(manifest, snapshot, argv, cwd_relative, &name)?;
-    execute_bounded(command, timeout_s, || remove_test_container(manifest, &name))
+    let cancel=AtomicBool::new(false);
+    run_offline_cancel(manifest,snapshot,argv,cwd_relative,timeout_s,&cancel)
 }
 
-fn execute_bounded(mut command: Command, timeout_s: u64, cleanup_container: impl FnOnce() -> io::Result<()>) -> io::Result<RunResult> {
+/// The fleet controller keeps this cancellation flag until the Docker CLI is
+/// reaped and the named container cleanup has been attempted and confirmed.
+pub fn run_offline_cancel(manifest: &Manifest, snapshot: &Path, argv: &[String], cwd_relative: &str, timeout_s: u64,
+    cancel:&AtomicBool) -> io::Result<RunResult> {
+    if !(1..=300).contains(&timeout_s) || !snapshot.is_dir() { return Err(error("invalid fleet test snapshot or timeout")); }
+    if cancel.load(Ordering::Acquire) { return Err(io::Error::new(io::ErrorKind::Interrupted,"fleet host test cancelled")); }
+    crate::preflight(manifest.policy.as_ref().ok_or_else(|| error("offline Docker policy unavailable"))?)?;
+    if cancel.load(Ordering::Acquire) { return Err(io::Error::new(io::ErrorKind::Interrupted,"fleet host test cancelled")); }
+    let name = format!("doxa-test-{}-{}", &format!("{:x}", Sha256::digest(manifest.session_id.as_bytes()))[..12], std::process::id());
+    let command = command_for(manifest, snapshot, argv, cwd_relative, &name)?;
+    execute_bounded_cancel(command, timeout_s, || remove_test_container(manifest, &name),cancel)
+}
+
+#[cfg(test)]
+fn execute_bounded(command: Command, timeout_s: u64, cleanup_container: impl FnOnce() -> io::Result<()>) -> io::Result<RunResult> {
+    let cancel=AtomicBool::new(false);
+    execute_bounded_cancel(command,timeout_s,cleanup_container,&cancel)
+}
+
+fn execute_bounded_cancel(mut command: Command, timeout_s: u64, cleanup_container: impl FnOnce() -> io::Result<()>,cancel:&AtomicBool) -> io::Result<RunResult> {
+    if cancel.load(Ordering::Acquire) { return Err(io::Error::new(io::ErrorKind::Interrupted,"fleet host test cancelled")); }
     let start = Instant::now();
     let mut child = command.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let (tx, rx) = mpsc::sync_channel::<(usize, io::Result<Vec<u8>>)>(16);
@@ -93,6 +120,7 @@ fn execute_bounded(mut command: Command, timeout_s: u64, cleanup_container: impl
     let deadline = start + Duration::from_secs(timeout_s);
     let mut status = None;
     let mut timed_out = false;
+    let mut cancelled = false;
     loop {
         if let Ok((stream, result)) = rx.recv_timeout(Duration::from_millis(20)) {
             match result {
@@ -104,9 +132,10 @@ fn execute_bounded(mut command: Command, timeout_s: u64, cleanup_container: impl
         if status.is_none() { status = child.try_wait()?; }
         if status.is_some() && ended == 2 { break; }
         if exceeded || io_failed { break; }
+        if cancel.load(Ordering::Acquire) { cancelled=true; break; }
         if Instant::now() >= deadline { timed_out = true; break; }
     }
-    let cleanup = if status.is_none() || exceeded || io_failed || timed_out {
+    let cleanup = if status.is_none() || exceeded || io_failed || timed_out || cancelled {
         unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
         let _ = child.kill();
         cleanup_container()
@@ -114,7 +143,8 @@ fn execute_bounded(mut command: Command, timeout_s: u64, cleanup_container: impl
     let status = child.wait()?;
     drop(rx);
     for reader in readers { let _ = reader.join(); }
-    cleanup?;
+    cleanup.map_err(|error|io::Error::other(CleanupUnconfirmed(error.to_string())))?;
+    if cancelled {return Err(io::Error::new(io::ErrorKind::Interrupted,"fleet host test cancelled after Docker cleanup"));}
     let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
     let mut summary = Sha256::new(); for output in outputs { summary.update(output.finalize()); }
     Ok(RunResult { exit_code: status.code().unwrap_or(-1), duration_ms: elapsed,
@@ -301,5 +331,27 @@ mod tests {
         cleaned.set(false);
         let timed=execute_bounded({let mut c=Command::new("sleep");c.arg("2");c},1,||{cleaned.set(true);Ok(())}).unwrap();
         assert!(cleaned.get() && !timed.passed && timed.duration_ms>=1000);
+        let unconfirmed=execute_bounded(Command::new("/usr/bin/yes"),2,||Err(error("Docker rm failed"))).unwrap_err();
+        assert!(cleanup_unconfirmed(&unconfirmed),"failed container removal must block teardown confirmation");
+    }
+    #[test]
+    fn cancellation_kills_and_reaps_the_command_before_confirming_cleanup() {
+        use std::sync::{Arc,atomic::AtomicBool};
+        let dir=tempfile::tempdir().unwrap();let pid_file=dir.path().join("pid");
+        let cancel=Arc::new(AtomicBool::new(false));let thread_cancel=Arc::clone(&cancel);
+        let cleaned=Arc::new(AtomicBool::new(false));let thread_cleaned=Arc::clone(&cleaned);
+        let mut command=Command::new("/bin/sh");
+        command.arg("-c").arg("printf '%s' $$ > \"$PID_FILE\"; exec sleep 30").env("PID_FILE",&pid_file);
+        let runner=std::thread::spawn(move ||execute_bounded_cancel(command,30,||{
+            thread_cleaned.store(true,Ordering::Release);Ok(())
+        },&thread_cancel));
+        let deadline=Instant::now()+Duration::from_secs(3);
+        while !pid_file.exists(){assert!(Instant::now()<deadline,"fixture child did not start");std::thread::sleep(Duration::from_millis(5));}
+        let pid:i32=fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        cancel.store(true,Ordering::Release);
+        let result=runner.join().unwrap();
+        assert_eq!(result.unwrap_err().kind(),io::ErrorKind::Interrupted);
+        assert!(cleaned.load(Ordering::Acquire));
+        assert_eq!(unsafe{libc::kill(pid,0)},-1,"fixture process was not reaped");
     }
 }

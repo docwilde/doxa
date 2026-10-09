@@ -172,6 +172,9 @@ pub fn status(root: &Path, prefix: &str) -> io::Result<String> {
         lines.push(format!("automatic host tests enabled · attempts {}/32 · owner release required",
             value["auto_test_runs"].as_u64().unwrap_or(0)));
     }
+    if value["auto_test_cleanup_failed"]==true {
+        lines.push("automatic host test Docker cleanup unconfirmed · fleet teardown incomplete".into());
+    }
     if value["supervision"].is_object() {
         let guard = &value["supervision"];
         let review = &guard["context"]["review"];

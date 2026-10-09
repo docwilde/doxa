@@ -119,7 +119,11 @@ An interrupted attempt is not replayed on resume. A failed or stale test does
 not prove completion; a worker completion message must still cite the exact
 signed diff and passing test IDs, and the host rechecks the current source and
 runner image. Test output is hashed and bounded, not injected into worker
-instructions. Dependency release remains a separate owner review.
+instructions. On controller stop or timeout, an active test is cancelled; the
+Docker CLI is reaped and container cleanup must be confirmed before fleet
+teardown reports completion. If cleanup cannot be confirmed, status retains
+`teardown_incomplete` for operator inspection. Dependency release remains a
+separate owner review.
 Rootless Docker end-to-end execution still needs a
 capable host and an owner-approved project recipe.
 

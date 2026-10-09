@@ -24,11 +24,11 @@ pub fn words(text:&str)->io::Result<Vec<String>>{
     if out.len()>512{return Err(invalid("Too many fleet arguments"));}Ok(out)
 }
 
-fn has_option(args:&[String],name:&str)->bool{let mut index=0;while index<args.len(){let key=args[index].as_str();if key==name{return true;}index+=if matches!(key,"--force"|"--allow-unbudgeted"|"--dry-run"|"--strict-unreviewed"){1}else{2};}false}
+fn has_option(args:&[String],name:&str)->bool{let mut index=0;while index<args.len(){let key=args[index].as_str();if key==name{return true;}index+=if matches!(key,"--force"|"--allow-unbudgeted"|"--dry-run"|"--strict-unreviewed"|"--auto-test"){1}else{2};}false}
 
 pub struct Prepared {
     pub root:PathBuf,pub id:String,pub lines:Vec<String>,args:Vec<String>,resume_snapshot:Option<Value>,
-    pub seen:Cell<usize>,pub complete:Cell<bool>,pub armed:bool,prompt_digest:Option<String>,assignment_digest:Option<String>,lore_default:Option<bool>,
+    pub seen:Cell<usize>,pub complete:Cell<bool>,pub armed:bool,prompt_digest:Option<String>,assignment_digest:Option<String>,recipe_digest:Option<String>,lore_default:Option<bool>,
 }
 impl fmt::Debug for Prepared{fn fmt(&self,f:&mut fmt::Formatter<'_>)->fmt::Result{f.debug_struct("PreparedFleet").field("root",&self.root).field("id",&self.id).finish_non_exhaustive()}}
 impl Prepared {
@@ -37,7 +37,7 @@ impl Prepared {
     pub fn from_fixture_review(review:&Value)->io::Result<Self>{
         let root=PathBuf::from(review["root"].as_str().ok_or_else(||invalid("Fixture root missing"))?);
         let id=review["run_id"].as_str().filter(|id|doxa_state::valid_session_id(id)).ok_or_else(||invalid("Fixture run ID missing"))?.to_owned();
-        Ok(Self{root,id,lines:review_lines("Start native fleet",review),args:Vec::new(),resume_snapshot:None,prompt_digest:None,assignment_digest:None,lore_default:review["lore_enabled"].as_bool(),seen:Cell::new(0),complete:Cell::new(false),armed:false})
+        Ok(Self{root,id,lines:review_lines("Start native fleet",review),args:Vec::new(),resume_snapshot:None,prompt_digest:None,assignment_digest:None,recipe_digest:None,lore_default:review["lore_enabled"].as_bool(),seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn start(mut args:Vec<String>,cwd:Option<&Path>)->io::Result<Self>{
         if !has_option(&args,"--run-id"){
@@ -46,27 +46,33 @@ impl Prepared {
         }
         if !has_option(&args,"--cwd"){if let Some(cwd)=cwd{args.extend(["--cwd".into(),cwd.to_string_lossy().into_owned()]);}}
         let spec=crate::fleet_control::Spec::parse(&args).map_err(public_plan_error)?;let review=spec.review().map_err(public_plan_error)?;
-        if review["review_version"]!=1||["prompt_sha256","assignments_sha256"].iter().any(|key|review[*key].as_str().is_none_or(|digest|digest.len()!=64||!digest.bytes().all(|byte|byte.is_ascii_hexdigit()))){return Err(invalid("Fleet review contract unavailable"));}
+        if review["review_version"]!=1||["prompt_sha256","assignments_sha256","test_recipe_sha256"].iter().any(|key|review[*key].as_str().is_none_or(|digest|digest.len()!=64||!digest.bytes().all(|byte|byte.is_ascii_hexdigit()))){return Err(invalid("Fleet review contract unavailable"));}
         let root=PathBuf::from(review["root"].as_str().ok_or_else(||invalid("Fleet review root unavailable"))?);
         let id=review["run_id"].as_str().filter(|id|doxa_state::valid_session_id(id)).ok_or_else(||invalid("Fleet review run ID unavailable"))?.to_owned();
         let lines=review_lines("Start native fleet",&review);
         let mut command=vec!["start".into()];command.extend(args);
-        Ok(Self{root,id,lines,args:command,resume_snapshot:None,prompt_digest:review["prompt_sha256"].as_str().map(str::to_owned),assignment_digest:review["assignments_sha256"].as_str().map(str::to_owned),lore_default:review["lore_enabled"].as_bool(),seen:Cell::new(0),complete:Cell::new(false),armed:false})
+        Ok(Self{root,id,lines,args:command,resume_snapshot:None,prompt_digest:review["prompt_sha256"].as_str().map(str::to_owned),assignment_digest:review["assignments_sha256"].as_str().map(str::to_owned),recipe_digest:review["test_recipe_sha256"].as_str().map(str::to_owned),lore_default:review["lore_enabled"].as_bool(),seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn resume(root:PathBuf,id:&str)->io::Result<Self>{
         let snapshot=crate::fleet_control::snapshot(&root,id)?;
         if snapshot["phase"]!="monitoring"||snapshot["live"]!=true{return Err(invalid("Only a native live monitoring run can resume"));}
-        let review=json!({"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"memory_off":snapshot["spec"]["memory_off"],"lore_enabled":snapshot["spec"]["lore_enabled"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"],"independent_review":snapshot["supervision"]["context"]["review"],"charter_sha256":snapshot["supervision"]["context"]["charter_sha256"]});
-        Ok(Self{lines:review_lines("Resume native fleet",&review),root:root.clone(),id:id.into(),args:vec!["resume".into(),id.into(),"--root".into(),root.to_string_lossy().into_owned()],resume_snapshot:Some(snapshot),prompt_digest:None,assignment_digest:None,lore_default:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
+        let review=json!({"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"memory_off":snapshot["spec"]["memory_off"],"lore_enabled":snapshot["spec"]["lore_enabled"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"],"independent_review":snapshot["supervision"]["context"]["review"],"charter_sha256":snapshot["supervision"]["context"]["charter_sha256"],"auto_test":snapshot["spec"]["auto_test"],"test_recipe":snapshot["supervision"]["context"]["charter"]["test_recipe"]});
+        Ok(Self{lines:review_lines("Resume native fleet",&review),root:root.clone(),id:id.into(),args:vec!["resume".into(),id.into(),"--root".into(),root.to_string_lossy().into_owned()],resume_snapshot:Some(snapshot),prompt_digest:None,assignment_digest:None,recipe_digest:None,lore_default:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn launch(self,exe:&Path)->io::Result<Controller>{
         if self.args.is_empty(){return Err(invalid("Gallery fixture cannot launch a controller"));}
         if !self.armed||!self.complete.get(){return Err(invalid("Read and explicitly confirm the complete fleet review"));}
         if let Some(snapshot)=&self.resume_snapshot{if &crate::fleet_control::snapshot(&self.root,&self.id)?!=snapshot{return Err(invalid("Fleet changed since review; review it again"));}}
+        if let Some(digest)=&self.recipe_digest {
+            let args=self.args.get(1..).ok_or_else(||invalid("Fleet review arguments unavailable"))?;
+            let current=crate::fleet_control::Spec::parse(args).map_err(public_plan_error)?.review().map_err(public_plan_error)?;
+            if current["test_recipe_sha256"].as_str()!=Some(digest){return Err(invalid("Fleet test recipe or automatic test choice changed since review"));}
+        }
         let mut command=Command::new(exe);command.arg("fleet").args(&self.args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
         if let Some(enabled)=self.lore_default{command.env("DOXA_LORE",if enabled{"1"}else{"0"});}
         if let Some(digest)=&self.prompt_digest{if digest.len()!=64||!digest.bytes().all(|byte|byte.is_ascii_hexdigit()){return Err(invalid("Fleet review task digest invalid"));}command.env("DOXA_FLEET_REVIEW_PROMPT_SHA256",digest);}
         if let Some(digest)=&self.assignment_digest{if digest.len()!=64||!digest.bytes().all(|byte|byte.is_ascii_hexdigit()){return Err(invalid("Fleet review assignment digest invalid"));}command.env("DOXA_FLEET_REVIEW_ASSIGNMENTS_SHA256",digest);}
+        if let Some(digest)=&self.recipe_digest{if digest.len()!=64||!digest.bytes().all(|byte|byte.is_ascii_hexdigit()){return Err(invalid("Fleet review test recipe digest invalid"));}command.env("DOXA_FLEET_REVIEW_TEST_RECIPE_SHA256",digest);}
         let child=command.spawn()?;
         Ok(Controller{child:Some(child),root:self.root,id:self.id,cancelling:false})
     }
@@ -87,6 +93,12 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
     for (label,key)in [("Run","run_id"),("Root","root"),("Directory","cwd"),("Mode","mode"),("Isolation","isolation"),("Workers","workers"),("Sessions","sessions"),("Seed","seed"),("Workers with memory off","memory_off"),("Memory default enabled","lore_enabled"),("Total budget USD","run_budget_usd"),("Allow unbudgeted","allow_unbudgeted"),("Approval policy","approval_policy"),("Approval grace seconds","approval_grace_s"),("Dry run","dry_run"),("Preflight","preflight"),("Task digest","prompt_sha256"),("Assignment plan digest","assignments_sha256"),("Quiescence deadline seconds","quiescence_timeout_s"),("Quiescence grace seconds","quiescence_grace_s")]{
         if !value[key].is_null(){lines.push(format!("{label}: {}",value[key].as_str().map(str::to_owned).unwrap_or_else(||value[key].to_string())));}
     }
+    if !value["auto_test"].is_null(){lines.push(format!("Automatic host tests after worker turns: {}",value["auto_test"]));}
+    if value["test_recipe"].is_object(){let recipe=&value["test_recipe"];
+        lines.push(format!("Host test argv (exact JSON): {}",recipe["argv"]));
+        lines.push(format!("Host test working directory: {}",recipe["cwd_relative"]));
+        lines.push(format!("Host test timeout seconds: {}",recipe["timeout_s"]));
+    }
     if value["independent_review"].is_object(){let review=&value["independent_review"];for(label,key)in [("Independent supervisor model","supervisor"),("Supervisor action","supervisor_mode"),("Fast message judge","message_judge"),("Message review mode","message_mode"),("Review allocation USD","budget_usd"),("Maximum review calls","max_calls"),("Checkpoint interval seconds","interval_s"),("Input rate USD/Mtok","input_usd_per_million"),("Output rate USD/Mtok","output_usd_per_million"),("Message risk threshold","risk_threshold")]{lines.push(format!("{label}: {}",review[key]));}lines.push("Independent models use API credentials; review data is LORE-scrubbed, stateless and has no tools.".into());}
     if let Some(hash)=value["charter_sha256"].as_str(){lines.push(format!("Approved charter SHA256: {hash}"));}
     let mut counts:BTreeMap<(String,String,String,String),usize>=BTreeMap::new();
@@ -94,7 +106,7 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
     for ((role,engine,model,lore),count)in counts{lines.push(format!("Planned {count} × {role}: {engine}:{model} · memory {lore}"));}
     for slot in value["slots"].as_array().into_iter().flatten(){if let Some(digest)=slot["task_sha256"].as_str(){lines.push(format!("Worker {} task SHA256: {digest}; paths: {}; predecessors: {}",slot["index"],slot["allowed_paths"],slot["depends_on"]));}}
     if value["slots"].as_array().is_some_and(|slots|slots.iter().any(|slot|slot["depends_on"].as_array().is_some_and(|rows|!rows.is_empty()))){
-        lines.push("Dependent workers wait for coordinator-accepted host evidence and explicit human dependency release. Tests are not automatically verified.".into());
+        lines.push("Dependent workers wait for coordinator-accepted host evidence and explicit human release. Automatic host tests can collect receipts but never release dependencies.".into());
     }
     lines.push("Task text stays private; controller output is suppressed. Ctrl+C cancels the controller and waits for teardown.".into());
     lines.into_iter().map(|line|crate::markdown::sanitize(&line.replace('\n',"\\n").replace('\t',"\\t"))).collect()
@@ -193,6 +205,30 @@ mod tests{
         for visible in ["claude-sonnet-5-5","deepseek-flash","shadow","enforce","Input rate USD/Mtok: 0.42","Output rate USD/Mtok: 0.84","Message risk threshold: 0.7","API credentials"]{assert!(review.contains(visible),"{visible}");}
         assert!(!review.contains("PRIVATE-TASK"));
         let mut invalid=args.clone();let model=invalid.iter().position(|arg|arg=="--alignment-supervisor").unwrap()+1;invalid[model]="jev:jev-1.13.0".into();assert!(Prepared::start(invalid,None).is_err());
+    }
+
+    #[test]
+    fn automatic_test_review_shows_exact_recipe_and_rejects_an_edit_before_launch(){
+        let dir=tempfile::tempdir().unwrap();let recipe=dir.path().join("recipe.json");
+        std::fs::write(&recipe,r#"{"argv":["/usr/bin/true","--reviewed"],"cwd_relative":"src","timeout_s":17}"#).unwrap();
+        let root=format!("/doxa-auto-review-{}",std::process::id());
+        let cwd=std::env::current_dir().unwrap();
+        let args=vec!["--pool".into(),"fixture:fixture-v1".into(),"--prompt".into(),"task".into(),
+            "--run-budget".into(),"10".into(),"--review-budget".into(),"1".into(),
+            "--alignment-supervisor".into(),"deepseek:reviewer".into(),
+            "--isolation".into(),"docker-offline".into(),"--auto-test".into(),
+            "--run-id".into(),"reviewed-run".into(),"--cwd".into(),cwd.to_string_lossy().into_owned(),
+            "--test-recipe".into(),recipe.to_string_lossy().into_owned(),"--root".into(),root];
+        let mut prepared=Prepared::start(args.clone(),Some(Path::new("/unreviewed-cwd"))).unwrap();
+        assert_eq!(&prepared.args[1..],args,"valueless --auto-test must not hide following options");
+        let lines=prepared.lines.join("\n");
+        for visible in ["Automatic host tests after worker turns: true","/usr/bin/true","--reviewed","Host test working directory: \"src\"","Host test timeout seconds: 17"] {
+            assert!(lines.contains(visible),"missing {visible}");
+        }
+        assert!(prepared.recipe_digest.is_some());
+        std::fs::write(&recipe,r#"{"argv":["/usr/bin/false"],"cwd_relative":"src","timeout_s":17}"#).unwrap();
+        prepared.armed=true;prepared.complete.set(true);
+        assert!(prepared.launch(Path::new("/nonexistent-fixture-executable")).unwrap_err().to_string().contains("changed since review"));
     }
 
 }
