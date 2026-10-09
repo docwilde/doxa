@@ -29,18 +29,29 @@ is decoded for this app run and cleared on disconnect or process exit. An
 encrypted session cannot be opened without it. Plaintext sessions can be
 opened without a key. The app does not store a provider token or host lease.
 
-The app stores the hub URL, selected session ID, last event cursor, and one
-unsent draft in app-private preferences. It does not store transcript content,
-approval answers, the shared key, or uncertain request bodies. A process
-restart reloads an authoritative snapshot before following events again.
+The app stores the hub URL, selected session ID, last event cursor, one unsent
+draft, and a versioned, size-bounded marker for an uncertain write in app-private
+preferences. The marker holds only the hub origin, target and incarnation,
+operation, request ID, and creation time. It is committed synchronously before
+the POST; a failed commit prevents submission. It holds no prompt, approval
+answer, shared key, encrypted envelope, or submitted request body. A process restart
+reloads an authoritative snapshot before following events again.
 
 ## Write and reconnect behavior
 
-Each prompt or answer has a random `request_id`; an uncertain retry sends the
-exact same JSON body, including the original encrypted envelope. After the
-host's two-minute freshness window, **Retry same request** first reloads the
-transcript. The user can review it before choosing **Send new request** and
-confirming the new submission.
+Each prompt or answer has a random `request_id`. While the process is alive,
+an uncertain retry sends the exact same JSON body, including the original
+encrypted envelope. After the host's two-minute freshness window, **Retry same
+request** first reloads the transcript. The user can review it before choosing
+**Send new request** and confirming the new submission.
+
+After process death, the body is gone and the app never replays the write. It
+blocks all new prompts and answers, including after changing hub or session,
+until a fresh authoritative snapshot has loaded and the user explicitly
+acknowledges the uncertain result in the app. A terminal host response clears
+the marker; a failed local clear keeps writes blocked for review. A corrupted
+marker also fails closed. The app cannot establish from a lost response alone
+whether the earlier write ran.
 A new prompt may repeat an action that succeeded before the connection failed;
 review the refreshed transcript before confirming. Pending inputs are
 refreshed and compared immediately before sending an answer, and the host
@@ -106,7 +117,11 @@ locally on 2026-10-09 with Temurin JDK 21.0.12.1, Android SDK 37.0, and Gradle
 disconnected screen was captured and inspected in an offline Android 36
 emulator, including system-bar clearance. It has not been installed on a
 Firebase-enabled device or exercised against a provisioned FCM project and
-two-host tailnet. Device QA must cover token issuance and rotation,
+two-host tailnet. A separate offline Android 36 emulator smoke installed this
+debug APK, injected a synthetic body-free marker, force-stopped and relaunched
+the app, and confirmed the recovery warning and disabled acknowledgment before
+a snapshot. Device QA must cover a real process-kill write and review flow,
+token issuance and rotation,
 background delivery after process
 restart, opt-out while offline, Android notification permission, Tailscale
 reconnect, encrypted/plaintext sessions, duplicate request, stale approval,

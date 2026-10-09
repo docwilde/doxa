@@ -29,8 +29,15 @@ import java.io.ByteArrayOutputStream
 private data class Entry(val kind: String, val text: String)
 private class ReplayGap : Exception()
 
+private class PreferencesPendingWriteStore(private val prefs: SharedPreferences) : PendingWriteMarkerStore {
+    override fun read(): String? = prefs.getString("pending_write_marker_v1", null)
+    override fun write(value: String): Boolean = prefs.edit().putString("pending_write_marker_v1", value).commit()
+    override fun clear(): Boolean = prefs.edit().remove("pending_write_marker_v1").commit()
+}
+
 private class RemoteController(private val prefs: SharedPreferences, private val scope: CoroutineScope,
                                private val alerts: LocalAlerts, private val push: BackgroundPush) {
+    private val writeRecovery = PendingWriteGuard(PreferencesPendingWriteStore(prefs))
     var origin by mutableStateOf(prefs.getString("hub", "") ?: "")
     var status by mutableStateOf("Connect through your user-owned Tailscale device")
         private set
@@ -54,6 +61,14 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         private set
     var uncertain by mutableStateOf<PendingCommand?>(null)
         private set
+    var recoveryBlocked by mutableStateOf(writeRecovery.blocked)
+        private set
+    var recoveryReviewed by mutableStateOf(false)
+        private set
+    var recoveryScopeChanged by mutableStateOf(false)
+        private set
+    var confirmRecovery by mutableStateOf(false)
+        private set
     var confirmFresh by mutableStateOf(false)
         private set
     var readyFresh by mutableStateOf(false)
@@ -69,6 +84,40 @@ private class RemoteController(private val prefs: SharedPreferences, private val
     private var generation = 0
     private var cursor = 0L
     private var currentText = false
+
+    val recoveryMessage: String get() = writeRecovery.marker?.let { marker ->
+        "A ${marker.operation} to ${marker.scope.target} on ${marker.scope.origin} may have completed. " +
+            "The request body was not saved; review a fresh snapshot before another write."
+    } ?: "A prior write marker could not be read. Review a fresh snapshot before another write."
+
+    private fun writeScope(session: Session) = PendingWriteScope(origin, session.id, session.incarnation)
+
+    private fun markerFor(session: Session, command: PendingCommand) =
+        PendingWriteMarker(writeScope(session), command.operation, command.requestId, command.createdAt)
+
+    private fun refreshRecovery() {
+        recoveryBlocked = writeRecovery.blocked
+        recoveryReviewed = selected?.let { writeRecovery.canAcknowledge(writeScope(it)) } ?: false
+        recoveryScopeChanged = selected?.let { current ->
+            writeRecovery.marker?.scope != null && writeRecovery.marker?.scope != writeScope(current)
+        } ?: false
+    }
+
+    fun askRecoveryReview() {
+        val session = selected ?: return
+        if (uncertain == null && writeRecovery.canAcknowledge(writeScope(session))) confirmRecovery = true
+    }
+
+    fun cancelRecoveryReview() { confirmRecovery = false }
+
+    fun acknowledgeRecovery() {
+        val session = selected ?: return
+        confirmRecovery = false
+        status = if (writeRecovery.acknowledgeAfterReview(writeScope(session)))
+            "Prior outcome acknowledged; new writes are available"
+        else "Could not clear the recovery marker; writes remain blocked"
+        refreshRecovery()
+    }
 
     fun statusMessage(message: String) { status = message }
 
@@ -97,6 +146,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
                 prefs.edit().putString("hub", normalized).apply()
                 connected = true
                 sessions = inventory
+                refreshRecovery()
                 status = if (inventory.isEmpty()) "No live sessions" else "Connected"
                 val remembered = prefs.getString("session", null)
                 inventory.firstOrNull { it.id == remembered && (!it.encrypted || keySelected) }
@@ -115,6 +165,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         connected = false; sessions = emptyList(); selected = null
         entries = emptyList(); pending = emptyList(); olderBefore = null
         uncertain = null; confirmFresh = false; readyFresh = false
+        confirmRecovery = false; writeRecovery.forgetSnapshot(); refreshRecovery()
         status = "Disconnected; shared key cleared"
     }
 
@@ -129,6 +180,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
                 val active = selected
                 if (active != null && inventory.none { it.id == active.id && it.encrypted == active.encrypted && it.incarnation == active.incarnation }) {
                     eventJob?.cancel(); selected = null; push.clearSelection(); entries = emptyList(); pending = emptyList()
+                    writeRecovery.forgetSnapshot(); refreshRecovery()
                     status = "Session went offline"
                 } else status = "Session list refreshed"
             } catch (error: Exception) { status = error.message ?: "Refresh failed" }
@@ -147,6 +199,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         eventJob?.cancel(); eventJob = null
         selected = session; push.select(origin, session); entries = emptyList(); pending = emptyList(); olderBefore = null
         uncertain = null; readyFresh = false; questionIndex = 0; answers = emptyMap(); currentText = false
+        confirmRecovery = false; writeRecovery.forgetSnapshot(); refreshRecovery()
         prefs.edit().putString("session", session.id).apply()
         status = "Loading ${session.title}"
         scope.launch {
@@ -191,6 +244,8 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         olderBefore = if (history.optBoolean("has_more")) history.optLong("before", -1).takeIf { it >= 0 } else null
         cursor = next
         prefs.edit().putLong("cursor", cursor).apply()
+        writeRecovery.observeSnapshot(writeScope(session))
+        refreshRecovery()
         status = if (history.optBoolean("pending_inputs_complete"))
             "${session.title} · connected" else "Pending input review incomplete; refresh before answering"
     }
@@ -284,7 +339,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
     fun sendPrompt() {
         val session = selected ?: return
         val text = draft.trim()
-        if (text.isEmpty() || busy || uncertain != null) return
+        if (text.isEmpty() || busy || uncertain != null || writeRecovery.blocked) return
         send(JSONObject().put("text", text), "prompt", session)
     }
 
@@ -299,9 +354,10 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         val session = selected ?: return
         val item = pending.firstOrNull() ?: return
         val id = item.optString("id")
-        if (!Wire.id(id) || busy || uncertain != null) return
+        if (!Wire.id(id) || busy || uncertain != null || writeRecovery.blocked) return
         scope.launch {
             busy = true
+            var submittedMarker: PendingWriteMarker? = null
             try {
                 val client = api ?: return@launch
                 // Re-read authoritative pending inputs; an SSE event alone cannot authorize an answer.
@@ -315,15 +371,23 @@ private class RemoteController(private val prefs: SharedPreferences, private val
                 }
                 val payload = JSONObject().put("id", id).put("answer", answer)
                 val command = client.prepare(session.id, "answer", payload, session.encrypted)
+                val marker = markerFor(session, command)
+                require(writeRecovery.begin(marker)) { "Could not save recovery marker; answer not sent" }
+                submittedMarker = marker
                 uncertain = command; readyFresh = false
+                refreshRecovery()
                 val result = client.submit(command, session.encrypted)
+                if (!finishWrite(marker)) return@launch
                 uncertain = null
                 pending = pending.filterNot { it.optString("id") == id }
                 questionIndex = 0; answers = emptyMap()
                 status = result.optString("status", "Answer delivered")
             } catch (error: RemoteRefusal) {
-                uncertain = null
-                status = error.message ?: "Answer refused"
+                val marker = submittedMarker
+                if (marker != null && finishWrite(marker)) {
+                    uncertain = null
+                    status = error.message ?: "Answer refused"
+                }
             } catch (error: Exception) { status = error.message ?: "Answer outcome uncertain" }
             finally { busy = false }
         }
@@ -331,23 +395,40 @@ private class RemoteController(private val prefs: SharedPreferences, private val
 
     private fun send(payload: JSONObject, operation: String, session: Session) {
         val client = api ?: return
+        if (writeRecovery.blocked || uncertain != null) return
         try {
             val command = client.prepare(session.id, operation, payload, session.encrypted)
+            val marker = markerFor(session, command)
+            require(writeRecovery.begin(marker)) { "Could not save recovery marker; request not sent" }
             uncertain = command; readyFresh = false
-            scope.launch { deliver(client, command) }
+            refreshRecovery()
+            scope.launch { deliver(client, command, marker) }
         } catch (error: Exception) { status = error.message ?: "Invalid request" }
     }
 
-    private suspend fun deliver(client: HubApi, command: PendingCommand) {
+    private fun finishWrite(marker: PendingWriteMarker): Boolean {
+        // A terminal response is known even when the local delete fails. Never offer a retry then.
+        uncertain = null
+        readyFresh = false
+        val cleared = writeRecovery.finish(marker)
+        refreshRecovery()
+        if (!cleared) status = "Outcome received, but recovery marker could not be cleared; writes remain blocked"
+        return cleared
+    }
+
+    private suspend fun deliver(client: HubApi, command: PendingCommand, marker: PendingWriteMarker) {
         busy = true
         try {
             client.submit(command, command.encrypted)
+            if (!finishWrite(marker)) return
             uncertain = null
             if (command.operation == "prompt" && draft.trim() == command.payload.optString("text")) updateDraft("")
             status = if (command.operation == "prompt") "Prompt delivered" else "Answer delivered"
         } catch (error: RemoteRefusal) {
-            uncertain = null
-            status = error.message ?: "Request refused"
+            if (finishWrite(marker)) {
+                uncertain = null
+                status = error.message ?: "Request refused"
+            }
         } catch (error: Exception) { status = error.message ?: "Request outcome uncertain" }
         finally { busy = false }
     }
@@ -356,6 +437,9 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         val command = uncertain ?: return
         val client = api ?: return
         if (busy || selected?.id != command.target) return
+        val session = selected ?: return
+        val marker = markerFor(session, command)
+        if (!writeRecovery.matches(marker)) return
         if (System.currentTimeMillis() - command.createdAt >= 120_000) {
             scope.launch {
                 busy = true
@@ -367,7 +451,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
                 } catch (error: Exception) { status = error.message ?: "Review unavailable" }
                 finally { busy = false }
             }
-        } else scope.launch { deliver(client, command) }
+        } else scope.launch { deliver(client, command, marker) }
     }
 
     fun cancelFresh() { confirmFresh = false }
@@ -381,6 +465,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         if (busy || session.id != prior.target) return
         scope.launch {
             busy = true
+            var submittedMarker: PendingWriteMarker? = null
             try {
                 if (prior.operation == "answer") {
                     require(pending.any { it.optString("id") == prior.payload.optString("id") }) {
@@ -388,14 +473,26 @@ private class RemoteController(private val prefs: SharedPreferences, private val
                     }
                 }
                 val fresh = client.prepare(session.id, prior.operation, prior.payload, session.encrypted)
+                val previous = markerFor(session, prior)
+                require(writeRecovery.matches(previous)) { "Earlier recovery marker is unavailable" }
+                val marker = markerFor(session, fresh)
+                require(writeRecovery.replaceAfterReview(previous, marker, writeScope(session))) {
+                    "Could not save new recovery marker; request not sent"
+                }
+                submittedMarker = marker
                 uncertain = fresh
+                refreshRecovery()
                 client.submit(fresh, session.encrypted)
+                if (!finishWrite(marker)) return@launch
                 uncertain = null
                 if (prior.operation == "prompt" && draft.trim() == prior.payload.optString("text")) updateDraft("")
                 status = "New request delivered"
             } catch (error: RemoteRefusal) {
-                uncertain = null
-                status = error.message ?: "New request refused"
+                val marker = submittedMarker
+                if (marker != null && finishWrite(marker)) {
+                    uncertain = null
+                    status = error.message ?: "New request refused"
+                }
             } catch (error: Exception) { status = error.message ?: "New request failed" }
             finally { busy = false }
         }
@@ -476,6 +573,22 @@ private fun RemoteScreen(state: RemoteController, alerts: LocalAlerts, push: Bac
         Text("DOXA Remote", style = MaterialTheme.typography.headlineSmall)
         Text(state.status, style = MaterialTheme.typography.bodySmall)
         Spacer(Modifier.height(8.dp))
+        if (state.recoveryBlocked && state.uncertain == null) {
+            Card(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Write outcome needs review", style = MaterialTheme.typography.titleMedium)
+                    Text(state.recoveryMessage, style = MaterialTheme.typography.bodySmall)
+                    if (state.recoveryScopeChanged) Text(
+                        "The selected hub or session differs from the saved write. Check the original scope before clearing it.",
+                        style = MaterialTheme.typography.bodySmall)
+                    Text(if (state.recoveryReviewed) "Fresh snapshot loaded. Review the transcript and pending inputs."
+                        else "Connect and select a session to load a fresh snapshot.",
+                        style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton(onClick = state::askRecoveryReview,
+                        enabled = state.recoveryReviewed && !state.busy) { Text("Acknowledge after review") }
+                }
+            }
+        }
         if (!state.connected) {
             OutlinedTextField(value = state.origin, onValueChange = { state.origin = it },
                 label = { Text("Private Tailscale hub URL") }, singleLine = true,
@@ -530,7 +643,8 @@ private fun RemoteScreen(state: RemoteController, alerts: LocalAlerts, push: Bac
                     label = { Text("Prompt") }, minLines = 2, maxLines = 5,
                     enabled = !state.busy,
                     modifier = Modifier.fillMaxWidth())
-                Button(onClick = state::sendPrompt, enabled = !state.busy && state.uncertain == null && state.draft.isNotBlank()) {
+                Button(onClick = state::sendPrompt, enabled = !state.busy && state.uncertain == null &&
+                    !state.recoveryBlocked && state.draft.isNotBlank()) {
                     Text("Send prompt")
                 }
                 if (state.uncertain != null) {
@@ -551,6 +665,11 @@ private fun RemoteScreen(state: RemoteController, alerts: LocalAlerts, push: Bac
         text = { Text("The earlier result is uncertain. Review the refreshed transcript; a new request may repeat the action.") },
         confirmButton = { TextButton(onClick = state::freshAfterReview) { Text("Send new request") } },
         dismissButton = { TextButton(onClick = state::cancelFresh) { Text("Cancel") } })
+    if (state.confirmRecovery) AlertDialog(onDismissRequest = state::cancelRecoveryReview,
+        title = { Text("Clear uncertain write?") },
+        text = { Text("The previous write may have completed. Compare the fresh transcript and pending inputs with the saved scope. The request body is unavailable after restart and will not be replayed. Clearing this marker allows new writes.") },
+        confirmButton = { TextButton(onClick = state::acknowledgeRecovery) { Text("I reviewed the snapshot") } },
+        dismissButton = { TextButton(onClick = state::cancelRecoveryReview) { Text("Keep blocked") } })
 }
 
 @Composable
@@ -567,19 +686,19 @@ private fun PendingInput(state: RemoteController, item: JSONObject) {
                     val options = question.optJSONArray("options") ?: JSONArray()
                     for (i in 0 until minOf(options.length(), 32)) {
                         val label = options.getJSONObject(i).optString("label")
-                        OutlinedButton(onClick = { state.chooseOption(question, label) }, enabled = !state.busy && state.uncertain == null) {
+                        OutlinedButton(onClick = { state.chooseOption(question, label) }, enabled = !state.busy && state.uncertain == null && !state.recoveryBlocked) {
                             Text(label)
                         }
                     }
                 }
                 TextButton(onClick = { state.sendAnswer(JSONObject().put("declined", true)) },
-                    enabled = !state.busy && state.uncertain == null) { Text("Decline") }
+                    enabled = !state.busy && state.uncertain == null && !state.recoveryBlocked) { Text("Decline") }
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { state.sendAnswer(JSONObject().put("decision", "allow")) },
-                        enabled = !state.busy && state.uncertain == null) { Text("Allow") }
+                        enabled = !state.busy && state.uncertain == null && !state.recoveryBlocked) { Text("Allow") }
                     OutlinedButton(onClick = { state.sendAnswer(JSONObject().put("decision", "deny")) },
-                        enabled = !state.busy && state.uncertain == null) { Text("Deny") }
+                        enabled = !state.busy && state.uncertain == null && !state.recoveryBlocked) { Text("Deny") }
                 }
             }
         }
