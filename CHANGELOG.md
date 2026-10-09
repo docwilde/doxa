@@ -9,7 +9,7 @@ the stable 2.0 release has not been cut.
 
 **Remote and workspace**
 
-- Add opt-in Android FCM background-push source and protocol tests with owner- and session-incarnation-scoped registration and generic tagged notifications. APK, device, Firebase and two-host QA remain open.
+- Add opt-in Android FCM background-push source and protocol tests with owner- and session-incarnation-scoped registration and generic tagged notifications. The debug APK builds and opens in an offline emulator; provisioned device, Firebase and two-host QA remain open.
 - Add pane-row collection navigation, manual hues and label rename. Automatic project-label editing remains open.
 - Read reviewed LORE 0.62.20 code-graph snapshots explicitly in the CLI and TUI, rejecting stale or mismatched source data; DOXA does not write the store.
 

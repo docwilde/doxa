@@ -7,6 +7,12 @@ must be an `https://*.ts.net/` origin reachable from a user-owned Tailscale
 device. The app supplies no Tailscale identity header: Serve authenticates the
 device and forwards its attested login to the hub.
 
+![DOXA Remote disconnected setup screen on an offline Android emulator](../assets/shots/android-remote-beta17-offline.png)
+
+This capture uses an unconfigured debug APK on an offline Android 36 emulator;
+no Tailscale account, hub, or shared key was entered. A connected session view
+requires a user-owned device and private hub.
+
 ## Build and connect
 
 Open this directory in Android Studio with Android SDK 37.0 and JDK 21,
@@ -96,7 +102,8 @@ There is no persistent shared key, file browser, or direct host command
 endpoint in this client. Protocol and hub tests cover registration scope,
 rotation, expiry, and generic payloads. An unconfigured debug APK was assembled
 locally on 2026-10-09 with Temurin JDK 21.0.12.1, Android SDK 37.0, and Gradle
-9.3.1; `:protocol:test` and `:app:lintDebug` passed in the same run. It has not
+9.3.1; `:protocol:test` and `:app:lintDebug` passed in the same run. It was
+installed on an offline Android 36 emulator to capture the setup screen. It has not
 been installed on a Firebase-enabled Android device or exercised against a
 provisioned FCM project and two-host tailnet. Device QA must cover token
 issuance and rotation, background delivery after process
