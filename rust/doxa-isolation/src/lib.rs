@@ -15,6 +15,8 @@ use std::{
 pub mod broker;
 #[cfg(target_os = "linux")]
 mod broker_origin;
+#[cfg(target_os = "linux")]
+mod broker_sender;
 pub mod egress;
 pub mod hardened;
 pub mod quota_verify;

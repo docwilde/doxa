@@ -241,9 +241,18 @@ after worker, daemon and Engine restart. A disabled Linux probe now obtains
 observes its PID namespace and cgroup v2 path. It rejects host-scope
 candidates, but an inherited-descriptor test proves that the pidfd still
 names the original connector when another process writes the frame. No
-production broker calls this probe. An authenticated exact-container Engine
-observation, per-message writer provenance and process-movement proof remain
-necessary; startup must refuse hardened mode without them.
+production broker calls this probe.
+
+A disabled Linux probe now enables `SO_PASSPIDFD` and `SO_PASSCRED` before
+accepting a socket. Its bounded `recvmsg` loop requires one kernel-supplied
+sender pidfd and credentials for every frame segment and refuses a mixed
+sender, missing control message or unsupported kernel option. An inherited
+socket test shows `SCM_PIDFD` names the child that sent bytes, while the
+connect-time credentials name its parent. This is stronger sender evidence,
+but the probe is not wired into `HookBroker`: it has no authenticated binding
+to the exact inspected Docker container, no proof that sender cgroup membership
+cannot change after send, and no real provider hook compatibility result.
+Startup must refuse hardened mode without these proofs.
 The opt-in disposable quota fixture can compare aggregate writes through all
 three data binds and recheck EDQUOT after restarting the same container. A
 separate disposable four-bind guest proof retained EDQUOT on ext4 after an
