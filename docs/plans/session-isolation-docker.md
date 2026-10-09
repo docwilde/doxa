@@ -234,11 +234,16 @@ owner UID, accepts one bounded `PreCompact` frame with a session-private
 transcript path, and bounds its response. A disposable local Unix-socket test
 also demonstrates the remaining gap: a same-UID host client with the bearer
 capability passes those checks. Before hardened admission, bind every broker
-connection to the exact inspected container and live process namespace using
-a kernel-stable peer handle (for example `SO_PEERPIDFD` where supported),
+connection to the exact inspected container and live process namespace,
 reject host/sibling/changed-container peers, and rerun the protocol tests
-after worker, daemon and Engine restart. If the kernel or Engine cannot
-provide that origin evidence, startup must refuse hardened mode.
+after worker, daemon and Engine restart. A disabled Linux probe now obtains
+`SO_PEERPIDFD`, cross-checks the pinned connector against `SO_PEERCRED`, and
+observes its PID namespace and cgroup v2 path. It rejects host-scope
+candidates, but an inherited-descriptor test proves that the pidfd still
+names the original connector when another process writes the frame. No
+production broker calls this probe. An authenticated exact-container Engine
+observation, per-message writer provenance and process-movement proof remain
+necessary; startup must refuse hardened mode without them.
 The opt-in disposable quota fixture can compare aggregate writes through all
 three data binds and recheck EDQUOT after restarting the same container. A
 separate disposable four-bind guest proof retained EDQUOT on ext4 after an
