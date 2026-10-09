@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.38 — 2026-10-09
+
+**Native plugin host review**
+
+- Add read-only **`doxa native-plugin host-check`** for delegated cgroup membership and opened frontend, worker and Bubblewrap identities. It issues no TUI authority; installed-host acceptance remains closed.
+
+**Docker quota observation**
+
+- Add an advisory **`query_advisory_quota`** host client for the administrator-pinned, root-owned helper endpoint and saved session identity. The 25-case ext4 guest passed; no hardened admission is enabled.
+
+**Code graph source basis**
+
+- Bind the disabled semantic stream probe to a complete Rust **`calls`** answer and its full scan digest. Six synthetic guest cases passed; analyzer origin remains unproved and **`binding=unknown`**.
+
 ## 2.0.0-beta.37 — 2026-10-09
 
 **Docker hook boundary**
