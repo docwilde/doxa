@@ -1183,6 +1183,21 @@ mod tests {
         assert!(!Path::new(&format!("/fr-{}",std::process::id())).exists());
     }
     #[test]
+    fn astra_supervisor_and_message_judge_are_frozen_as_separate_exact_selections(){
+        let args=vec!["--pool","fixture:fixture-v1","--prompt","bounded task","-n","1",
+            "--run-budget","10","--review-budget","1",
+            "--alignment-supervisor","codex:gpt-6-astra",
+            "--message-review","shadow","--message-judge","llm:codex:gpt-6-astra",
+            "--review-input-price","165","--review-output-price","495","--dry-run"]
+            .into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let spec=Spec::parse(&args).unwrap();
+        let review=spec.review().unwrap();
+        assert_eq!(review["independent_review"]["supervisor"],json!({"provider":"codex","model":"gpt-6-astra"}));
+        assert_eq!(review["independent_review"]["message_judge"],json!({"provider":"codex","model":"gpt-6-astra"}));
+        assert_eq!(review["independent_review"]["input_usd_per_million"],165.0);
+        assert_eq!(review["independent_review"]["output_usd_per_million"],495.0);
+    }
+    #[test]
     fn host_git_observations_never_execute_worker_fsmonitor_or_clean_filters() {
         let dir=tempfile::tempdir().unwrap();let repo=dir.path().join("worker");fs::create_dir(&repo).unwrap();
         let git=|args:&[&str]|{let status=std::process::Command::new("/usr/bin/git").env_clear().env("PATH","/usr/bin:/bin").env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_NOSYSTEM","1").current_dir(&repo).args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap();assert!(status.success(),"{args:?}");};
