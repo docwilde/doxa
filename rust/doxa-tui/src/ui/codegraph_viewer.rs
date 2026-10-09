@@ -41,7 +41,7 @@ fn answer_lines(answer: &Answer) -> Vec<String> {
             answer.coverage.skipped.count, answer.coverage.unparseable.count),
         format!("Rust scan inputs: {}", answer.scan_input_sha256.as_deref()
             .unwrap_or("unknown (skipped or unparseable input)")),
-        "Syntax only · semantic bindings are unknown; Python calls and modules are unsupported".into(),
+        "Syntax only · semantic bindings are unknown; Python module targets are unresolved".into(),
     ];
     for (language, count) in &answer.coverage.unsupported_languages {
         lines.push(format!("Unsupported {language}: {count} file(s)"));
@@ -261,6 +261,22 @@ mod tests {
         assert!(lines.contains(modules.module_edges[1].conditional_candidate_sha256.as_deref().unwrap()));
         assert!(request("module lib.rs").is_err());
         assert!(request("file ../lib.rs\nattack").is_err());
+    }
+
+    #[test]
+    fn viewer_labels_python_calls_and_import_modules_as_unresolved() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(Command::new("git").args(["init", "-q"]).arg(root.path()).status().unwrap().success());
+        fs::write(root.path().join("service.py"), "from package import helper\nhelper()\n").unwrap();
+        let calls = doxa_codegraph::query(root.path(), Query::Calls("service.py".into())).unwrap();
+        let lines = answer_lines(&calls).join("\n");
+        assert!(lines.contains("python_name · unresolved · python_binding_unknown"));
+        assert!(lines.contains(&calls.edges[0].sha256));
+        let modules = doxa_codegraph::query(root.path(), Query::Modules("service.py".into())).unwrap();
+        let lines = answer_lines(&modules).join("\n");
+        assert!(lines.contains("unknown · python_from_import_declaration"));
+        assert!(lines.contains("target: unknown"));
+        assert!(lines.contains(&modules.module_edges[0].source_sha256));
     }
 
     #[test]

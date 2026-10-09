@@ -4,7 +4,7 @@ Status: **read-only syntax queries, explicit file-map export, and reviewed LORE
 snapshot reads implemented**. DOXA can query current Rust source for definitions, imports,
 conservative call-site candidates, and bounded top-level module-file layout,
 including literal paths and unverified conditional candidates. Python `.py`
-files support syntax-only definitions and imports.
+files support syntax-only definitions, imports, call sites, and module import spellings.
 LORE 0.62.20 owns durable source-hashed snapshots; DOXA does not write them.
 
 ## Contents
@@ -26,7 +26,14 @@ returns bounded JSON. With no `--root`, it uses the current Git worktree.
 `from ... import`, and `__future__` declarations in one file. Python rows cover
 classes, functions, methods, and nested definitions with dotted lexical names.
 Aliases and glob imports stay declarations; they do not prove a module target or
-binding. Python `calls` and `modules` return explicit unsupported statuses.
+binding. Python `calls` lists bare-name, attribute, and indirect call expressions
+under their lexical caller. Decorator, default-argument, annotation, and class-base
+calls belong to the enclosing scope; definition bodies use the new scope. Every
+Python call has `binding: unresolved` and no candidates. Python `modules` lists
+static `import` and `from ... import`
+module spellings, including relative imports; its targets and resolutions stay
+unknown even when a matching file is present. Dynamic imports are calls, not
+module edges.
 Rust `modules` lists top-level `mod child;` declarations and resolves a unique
 listed, readable, parseable `child.rs` or `child/mod.rs` with source and target
 hashes. A literal `#[path = "relative/file.rs"]` can resolve a top-level module
@@ -101,7 +108,9 @@ Work is bounded: at most 20,000 files, 1 MiB per Rust or Python file, 64 MiB
 total source per language, ten seconds for the Python scan, and two seconds of
 parsing, 200,000 syntax nodes, and 128 nested definition levels per Python file.
 Results hold at most 100 rows,
-call edges, or module declarations, 10,000 call sites in the requested Rust file,
+call edges, or module declarations, 10,000 call sites in the requested
+Rust or Python file, 10,000 Python import-module declarations, 4 KiB per
+retained Python call target expression and 32 KiB total retained target text,
 100,000 candidate declarations, and a 64 KiB reply. The answer counts omitted
 rows, edges, and per-edge candidates.
 When enumeration or the total scan budget fails, the command returns an error
@@ -194,7 +203,7 @@ is read-only and creates no second memory authority.
 - Decide whether a reviewed agent tool or persistent TUI tree is useful. The
   current viewer offers explicit fresh and stored queries only.
 - Decide whether other languages justify a parser dependency and coverage bar.
-  Python calls, module resolution, runtime imports, and type-aware binding are
-  outside the shipped syntax slice.
+  Python module resolution, runtime imports, and type-aware
+  binding remain outside the shipped syntax slice.
 - Benchmark scan latency on large repositories before using this query in an
   automatic turn path or adding a persisted incremental index.
