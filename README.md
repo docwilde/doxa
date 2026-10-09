@@ -11,7 +11,7 @@
 > [!WARNING]
 > Rust 2.0 is in beta. Agents can edit files and run commands with your privileges. Choose a [session isolation profile](docs/session-isolation.md) and review the [platform limits](#platform-and-scope) before using DOXA on important work.
 
-![DOXA Rust beta.22 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.22-hero.png)
+![DOXA Rust beta.23 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.23-hero.png)
 
 [How the gallery was captured](docs/rust-gallery.md)
 
@@ -62,6 +62,7 @@ The [Rust guide](rust/README.md) covers keys, session recovery, worktrees, setti
 | GLM | Rust API client | Supply a z.ai API key. |
 
 [Engine capability matrix](docs/engine-capabilities.md) lists model, permission, cost, compaction, and platform support. The picker distinguishes sourced model facts from unknown context or thinking support. Budget admission uses a conservative documented price bound and refuses an unknown priced bound. DOXA does not silently switch engines during a session.
+`doxa model-facts ENGINE MODEL [--review-before YYYY-MM-DD]` prints exact sourced facts and flags operator-selected review candidates without changing availability or budget admission.
 
 Fleets can run an acting coordinator and workers under a reviewed charter, typed host gates, and spending limits. A separately selected alignment supervisor and fast LLM or Jev message judge can inspect work and messages. Dependent Docker-isolated workers wait for a host checkpoint, accepted handoff, and explicit human release. `/fleet dependency-review` shows the evidence in the TUI. An owner-run offline recipe can produce snapshot-bound test receipts on a capable rootless Docker host. A private scorer can evaluate consented, labeled real-message verdicts; no such corpus ships and evaluation does not change enforcement. [Fleet supervision](docs/fleet-supervision.md).
 
@@ -73,13 +74,13 @@ Remote control is opt in. `doxa remote serve` exposes a private Rust browser vie
 
 ## Gallery
 
-These beta.22 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
+These beta.23 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
 
-The gallery also shows the [read-only code graph modal](assets/shots/rust-2.0.0-beta.22-codegraph.png), [explicit project label](assets/shots/rust-2.0.0-beta.22-project-label.png), and [pane-row rail](assets/shots/rust-2.0.0-beta.22-pane-triage.png).
+The gallery also shows the [read-only code graph modal](assets/shots/rust-2.0.0-beta.23-codegraph.png), [explicit project label](assets/shots/rust-2.0.0-beta.23-project-label.png), and [pane-row rail](assets/shots/rust-2.0.0-beta.23-pane-triage.png).
 
 | Image preview | Isolation details | Fleet release review |
 | --- | --- | --- |
-| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.22-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.22-isolation.png) | ![Synthetic checkpoint and handoff evidence in the fleet release modal](assets/shots/rust-2.0.0-beta.22-fleet-release-review.png) |
+| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.23-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.23-isolation.png) | ![Synthetic checkpoint and handoff evidence in the fleet release modal](assets/shots/rust-2.0.0-beta.23-fleet-release-review.png) |
 
 ## Platform and scope
 
@@ -93,7 +94,7 @@ DOXA loads selected provider plugins with scoped adoption rules. Remote access n
 - [Engine capabilities](docs/engine-capabilities.md) — what each provider supports.
 - [Session isolation](docs/session-isolation.md) — Docker profiles and their limits.
 - [Fleet supervision](docs/fleet-supervision.md) — independent review and message judging.
-- [Code graph queries](docs/plans/code-graph.md) — bounded Rust call candidates and Python definitions and imports.
+- [Code graph queries](docs/plans/code-graph.md) — bounded Rust candidates and Python definitions, imports, and lexical call sites.
 - [Native plugins](docs/native-plugins.md) — owner-approved text commands, status files and WASM package preflight.
 - [Plans and open work](docs/plans/README.md) — current implementation status.
 
