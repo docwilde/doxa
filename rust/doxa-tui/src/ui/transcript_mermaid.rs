@@ -50,6 +50,7 @@ impl PngCache {
     fn new() -> Option<Self> {
         let dir = tempfile::Builder::new().prefix("doxa-mermaid-cache-")
             .tempdir_in(private_temp_root()?).ok()?;
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).ok()?;
         let meta = fs::symlink_metadata(dir.path()).ok()?;
         if !meta.is_dir() || meta.file_type().is_symlink() || meta.permissions().mode() & 0o777 != 0o700 {
             return None;
