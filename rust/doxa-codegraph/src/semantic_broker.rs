@@ -9,6 +9,7 @@ use super::semantic_evidence::inspect_definition_reply;
 use super::semantic_producer::{plan_rust_analyzer, read_lsp_frame, ProducerPlan};
 use super::semantic_runtime::bounded_unix_connect;
 use super::{current_scan_input_sha256, file_bytes, source_language, Answer, CallCandidate, CallEdge};
+use super::whole_scan::current_whole_worktree_sha256;
 use serde::de::{MapAccess, Visitor};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -50,15 +51,28 @@ fn query_digest(plan: &ProducerPlan, edge: &CallEdge, candidate: &CallCandidate)
 }
 
 // Bind this particular stream challenge to the complete Git-listed Rust
-// source digest from the syntax query. The hash is a local observation, not a
-// snapshot of every byte visible in the analyzer's eventual mount.
+// source digest from the syntax query and a bounded observation of all
+// worktree entries. Neither is an atomic snapshot or an analyzer measurement.
 fn stream_query_digest(plan: &ProducerPlan, edge: &CallEdge,
-    candidate: &CallCandidate, rust_scan: &str) -> Result<String, String> {
+    candidate: &CallCandidate, rust_scan: &str, whole_scan: &str) -> Result<String, String> {
     let query = query_digest(plan, edge, candidate)?;
     let bytes = serde_json::to_vec(&json!({"protocol":STREAM_PROTOCOL,
-        "query_sha256":query,"rust_scan_input_sha256":rust_scan}))
+        "query_sha256":query,"rust_scan_input_sha256":rust_scan,
+        "whole_worktree_input_sha256":whole_scan}))
         .map_err(|_| "cannot encode source-bound stream query")?;
     Ok(sha256_hex(&bytes))
+}
+
+fn with_whole_worktree_basis<T>(root: &Path, expected_rust: &str,
+    exchange: impl FnOnce(&str, &str) -> Result<T, String>) -> Result<(T, String, String), String> {
+    let whole_before = current_whole_worktree_sha256(root)?;
+    let (result, rust_scan) = with_rust_scan_basis(root, expected_rust,
+        |rust_scan| exchange(rust_scan, &whole_before.digest))?;
+    let whole_after = current_whole_worktree_sha256(root)?;
+    if whole_after != whole_before {
+        return Err("whole-worktree inputs changed during stream observation".into());
+    }
+    Ok((result, rust_scan, whole_before.digest))
 }
 
 fn with_rust_scan_basis<T>(root: &Path, expected: &str,
@@ -503,9 +517,10 @@ pub(crate) fn observe_stream_definition(path: &Path, plan: &ProducerPlan,
     if source != edge.sha256 || target != candidate.sha256 {
         return Err("semantic source changed before stream challenge".into());
     }
-    let (evidence, rust_scan) = with_rust_scan_basis(&plan.root, rust_scan_input_sha256, |basis| {
+    let (evidence, rust_scan, whole_scan) = with_whole_worktree_basis(&plan.root,
+        rust_scan_input_sha256, |basis, whole| {
         let nonce = challenge_nonce()?;
-        let digest = stream_query_digest(plan, edge, candidate, basis)?;
+        let digest = stream_query_digest(plan, edge, candidate, basis, whole)?;
         let response = observe_stream_packets(path, &nonce, &digest, &source, &target, basis)?;
         let request = json!({"jsonrpc":"2.0","id":7,"method":"textDocument/definition",
             "params":{"textDocument":{"uri":format!("file://{}/{}",plan.root.display(),edge.file)},
@@ -521,7 +536,8 @@ pub(crate) fn observe_stream_definition(path: &Path, plan: &ProducerPlan,
     Ok(json!({"status":"protocol_match_untrusted","binding":"unknown",
         "socket_observation":"one_sender_stream_untrusted",
         "reason":"analyzer_engine_and_broker_binary_unproven",
-        "rust_scan_input_sha256":rust_scan,"evidence":evidence}))
+        "rust_scan_input_sha256":rust_scan,
+        "whole_worktree_input_sha256":whole_scan,"evidence":evidence}))
 }
 
 /// Guest-only check of a reply *sender* on one packet. Still returns unknown:
@@ -903,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_query_digest_binds_whole_rust_scan_to_challenge() {
+    fn stream_query_digest_binds_rust_and_whole_worktree_inputs_to_challenge() {
         let root = tempfile::tempdir().unwrap();
         assert!(Command::new("git").arg("init").arg("-q").arg(root.path()).status().unwrap().success());
         fs::write(root.path().join("a.rs"), "fn caller() { target(); }\nfn target() {}\n").unwrap();
@@ -913,11 +929,43 @@ mod tests {
         let plan = plan_rust_analyzer(root.path(), IMAGE,
             "unix:///run/user/1000/docker.sock", true).unwrap();
         let basis = answer.scan_input_sha256.as_deref().unwrap();
-        let digest = stream_query_digest(&plan, edge, candidate, basis).unwrap();
-        assert_ne!(digest, stream_query_digest(&plan, edge, candidate, &"0".repeat(64)).unwrap());
+        let whole = current_whole_worktree_sha256(root.path()).unwrap().digest;
+        let digest = stream_query_digest(&plan, edge, candidate, basis, &whole).unwrap();
+        assert_ne!(digest, stream_query_digest(&plan, edge, candidate,
+            &"0".repeat(64), &whole).unwrap());
+        assert_ne!(digest, stream_query_digest(&plan, edge, candidate,
+            basis, &"0".repeat(64)).unwrap());
         assert_ne!(digest, query_digest(&plan, edge, candidate).unwrap());
         assert_eq!(with_rust_scan_basis(root.path(), "", |_| Ok(())).unwrap_err(),
             "missing or invalid Rust scan input digest from syntax query");
+    }
+
+    #[test]
+    fn stream_whole_basis_rejects_ignored_and_manifest_drift() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(Command::new("git").arg("init").arg("-q").arg(root.path()).status().unwrap().success());
+        fs::write(root.path().join(".gitignore"), "ignored/\n").unwrap();
+        fs::create_dir(root.path().join("ignored")).unwrap();
+        fs::write(root.path().join("ignored/input.bin"), [0, 255]).unwrap();
+        fs::write(root.path().join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+        fs::write(root.path().join("a.rs"), "fn caller() { target(); }\nfn target() {}\n").unwrap();
+        let answer = query(root.path(), Query::Calls("a.rs".into())).unwrap();
+        let rust = answer.scan_input_sha256.unwrap();
+        for (path, content) in [("ignored/input.bin", vec![0, 254]),
+            ("Cargo.toml", b"[package]\nname='y'\n".to_vec())] {
+            let original = fs::read(root.path().join(path)).unwrap();
+            let error = with_whole_worktree_basis(root.path(), &rust, |_, _| {
+                fs::write(root.path().join(path), &content).unwrap();
+                Ok(())
+            }).unwrap_err();
+            assert!(error.contains("whole-worktree inputs changed"), "{path}: {error}");
+            fs::write(root.path().join(path), original).unwrap();
+        }
+        let error = with_whole_worktree_basis(root.path(), &rust, |_, _| {
+            fs::write(root.path().join("ignored/new.bin"), [1]).unwrap();
+            Ok(())
+        }).unwrap_err();
+        assert!(error.contains("whole-worktree inputs changed"), "{error}");
     }
 
     /// Guest only: root owns this endpoint and sends a complete stream in

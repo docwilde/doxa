@@ -321,10 +321,36 @@ class DelegatedShapeTests(unittest.TestCase):
             self.assertEqual(proof.check_bwrap(), "bwrap fixture")
         self.assertEqual(len(smoke_script), 1)
         self.assertEqual(subprocess.run(["/bin/sh", "-n", "-c", smoke_script[0]]).returncode, 0)
+        resolved_awk = proof.sandbox_visible_tool(Path("/usr/bin/awk"))
+        self.assertIn(resolved_awk, smoke_script[0])
+        if resolved_awk != "/usr/bin/awk":
+            self.assertNotIn("/usr/bin/awk", smoke_script[0])
         for source in ("/proc/net/dev", "/proc/net/route", "/proc/net/ipv6_route",
                        "/proc/self/ns/net", "/proc/self/ns/mnt", "/proc/self/ns/user",
                        "/proc/self/ns/pid"):
             self.assertIn(source, smoke_script[0])
+
+    def test_sandbox_tool_resolves_alternatives_without_mounting_etc(self) -> None:
+        host = Path(self.temp.name)
+        usr_bin = host / "usr/bin"
+        alternatives = host / "etc/alternatives"
+        usr_bin.mkdir(parents=True)
+        alternatives.mkdir(parents=True)
+        executable = usr_bin / "mawk"
+        executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+        executable.chmod(0o700)
+        (alternatives / "awk").symlink_to("../../usr/bin/mawk")
+        alias = usr_bin / "awk"
+        alias.symlink_to("../../etc/alternatives/awk")
+        self.assertEqual(proof.sandbox_visible_tool(alias, host / "usr"), str(executable))
+
+        outside = host / "outside"
+        outside.write_bytes(b"#!/bin/sh\nexit 0\n")
+        outside.chmod(0o700)
+        (alternatives / "awk").unlink()
+        (alternatives / "awk").symlink_to(outside)
+        with self.assertRaisesRegex(proof.ProofError, "outside the sandbox"):
+            proof.sandbox_visible_tool(alias, host / "usr")
 
     def test_route_policy_allows_loopback_and_denies_egress(self) -> None:
         ipv4_header = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n"

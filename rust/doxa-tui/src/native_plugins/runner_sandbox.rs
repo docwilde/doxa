@@ -56,8 +56,9 @@ fn delegated_parent_at(root: &Path, membership: &str, uid: u32, pid: u32) -> io:
     let mut group = leaf.as_path();
     while group != root {
         let metadata = fs::symlink_metadata(group)?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(unavailable("cgroup membership traverses a non-directory or symlink"));
+        if !metadata.is_dir() || metadata.file_type().is_symlink()
+            || metadata.permissions().mode() & 0o022 != 0 {
+            return Err(unavailable("cgroup membership traverses an unsafe directory"));
         }
         group = group.parent().ok_or_else(|| unavailable("cgroup membership escaped the hierarchy"))?;
     }
@@ -354,6 +355,36 @@ fn open_trusted_executable(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Metadata compared again in the forked child immediately before exec.
+/// This catches replacement or in-place edits after the trusted descriptor
+/// was opened, without path lookup or allocation in the pre-exec closure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExecutableStamp {
+    device: libc::dev_t,
+    inode: libc::ino_t,
+    mode: libc::mode_t,
+    uid: libc::uid_t,
+    links: libc::nlink_t,
+    size: libc::off_t,
+    mtime_seconds: libc::time_t,
+    mtime_nanos: libc::c_long,
+    ctime_seconds: libc::time_t,
+    ctime_nanos: libc::c_long,
+}
+
+fn executable_stamp(fd: libc::c_int) -> io::Result<ExecutableStamp> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(ExecutableStamp {
+        device: stat.st_dev, inode: stat.st_ino, mode: stat.st_mode,
+        uid: stat.st_uid, links: stat.st_nlink, size: stat.st_size,
+        mtime_seconds: stat.st_mtime, mtime_nanos: stat.st_mtime_nsec,
+        ctime_seconds: stat.st_ctime, ctime_nanos: stat.st_ctime_nsec,
+    })
+}
+
 fn status_memfd() -> io::Result<File> {
     let label = CString::new("doxa-plugin-bwrap-status").unwrap();
     let fd = unsafe { libc::memfd_create(label.as_ptr(), libc::MFD_CLOEXEC) };
@@ -396,8 +427,9 @@ fn command_impl_with_bwrap(bwrap: &Path, worker: &Path, args: &[&str], cgroup: O
     let status = status_memfd()?;
     let status_child = status.try_clone()?;
     let bwrap_fd = bwrap_file.as_raw_fd();
-    let bwrap_metadata = bwrap_file.metadata()?;
     let worker_fd = worker_file.as_raw_fd();
+    let bwrap_stamp = executable_stamp(bwrap_fd)?;
+    let worker_stamp = executable_stamp(worker_fd)?;
     let status_fd = status_child.as_raw_fd();
     if bwrap_fd == worker_fd || bwrap_fd == status_fd || worker_fd == status_fd {
         return Err(unavailable("plugin executable and status descriptors collided"));
@@ -407,7 +439,8 @@ fn command_impl_with_bwrap(bwrap: &Path, worker: &Path, args: &[&str], cgroup: O
     // intentionally close-on-exec: the kernel resolves the checked ELF before
     // closing it, and Bubblewrap cannot pass the descriptor to its worker.
     // A replacement of bwrap's pathname after validation cannot change the
-    // wrapper that starts. The pre-exec closure owns the file until execve.
+    // wrapper that starts. The pre-exec closure owns both opened executables
+    // until execve and refuses detectable in-place edits to either one.
     let mut command = Command::new(format!("/proc/self/fd/{bwrap_fd}"));
     command.env_clear().current_dir("/");
     command.args(["--json-status-fd", &status_fd.to_string(),
@@ -435,12 +468,8 @@ fn command_impl_with_bwrap(bwrap: &Path, worker: &Path, args: &[&str], cgroup: O
         for fd in [worker_file.as_raw_fd(), status_child.as_raw_fd()] {
             if libc::fcntl(fd, libc::F_SETFD, 0) < 0 { return Err(io::Error::last_os_error()); }
         }
-        let mut observed: libc::stat = std::mem::zeroed();
-        if libc::fstat(bwrap_file.as_raw_fd(), &mut observed) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if observed.st_dev != bwrap_metadata.dev() as libc::dev_t
-            || observed.st_ino != bwrap_metadata.ino() as libc::ino_t {
+        if executable_stamp(bwrap_file.as_raw_fd())? != bwrap_stamp
+            || executable_stamp(worker_file.as_raw_fd())? != worker_stamp {
             return Err(io::Error::from_raw_os_error(libc::EACCES));
         }
         Ok(())
@@ -565,6 +594,7 @@ mod tests {
     use std::net::TcpListener;
     use std::os::fd::AsRawFd;
     use std::process::Stdio;
+    use std::io::Write;
 
     fn fixture(script: &str) -> Command {
         let mut command = Command::new(BWRAP);
@@ -608,6 +638,9 @@ mod tests {
         let parent = root.join("delegated");
         let leaf = parent.join("supervisor");
         fs::create_dir_all(&leaf).unwrap();
+        for component in [&root, &parent, &leaf] {
+            fs::set_permissions(component, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         fs::write(parent.join("cgroup.procs"), "").unwrap();
         fs::write(parent.join("cgroup.subtree_control"), "cpu memory pids\n").unwrap();
         fs::write(leaf.join("cgroup.procs"), "4242\n").unwrap();
@@ -759,6 +792,21 @@ mod tests {
     }
 
     #[test]
+    fn delegated_parent_rejects_other_user_writable_ancestors_and_leaf() {
+        let (_dir, root, parent) = fake_delegated_tree();
+        let uid = unsafe { libc::geteuid() };
+        let membership = "0::/delegated/supervisor\n";
+        for (path, mode) in [(&parent, 0o720), (&parent, 0o702),
+            (&parent.join("supervisor"), 0o770)] {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(delegated_parent_at(&root, membership, uid, 4242).is_err(),
+                "accepted writable cgroup component {}", path.display());
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(delegated_parent_at(&root, membership, uid, 4242).is_ok());
+    }
+
+    #[test]
     fn delegated_parent_rejects_ambiguous_paths_and_symlinked_parent() {
         let (_dir, root, parent) = fake_delegated_tree();
         let uid = unsafe { libc::geteuid() };
@@ -786,21 +834,39 @@ mod tests {
     }
 
     #[test]
-    fn opened_worker_inode_survives_path_replacement() {
+    fn launch_refuses_same_inode_edits_to_worker_or_wrapper_before_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let bwrap = dir.path().join("bwrap");
+        let worker = dir.path().join("worker");
+        script(&bwrap, "exit 0");
+        script(&worker, "exit 0");
+        for edited in [&worker, &bwrap] {
+            let WorkerCommand { mut command, .. } =
+                command_impl_with_bwrap(&bwrap, &worker, &[], None).unwrap();
+            let before = executable_stamp(open_trusted_executable(edited).unwrap().as_raw_fd()).unwrap();
+            thread::sleep(Duration::from_millis(2));
+            let mut file = OpenOptions::new().write(true).open(edited).unwrap();
+            file.write_all(b"#!/bin/sh\nexit 9\n").unwrap();
+            assert_ne!(before,
+                executable_stamp(open_trusted_executable(edited).unwrap().as_raw_fd()).unwrap());
+            assert_eq!(command.spawn().unwrap_err().raw_os_error(), Some(libc::EACCES));
+        }
+    }
+
+    #[test]
+    fn opened_worker_inode_rejects_path_replacement_before_exec() {
         if !sandbox_available() { return; }
         let dir = tempfile::tempdir().unwrap();
         let worker = dir.path().join("worker");
         script(&worker, "printf 'DOXA-WORKER-READY-v1\\n' >&2; printf 'DOXAR1\\000\\000\\000\\052\\000\\000\\000'");
-        let launch = command_impl(&worker, &[], None).unwrap();
+        let WorkerCommand { mut command, .. } = command_impl(&worker, &[], None).unwrap();
         fs::rename(&worker, dir.path().join("original")).unwrap();
         script(&worker, "printf 'replaced'");
-        let (capture, wrapper) = run_bwrap(launch);
-        assert!(wrapper.child_started);
-        assert_eq!(classify(&capture, wrapper), IsolatedOutcome::Return(42));
+        assert_eq!(command.spawn().unwrap_err().raw_os_error(), Some(libc::EACCES));
     }
 
     #[test]
-    fn opened_wrapper_inode_survives_path_replacement() {
+    fn opened_wrapper_inode_rejects_path_replacement_before_exec() {
         if !sandbox_available() { return; }
         let dir = tempfile::tempdir().unwrap();
         let bwrap = dir.path().join("bwrap");
@@ -808,12 +874,11 @@ mod tests {
         fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o700)).unwrap();
         let worker = dir.path().join("worker");
         script(&worker, "printf 'DOXA-WORKER-READY-v1\\n' >&2; printf 'DOXAR1\\000\\000\\000\\052\\000\\000\\000'");
-        let launch = command_impl_with_bwrap(&bwrap, &worker, &[], None).unwrap();
+        let WorkerCommand { mut command, .. } =
+            command_impl_with_bwrap(&bwrap, &worker, &[], None).unwrap();
         fs::rename(&bwrap, dir.path().join("original-wrapper")).unwrap();
         script(&bwrap, "printf 'replacement-wrapper'; exit 9");
-        let (capture, wrapper) = run_bwrap(launch);
-        assert!(wrapper.child_started);
-        assert_eq!(classify(&capture, wrapper), IsolatedOutcome::Return(42));
+        assert_eq!(command.spawn().unwrap_err().raw_os_error(), Some(libc::EACCES));
     }
 
     #[test]

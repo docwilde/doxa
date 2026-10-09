@@ -152,9 +152,12 @@ checks TLS SNI before dialing the pinned DNS answer. It rejects ECH, TLS early
 data and extra handshake bytes in a network-none fixture. An offline rebinding
 test checks that a later private DNS answer cannot reach the connector and that
 the first tunnel never re-resolves after validating its public answer. The gateway
-also checks the kernel writer of guarded CONNECT and ClientHello bytes against
-the original connector, refusing an inherited socket writer before DNS or
-upstream dial. Later relay bytes and process movement are not fully proven.
+also checks the kernel writer of guarded CONNECT, ClientHello and later
+worker-to-upstream relay chunks against the original connector. It rechecks
+the connector's observed container scope before forwarding each relay chunk
+and closes both tunnel directions on a rejected writer. These are sequential
+observations; process movement between send, inspection and forwarding and
+exact Engine/container identity remain unproven.
 The gateway is not wired into a production profile. Provider streaming, login, refresh and
 bypass tests in a rootless container remain the gate. There is no hard disk quota
 or CLI credential secrecy.

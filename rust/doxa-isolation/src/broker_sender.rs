@@ -118,7 +118,7 @@ pub(crate) fn pin_connector_sender(stream: &UnixStream) -> io::Result<ConnectorS
 /// No bytes from a transferred descriptor are returned to the caller.
 pub(crate) fn read_pinned_sender(stream: &UnixStream, bytes: &mut [u8],
     connector: &ConnectorSenderPin) -> io::Result<usize> {
-    let (count, sender, cred) = recv_sender_chunk(stream, bytes)?;
+    let Some((count, sender, cred)) = recv_sender_chunk(stream, bytes)? else { return Ok(0); };
     if !same_pidfd(&connector.pidfd, &sender)?
         || (connector.cred.pid, connector.cred.uid, connector.cred.gid)
             != (cred.pid, cred.uid, cred.gid) {
@@ -165,7 +165,7 @@ fn align(value: usize) -> usize {
 
 /// One bounded recvmsg segment and its kernel-supplied sender pidfd. Unexpected
 /// SCM_RIGHTS are closed even when the control message is truncated/refused.
-fn recv_sender_chunk(stream: &UnixStream, bytes: &mut [u8]) -> io::Result<(usize, File, libc::ucred)> {
+fn recv_sender_chunk(stream: &UnixStream, bytes: &mut [u8]) -> io::Result<Option<(usize, File, libc::ucred)>> {
     if bytes.is_empty() { return Err(error("empty broker sender read")); }
     let mut control = [0u64; MAX_CONTROL / mem::size_of::<u64>()];
     let mut iov = libc::iovec { iov_base: bytes.as_mut_ptr().cast(), iov_len: bytes.len() };
@@ -176,7 +176,6 @@ fn recv_sender_chunk(stream: &UnixStream, bytes: &mut [u8]) -> io::Result<(usize
     msg.msg_controllen = MAX_CONTROL;
     let count = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC) };
     if count < 0 { return Err(io::Error::last_os_error()); }
-    if count == 0 { return Err(error("incomplete broker sender frame")); }
     let mut pidfds = Vec::new();
     let mut rights = Vec::new();
     let mut credentials = Vec::new();
@@ -210,10 +209,19 @@ fn recv_sender_chunk(stream: &UnixStream, bytes: &mut [u8]) -> io::Result<(usize
         offset = offset.saturating_add(align(size));
     }
     if total > MAX_CONTROL || msg.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0
-        || unexpected || !rights.is_empty() || pidfds.len() != 1 || credentials.len() != 1 {
+        || unexpected || !rights.is_empty() {
         return Err(error("broker sender cmsg missing, truncated or unexpected"));
     }
-    Ok((count as usize, pidfds.pop().unwrap(), credentials.pop().unwrap()))
+    // EOF carries no payload to attribute. Parse and close any descriptors
+    // first; an EOF cannot forward bytes even if the kernel supplied sender
+    // metadata for the close notification.
+    if count == 0 {
+        return Ok(None);
+    }
+    if pidfds.len() != 1 || credentials.len() != 1 {
+        return Err(error("broker sender cmsg missing, truncated or unexpected"));
+    }
+    Ok(Some((count as usize, pidfds.pop().unwrap(), credentials.pop().unwrap())))
 }
 
 fn read_exact_from_one_sender(stream: &UnixStream, bytes: &mut [u8], first: &mut Option<File>,
@@ -224,7 +232,8 @@ fn read_exact_from_one_sender(stream: &UnixStream, bytes: &mut [u8], first: &mut
         if remaining.is_zero() { return Err(error("broker sender frame deadline exceeded")); }
         stream.set_read_timeout(Some(remaining.min(RECV_TIMEOUT)))?;
         let (read, pidfd, cred) = match recv_sender_chunk(stream, &mut bytes[position..]) {
-            Ok(chunk) => chunk,
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => return Err(error("incomplete broker sender frame")),
             Err(err) if matches!(err.kind(), io::ErrorKind::WouldBlock
                 | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => continue,
             Err(err) => return Err(err),
@@ -343,6 +352,17 @@ mod tests {
         client.write_all(&0u32.to_be_bytes()).unwrap();
         let err = read_frame_sender(&server).unwrap_err();
         assert!(err.to_string().contains("empty broker sender frame"), "{err}");
+    }
+
+    #[test]
+    fn eof_is_valid_for_stream_relay_but_not_an_incomplete_broker_frame() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        enable_sender_pidfds(server.as_raw_fd()).unwrap();
+        client.write_all(&5u32.to_be_bytes()).unwrap();
+        client.write_all(b"part").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let err = read_frame_sender(&server).unwrap_err();
+        assert!(err.to_string().contains("incomplete broker sender frame"), "{err}");
     }
 
     #[test]

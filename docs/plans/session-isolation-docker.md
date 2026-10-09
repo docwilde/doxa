@@ -219,13 +219,16 @@ connector unless its live pidfd, owner UID, PID namespace and cgroup belong
 to that container scope. Replacing or restarting the init closes admission
 for subsequent connectors. A refusal occurs before CONNECT parsing, DNS or
 upstream dialing. Linux guarded gateways now require kernel sender pidfds and
-credentials on every CONNECT and ClientHello read, matching the pinned
-connector; an inherited socket writer is refused before DNS or dial. The
-connector's pinned container scope is rechecked after CONNECT and after the
-ClientHello. These are sequential observations. The relay after the first
-ClientHello does not bind every later writer, and an authenticated exact
-Engine/container observation, process-movement proof and real provider flow
-tests remain necessary before hardened admission.
+credentials on every CONNECT, ClientHello and later worker-to-upstream relay
+read, matching the pinned connector. An inherited socket writer is refused
+before DNS, dial or forwarding its later relay bytes. The connector's pinned
+container scope is rechecked after CONNECT, after the ClientHello and after
+each accepted relay chunk before forwarding it. A rejected relay writer
+closes both tunnel directions. These checks are sequential observations, not
+an atomic guarantee against process movement between send, scope inspection
+and write. An authenticated exact Engine/container observation and real
+provider-flow and post-handshake movement tests remain necessary before
+hardened admission.
 
 No production profile starts the gateway or injects proxy variables yet.
 The reserved hardened gateway entry point requires a ready offline manifest

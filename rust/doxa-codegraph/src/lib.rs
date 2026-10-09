@@ -22,6 +22,8 @@ pub mod semantic_producer;
 pub mod semantic_runtime;
 pub mod cache;
 #[cfg(target_os = "linux")]
+mod whole_scan;
+#[cfg(target_os = "linux")]
 mod semantic_broker;
 
 const MAX_FILES: usize = 20_000;
@@ -403,11 +405,13 @@ fn verify_parsed_source_hashes<'a>(root: &Path, language: &str, started: Instant
 }
 
 type SourceBytes = (String, String, u128);
+type RawBytes = (Vec<u8>, String, u128);
 
 struct SourceReadRequest {
     root: PathBuf,
     relative: String,
-    reply: mpsc::Sender<Result<SourceBytes, String>>,
+    max_bytes: u64,
+    reply: mpsc::Sender<Result<RawBytes, String>>,
     pause: Option<Duration>,
 }
 
@@ -428,7 +432,7 @@ impl SourceReader {
             .spawn(move || {
                 for request in incoming {
                     if let Some(pause) = request.pause { std::thread::sleep(pause); }
-                    let result = read_file_bytes(&request.root, &request.relative);
+                    let result = read_file_bytes(&request.root, &request.relative, request.max_bytes);
                     let _ = request.reply.send(result);
                 }
             }).map_err(|e| format!("source reader start: {e}"))?;
@@ -436,14 +440,17 @@ impl SourceReader {
     }
 
     fn read(&mut self, root: &Path, relative: &str, deadline: Duration) -> Result<SourceBytes, String> {
-        self.read_request(root, relative, deadline, None)
+        let (bytes, sha, read_unix_ms) = self.read_request(root, relative,
+            MAX_SOURCE_BYTES, deadline, None)?;
+        let content = String::from_utf8(bytes).map_err(|_| "non-UTF-8 source")?;
+        Ok((content, sha, read_unix_ms))
     }
 
-    fn read_request(&mut self, root: &Path, relative: &str, deadline: Duration,
-        pause: Option<Duration>) -> Result<SourceBytes, String> {
+    fn read_request(&mut self, root: &Path, relative: &str, max_bytes: u64,
+        deadline: Duration, pause: Option<Duration>) -> Result<RawBytes, String> {
         if self.disabled { return Err("source reader disabled after a failed or timed-out read".into()); }
         let (reply, received) = mpsc::channel();
-        let request = SourceReadRequest { root: root.to_path_buf(), relative: relative.into(), reply, pause };
+        let request = SourceReadRequest { root: root.to_path_buf(), relative: relative.into(), max_bytes, reply, pause };
         if self.requests.try_send(request).is_err() {
             self.disabled = true;
             return Err("source reader unavailable; subsequent source reads disabled".into());
@@ -489,7 +496,28 @@ fn file_bytes(root: &Path, relative: &str) -> Result<SourceBytes, String> {
     reader.read(root, relative, remaining)
 }
 
-fn read_file_bytes(root: &Path, relative: &str) -> Result<SourceBytes, String> {
+#[cfg(target_os = "linux")]
+fn file_digest(root: &Path, relative: &str, max_bytes: u64) -> Result<(String, u64), String> {
+    let deadline = Instant::now() + MAX_SOURCE_READ_TIME;
+    let reader = SOURCE_READER.get_or_init(|| SourceReader::new().map(Mutex::new))
+        .as_ref().map_err(Clone::clone)?;
+    let mut reader = loop {
+        match reader.try_lock() {
+            Ok(reader) => break reader,
+            Err(std::sync::TryLockError::Poisoned(_)) => return Err("source reader lock poisoned".into()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline { return Err("source reader busy for two seconds".into()); }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() { return Err("source reader wait exceeded two-second deadline".into()); }
+    let (bytes, digest, _) = reader.read_request(root, relative, max_bytes, remaining, None)?;
+    Ok((digest, bytes.len() as u64))
+}
+
+fn read_file_bytes(root: &Path, relative: &str, max_bytes: u64) -> Result<RawBytes, String> {
     // Anchor each component to an opened worktree descriptor. A repository
     // writer may replace a symlink between path validation and File::open;
     // canonicalize + symlink_metadata followed by a pathname open leaks the
@@ -521,18 +549,17 @@ fn read_file_bytes(root: &Path, relative: &str) -> Result<SourceBytes, String> {
     let mut file = file.expect("nonempty Git path");
     let metadata = file.metadata().map_err(|e| format!("file metadata: {e}"))?;
     if !metadata.is_file() { return Err("not a regular file (symlinks are skipped)".into()); }
-    if metadata.len() > MAX_SOURCE_BYTES { return Err("source file exceeds 1 MiB limit".into()); }
+    if metadata.len() > max_bytes { return Err("file exceeds read limit".into()); }
     let mut bytes = Vec::new();
-    file.by_ref().take(MAX_SOURCE_BYTES + 1).read_to_end(&mut bytes).map_err(|e| format!("file read: {e}"))?;
+    file.by_ref().take(max_bytes + 1).read_to_end(&mut bytes).map_err(|e| format!("file read: {e}"))?;
     let after = file.metadata().map_err(|e| format!("file metadata after read: {e}"))?;
-    if bytes.len() as u64 > MAX_SOURCE_BYTES || metadata.len() != after.len()
+    if bytes.len() as u64 > max_bytes || metadata.len() != after.len()
         || metadata.modified().ok() != after.modified().ok() {
-        return Err("source changed during read or exceeded 1 MiB limit".into());
+        return Err("file changed during read or exceeded read limit".into());
     }
     let sha = format!("{:x}", Sha256::digest(&bytes));
     let read_unix_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
-    let content = String::from_utf8(bytes).map_err(|_| "non-UTF-8 source")?;
-    Ok((content, sha, read_unix_ms))
+    Ok((bytes, sha, read_unix_ms))
 }
 
 /// Recheck one recorded Rust or Python source without following symlinks in any path
@@ -2097,7 +2124,7 @@ mod tests {
         assert_eq!(reader.read(root.path(), "lib.rs", Duration::from_secs(1)).unwrap().0,
             "fn visible() {}\n");
         let started = Instant::now();
-        let error = reader.read_request(root.path(), "lib.rs", Duration::from_millis(30),
+        let error = reader.read_request(root.path(), "lib.rs", MAX_SOURCE_BYTES, Duration::from_millis(30),
             Some(Duration::from_millis(150))).unwrap_err();
         assert!(error.contains("deadline"), "{error}");
         assert!(started.elapsed() < Duration::from_millis(500));
