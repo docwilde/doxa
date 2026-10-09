@@ -58,9 +58,12 @@ fn checked_event(frame: Value, capability: &str, manifest: &Manifest) -> io::Res
 
 fn process_client(mut stream: UnixStream, capability: &str, manifest: &Manifest,
     handler: &impl Fn(Value, &Manifest) -> Value) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let result = (|| -> io::Result<Value> {
+        // Accepted sockets may inherit the listener's nonblocking state on
+        // some platforms; short blocking I/O plus timeouts is the contract.
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         require_owner_peer(&stream)?;
         let mut size = [0; 4]; stream.read_exact(&mut size)?;
         let size = u32::from_be_bytes(size) as usize;
