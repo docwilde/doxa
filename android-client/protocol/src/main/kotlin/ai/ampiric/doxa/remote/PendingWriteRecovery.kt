@@ -10,9 +10,30 @@ object AndroidWriteId {
 
     fun validBoot(value: String): Boolean = boot.matches(value)
     fun valid(value: String): Boolean = id.matches(value)
+    fun bootOf(value: String): String {
+        require(valid(value)) { "Invalid Android write ID" }
+        return value.substring(0, 32)
+    }
     fun new(boot: String): String {
         require(validBoot(boot)) { "Invalid hub boot nonce" }
         return "$boot-${UUID.randomUUID()}"
+    }
+}
+
+/** A transcript must identify the session actually read, including its incarnation. */
+object AndroidReview {
+    fun matchesIncarnation(history: JSONObject, incarnation: String): Boolean =
+        incarnation.isNotBlank() && history.opt("incarnation") == incarnation
+
+    fun matchesAnswer(history: JSONObject, payload: JSONObject, incarnation: String): Boolean {
+        if (!matchesIncarnation(history, incarnation) || history.opt("pending_inputs_complete") != true)
+            return false
+        val id = payload.optString("id")
+        val reviewed = payload.optJSONObject("reviewed_request") ?: return false
+        val inputs = history.optJSONArray("pending_inputs") ?: return false
+        if (!Wire.id(id) || reviewed.optString("id") != id || inputs.length() > 64) return false
+        return (0 until inputs.length()).mapNotNull { inputs.optJSONObject(it) }
+            .any { it.optString("id") == id && it.toString() == reviewed.toString() }
     }
 }
 

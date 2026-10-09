@@ -214,4 +214,31 @@ class PendingWriteRecoveryTest {
         assertFalse(old.replaceAfterReview(marker, marker.copy(createdAt = 3_000), scope))
         assertEquals(next, PendingWriteMarker.decode(store.value!!))
     }
+
+    @Test fun answerReviewNeedsExactIncarnationCompleteSnapshotAndUnchangedQuestion() {
+        val reviewed = JSONObject().put("id", "question-1")
+            .put("question", "Delete the files?")
+            .put("options", org.json.JSONArray().put("allow").put("deny"))
+        val payload = JSONObject().put("id", "question-1")
+            .put("answer", JSONObject().put("decision", "allow"))
+            .put("reviewed_request", reviewed)
+        val history = JSONObject().put("incarnation", "incarnation-1")
+            .put("pending_inputs_complete", true)
+            .put("pending_inputs", org.json.JSONArray().put(JSONObject(reviewed.toString())))
+        assertTrue(AndroidReview.matchesIncarnation(history, "incarnation-1"))
+        assertTrue(AndroidReview.matchesAnswer(history, payload, "incarnation-1"))
+        assertFalse(AndroidReview.matchesAnswer(JSONObject(history.toString())
+            .put("incarnation", "incarnation-2"), payload, "incarnation-1"))
+        assertFalse(AndroidReview.matchesAnswer(JSONObject(history.toString())
+            .put("pending_inputs_complete", false), payload, "incarnation-1"))
+        val changed = JSONObject(reviewed.toString())
+            .put("options", org.json.JSONArray().put("allow always").put("deny"))
+        assertFalse(AndroidReview.matchesAnswer(JSONObject(history.toString())
+            .put("pending_inputs", org.json.JSONArray().put(changed)), payload, "incarnation-1"))
+        assertFalse(AndroidReview.matchesAnswer(JSONObject(history.toString())
+            .put("pending_inputs", org.json.JSONArray()), payload, "incarnation-1"))
+        val missingIncarnation = JSONObject(history.toString())
+        missingIncarnation.remove("incarnation")
+        assertFalse(AndroidReview.matchesIncarnation(missingIncarnation, "incarnation-1"))
+    }
 }

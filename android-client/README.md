@@ -51,7 +51,8 @@ a hub-boot-scoped ID and exact session incarnation, so a delayed POST cannot
 arrive after a successful fence or cross a hub restart. A queued request is
 cancelled; an already delivered request stays blocked until the host reports a
 terminal result. Only then does the app load a fresh authoritative snapshot of
-the saved hub and session incarnation, including complete pending inputs, and
+the saved hub and session incarnation, checks the host's transcript incarnation
+receipt against inventory on both sides of the read, includes complete pending inputs, and
 offer explicit acknowledgment. New prompts and answers remain blocked across
 hub or session changes. If that exact scope is unavailable, or the hub rebooted
 while the request was uncertain, the readable marker stays blocked.
@@ -64,8 +65,10 @@ marker also fails closed. The app cannot establish from a lost response alone
 whether the earlier write ran.
 A new prompt may repeat an action that succeeded before the connection failed;
 review the refreshed transcript before confirming. Pending inputs are
-refreshed and compared immediately before sending an answer, and the host
-checks them again.
+refreshed and compared immediately before sending an answer. The exact reviewed
+pending input travels with the answer, and the host compares it to its current
+pending input before acting. A fresh answer after an uncertain outcome repeats
+that comparison against the original reviewed input.
 
 The app reconnects SSE from the last processed sequence. A `replay_gap`
 reloads the host transcript and pending inputs. Transcript and event text are

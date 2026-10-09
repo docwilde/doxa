@@ -54,9 +54,16 @@ class WireTest {
         assertEquals("incarnation-1", plain.getString("incarnation"))
         assertEquals("hello", plain.getString("text"))
         val plainRequest = api.prepare("host~session", "answer", JSONObject().put("id", "question-1")
-            .put("answer", JSONObject().put("decision", "deny")), false, "incarnation-1")
+            .put("answer", JSONObject().put("decision", "deny"))
+            .put("reviewed_request", JSONObject().put("id", "question-1")
+                .put("options", org.json.JSONArray().put("deny").put("allow"))), false, "incarnation-1")
         assertEquals(boot, plainRequest.body.getString("hub_boot"))
         assertEquals("incarnation-1", plainRequest.body.getString("incarnation"))
+        assertEquals("question-1", plainRequest.body.getJSONObject("reviewed_request").getString("id"))
+        assertThrows(Exception::class.java) {
+            api.prepare("host~session", "answer", JSONObject().put("id", "question-1")
+                .put("answer", JSONObject().put("decision", "deny")), false, "incarnation-1")
+        }
         assertThrows(Exception::class.java) {
             HubApi("https://owner.tailnet.ts.net/", null).prepare("host~session", "prompt",
                 JSONObject().put("text", "hello"), false, "incarnation-1")

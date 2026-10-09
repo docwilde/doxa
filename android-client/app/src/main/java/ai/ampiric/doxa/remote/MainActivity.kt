@@ -256,9 +256,19 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         return result
     }
 
-    private suspend fun snapshot(client: HubApi, session: Session, mine: Int) {
+    private suspend fun snapshot(client: HubApi, session: Session, mine: Int,
+                                 recoveryBoot: String? = null): Boolean? {
+        if (recoveryBoot != null) require(client.inventoryContains(session, recoveryBoot)) {
+            "Saved session incarnation or hub boot changed; writes remain blocked"
+        }
         val history = client.transcript(session.id, session.encrypted)
-        if (mine != generation) return
+        if (recoveryBoot != null) require(client.inventoryContains(session, recoveryBoot)) {
+            "Saved session incarnation or hub boot changed; writes remain blocked"
+        }
+        if (mine != generation || api !== client) return null
+        require(AndroidReview.matchesIncarnation(history, session.incarnation)) {
+            "Transcript belongs to a different session incarnation; writes remain blocked"
+        }
         val turns = history.getJSONArray("turns")
         val inputs = history.getJSONArray("pending_inputs")
         require(inputs.length() <= 64) { "Invalid pending input list" }
@@ -276,6 +286,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         refreshRecovery()
         status = if (pendingInputsComplete)
             "${session.title} · connected" else "Pending input review incomplete; refresh before answering"
+        return pendingInputsComplete
     }
 
     private fun fenceMessage(status: String): String = when (status) {
@@ -288,12 +299,20 @@ private class RemoteController(private val prefs: SharedPreferences, private val
                                          marker: PendingWriteMarker): WriteFenceResult? {
         val fence = client.fence(marker)
         if (mine != generation || api !== client) return null
-        val safe = writeRecovery.recordFence(marker, fence)
         recoveryFenceStatus = fence.status
-        refreshRecovery()
-        snapshot(client, session, mine)
+        if (fence.safeToClear) {
+            val complete = snapshot(client, session, mine, AndroidWriteId.bootOf(marker.requestId))
+                ?: return null
+            if (mine != generation || api !== client) return null
+            require(writeRecovery.recordFence(marker, fence)) { "Saved write marker changed; writes remain blocked" }
+            writeRecovery.observeSnapshot(writeScope(session), complete)
+        } else {
+            writeRecovery.recordFence(marker, fence)
+            snapshot(client, session, mine)
+        }
         if (mine != generation || api !== client) return null
-        if (!safe) status = fenceMessage(fence.status)
+        refreshRecovery()
+        if (!fence.safeToClear) status = fenceMessage(fence.status)
         return fence
     }
 
@@ -414,14 +433,11 @@ private class RemoteController(private val prefs: SharedPreferences, private val
                 // Re-read authoritative pending inputs; an SSE event alone cannot authorize an answer.
                 val latest = client.transcript(session.id, session.encrypted)
                 if (mine != generation || api !== client) return@launch
-                require(latest.optBoolean("pending_inputs_complete")) { "Pending input review incomplete" }
-                val latestInputs = latest.getJSONArray("pending_inputs")
-                val current = (0 until latestInputs.length()).map { latestInputs.getJSONObject(it) }
-                    .firstOrNull { it.optString("id") == id }
-                require(current != null && current.toString() == item.toString()) {
-                    "Pending input changed; review it again"
-                }
                 val payload = JSONObject().put("id", id).put("answer", answer)
+                    .put("reviewed_request", JSONObject(item.toString()))
+                require(AndroidReview.matchesAnswer(latest, payload, session.incarnation)) {
+                    "Pending input or session incarnation changed; review it again"
+                }
                 val command = client.prepare(session.id, "answer", payload, session.encrypted,
                     session.incarnation)
                 val marker = markerFor(session, command)
@@ -540,8 +556,10 @@ private class RemoteController(private val prefs: SharedPreferences, private val
             try {
                 if (mine != generation || api !== client) return@launch
                 if (prior.operation == "answer") {
-                    require(pending.any { it.optString("id") == prior.payload.optString("id") }) {
-                        "The pending input is gone; no new answer sent"
+                    val latest = client.transcript(session.id, session.encrypted)
+                    if (mine != generation || api !== client) return@launch
+                    require(AndroidReview.matchesAnswer(latest, prior.payload, session.incarnation)) {
+                        "The reviewed pending input changed or is incomplete; no new answer sent"
                     }
                 }
                 val fresh = client.prepare(session.id, prior.operation, prior.payload, session.encrypted,

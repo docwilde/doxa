@@ -173,7 +173,10 @@ writes use a hub-boot-scoped request ID and exact incarnation. Before review,
 the client fences that ID at the hub; a queued command is cancelled, while an
 already delivered command remains blocked until a terminal host result. Only a
 safe fence followed by an authoritative snapshot of the original incarnation
-with complete pending inputs and explicit user acknowledgment permits new writes.
+with a matching host incarnation receipt, matching inventory before and after
+the read, complete pending inputs, and explicit user acknowledgment permits new
+writes. Answers carry the exact reviewed pending input; the host rejects a
+same-ID changed question or options before acting.
 A changed hub boot or unreadable marker remains blocked; neither can prove the
 earlier delivery outcome from the volatile hub state.
 The host lease never leaves the connector.

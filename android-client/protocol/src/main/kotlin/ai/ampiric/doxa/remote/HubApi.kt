@@ -132,6 +132,15 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
         parseInventory(get("api/sessions"))
     }
 
+    suspend fun inventoryContains(session: Session, expectedBoot: String): Boolean = withContext(Dispatchers.IO) {
+        require(AndroidWriteId.validBoot(expectedBoot)) { "Invalid recovery boot nonce" }
+        val inventory = get("api/sessions")
+        val sessions = parseInventory(inventory)
+        inventory.optString("hub_boot") == expectedBoot && sessions.any {
+            it.id == session.id && it.incarnation == session.incarnation && it.encrypted == session.encrypted
+        }
+    }
+
     fun prepare(target: String, operation: String, payload: JSONObject, encrypted: Boolean,
                 incarnation: String? = null): PendingCommand {
         require(Wire.target(target) && operation in setOf("prompt", "answer", "transcript"))
@@ -140,6 +149,10 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
         val boot = if (write) hubBoot ?: error("Refresh the hub inventory before writing") else null
         if (write) require(PendingWriteScope(origin, target, incarnation ?: "").valid()) {
             "Invalid session incarnation"
+        }
+        if (operation == "answer") require(payload.optJSONObject("reviewed_request")?.optString("id") ==
+            payload.optString("id") && Wire.id(payload.optString("id"))) {
+            "Answer is missing its reviewed pending input"
         }
         val requestId = if (boot != null) AndroidWriteId.new(boot) else UUID.randomUUID().toString()
         val plain = JSONObject(payload.toString()).put("request_id", requestId)
