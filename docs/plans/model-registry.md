@@ -96,6 +96,21 @@ the turn reports neither individual request sizes nor service tiers. This
 overestimates short requests and cache reads but does not miss a long-context
 token premium for admitted models.
 
+`status.billing.budget.price_evidence` now reports
+`static_upper_bound_only`, the source and checked date, the input/output
+bounds, and `unknown` for billing tier and provider charge. The checked date is
+the registry review date, not a live price verification or an expiry promise.
+The native Codex turn path supplies model-consistent token totals, but no
+per-request billed tier, cache-write split, or provider charge. The
+[Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+can report the tier on direct API responses when `service_tier` is set; DOXA's
+Codex app-server turn event does not carry that response field. A stray tier or
+cost hint in a turn event cannot reduce the bound. If the exact model has no
+complete documented upper bound, priced-budget admission is refused. An
+operator must refresh a dated registry fact against its primary source before
+changing it; no calendar age alone proves a current price or an exact billed
+tier.
+
 | Exact model ID | Standard API input / output | Budget bound input / output | Basis |
 | --- | ---: | ---: | --- |
 | [`gpt-6-astra`](https://developers.openai.com/api/docs/models/gpt-6-astra) | 10 / 50 | 165 / 495 | Ultrafast long cache write 150 / output 450, ×1.10 |
@@ -123,7 +138,9 @@ per-request tier would allow tighter accounting in a later slice.
   preserving its own source and observation time. Do not replace an unknown
   with a guessed family value.
 - Consider an operator-facing refresh and stale-fact review flow before using
-  the registry for automatic task routing. No quality or benchmark score is
-  planned without a maintained, task-specific evaluation method.
+  the registry for automatic task routing. The budget status exposes the
+  review date and missing live billing evidence, but it has no automatic
+  expiry rule. No quality or benchmark score is planned without a maintained,
+  task-specific evaluation method.
 - Capture provider billing mode and per-request tier when available so a budget
   can use an exact billed rate rather than the documented upper token bound.

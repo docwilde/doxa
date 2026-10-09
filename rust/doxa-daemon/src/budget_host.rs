@@ -221,11 +221,25 @@ impl Host for BudgetHost {
         // hello/status must remain responsive so a person can answer asks.
         let state = self.state.try_lock().ok();
         let mut value = self.inner.billing_snapshot().unwrap_or_else(|| json!({}));
+        // Codex's normalized turn usage does not identify the billed service
+        // tier, cache-write split or a provider-reported charge. Keep the
+        // published upper bound and make that missing evidence explicit; a
+        // provider event cannot silently authorize a cheaper rate.
+        let price_evidence = self.pricing.map(|price| json!({
+            "status":"static_upper_bound_only",
+            "billing_tier":"unknown",
+            "provider_charge":"unknown",
+            "source":price.source,
+            "checked_on":price.as_of,
+            "input_bound_usd_per_million":price.input,
+            "output_bound_usd_per_million":price.output
+        }));
         value["budget"] = json!({"ceiling_usd":self.ceiling,
             "spent_usd":state.as_ref().filter(|state| !state.unknown).map(|state| state.spent),
             "accounting_unknown":state.as_ref().is_some_and(|state| state.unknown),
             "accounting_pending":state.is_none(),
             "cost_basis":if self.pricing.is_some() { "priced_conservative" } else { "reported" },
+            "price_evidence":price_evidence,
             "durable":self.journal.is_some()});
         Some(value)
     }
@@ -423,6 +437,31 @@ mod tests {
         assert_eq!(events[1]["data"]["spent_usd"], 99.0);
         assert!(BudgetHost::new_priced(Arc::new(VendorCostHost(json!({}))), 90.0, "codex", "gpt-5.5").is_err());
         assert!(BudgetHost::new_priced(Arc::new(VendorCostHost(json!({}))), 90.0, "codex", "gpt-5.6-sol").is_err());
+    }
+
+    #[test]
+    fn priced_status_exposes_missing_tier_and_ignores_unverified_tier_hint() {
+        let mut data = json!({"model":"gpt-6-astra","model_consistent":true,"usage_complete":true,
+            "usage_source":"codex_cli_turn_completed","turn_input_tokens":1_000_000,"turn_output_tokens":1_000_000});
+        // This is not part of the trusted normalized Codex billing contract.
+        data["service_tier"] = json!("default");
+        data["cost_usd"] = json!(0.0);
+        let host = BudgetHost::new_priced(Arc::new(VendorCostHost(data)), 1_000.0, "codex", "gpt-6-astra").unwrap();
+        let before = host.billing_snapshot().unwrap();
+        let evidence = &before["budget"]["price_evidence"];
+        assert_eq!(evidence["status"], "static_upper_bound_only");
+        assert_eq!(evidence["billing_tier"], "unknown");
+        assert_eq!(evidence["provider_charge"], "unknown");
+        assert_eq!(evidence["source"], "https://developers.openai.com/api/docs/pricing");
+        assert_eq!(evidence["checked_on"], "2026-10-09");
+        assert_eq!(evidence["input_bound_usd_per_million"], 165.0);
+        assert_eq!(evidence["output_bound_usd_per_million"], 495.0);
+        let mut events = Vec::new(); host.prompt("hello", &mut |event| events.push(event));
+        assert_eq!(events[0]["data"]["cost_usd"], 660.0);
+        assert_eq!(events[0]["data"]["cost_basis"], "priced_conservative");
+        assert_eq!(host.billing_snapshot().unwrap()["budget"]["price_evidence"], *evidence);
+        assert!(BudgetHost::new_priced(Arc::new(VendorCostHost(json!({}))), 1.0, "codex", "gpt-5.5").is_err());
+        assert!(BudgetHost::new(Arc::new(CostHost(Some(0.1))), 1.0).billing_snapshot().unwrap()["budget"]["price_evidence"].is_null());
     }
 
     #[test]
