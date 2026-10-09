@@ -6,6 +6,7 @@ import importlib.util
 import os
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -149,6 +150,32 @@ class DelegatedShapeTests(unittest.TestCase):
         ):
             with self.subTest(bad=bad[:40]), self.assertRaises(proof.ProofError):
                 proof.check_namespace_receipt(bad, host)
+
+    def test_bwrap_smoke_requires_receipt_and_egress_checks(self) -> None:
+        fake_bwrap = Path(self.temp.name) / "bwrap"
+        fake_bwrap.write_bytes(b"#!/bin/sh\nexit 0\n")
+        fake_bwrap.chmod(0o700)
+        smoke_script = []
+        receipt = "".join(f"{name}={name}:[999999999999]\n" for name in proof.NAMESPACES).encode()
+
+        def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+            if args[1] == "--help":
+                return subprocess.CompletedProcess(args, 0, stdout=" ".join(proof.BWRAP_FLAGS))
+            if args[1] == "--version":
+                return subprocess.CompletedProcess(args, 0, stdout="bwrap fixture")
+            smoke_script.append(args[-1])
+            return subprocess.CompletedProcess(args, 0, stdout=receipt, stderr=b"")
+
+        with mock.patch.object(proof, "BWRAP", fake_bwrap), mock.patch.object(
+            proof.subprocess, "run", side_effect=fake_run
+        ):
+            self.assertEqual(proof.check_bwrap(), "bwrap fixture")
+        self.assertEqual(len(smoke_script), 1)
+        self.assertEqual(subprocess.run(["/bin/sh", "-n", "-c", smoke_script[0]]).returncode, 0)
+        for source in ("/proc/net/dev", "/proc/net/route", "/proc/net/ipv6_route",
+                       "/proc/self/ns/net", "/proc/self/ns/mnt", "/proc/self/ns/user",
+                       "/proc/self/ns/pid"):
+            self.assertIn(source, smoke_script[0])
 
 
 if __name__ == "__main__":
