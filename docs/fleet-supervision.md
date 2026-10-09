@@ -302,7 +302,7 @@ reads the owned manifest and private host guard journal. It reports worker
 completion only when the host admitted a completion with its receipt checks;
 dependency holds and current pauses are shown as blocked, while every other
 outcome remains unknown. It counts typed handoffs, read-backs, confirmations,
-corrections and human releases, and verifies signed host test receipts before
+corrections and current human release records, and verifies signed host test receipts before
 counting them. The review-event history retains at most 256 observations, so
 quarantine and supervisor counts are labeled as counts within that window.
 Test duration and token-based review cost are estimates or measurements only

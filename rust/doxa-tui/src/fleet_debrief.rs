@@ -59,7 +59,7 @@ fn render(id: &str, context: &Context, state: &State) -> io::Result<String> {
 
     let handoffs: Vec<_> = state.traces.iter()
         .filter(|(_, trace)| trace.seq > 0 && trace.kind == Kind::Handoff).collect();
-    let mut readbacks = 0; let mut confirmations = 0; let mut resolved = 0;
+    let mut readbacks = 0; let mut confirmations = 0; let mut agreed = 0;
     let mut corrections = 0; let mut open_questions = 0;
     for (handoff_id, handoff) in &handoffs {
         let ack = state.traces.iter().filter(|(_, trace)| trace.kind == Kind::Ack
@@ -79,12 +79,12 @@ fn render(id: &str, context: &Context, state: &State) -> io::Result<String> {
             confirmations += 1;
             if let Some(response) = &confirm.handoff_response {
                 if response.agrees && ack.readback.as_ref().is_some_and(|row| row.open_questions.is_empty()) {
-                    resolved += 1;
+                    agreed += 1;
                 } else if !response.agrees { corrections += 1; }
             }
         }
     }
-    lines.push(format!("Handoffs: {} · read-backs {readbacks} · confirmations {confirmations} · resolved {resolved} · corrections {corrections} · open questions {open_questions} · human releases {}",
+    lines.push(format!("Handoffs: {} · read-backs {readbacks} · confirmations {confirmations} · agreed {agreed} · corrections {corrections} · open questions {open_questions} · current human release records {}",
         handoffs.len(), state.dependency_releases.len()));
 
     let mut tests = 0u64; let mut passed = 0u64; let mut failed = 0u64; let mut test_ms = 0u64;
@@ -108,7 +108,7 @@ fn render(id: &str, context: &Context, state: &State) -> io::Result<String> {
         }
         if row["event"] == "outbound_semantic" && context.review.message_mode == Mode::Enforce {
             if let Ok(Ok(verdict)) = serde_json::from_value::<Result<doxa_fleet::SemanticVerdict, String>>(row["result"].clone()) {
-                if verdict.risky(context.review.risk_threshold) {
+                if verdict.validate().is_ok() && verdict.risky(context.review.risk_threshold) {
                     if let Some(id) = row["id"].as_str() { quarantine_ids.insert(id); }
                 }
             }
@@ -191,7 +191,7 @@ mod tests {
         state.calls = 2; state.actual_estimated_usd = 0.125;
         let report = render("run", &context, &state).unwrap();
         assert!(report.contains("completed 1 · blocked 1 · unknown 0"));
-        assert!(report.contains("Handoffs: 1 · read-backs 1 · confirmations 1 · resolved 1"));
+        assert!(report.contains("Handoffs: 1 · read-backs 1 · confirmations 1 · agreed 1"));
         assert!(report.contains("Host test receipts: 1 · passed 1 · failed 0 · measured test time 123 ms"));
         assert!(report.contains("judge quarantine IDs 1"));
         assert!(report.contains("$0.125000"));
