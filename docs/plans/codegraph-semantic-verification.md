@@ -128,6 +128,19 @@ host cannot supply the adversarial production proof. A host-controlled trust
 anchor beyond namespace-relative metadata remains necessary before enabling
 producer attestation, launch, or semantic binding.
 
+A second disabled guest-only seam now uses a Unix `SOCK_SEQPACKET` reply with
+`SO_PASSCRED`. It checks the kernel's `SCM_CREDENTIALS` on the one reply
+packet after checking the same root-owned path and listener credentials.
+The [offline sender fixture](../../scripts/semantic-broker-proof/README.md)
+accepts a root sender only as `uid_zero_reply_sender_untrusted` with
+`binding: unknown`; it rejects both a server that drops to UID 1000 and a
+UID-1000 child handed the root listener FD. All three cases echo the fresh
+nonce and exact query hash, so the negative cases fail on the actual reply
+sender rather than protocol mismatch. This narrows the stale-listener
+counterexample. It does not establish a host namespace or trusted client
+binary, attest broker code/configuration, or bind any Docker or LSP stream.
+The CLI still never calls either socket seam.
+
 The library-only LSP driver exercises a bounded initialize, quiescence,
 definition, and shutdown exchange against a fixture server. It caps messages
 and output, enforces a 20-second maximum deadline, and kills the process group

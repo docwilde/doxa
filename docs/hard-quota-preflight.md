@@ -154,15 +154,44 @@ refuses even a
 hand-edited `admissible_as_hard_quota=true`. Selecting `docker-hardened` remains
 unavailable.
 
-The ext4 query branch uses the same descriptor-bound, read-only
-`Q_XGETQSTATV` and `Q_XGETQUOTA` calls as XFS. Linux's generic quota dispatcher
-routes those calls through ext4's quota state and limit operations, including
-separate project accounting and enforcement flags. The code checks the exact
-project ID and 512-byte block limit. This branch has unit coverage but has
-not yet been exercised against a live ext4 project-quota mount; a disposable
-read-only syscall probe, a privileged-helper permission check, and negative
-controls for disabled enforcement remain required before counting it as
-production evidence.
+### Disposable read-only kernel query
+
+The fixture-only `quota_fixture_read` example uses the existing XFS/ext4
+descriptor verifier. It checks the root descriptor against the exact visible
+root, opens all four bind sources relative to it, walks existing data-bind
+entries, and compares the project ID, accounting/enforcement state and exact
+effective hard limit. It always prints `admissible_as_hard_quota=false`. Build
+it with `cargo build --locked -p doxa-isolation --example quota_fixture_read`;
+run the resulting binary and `scripts/test_quota_fixture_guest.py` only in a
+disposable Linux guest with an operator-provisioned four-bind quota fixture:
+
+```sh
+sudo python3 scripts/test_quota_fixture_guest.py \
+  /absolute/path/to/quota_fixture_read /absolute/fixture/root \
+  1002 33554432 1000
+```
+
+The script makes only read-only calls. It requires the exact query to succeed
+and a substituted root FD, wrong directory, wrong project ID and wrong hard
+limit to refuse. On a fresh QEMU Ubuntu 26.04.1 guest with ext4 `prjquota`,
+project 1002 and a 32 MiB hard limit, the exact query returned the limit,
+project ID and mount identity; all four adversarial inputs refused. A guest
+rootless query was denied. Passing a descriptor for a bind-mounted alias of
+the same root inode refused on mount identity; changing the broker directory
+to project 1003 and disabling project enforcement also refused. Restoring the
+project ID and enforcement restored the positive result. The signed-image and
+command receipts are in the task-local guest evidence. This exercises ext4's
+descriptor-bound `Q_XGETQSTATV` and `Q_XGETQUOTA` branch with a privileged
+read-only query, including an enforcement-off negative control.
+
+This example is **not** a deployable privileged helper. Its CLI accepts the
+expected project, limit and owner UID from its caller, so it cannot establish
+an owner-controlled policy. It has no authenticated helper transport or
+privilege boundary. A production helper must bind those values to trusted
+owner policy and the exact session tree, constrain its privilege and lifetime,
+and return a non-forgeable result to the admission path. Runtime EDQUOT and
+broker-origin proofs remain separate requirements. `docker-hardened` stays
+closed.
 
 The Codex hook broker checks the Unix peer owner UID and a bounded
 `PreCompact` frame. A local same-UID process with the session capability can

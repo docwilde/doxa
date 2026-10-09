@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.33 — 2026-10-09
+
+**Isolation evidence**
+
+- Add a descriptor-bound ext4 quota query. A disposable guest verified the exact 32 MiB project limit across four binds and rejected wrong descriptors, mounts, projects and enforcement; production needs a trusted privileged helper.
+- Probe Linux broker caller identity with `SO_PEERPIDFD`. An inherited socket proves the pinned connector can differ from its writer, so hardened broker admission remains closed.
+- Check code-graph broker reply credentials per packet against a nonce and query hash. A guest rejected UID drop and listener handoff; semantic binding remains `unknown` pending host and analyzer provenance.
+
+**Plugin proof**
+
+- Bind delegated-host review receipts to the exact test binary and build identity, with bounded output, deadline and process cleanup. The receipt cannot enable TUI execution; installed-host acceptance remains open.
+
 ## 2.0.0-beta.32 — 2026-10-09
 
 **Review and rendering**

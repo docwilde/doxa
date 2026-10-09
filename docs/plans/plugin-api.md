@@ -195,20 +195,14 @@ a fixed-size integer result and bounded failure code return. `render-local-panel
 remains a reserved name until a separate reviewed protocol and grant gate
 exist.
 
-The remaining step is to prove the complete child path on a host with
-delegated controllers, including aggregate memory/CPU/PID enforcement and
-fork and process-group escape attempts. Wider activation may follow only after
-those gates pass. Parent-side deadlines and module-declared
-maxima are not hard resource guarantees. Other platforms stay unavailable
-until equivalent isolation is proven.
-
-The acceptance fixture must run a valid return module, an infinite loop,
-memory growth at the cap, a trap and a crashing child; exercise cancellation
-and attempt file/network access from a compromised child, checking that the
-sandbox prevents it. Verify no orphan remains after timeout/cancellation,
-that oversized/truncated frames fail closed, and that stale approval refuses
-the child spawn. These are prerequisites for a future prototype, not claims
-about current production support.
+The seven-case fixture passed on a disposable host with delegated
+controllers. It covered aggregate memory/CPU/PID enforcement, cancellation,
+network and host-file denial, stale approval, and cgroup cleanup. A separate
+review-only receipt workflow now binds an exact test executable and clean
+source tree, but has not yet supplied a fresh guest receipt. Installed-host
+acceptance, TUI cancellation and exit lifecycle, and an operator activation
+policy remain open. Parent deadlines and module maxima are not hard resource
+guarantees; other platforms need equivalent isolation proof.
 
 ### Other extensions
 

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -85,6 +89,40 @@ class DelegatedShapeTests(unittest.TestCase):
         with self.assertRaises(proof.ProofError):
             proof.check_cgroup_files(self.parent)
 
+    def test_cgroup_receipt_binds_direct_supervisor_inode(self) -> None:
+        observed = proof.cgroup_identity(self.parent, self.root, self.membership)
+        self.assertEqual(observed["parent_inode"], self.parent.stat().st_ino)
+        self.assertEqual(observed["supervisor_inode"], self.leaf.stat().st_ino)
+        with self.assertRaises(proof.ProofError):
+            proof.cgroup_identity(self.parent, self.root, "0::/other/supervisor\n")
+        with self.assertRaises(proof.ProofError):
+            proof.cgroup_identity(self.parent, self.root, "0::/delegated/../supervisor\n")
+
+    def test_worker_cgroup_inventory_requires_no_leftovers(self) -> None:
+        proof.require_no_plugin_cgroups(self.parent)
+        (self.parent / "doxa-plugin-leak").mkdir()
+        with self.assertRaises(proof.ProofError):
+            proof.require_no_plugin_cgroups(self.parent)
+
+    def test_source_identity_refuses_untracked_and_ignored_build_inputs(self) -> None:
+        repo = Path(self.temp.name) / "source"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / ".gitignore").write_text("hidden-input\n")
+        (repo / "source.rs").write_text("fn main() {}\n")
+        subprocess.run(["git", "add", ".gitignore", "source.rs"], cwd=repo, check=True)
+        subprocess.run(["git", "-c", "user.name=Proof Test", "-c", "user.email=proof@example.invalid",
+                        "commit", "-q", "-m", "test source"], cwd=repo, check=True)
+        identity = proof.source_identity(repo)
+        self.assertEqual(len(identity["commit"]), 40)
+        (repo / "untracked.rs").write_text("unexpected")
+        with self.assertRaises(proof.ProofError):
+            proof.source_identity(repo)
+        (repo / "untracked.rs").unlink()
+        (repo / "hidden-input").write_text("unexpected")
+        with self.assertRaises(proof.ProofError):
+            proof.source_identity(repo)
+
     def test_run_requires_two_explicit_opt_ins_before_preflight(self) -> None:
         with mock.patch.object(proof, "preflight", side_effect=AssertionError("preflight ran")):
             with mock.patch.dict(os.environ, {}, clear=True):
@@ -134,6 +172,113 @@ class DelegatedShapeTests(unittest.TestCase):
         with self.assertRaises(OSError):
             with proof.staged_worker(alias, Path(self.temp.name)):
                 pass
+
+    def test_executable_digest_rejects_symlink_replacement(self) -> None:
+        source = Path(self.temp.name) / "worker"
+        source.write_bytes(b"worker")
+        alias = Path(self.temp.name) / "alias"
+        alias.symlink_to(source)
+        with self.assertRaises(OSError):
+            proof.file_sha256(alias)
+
+    def test_bounded_runner_kills_output_flood_before_unbounded_capture(self) -> None:
+        start = time.monotonic()
+        with self.assertRaisesRegex(proof.ProofError, "output limit"):
+            proof.run_bounded([sys.executable, "-c", "import os,time; os.write(1,b'x'*1000000); time.sleep(30)"],
+                              cwd=Path(self.temp.name), environment=os.environ.copy(),
+                              limit=1024, timeout=3)
+        self.assertLess(time.monotonic() - start, 3)
+
+    def test_bounded_runner_deadline_kills_child_process_group(self) -> None:
+        marker = Path(self.temp.name) / "child-survived"
+        child = f"import time,pathlib; time.sleep(0.7); pathlib.Path({str(marker)!r}).write_text('bad')"
+        parent = f"import subprocess,time,sys; subprocess.Popen([sys.executable,'-c',{child!r}]); print('started',flush=True); time.sleep(30)"
+        start = time.monotonic()
+        with self.assertRaisesRegex(proof.ProofError, "deadline"):
+            proof.run_bounded([sys.executable, "-c", parent], cwd=Path(self.temp.name),
+                              environment=os.environ.copy(), limit=1024, timeout=0.25)
+        self.assertLess(time.monotonic() - start, 2)
+        time.sleep(0.8)
+        self.assertFalse(marker.exists(), "child escaped proof process-group cleanup")
+
+    def test_opened_test_executable_runs_exact_inode_after_path_swap(self) -> None:
+        path = Path(self.temp.name) / "test-executable"
+        shutil.copy2("/usr/bin/true", path)
+        path.chmod(0o700)
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC), "rb") as opened:
+            expected = proof.descriptor_sha256(opened.fileno(), str(path))
+            path.rename(path.with_name("reviewed-original"))
+            shutil.copy2("/usr/bin/false", path)
+            status, output = proof.run_bounded([str(path)], cwd=Path(self.temp.name),
+                                               environment=os.environ.copy(), limit=1024,
+                                               timeout=3, executable=f"/proc/self/fd/{opened.fileno()}",
+                                               pass_fds=(opened.fileno(),))
+            self.assertEqual((status, output), (0, b""))
+            self.assertNotEqual(expected, proof.file_sha256(path))
+
+    def test_cargo_artifact_parser_requires_one_in_target_lib_test(self) -> None:
+        target = Path(self.temp.name) / "target"
+        target.mkdir()
+        executable = target / "doxa_tui-test"
+        executable.write_bytes(b"fixture")
+        row = {"reason": "compiler-artifact", "target": {"name": "doxa_tui", "kind": ["lib"]},
+               "profile": {"test": True}, "executable": str(executable)}
+        encoded = (json.dumps(row) + "\n").encode()
+        self.assertEqual(proof.test_artifact(encoded, target), executable)
+        for bad in (b"", encoded + encoded,
+                    (json.dumps({**row, "executable": str(Path(self.temp.name) / "outside")}) + "\n").encode()):
+            with self.assertRaises((proof.ProofError, FileNotFoundError)):
+                proof.test_artifact(bad, target)
+
+    def test_build_identity_changes_with_config_and_build_environment(self) -> None:
+        root = Path(self.temp.name) / "source"
+        (root / ".cargo").mkdir(parents=True)
+        config = root / ".cargo/config.toml"
+        config.write_text("[build]\njobs = 2\n")
+        environment = {**os.environ, "CARGO_TARGET_DIR": str(Path(self.temp.name) / "target")}
+        first = proof.build_identity(root, environment)
+        config.write_text("[build]\njobs = 3\n")
+        self.assertNotEqual(proof.build_identity(root, environment), first)
+        config.write_text("[build]\njobs = 2\n")
+        self.assertNotEqual(proof.build_identity(root, {**environment, "RUSTFLAGS": "-C opt-level=1"}), first)
+
+    def test_receipt_is_private_exclusive_and_explicitly_non_authorizing(self) -> None:
+        scratch = Path(self.temp.name)
+        for bad in ("../escape", "/absolute", "UPPER", ".", "a/b"):
+            with self.subTest(bad=bad), self.assertRaises(proof.ProofError):
+                proof.receipt_name(bad, scratch)
+        receipt = proof.receipt_name("proof.json", scratch)
+        proof.write_receipt(receipt, {"tui_execution_authorized": False})
+        self.assertEqual(json.loads(receipt.read_text()), {"tui_execution_authorized": False})
+        self.assertEqual(stat.S_IMODE(receipt.stat().st_mode), 0o600)
+        with self.assertRaises(FileExistsError):
+            proof.write_receipt(receipt, {"tui_execution_authorized": True})
+        self.assertEqual(json.loads(receipt.read_text()), {"tui_execution_authorized": False})
+
+    def test_seven_case_log_refuses_missing_duplicate_and_failed_cleanup(self) -> None:
+        names = ["approved-wasm", "boundary", "pids", "memory", "cpu", "setsid-cancel", "timeout"]
+        outcomes = ["Return(17)", "Exit(0)", "Cancelled", "Crash(9)",
+                    "Timeout", "Cancelled", "Timeout"]
+        rows = []
+        for name, outcome in zip(names, outcomes):
+            if name == "approved-wasm":
+                rows.append("test native_plugins::runner_sandbox::acceptance::delegated_cgroup_containment_acceptance ... "
+                            f"plugin-acceptance case={name} outcome={outcome} elapsed_ms=2 "
+                            "stale_approval=refused cleanup=removed")
+            else:
+                rows.append(f"plugin-acceptance case={name} outcome={outcome} elapsed_ms=2 "
+                            "memory_peak=1 oom_kill=0 pids_peak=1 pids_max=0 "
+                            "cpu_usec=1 cpu_throttled=0 stdout_bytes=0 stderr_bytes=0 cleanup=removed")
+        suffix = "\ntest result: ok. 1 passed; 0 failed; 0 ignored\n"
+        self.assertEqual(set(proof.proof_cases(("\n".join(rows) + suffix).encode())), set(names))
+        for changed in (rows[:-1], rows + [rows[0]],
+                        [row.replace("cleanup=removed", "cleanup=leaked") if "case=cpu " in row else row for row in rows],
+                        [row.replace("stale_approval=refused", "stale_approval=accepted") for row in rows],
+                        [row.replace("outcome=Exit(0)", "outcome=Exit(1)") for row in rows]):
+            with self.assertRaises(proof.ProofError):
+                proof.proof_cases(("\n".join(changed) + suffix).encode())
+        with self.assertRaises(proof.ProofError):
+            proof.proof_cases(("\n".join(rows)).encode())
 
     def test_namespace_receipt_requires_four_distinct_private_identities(self) -> None:
         host = {name: f"{name}:[100]" for name in proof.NAMESPACES}
