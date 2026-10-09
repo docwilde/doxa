@@ -38,6 +38,8 @@ fn answer_lines(answer: &Answer) -> Vec<String> {
         format!("Coverage: {} listed · {} parsed Rust · {} skipped · {} unparseable",
             answer.coverage.enumerated_files, answer.coverage.parsed_rust_files,
             answer.coverage.skipped.count, answer.coverage.unparseable.count),
+        format!("Rust scan inputs: {}", answer.scan_input_sha256.as_deref()
+            .unwrap_or("unknown (skipped or unparseable input)")),
         "Syntax only · declarations and call candidates are not resolved Rust bindings".into(),
     ];
     for (language, count) in &answer.coverage.unsupported_languages {
@@ -113,6 +115,8 @@ fn stored_lines(snapshot: &CodegraphSnapshot) -> Vec<String> {
                 "Freshness: requested source verified at read time".into(),
                 format!("Included reference files: {} · {} checked at read time",
                     row.referenced_sources.status, row.referenced_sources.checked_files),
+                format!("Rust scan inputs: {} · {} checked · {}",
+                    row.scan_inputs.status, row.scan_inputs.checked_files, row.scan_inputs.reason),
                 "Binding: unknown · syntax data only".into(),
                 String::new(),
             ];
@@ -269,6 +273,8 @@ mod tests {
                 "conditional_candidate":"child.rs","target":null}]}),
             referenced_sources: doxa_lore::ReferenceFreshness { status: "unknown",
                 checked_files: 0, issues: vec![] },
+            scan_inputs: doxa_lore::ScanInputFreshness { status: "unknown",
+                checked_files: 0, reason: "scan_input_digest_absent" },
         };
         let lines = stored_lines(&CodegraphSnapshot::Current(row)).join("\n");
         assert!(lines.contains("revision 3"));

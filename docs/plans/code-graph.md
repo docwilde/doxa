@@ -75,6 +75,10 @@ Every query enumerates the current tracked **and untracked, nonignored** Git
 files and reads Rust bytes afresh. There is no index that can lag an edit.
 Each row and call edge carries its file, line, SHA-256 of the parsed bytes, and
 read time. Candidate declarations carry their own source hashes and read times.
+When **every listed Rust file parses**, the answer also contains a deterministic
+`scan_input_sha256` over each Rust path and source hash. A skipped or
+unparseable Rust file leaves it null. This inventory covers listed Rust inputs,
+not ignored files, other languages, macro expansion, or compiler semantics.
 File-scoped answers also carry the requested source's hash and read time, even
 when that parsed file produces no rows.
 The answer names its worktree and reports parsed files, unsupported languages,
@@ -120,9 +124,13 @@ and rehashes the requested file on each read. A source edit or checkout
 replacement rejects the read. DOXA also rechecks the hashes of included row,
 call-candidate, and module-target files through a bounded, symlink-safe reader.
 The result reports `verified`, `stale`, or `unknown` for those included
-references, with bounded reasons. A changed or uncheckable reference is never
-reported as verified. Omitted rows and scan coverage are outside that claim;
-no hash check proves a Rust binding or compilation reachability.
+references, with bounded reasons. When the graph has a complete scan-input
+digest, DOXA also re-enumerates and rehashes every listed Rust input at read
+time. An edit, addition, or removal makes `scan_inputs` stale; an unreadable
+or symlinked source makes it unknown. Older snapshots without the digest stay
+unknown. This check is a read-time observation, not an atomic repository
+snapshot. Omitted result rows and semantic Rust bindings remain outside its
+claim.
 
 To persist an export, an owner must inspect it and invoke LORE's explicit
 `codegraph_snapshot_store_v1` command with human-review authority and an
@@ -155,7 +163,10 @@ is read-only and creates no second memory authority.
 - Resolve imports and actual Rust call bindings with crate, trait, type, and
   conditional-compilation context. Module edges remain top-level and structural;
   `cfg_attr` and conditional reachability are unresolved. Call candidates stop
-  at spelling matches.
+  at spelling matches. An optional rust-analyzer evidence overlay needs a
+  quota-limited, no-egress container, disabled build scripts and proc macros,
+  pinned toolchain/configuration, and source/target hash rechecks before it can
+  claim analyzer-resolved definitions. It is not shipped yet.
 - Decide whether a reviewed agent tool or persistent TUI tree is useful. The
   current viewer offers explicit fresh and stored queries only.
 - Decide whether other languages justify a parser dependency and coverage bar.
