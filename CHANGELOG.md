@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.21 — 2026-10-09
+
+**Docker isolation**
+
+- Inspect effective XFS project IDs, inheritance, mount identity, accounting, enforcement, and exact hard block limits by directory descriptor. Hardened admission remains closed pending live descendant and restart proof.
+
+**Code graph**
+
+- Add a bounded rust-analyzer LSP session driver with quiescence, source rehash, deadline, and kill/reap tests. The opt-in semantic probe reports unknown until effective Docker containment can be attested.
+
+**Native plugins**
+
+- Add an explicit, owner-approved, zero-grant CLI prototype and package its cgroup-gated Bubblewrap worker. TUI activation and delegated-host aggregate containment remain open.
+
 ## 2.0.0-beta.20 — 2026-10-09
 
 **Code graph**
