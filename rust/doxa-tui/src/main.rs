@@ -57,6 +57,8 @@ Commands:
                        Run the explicitly selected provider authentication
   plugins [refresh | adopt on|off]
                        Discover plugins or change sanitized adoption for new sessions
+  native-plugin preflight NAME
+                       Review one owner-local WebAssembly package without running it
   codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH
                        Query current Rust syntax and structural module files with source hashes
   codegraph --lore-map [--root WORKTREE] file|imports|calls|modules PATH
@@ -230,6 +232,14 @@ fn run(args: &[String]) -> io::Result<()> {
                     [_, action] if action == "refresh" => println!("{}", operations::plugins_reload()?),
                     [_, action, value] if action == "adopt" && (value == "on" || value == "off") => println!("{}", operations::plugins_change(value == "on")?),
                     _ => return Err(invalid("usage: doxa plugins [refresh | adopt on|off]")),
+                }
+                return Ok(());
+            }
+            "native-plugin" => {
+                match args {
+                    [_, action, name] if action == "preflight" =>
+                        print!("{}", operations::native_plugin_package_preflight(name)?),
+                    _ => return Err(invalid("usage: doxa native-plugin preflight NAME")),
                 }
                 return Ok(());
             }

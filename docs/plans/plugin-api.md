@@ -1,6 +1,6 @@
 # Native DOXA plugin API
 
-Status: **data-only v1 command and status slices implemented; executable plugins remain open**.
+Status: **data-only v1 and explicit package identity preflight implemented; executable plugins remain open**.
 This plan supersedes the Python/Textual `Plugin` and `PANE_COMMANDS` draft. The
 Rust frontend uses its own command registry, palette and help panel. Claude Code
 plugin adoption through `/plugins` is a separate provider feature.
@@ -9,6 +9,7 @@ plugin adoption through `/plugins` is a separate provider feature.
 
 - [Shipped slice](#shipped-slice)
 - [Trust boundary](#trust-boundary)
+- [Executable package preflight](#executable-package-preflight)
 - [Open extension work](#open-extension-work)
 - [Acceptance bar](#acceptance-bar)
 
@@ -60,6 +61,28 @@ provider passthrough and cannot override a native command name.
   discovery path to a later executable API.
 
 ## Open extension work
+
+### Executable package preflight
+
+`doxa native-plugin preflight NAME` now opens only the explicitly named,
+owner-private `$DOXA_HOME/native-plugin-packages/NAME` package. It binds a
+versioned manifest and bounded WebAssembly core-module file to their SHA-256
+digests and opened inodes. The optional owner-private config entry must match
+both digests and the requested grants exactly. A mismatch rejects the package;
+an absent entry yields a review-required result. No package is loaded at TUI
+startup, and neither preflight nor a matching config entry executes code. The
+only reserved grant name is `render-local-panel-v1`; no runtime capability is
+implemented. See [Native text plugins](../native-plugins.md#executable-package-identity-review)
+for the concrete format and owner review flow.
+
+The next execution slice needs a real WebAssembly validator and an isolated,
+resource-limited runner with a narrow host protocol, per-invocation identity
+recheck, grant enforcement, cancellation and crash reporting. Preflight checks
+only file ownership, size, identity and the WebAssembly core header; it cannot
+establish module validity or safe execution. Native shared libraries and
+in-process callbacks remain out of scope.
+
+### Other extensions
 
 The Python draft also proposed transcript renderers, lifecycle hooks, LORE
 access, settings rows and provider backends. None is a Rust-native plugin
