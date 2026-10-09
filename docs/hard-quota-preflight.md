@@ -130,6 +130,13 @@ owner-controlled policy, and the admission seam still refuses even a
 hand-edited `admissible_as_hard_quota=true`. Selecting `docker-hardened` remains
 unavailable.
 
+The Codex hook broker checks the Unix peer owner UID and a bounded
+`PreCompact` frame. A local same-UID process with the session capability can
+still satisfy both checks; that negative fixture is in the isolation tests.
+Production hardened admission requires kernel-stable peer-to-container origin
+evidence for each accepted connection, with host and sibling processes denied
+through worker, daemon and Engine restarts. This has not been proved.
+
 For the focused refusal-path tests:
 
 ```sh

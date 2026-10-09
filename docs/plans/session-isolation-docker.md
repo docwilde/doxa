@@ -222,6 +222,17 @@ exact session directories, bounded existing descendants in the three data
 binds, only the expected owner-private broker sockets, and the effective
 project hard limit through open descriptors. Live broker peer/protocol
 attestation and production EDQUOT/restart/remount proof remain open. The
+Codex compaction hook broker now checks the connecting Unix peer's rootless
+owner UID, accepts one bounded `PreCompact` frame with a session-private
+transcript path, and bounds its response. A disposable local Unix-socket test
+also demonstrates the remaining gap: a same-UID host client with the bearer
+capability passes those checks. Before hardened admission, bind every broker
+connection to the exact inspected container and live process namespace using
+a kernel-stable peer handle (for example `SO_PEERPIDFD` where supported),
+reject host/sibling/changed-container peers, and rerun the protocol tests
+after worker, daemon and Engine restart. If the kernel or Engine cannot
+provide that origin evidence, startup must refuse hardened mode.
+The
 opt-in disposable quota fixture can compare aggregate writes through all three
 binds and recheck EDQUOT after restarting the same container; it does not
 restart the Engine, remount the source or produce a production admission token.
