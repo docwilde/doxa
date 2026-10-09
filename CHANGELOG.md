@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.29 — 2026-10-09
+
+**Runtime proof**
+
+- Prove the approved Wasm worker, aggregate cgroup limits, namespaces, egress and cleanup in a disposable delegated guest. Broader TUI activation remains closed.
+- Test checked-address DNS dialing and reject rebinding. A disposable ext4 rootless fixture passed aggregate and restart `EDQUOT`; production admission still needs broker, remount and provider proof.
+- Add a disabled direct Engine attach probe and document the same-user daemon spoofing gap. Code-graph semantic binding still reports unknown.
+
+**Model facts**
+
+- Add explicit `doxa model-facts codex MODEL --check-catalog` for a bounded read-only OpenAI model listing. It reports listed, unlisted or unknown; inference access, billed tier and latency remain unverified.
+
 ## 2.0.0-beta.28 — 2026-10-09
 
 **Android remote recovery**

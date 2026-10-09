@@ -198,6 +198,10 @@ and private answers), and requires a bounded TLS ClientHello with SNI matching
 the `CONNECT` hostname before dialing the checked IP or forwarding worker
 bytes. Missing, duplicate, mismatched and known encrypted ClientHello names,
 early data and extra handshake bytes are refused. TLS remains end-to-end. The
+offline gateway fixture now changes an allowed DNS answer to a private address
+between tunnels: it verifies that the first dial uses its checked address
+without another lookup and that the second tunnel is rejected before dialing.
+This tests the gateway's address binding, not provider DNS or redirects. The
 worker's `egress-proxy PORT` command can bridge loopback
 HTTP proxy traffic to that Unix socket in a `network=none` fixture. A fixture
 can explicitly set `HTTP_PROXY` and `HTTPS_PROXY` to its loopback port. The

@@ -64,6 +64,15 @@ reasoning effort, so thinking is optional. OpenAI's
 explicitly refuses `none` for `gpt-6-astra`, so thinking is mandatory. Each
 context and thinking field cites its own page and check date.
 
+For an OpenAI API reviewer, an authenticated
+[`GET /v1/models`](https://developers.openai.com/api/reference/resources/models/methods/list)
+with the same API key can check whether `gpt-6-astra` is currently listed without
+making a generation call. That read-only result does not establish a successful
+Responses request, its billed service tier, latency, or output quality. This
+audit made no account call. The model page lists Free as unsupported and
+publishes Build, Launch and Grow rate limits; an organization's actual limits
+still need its own account view.
+
 Z.AI describes model context as “1M,” “200K,” or “128K” without a precise
 integer token count, so those fields remain unknown. The `gpt-5.3-codex`
 thinking off switch remains unknown. OpenAI API model specifications describe
@@ -89,6 +98,17 @@ filter, not an expiry or live verification. Refreshing a fact requires an
 operator to inspect the exact provider source and change the registry in a
 reviewed code commit. The command cannot grant a model, effort level, or
 priced-budget admission.
+
+`doxa model-facts codex gpt-6-astra --check-catalog` explicitly reads OpenAI's
+Models API with `OPENAI_API_KEY`. The fixed `GET /v1/models` request has no
+generation payload, follows no redirects or environment proxy, and has a five
+second total deadline and a 1 MiB response limit. It prints only `listed`,
+`unlisted`, or `unknown`; missing credentials, refused requests, malformed or
+oversized responses, and timeouts are `unknown`. An unlisted result means the
+exact ID was absent from that successful catalog response. A listed result
+does not prove a Responses call will succeed, its billed tier, latency, or
+review quality. The flag is accepted only for the `codex` engine and never runs
+implicitly during fact review or model selection.
 
 ## Token-budget bounds
 

@@ -11,6 +11,8 @@ use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
+#[cfg(target_os = "linux")]
+use std::os::{fd::FromRawFd, unix::ffi::OsStrExt, unix::fs::{FileTypeExt, MetadataExt}, unix::net::UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use std::time::{Duration, Instant};
@@ -25,6 +27,168 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PROBE_OUTPUT: usize = 64 * 1024;
 const MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_PIDS: u64 = 64;
+#[cfg(target_os = "linux")]
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Prospective direct Engine transport. This is intentionally disconnected
+/// from `run_definition`: its Docker CLI child still owns the LSP pipes.
+/// An HTTP upgrade on a Unix socket is only useful after the launcher also
+/// routes *all* LSP bytes through this exact connection and obtains inspect
+/// observations from the same reviewed daemon.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+struct AttachTransport {
+    stream: UnixStream,
+    cid: String,
+    peer_pid: libc::pid_t,
+    socket_inode: u64,
+}
+
+/// Connect with a wall-clock bound; UnixStream::connect alone has no timeout.
+#[cfg(target_os = "linux")]
+fn bounded_unix_connect(path: &Path, deadline: Instant) -> Result<UnixStream, String> {
+    let bytes = path.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.is_empty() || bytes.len() >= address.sun_path.len() {
+        return Err("invalid Docker socket path".into());
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (index, byte) in bytes.iter().enumerate() { address.sun_path[index] = *byte as libc::c_char; }
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) };
+    if fd < 0 { return Err("cannot create Docker socket connection".into()); }
+    let result = (|| {
+        let length = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+        let connected = unsafe { libc::connect(fd, &address as *const _ as *const libc::sockaddr, length) };
+        if connected < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err("Docker socket connect failed".into());
+        }
+        if connected < 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { return Err("Docker socket connect deadline exceeded".into()); }
+            let mut pollfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+            let ready = unsafe { libc::poll(&mut pollfd, 1, remaining.as_millis().min(i32::MAX as u128) as i32) };
+            if ready <= 0 { return Err("Docker socket connect deadline exceeded".into()); }
+            let mut error: libc::c_int = 0;
+            let mut size = std::mem::size_of_val(&error) as libc::socklen_t;
+            if unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_ERROR,
+                &mut error as *mut _ as *mut _, &mut size) } < 0 || error != 0 {
+                return Err("Docker socket connect failed".into());
+            }
+        }
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+            return Err("cannot configure Docker socket".into());
+        }
+        let stream = unsafe { UnixStream::from_raw_fd(fd) };
+        Ok(stream)
+    })();
+    if result.is_err() { unsafe { libc::close(fd); } }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn socket_peer_pid(stream: &UnixStream) -> Result<libc::pid_t, String> {
+    let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    if unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
+        &mut peer as *mut _ as *mut _, &mut length) } < 0
+        || length as usize != std::mem::size_of::<libc::ucred>()
+        || peer.pid <= 0 || peer.uid != unsafe { libc::geteuid() } {
+        return Err("Docker socket peer is not the current rootless user".into());
+    }
+    Ok(peer.pid)
+}
+
+/// An opt-in, private measurement seam for the Engine's hijacked attach
+/// endpoint. A successful response identifies an attached transport to the
+/// requested CID *under the assumption that the Unix peer is a trusted
+/// Engine*. It does not authenticate the daemon binary or the CLI LSP pipes.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn open_disabled_attach_transport(docker_host: &str, cid: &str) -> Result<AttachTransport, String> {
+    if cid.len() != 64 || !cid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("invalid container ID for attach".into());
+    }
+    let socket = docker_host.strip_prefix("unix://").ok_or("Docker attach requires a Unix socket")?;
+    let path = Path::new(socket);
+    if !path.is_absolute() || matches!(socket, "/var/run/docker.sock" | "/run/docker.sock") {
+        return Err("Docker attach requires a local rootless socket".into());
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| "missing Docker socket")?;
+    if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0 || path.canonicalize().ok().as_deref() != Some(path) {
+        return Err("Docker socket must be private, owned, and unsymlinked".into());
+    }
+    let deadline = Instant::now() + ATTACH_TIMEOUT;
+    let mut stream = bounded_unix_connect(path, deadline)?;
+    let peer_pid = socket_peer_pid(&stream)?;
+    let after = fs::symlink_metadata(path).map_err(|_| "Docker socket disappeared")?;
+    if after.dev() != metadata.dev() || after.ino() != metadata.ino() {
+        return Err("Docker socket changed during connection".into());
+    }
+    let request = format!("POST /v1.51/containers/{cid}/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n");
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() { return Err("Docker attach deadline exceeded".into()); }
+    stream.set_write_timeout(Some(remaining))
+        .map_err(|_| "cannot set Docker attach write deadline")?;
+    stream.write_all(request.as_bytes()).map_err(|_| "Docker attach request failed")?;
+    let mut header = Vec::new();
+    while !header.ends_with(b"\r\n\r\n") {
+        if header.len() >= 4096 { return Err("Docker attach header exceeds 4 KiB".into()); }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err("Docker attach deadline exceeded".into()); }
+        stream.set_read_timeout(Some(remaining)).map_err(|_| "cannot set Docker attach read deadline")?;
+        let mut byte = [0];
+        stream.read_exact(&mut byte).map_err(|_| "Docker attach header read failed")?;
+        header.push(byte[0]);
+    }
+    let header = std::str::from_utf8(&header).map_err(|_| "invalid Docker attach header")?;
+    let mut lines = header.split("\r\n");
+    let status = lines.next().ok_or("missing Docker attach status")?;
+    if !status.starts_with("HTTP/1.1 101 ") { return Err("Docker attach did not upgrade".into()); }
+    let mut upgrade = false;
+    let mut connection = false;
+    let mut multiplexed = false;
+    for line in lines.take_while(|line| !line.is_empty()) {
+        let (key, value) = line.split_once(':').ok_or("invalid Docker attach header field")?;
+        let value = value.trim();
+        if key.eq_ignore_ascii_case("upgrade") {
+            if upgrade || !value.eq_ignore_ascii_case("tcp") { return Err("invalid Docker attach upgrade".into()); }
+            upgrade = true;
+        }
+        if key.eq_ignore_ascii_case("connection") {
+            if connection || !value.eq_ignore_ascii_case("upgrade") { return Err("invalid Docker attach connection".into()); }
+            connection = true;
+        }
+        if key.eq_ignore_ascii_case("content-type") {
+            if multiplexed || !value.eq_ignore_ascii_case("application/vnd.docker.multiplexed-stream") {
+                return Err("invalid Docker attach content type".into());
+            }
+            multiplexed = true;
+        }
+    }
+    if !upgrade || !connection || !multiplexed {
+        return Err("Docker attach is not a multiplexed upgraded stream".into());
+    }
+    Ok(AttachTransport { stream, cid: cid.into(), peer_pid, socket_inode: metadata.ino() })
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+impl AttachTransport {
+    fn read_frame(&mut self) -> Result<(u8, Vec<u8>), String> {
+        let mut header = [0u8; 8];
+        self.stream.read_exact(&mut header).map_err(|_| "Docker attach frame header read failed")?;
+        if !matches!(header[0], 1 | 2) || header[1..4] != [0, 0, 0] {
+            return Err("invalid Docker attach stream selector".into());
+        }
+        let length = u32::from_be_bytes(header[4..8].try_into().unwrap()) as usize;
+        if length == 0 || length > MAX_FRAME { return Err("Docker attach frame exceeds 32 KiB".into()); }
+        let mut body = vec![0; length];
+        self.stream.read_exact(&mut body).map_err(|_| "Docker attach frame body read failed")?;
+        Ok((header[0], body))
+    }
+}
 
 /// Both checks must be backed by observations of the *effective* runtime,
 /// not by the requested Docker arguments. No production caller exists.
@@ -163,6 +327,7 @@ fn verify_container(value: &Value, plan: &ProducerPlan, cid: &str, image_id: &st
             items.len() == 1 && items[0].as_str() == Some("/usr/local/bin/rust-analyzer"))
         && value.pointer("/Config/Cmd").is_some_and(|cmd| cmd.is_null()
             || cmd.as_array().is_some_and(|items| items.is_empty()))
+        && value.pointer("/Config/Tty").and_then(Value::as_bool) == Some(false)
         && value.pointer("/Config/Env").and_then(Value::as_array).is_some_and(|items|
             required_env.iter().all(|required| items.iter().any(|item| item.as_str() == Some(*required))))
         && value.pointer("/State/Running").and_then(Value::as_bool) == Some(true)
@@ -649,12 +814,106 @@ mod tests {
     use super::super::semantic_producer::plan_rust_analyzer;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::net::UnixListener;
     use std::path::Path;
     use std::process::Stdio;
+    #[cfg(target_os = "linux")]
+    use std::thread;
     use tempfile::TempDir;
 
     const IMAGE: &str = "reviewed/rust-analyzer@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const SOCKET: &str = "unix:///run/user/1000/docker.sock";
+
+    #[cfg(target_os = "linux")]
+    fn fake_attach(response: Vec<u8>) -> (TempDir, String, thread::JoinHandle<String>) {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("engine.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                assert!(request.len() < 1024);
+            }
+            stream.write_all(&response).unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (directory, format!("unix://{}", socket.display()), handle)
+    }
+
+    #[cfg(target_os = "linux")]
+    const ATTACH_101: &str = "HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n\r\n";
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_attach_seam_targets_exact_cid_and_parses_multiplexed_stdout() {
+        let cid = "c".repeat(64);
+        let mut response = ATTACH_101.as_bytes().to_vec();
+        response.extend([1, 0, 0, 0, 0, 0, 0, 4]);
+        response.extend(b"LSP!");
+        let (_dir, host, server) = fake_attach(response);
+        let mut transport = open_disabled_attach_transport(&host, &cid).unwrap();
+        assert_eq!(transport.cid, cid);
+        assert!(transport.peer_pid > 0);
+        assert!(transport.socket_inode > 0);
+        assert_eq!(transport.read_frame().unwrap(), (1, b"LSP!".to_vec()));
+        let request = server.join().unwrap();
+        assert!(request.starts_with(&format!("POST /v1.51/containers/{cid}/attach?logs=0&stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\n")));
+        assert!(request.contains("Connection: Upgrade\r\n"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_attach_seam_rejects_http_and_stream_spoofs() {
+        let cid = "d".repeat(64);
+        for response in [
+            b"HTTP/1.1 404 Not Found\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n\r\n".to_vec(),
+            ATTACH_101.replace("multiplexed-stream", "raw-stream").into_bytes(),
+            ATTACH_101.replace("Connection: Upgrade\r\n", "").into_bytes(),
+            ATTACH_101.replace("Upgrade: tcp\r\n", "Upgrade: tcp\r\nUpgrade: tcp\r\n").into_bytes(),
+            format!("HTTP/1.1 101 UPGRADED\r\nX-Fill: {}\r\n\r\n", "X".repeat(4096)).into_bytes(),
+        ] {
+            let (_dir, host, server) = fake_attach(response);
+            assert!(open_disabled_attach_transport(&host, &cid).is_err());
+            server.join().unwrap();
+        }
+        for frame in [
+            [0, 0, 0, 0, 0, 0, 0, 1].to_vec(),
+            [1, 1, 0, 0, 0, 0, 0, 1].to_vec(),
+            [1, 0, 0, 0, 0, 0, 128, 1].to_vec(),
+        ] {
+            let mut response = ATTACH_101.as_bytes().to_vec();
+            response.extend(frame);
+            response.push(b'X');
+            let (_dir, host, server) = fake_attach(response);
+            assert!(open_disabled_attach_transport(&host, &cid).unwrap().read_frame().is_err());
+            server.join().unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_attach_seam_rejects_unsafe_socket_and_cid_before_connect() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("engine.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let host = format!("unix://{}", socket.display());
+        let cid = "e".repeat(64);
+        assert!(open_disabled_attach_transport(&host, "short").is_err());
+        assert!(open_disabled_attach_transport("tcp://localhost:2375", &cid).is_err());
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(open_disabled_attach_transport(&host, &cid).is_err());
+        let link = directory.path().join("link.sock");
+        std::os::unix::fs::symlink(&socket, &link).unwrap();
+        assert!(open_disabled_attach_transport(&format!("unix://{}", link.display()), &cid).is_err());
+    }
     const FAKE: &str = r#"
 import json, os, subprocess, sys, time
 mode, target_uri, target_path, pid_path = sys.argv[1:]
@@ -836,7 +1095,7 @@ else:
         write_json(&root.path().join("container.json"), &json!({
             "Id":cid,"Image":image_id,"Config":{"Image":IMAGE,"User":"0:0",
                 "WorkingDir":plan.root,"Entrypoint":["/usr/local/bin/rust-analyzer"],
-                "Cmd":null,"Env":["HOME=/tmp","TMPDIR=/tmp","CARGO_HOME=/tmp/cargo",
+                "Cmd":null,"Tty":false,"Env":["HOME=/tmp","TMPDIR=/tmp","CARGO_HOME=/tmp/cargo",
                     "RUSTUP_HOME=/tmp/rustup","CARGO_NET_OFFLINE=true"]},
             "State":{"Running":true,"Pid":4242},
             "NetworkSettings":{"Networks":{}},
@@ -912,7 +1171,7 @@ else:
     #[test]
     fn fake_docker_inspect_denies_identity_network_mount_and_profile_drift() {
         for path in ["/Id", "/Image", "/Config/Image", "/Config/User",
-            "/Config/WorkingDir", "/Config/Entrypoint", "/Config/Env",
+            "/Config/WorkingDir", "/Config/Entrypoint", "/Config/Tty", "/Config/Env",
             "/HostConfig/NetworkMode",
             "/State/Running", "/HostConfig/ReadonlyRootfs", "/HostConfig/Privileged",
             "/HostConfig/Init", "/HostConfig/AutoRemove", "/HostConfig/Ulimits",

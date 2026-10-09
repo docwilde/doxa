@@ -132,16 +132,18 @@ conservative failure class on error. The caller must run in a supervisor leaf
 below an empty, user-owned delegated cgroup v2 parent with memory, CPU and PID
 controllers enabled for its children. Each worker gets a sibling cgroup under
 that parent. Without this layout, admission fails closed before spawning the
-worker. The current host lacks that delegation, so end-to-end aggregate cgroup
-containment still needs proof on a delegated host. TUI execution, nonempty
-grants, native shared libraries, scripts, provider backends, hooks and
+worker. A disposable delegated Ubuntu guest passed the seven-case acceptance
+fixture, including the approved Wasm worker, aggregate limits, namespace
+boundary and cleanup. TUI execution, nonempty grants, native shared
+libraries, scripts, provider backends, hooks and
 automatic startup remain unsupported.
 
 Before broader activation, a delegated-host acceptance run must verify the
 installed memory, swap, CPU and PID limits; worker membership before exec;
 aggregate limits under fork and process-group escape attempts; no host file or
 network access; and removal of all descendants after return, timeout and
-cancellation. The current host cannot exercise those cgroup checks.
+cancellation. The disposable guest passed these checks; broader activation
+still requires a reviewed operator path and installed-host acceptance.
 
 ### Delegated-host acceptance fixture
 
@@ -155,30 +157,47 @@ host, a transient service with `User=<test user>`, `Delegate=yes` and
 `DelegateSubgroup=supervisor` can provide this shape; the service must still
 enable the three controllers in its empty delegated parent before testing.
 Do not create cgroups under a systemd-owned, non-delegated slice. The host also
-needs Bubblewrap with `--ro-bind-fd` and `--json-status-fd`, Python 3, `setsid`,
-two available CPUs, and a private real-disk scratch directory. Then run:
+needs a writable cgroup v2 mount, a non-root test user, working unprivileged
+user and network namespaces, Bubblewrap with `--ro-bind-fd` and
+`--json-status-fd`, Python 3.9 or newer, the fixed `/usr/bin` fixture tools,
+Rust, two available CPUs, and a private real-disk scratch directory. Use a
+disposable machine with at least 1 GiB of spare memory: the proof deliberately exercises cgroup OOM,
+PID denial and CPU throttling. The read-only preflight checks the mount,
+caller membership, empty delegated parent, enabled controllers, executable,
+tools and scratch prerequisites. It also starts an unprivileged Bubblewrap
+namespace smoke probe. Run from the repository checkout:
 
 ```sh
-mkdir -m 700 -p "$HOME/t"
-TMPDIR="$HOME/t" DOXA_PLUGIN_CGROUP_ACCEPTANCE=1 \
-  CARGO_TARGET_DIR="$HOME/ssd-cache/doxa-plugin-acceptance-target" \
-  cargo test --locked -p doxa-tui --lib \
-  delegated_cgroup_containment_acceptance -- --ignored --nocapture
+mkdir -p "$HOME/t" "$HOME/ssd-cache"
+chmod 700 "$HOME/t"
+export TMPDIR="$HOME/t"
+export CARGO_TARGET_DIR="$HOME/ssd-cache/doxa-plugin-acceptance-target"
+python3 scripts/plugin-delegated-host-proof.py --check
+DOXA_PLUGIN_CGROUP_ACCEPTANCE=1 DOXA_PLUGIN_DISPOSABLE_HOST=1 \
+  python3 scripts/plugin-delegated-host-proof.py --run
 ```
 
-The fixture is ignored by ordinary tests and requires the explicit environment
-switch.
-It fails on missing delegation, controllers, tools or observations; it does
-not silently skip a failed host. It uses the same descriptor-mounted launcher,
-private cgroup and process supervisor as the grantless CLI. Each case prints
-one bounded counter summary, followed by `cleanup=removed` only after
-`cgroup.kill` empties and removes the group.
+`--run` requires both explicit environment switches and an absolute real-disk
+`CARGO_TARGET_DIR`. It repeats the preflight, builds the actual
+`doxa-plugin-worker`, then runs the ignored Rust fixture. It creates only per-worker child cgroups in
+the delegated parent; it does not configure systemd, enable controllers or
+change host networking. Missing prerequisites or proof observations fail the
+run, rather than skipping it. The fixture uses the same descriptor-mounted
+launcher, private cgroup and process supervisor as the grantless CLI. Each
+case prints one bounded counter summary, followed by `cleanup=removed` only
+after `cgroup.kill` empties and removes the group.
 
-The six cases check host file, environment and TCP isolation; the installed
-256 MiB memory, zero swap, 16 PID and one-CPU quotas; actual child cgroup
-membership; aggregate PID denial and memory OOM under multiple children; CPU
-throttling; a `setsid` descendant killed on cancellation; and timeout cleanup.
+The seven cases include an approved zero-grant Wasm module returning 17 through
+the production review, frame, worker and sandbox path; stale approval is
+refused before a worker cgroup is created. The other six cases check distinct
+network, mount, user and PID namespace identities;
+no non-loopback interface or route; host file, environment and TCP isolation;
+the installed 256 MiB memory, zero swap, 16 PID and one-CPU quotas; actual
+worker cgroup membership; aggregate PID denial and memory OOM under multiple
+children; CPU throttling; a `setsid` descendant killed on cancellation; and
+timeout cleanup.
 The evidence is limited to cgroup counters, outcomes, byte counts and elapsed
-time. Record the test output with the host's kernel, cgroup and Bubblewrap
-versions for review. Passing this fixture on one host does not grant plugin
+time. The preflight prints the kernel, cgroup parent, CPU count and Bubblewrap
+version; retain that line and all seven `plugin-acceptance` case lines with the
+test result for review. Passing this fixture on one host does not grant plugin
 permissions or enable TUI execution.

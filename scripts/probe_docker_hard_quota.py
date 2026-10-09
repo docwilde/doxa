@@ -19,7 +19,7 @@ import sys
 import tempfile
 import uuid
 
-from check_docker_quota_preflight import inspect
+from check_docker_quota_preflight import inspect, mount_for, parse_mountinfo
 
 
 MAX_WRITE_MIB = 128
@@ -171,7 +171,20 @@ def _checked_marker_sizes(root: Path, token: str, expected: dict[str, int]) -> N
 
 
 def _host_free_check(root: Path) -> None:
-    free = os.statvfs(root).f_bavail * os.statvfs(root).f_frsize
+    # XFS may report the project's remaining blocks for statvfs(root). The
+    # fixture intentionally has less than this host floor, so inspect the
+    # enclosing mount root instead. Stacked mounts and device drift fail closed.
+    mount = mount_for(root, parse_mountinfo(Path("/proc/self/mountinfo").read_text()))
+    if mount.point == root:
+        raise ValueError("quota fixture cannot be the filesystem mount root")
+    fd = os.open(mount.point, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        if os.fstat(fd).st_dev != root.stat().st_dev:
+            raise ValueError("quota fixture changed filesystem during free-space check")
+        space = os.fstatvfs(fd)
+        free = space.f_bavail * space.f_frsize
+    finally:
+        os.close(fd)
     if free < MIN_HOST_FREE:
         raise ValueError("host free space fell below fixture floor")
 
@@ -256,9 +269,7 @@ def _checked_fixture(root: Path) -> tuple[Path, dict]:
     for name in ("checkout", "home", "cache"):
         if any((root / name).iterdir()):
             raise ValueError("quota probe requires empty bind sources")
-    free = os.statvfs(root).f_bavail * os.statvfs(root).f_frsize
-    if free < MIN_HOST_FREE:
-        raise ValueError("host filesystem has less than 512 MiB available")
+    _host_free_check(root)
     return root, report
 
 
@@ -281,8 +292,12 @@ def _docker(endpoint: str, args: list[str], docker_config: Path, timeout: int = 
 def _checked_engine(endpoint: str, image: str, docker_config: Path) -> None:
     if not IMAGE.fullmatch(image):
         raise ValueError("fixture image must be pinned by sha256 digest")
-    info = json.loads(_docker(endpoint, ["info", "--format", "{{json .}}"], docker_config))
-    if not any("name=rootless" in option for option in info.get("SecurityOptions", [])):
+    # Full Docker info can exceed the bounded CLI output on recent Engines.
+    # Request only the security options needed for this rootless gate.
+    options = json.loads(_docker(endpoint, ["info", "--format", "{{json .SecurityOptions}}"],
+                                 docker_config, max_output=2048))
+    if not isinstance(options, list) or not all(isinstance(option, str) for option in options) \
+            or "name=rootless" not in options:
         raise ValueError("fixture Engine must report rootless mode")
     image_info = json.loads(_docker(endpoint, ["image", "inspect", image], docker_config))
     row = image_info[0]
@@ -346,8 +361,7 @@ def probe(root: Path, endpoint: str, image: str, max_write_mib: int,
                 receipts[source] = validate_receipt(row, source, cap)
                 if any((root / source).iterdir()):
                     raise ValueError("quota worker left a file in its bind")
-                if os.statvfs(root).f_bavail * os.statvfs(root).f_frsize < MIN_HOST_FREE:
-                    raise ValueError("host free space fell below fixture floor")
+                _host_free_check(root)
             if aggregate_restart:
                 aggregate = _aggregate_restart_probe(root, endpoint, image, name,
                                                      docker_config, token, cap, receipts)

@@ -530,6 +530,35 @@ mod tests {
         FixtureDir { _root: root, broker }
     }
     fn hosts() -> AllowedHosts { AllowedHosts::new(&["api.example.test".to_owned()]).unwrap() }
+    // Other tests spawn children while libtest runs cases in parallel. A child
+    // can retain a CLOEXEC listener or flock between fork and exec, after the
+    // fixture's owner has dropped it. That is a genuinely live descriptor:
+    // production must refuse it. Wait only for that bounded fixture lifetime.
+    #[cfg(target_os = "linux")]
+    fn assert_eventually_stale(socket: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match stale_socket(socket) {
+                Ok(true) => return,
+                Ok(false) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                Ok(false) => panic!("abandoned egress socket still has a listener"),
+                Err(err) => panic!("stale egress socket check failed: {err}"),
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn restart_after_transient_lock(broker: &Path) -> EgressGateway {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match EgressGateway::start(broker, hosts()) {
+                Ok(gateway) => return gateway,
+                Err(err) if err.kind() == io::ErrorKind::PermissionDenied
+                    && err.to_string() == "egress gateway already starting or live"
+                    && Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                Err(err) => panic!("egress gateway did not restart after owner drop: {err}"),
+            }
+        }
+    }
     fn gateway(root: &Path, addresses: Vec<SocketAddr>, upstream: SocketAddr, calls: Arc<AtomicUsize>) -> EgressGateway {
         EgressGateway::start_with(root, hosts(),
             Arc::new(move |_| Ok(addresses.clone())),
@@ -717,6 +746,68 @@ mod tests {
     }
 
     #[test]
+    fn dns_rebinding_cannot_change_a_checked_dial_or_reuse_an_old_answer() {
+        let root = fixture_dir();
+        let checked: SocketAddr = "1.1.1.1:443".parse().unwrap();
+        let rebound: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let local = listener.local_addr().unwrap();
+        let upstream = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                        thread::sleep(Duration::from_millis(5)),
+                    Err(e) => panic!("mock upstream was not reached before deadline: {e}"),
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            stream.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).unwrap();
+            stream.write_all(&received).unwrap();
+            received
+        });
+        let resolutions = Arc::new(AtomicUsize::new(0));
+        let resolutions_for_resolver = resolutions.clone();
+        let dialed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dialed_by_connector = dialed.clone();
+        let gateway = EgressGateway::start_with(root.path(), hosts(),
+            Arc::new(move |host| {
+                assert_eq!(host, "api.example.test");
+                let answer = if resolutions_for_resolver.fetch_add(1, Ordering::AcqRel) == 0 {
+                    checked
+                } else {
+                    rebound
+                };
+                Ok(vec![answer])
+            }),
+            Arc::new(move |address| {
+                dialed_by_connector.lock().unwrap().push(address);
+                if address != checked { return Err(error("unchecked dial target")); }
+                TcpStream::connect_timeout(&local, Duration::from_secs(2))
+            }),
+        ).unwrap();
+
+        let hello = client_hello("api.example.test");
+        let mut first = b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n".to_vec();
+        first.extend_from_slice(&hello);
+        let response = request(gateway.socket(), &first);
+        assert!(response.starts_with(b"HTTP/1.1 200 Connection Established\r\n\r\n"));
+        assert!(response.ends_with(&hello));
+        assert_eq!(upstream.join().unwrap(), hello);
+        assert_eq!(resolutions.load(Ordering::Acquire), 1, "dial must use the checked answer without re-resolving");
+        assert_eq!(*dialed.lock().unwrap(), vec![checked]);
+
+        let denied = request(gateway.socket(), b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n");
+        assert!(denied.starts_with(b"HTTP/1.1 403 Forbidden"), "{denied:?}");
+        assert_eq!(resolutions.load(Ordering::Acquire), 2, "each new tunnel must validate fresh DNS answers");
+        assert_eq!(*dialed.lock().unwrap(), vec![checked], "a private rebound address must never reach the connector");
+    }
+
+    #[test]
     fn dead_gateway_and_unsafe_socket_fail_closed() {
         let root = fixture_dir(); let calls = Arc::new(AtomicUsize::new(0));
         let gateway = gateway(root.path(), vec!["1.1.1.1:443".parse().unwrap()],
@@ -761,8 +852,12 @@ mod tests {
         let root = fixture_dir();
         let socket = root.path().join("egress.sock");
         let stale = UnixListener::bind(&socket).unwrap();
+        let retained = stale.try_clone().unwrap();
         drop(stale);
-        assert!(stale_socket(&socket).unwrap());
+        assert!(!stale_socket(&socket).unwrap(), "a retained listener must not be reclaimed");
+        assert!(EgressGateway::start(root.path(), hosts()).is_err());
+        drop(retained);
+        assert_eventually_stale(&socket);
         let gateway = EgressGateway::start(root.path(), hosts()).unwrap();
         assert!(!stale_socket(gateway.socket()).unwrap());
         drop(gateway);
@@ -776,6 +871,7 @@ mod tests {
         let socket = root.path().join("egress.sock");
         let stale = UnixListener::bind(&socket).unwrap();
         drop(stale);
+        assert_eventually_stale(&socket);
         let (locked, ready) = std::sync::mpsc::channel();
         let (release, proceed) = std::sync::mpsc::channel();
         let broker = root.path().to_owned();
@@ -792,8 +888,12 @@ mod tests {
         assert!(UnixStream::connect(gateway.socket()).is_ok());
         let occupied = EgressGateway::start(root.path(), hosts()).err().unwrap();
         assert!(occupied.to_string().contains("already starting or live"), "{occupied}");
+        let retained_lock = gateway._lock.try_clone().unwrap();
         drop(gateway);
         assert!(!socket.exists());
+        let occupied = EgressGateway::start(root.path(), hosts()).err().unwrap();
+        assert!(occupied.to_string().contains("already starting or live"), "{occupied}");
+        drop(retained_lock);
         let lock = gateway_lock_path(root.path()).unwrap();
         assert!(lock.exists());
         assert_eq!(lock.parent(), root.path().parent());
@@ -802,7 +902,7 @@ mod tests {
         assert_eq!(meta.uid(), unsafe { libc::geteuid() });
         assert_eq!(meta.mode() & 0o777, 0o600);
         assert_eq!(meta.nlink(), 1);
-        let restarted = EgressGateway::start(root.path(), hosts()).unwrap();
+        let restarted = restart_after_transient_lock(root.path());
         drop(restarted);
     }
 

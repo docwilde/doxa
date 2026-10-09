@@ -6,6 +6,7 @@ use std::io;
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::Ordering;
+use sha2::{Digest, Sha256};
 
 const POLL: Duration = Duration::from_millis(10);
 const PROBE_WAIT: Duration = Duration::from_secs(3);
@@ -109,6 +110,57 @@ fn worker_script(dir: &Path, body: &str) -> PathBuf {
     worker
 }
 
+fn write_private(path: &Path, bytes: impl AsRef<[u8]>) {
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+fn plugin_cgroups(parent: &Path) -> io::Result<usize> {
+    let mut count = 0;
+    for (visited, entry) in fs::read_dir(parent)?.enumerate() {
+        if visited >= 4096 { return Err(unavailable("delegated parent has too many children to audit")); }
+        if entry?.file_name().to_string_lossy().starts_with("doxa-plugin-") {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn approved_wasm_case(parent: &Path) {
+    let worker = PathBuf::from(std::env::var_os("DOXA_PLUGIN_ACCEPTANCE_WORKER")
+        .expect("proof harness must build and supply DOXA_PLUGIN_ACCEPTANCE_WORKER"));
+    assert!(worker.is_absolute(), "acceptance worker path must be absolute");
+    let home = fixture_dir();
+    let package_dir = home.path().join("native-plugin-packages/demo");
+    fs::create_dir_all(&package_dir).unwrap();
+    for path in [home.path().to_path_buf(), home.path().join("native-plugin-packages"), package_dir.clone()] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let module = wat::parse_str("(module (func (export \"doxa_main\") (result i32) i32.const 17))").unwrap();
+    let manifest = b"package_api_version = 1\nname = 'demo'\nversion = '1.0'\nartifact_format = 'wasm-core-v1'\nrequested_grants = []\n";
+    write_private(&package_dir.join("manifest.toml"), manifest);
+    write_private(&package_dir.join("module.wasm"), &module);
+    let config = format!(
+        "[[native_plugin_packages]]\nname = 'demo'\nmanifest_sha256 = '{:x}'\nmodule_sha256 = '{:x}'\ngrants = []\n",
+        Sha256::digest(manifest), Sha256::digest(&module));
+    write_private(&home.path().join("config.toml"), config.as_bytes());
+    let review = super::super::packages::preflight(home.path(), "demo").unwrap();
+    assert!(review.owner_approved && review.requested_grants.is_empty());
+    assert_eq!(plugin_cgroups(parent).unwrap(), 0, "disposable host already has plugin worker cgroups");
+    let start = Instant::now();
+    let result = supervise_reviewed(home.path(), &review, &worker, &AtomicBool::new(false),
+        start + Duration::from_secs(5)).expect("approved worker failed its sandbox");
+    assert_eq!(result, IsolatedOutcome::Return(17));
+    assert_eq!(plugin_cgroups(parent).unwrap(), 0, "approved worker cgroup survived return");
+    // Changed approval must be refused before the runner creates a cgroup.
+    write_private(&home.path().join("config.toml"), b"");
+    assert!(supervise_reviewed(home.path(), &review, &worker, &AtomicBool::new(false),
+        Instant::now() + Duration::from_secs(5)).is_err());
+    assert_eq!(plugin_cgroups(parent).unwrap(), 0, "stale approval created a worker cgroup");
+    eprintln!("plugin-acceptance case=approved-wasm outcome=Return(17) elapsed_ms={} stale_approval=refused cleanup=removed",
+        start.elapsed().as_millis());
+}
+
 struct Case {
     capture: Capture,
     counters: Counters,
@@ -167,6 +219,7 @@ fn delegated_cgroup_containment_acceptance() {
         "CPU throttling proof needs at least two available processors");
     let parent = delegated_cgroup_parent().expect("empty delegated parent and supervisor leaf required");
     assert!(parent.starts_with(CGROUP_ROOT));
+    approved_wasm_case(&parent);
 
     let host_marker = fixture_dir();
     let secret = host_marker.path().join("host-secret");
@@ -174,15 +227,37 @@ fn delegated_cgroup_containment_acceptance() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
+    let host_net_namespace = fs::read_link("/proc/self/ns/net").unwrap();
+    let host_mount_namespace = fs::read_link("/proc/self/ns/mnt").unwrap();
+    let host_user_namespace = fs::read_link("/proc/self/ns/user").unwrap();
+    let host_pid_namespace = fs::read_link("/proc/self/ns/pid").unwrap();
     let boundary = run_case("boundary", &format!(
-        "sleep 1\ntest ! -e /home || exit 31\ntest ! -e '{}' || exit 32\ntest -z \"${{DOXA_PLUGIN_TEST_SECRET-}}\" || exit 33\nif /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}' 2>/dev/null; then exit 34; fi\nprintf 'isolated\\n'",
+        "sleep 1\ntest ! -e /home || exit 31\ntest ! -e '{}' || exit 32\ntest -z \"${{DOXA_PLUGIN_TEST_SECRET-}}\" || exit 33\nif /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{port}' 2>/dev/null; then exit 34; fi\n/usr/bin/awk 'NR > 2 {{ split($0, a, \":\"); gsub(/[[:space:]]/, \"\", a[1]); if (a[1] != \"lo\") exit 1 }}' /proc/net/dev || exit 35\n/usr/bin/awk 'NR > 1 {{ exit 1 }}' /proc/net/route || exit 36\nprintf 'net=%s\\nmnt=%s\\nuser=%s\\npid=%s\\n' \"$(/usr/bin/readlink /proc/self/ns/net)\" \"$(/usr/bin/readlink /proc/self/ns/mnt)\" \"$(/usr/bin/readlink /proc/self/ns/user)\" \"$(/usr/bin/readlink /proc/self/ns/pid)\"",
         secret.display()), Duration::from_secs(4), |budget, _| {
-        wait_for("pre-exec cgroup membership", || {
-            members(budget).ok()?.into_iter().find(|pid| is_member(budget, *pid))
+        wait_for("worker cgroup membership", || {
+            members(budget).ok()?.into_iter().find(|pid| {
+                is_member(budget, *pid)
+                    && bounded_text(&PathBuf::from(format!("/proc/{pid}/cmdline")))
+                        .is_ok_and(|cmdline| cmdline.starts_with("/bin/sh\0/worker\0"))
+            })
         });
     });
     assert_eq!(boundary.capture.outcome, Outcome::Exit(0));
-    assert_eq!(boundary.capture.stdout, b"isolated\n");
+    let boundary_receipt = std::str::from_utf8(&boundary.capture.stdout).unwrap();
+    let mut receipt_lines = boundary_receipt.lines();
+    let net = receipt_lines.next().unwrap().strip_prefix("net=").unwrap();
+    let mount = receipt_lines.next().unwrap().strip_prefix("mnt=").unwrap();
+    let user = receipt_lines.next().unwrap().strip_prefix("user=").unwrap();
+    let pid = receipt_lines.next().unwrap().strip_prefix("pid=").unwrap();
+    assert!(receipt_lines.next().is_none(), "unexpected sandbox boundary receipt");
+    assert!(net.starts_with("net:[") && net.ends_with(']')
+        && mount.starts_with("mnt:[") && mount.ends_with(']')
+        && user.starts_with("user:[") && user.ends_with(']')
+        && pid.starts_with("pid:[") && pid.ends_with(']'));
+    assert_ne!(net, host_net_namespace.to_str().unwrap(), "worker reused host network namespace");
+    assert_ne!(mount, host_mount_namespace.to_str().unwrap(), "worker reused host mount namespace");
+    assert_ne!(user, host_user_namespace.to_str().unwrap(), "worker reused host user namespace");
+    assert_ne!(pid, host_pid_namespace.to_str().unwrap(), "worker reused host PID namespace");
     assert_eq!(listener.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
 
     let pids = run_case("pids", "for i in $(seq 1 48); do /bin/sleep 5 2>/dev/null & done\nwait",

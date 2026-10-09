@@ -61,8 +61,8 @@ Commands:
                        Review one owner-local WebAssembly package without running it
   native-plugin run NAME --grantless-prototype
                        Run a zero-grant, owner-approved package in a Linux cgroup sandbox
-  model-facts ENGINE MODEL [--review-before YYYY-MM-DD]
-                       Review exact static facts and operator-selected check dates
+  model-facts ENGINE MODEL [--review-before YYYY-MM-DD] [--check-catalog]
+                       Review static facts; optionally check OpenAI API catalog listing
   codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH
                        Query current Rust syntax and structural module files with source hashes
   codegraph --lore-map [--root WORKTREE] file|imports|calls|modules PATH
@@ -153,6 +153,24 @@ fn update() -> io::Result<()> {
     run_update_installer(&bin_dir, Path::new("/bin/sh"))
 }
 
+fn model_facts_args(args: &[String]) -> io::Result<(&str, &str, Option<&str>, bool)> {
+    const USAGE: &str = "usage: doxa model-facts ENGINE MODEL [--review-before YYYY-MM-DD] [--check-catalog]";
+    if args.len() < 3 { return Err(invalid(USAGE)); }
+    let mut before = None;
+    let mut check_catalog = false;
+    let mut index = 3;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--review-before" if before.is_none() && index + 1 < args.len() => {
+                before = Some(args[index + 1].as_str()); index += 2;
+            }
+            "--check-catalog" if !check_catalog => { check_catalog = true; index += 1; }
+            _ => return Err(invalid(USAGE)),
+        }
+    }
+    Ok((&args[1], &args[2], before, check_catalog))
+}
+
 fn run(args: &[String]) -> io::Result<()> {
     if args.first().is_some_and(|arg|arg=="install-launcher") {
         if args.len()!=2 {return Err(invalid("usage: doxa install-launcher ABSOLUTE_LAUNCHER_PATH"));}
@@ -171,13 +189,11 @@ fn run(args: &[String]) -> io::Result<()> {
                 return update();
             }
             "model-facts" => {
-                let before = match args {
-                    [_, _, _] => None,
-                    [_, _, _, option, date] if option == "--review-before" => Some(date.as_str()),
-                    _ => return Err(invalid("usage: doxa model-facts ENGINE MODEL [--review-before YYYY-MM-DD]")),
-                };
-                let report = doxa_tui::model_fact_review::report(&args[1], &args[2], before).map_err(invalid)?;
+                let (engine, model, before, check_catalog) = model_facts_args(args)?;
+                let report = doxa_tui::model_fact_review::report(engine, model, before).map_err(invalid)?;
+                let catalog = if check_catalog { Some(doxa_tui::model_catalog::check(engine, model)?) } else { None };
                 println!("{report}");
+                if let Some(status) = catalog { println!("OpenAI API catalog: {}", status.as_str()); }
                 return Ok(());
             }
             "codegraph" => {
@@ -728,6 +744,21 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn model_facts_catalog_network_is_only_explicitly_selected() {
+        let words = |parts: &[&str]| parts.iter().map(|part| (*part).to_owned()).collect::<Vec<_>>();
+        let plain = words(&["model-facts", "codex", "gpt-6-astra"]);
+        assert_eq!(model_facts_args(&plain).unwrap(), ("codex", "gpt-6-astra", None, false));
+        let selected = words(&["model-facts", "codex", "gpt-6-astra", "--check-catalog", "--review-before", "2026-10-09"]);
+        assert_eq!(model_facts_args(&selected).unwrap(), ("codex", "gpt-6-astra", Some("2026-10-09"), true));
+        for bad in [
+            words(&["model-facts", "codex"]),
+            words(&["model-facts", "codex", "gpt-6-astra", "--check-catalog", "--check-catalog"]),
+            words(&["model-facts", "codex", "gpt-6-astra", "--review-before"]),
+            words(&["model-facts", "codex", "gpt-6-astra", "--unknown"]),
+        ] { assert!(model_facts_args(&bad).is_err()); }
+    }
 
     #[test]
     fn update_runs_embedded_installer_for_verified_bin_directory() {

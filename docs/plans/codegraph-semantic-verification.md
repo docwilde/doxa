@@ -40,6 +40,46 @@ returning unrelated inspect and cgroup records. A production caller must
 establish that the reviewed Docker client/socket and attached LSP stream refer
 to the same attested container before this path can be enabled.
 
+An additional **private, disabled** Linux transport seam opens the configured
+Unix socket with a two-second deadline, checks that it is a private socket
+owned by the current user, records its inode and `SO_PEERCRED` PID, and sends a
+bounded [Engine attach request](https://docs.docker.com/reference/api/engine/version/v1.51/#tag/Container/operation/ContainerAttach)
+for the exact 64-digit container ID. It accepts only an HTTP upgrade with a
+multiplexed stream and checks the frame selector and size. Fake Unix daemons
+exercise the request path, response rejection, and frame bounds. This is a
+transport measurement, **not** a binding claim: a same-user fake daemon can
+answer it, and the existing Docker CLI child still supplies the LSP pipes.
+The probe intentionally rejects a `200` response or a `raw-stream` content
+type; API version and response compatibility need review on the chosen live
+Engine before this transport can be used.
+The next implementation must launch, inspect, and carry every LSP byte over
+one reviewed Engine endpoint, bind the attach request to the inspected CID,
+and preserve cleanup and resource checks across that exchange. Until then,
+the CLI never opens this seam and keeps `binding: unknown`.
+
+### Direct Engine launch blocker
+
+Moving `create`, `start`, `inspect`, and `attach` to HTTP on the same Unix
+socket would remove the caller-supplied Docker CLI from the LSP byte path. It
+would **not** establish that the peer is Docker: a process running as the same
+user can own a private socket, satisfy `SO_PEERCRED`, return a plausible
+container ID and inspect JSON, and send fabricated LSP frames. The current
+development host has no reviewed rootless Engine socket, so it cannot provide
+a live fixture for this boundary. Fake Engine tests alone
+would verify protocol parsing, not daemon identity or containment.
+
+Before implementing an activatable path, supply an owner-reviewed rootless
+Engine fixture or a trusted broker that passes an authenticated connected
+socket/daemon identity to DOXA. The launcher must pin that identity across
+every Engine request, use the `create` response's full ID for `start`,
+`inspect`, and `attach`, and carry every LSP byte on that exact upgraded
+connection. It must check non-TTY multiplexing, effective mounts, namespaces,
+cgroup limits, no egress, disk quota, and image bytes, then force-remove the
+same ID and prove absence after every outcome. The live fixture must exercise
+daemon restart, socket replacement, late output, timeouts, and cleanup
+failure. Until those checks pass, direct Engine replies remain untrusted and
+the CLI's `binding` claim stays `unknown`.
+
 The library-only LSP driver exercises a bounded initialize, quiescence,
 definition, and shutdown exchange against a fixture server. It caps messages
 and output, enforces a 20-second maximum deadline, and kills the process group

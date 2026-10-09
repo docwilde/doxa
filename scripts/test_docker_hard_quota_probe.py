@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -58,6 +59,18 @@ class HardQuotaProbeTests(unittest.TestCase):
                                                                 "reasons": ["different project ID"]}):
             with self.assertRaisesRegex(ValueError, "different project ID"):
                 quota._checked_fixture(self.root)
+
+    def test_host_free_floor_uses_enclosing_mount_not_quota_limited_fixture(self) -> None:
+        # A real XFS project quota makes statvfs(fixture) report its small
+        # remaining project allowance, even when the mount has ample space.
+        high = SimpleNamespace(f_bavail=quota.MIN_HOST_FREE // 4096, f_frsize=4096)
+        low = SimpleNamespace(f_bavail=1, f_frsize=4096)
+        with (mock.patch.object(quota.os, "statvfs", side_effect=AssertionError("fixture statvfs used")),
+              mock.patch.object(quota.os, "fstatvfs", return_value=high)):
+            quota._host_free_check(self.root)
+        with mock.patch.object(quota.os, "fstatvfs", return_value=low):
+            with self.assertRaisesRegex(ValueError, "host free space"):
+                quota._host_free_check(self.root)
 
     def test_bounded_rootless_run_uses_three_binds_and_keeps_admission_false(self) -> None:
         invocations = []
@@ -230,6 +243,31 @@ class HardQuotaProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "pinned"):
                 quota._checked_engine("unix:///run/user/1000/fixture.sock", "python:latest", self.root)
             docker.assert_not_called()
+
+    def test_engine_queries_only_bounded_security_options_and_requires_exact_rootless(self) -> None:
+        image = "sha256:" + "a" * 64
+        commands = []
+
+        def fake_docker(_endpoint, args, _config, **kwargs):
+            commands.append((args, kwargs))
+            if args[0] == "info":
+                return json.dumps(["name=seccomp,profile=builtin", "name=rootless"])
+            return json.dumps([{"Id": image}])
+
+        with mock.patch.object(quota, "_docker", side_effect=fake_docker):
+            quota._checked_engine("unix:///run/user/1000/fixture.sock", image, self.root)
+        self.assertEqual(commands[0],
+                         (["info", "--format", "{{json .SecurityOptions}}"],
+                          {"max_output": 2048}))
+        self.assertEqual(commands[1][0], ["image", "inspect", image])
+
+        for options in (["name=rootlesskit"], {"SecurityOptions": ["name=rootless"]},
+                        ["name=rootless", 1]):
+            with (self.subTest(options=options),
+                  mock.patch.object(quota, "_docker", return_value=json.dumps(options)) as docker,
+                  self.assertRaisesRegex(ValueError, "rootless mode")):
+                quota._checked_engine("unix:///run/user/1000/fixture.sock", image, self.root)
+            docker.assert_called_once()
 
     def test_explicit_acknowledgment_is_required_before_any_write(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
