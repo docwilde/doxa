@@ -848,6 +848,7 @@ dependencies = [
  "tui-nodes",
  "unicode-width 0.2.0",
  "uuid",
+ "wasmparser",
 ]
 
 [[package]]
@@ -3379,6 +3380,16 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.261.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f20f20e44f7e8aeb6744823ea9d869ede51e51be4fdaedede2852282e54d2d8"
+dependencies = [
+ "bitflags",
+ "indexmap",
 ]
 
 [[package]]

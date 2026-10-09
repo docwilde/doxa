@@ -66,7 +66,7 @@ provider passthrough and cannot override a native command name.
 
 `doxa native-plugin preflight NAME` now opens only the explicitly named,
 owner-private `$DOXA_HOME/native-plugin-packages/NAME` package. It binds a
-versioned manifest and bounded WebAssembly core-module file to their SHA-256
+versioned manifest and bounded WebAssembly 1.0 core-module file to their SHA-256
 digests and opened inodes. The optional owner-private config entry must match
 both digests and the requested grants exactly. A mismatch rejects the package;
 an absent entry yields a review-required result. No package is loaded at TUI
@@ -75,11 +75,16 @@ only reserved grant name is `render-local-panel-v1`; no runtime capability is
 implemented. See [Native text plugins](../native-plugins.md#executable-package-identity-review)
 for the concrete format and owner review flow.
 
-The next execution slice needs a real WebAssembly validator and an isolated,
-resource-limited runner with a narrow host protocol, per-invocation identity
-recheck, grant enforcement, cancellation and crash reporting. Preflight checks
-only file ownership, size, identity and the WebAssembly core header; it cannot
-establish module validity or safe execution. Native shared libraries and
+Preflight now uses pinned `wasmparser` validation of the complete module and
+refuses imports, start functions and features outside WebAssembly 1.0. A fresh
+`recheck_approved` re-opens the owner files, requires exact digest, grant and
+inode matches against the earlier approved review, and retains the validated
+module bytes so a future runner need not race a second path open. Validation
+does not make the module safe to run.
+
+The next execution slice needs an isolated, resource-limited runner with a
+narrow host protocol, grant enforcement, cancellation and crash reporting.
+Preflight cannot establish safe execution. Native shared libraries and
 in-process callbacks remain out of scope.
 
 ### Other extensions

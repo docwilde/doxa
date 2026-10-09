@@ -8,6 +8,7 @@ use std::fs::{File, Metadata};
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use wasmparser::{Parser, Payload, Validator, WasmFeatures};
 
 const MAX_PACKAGE_MANIFEST: u64 = 16 * 1024;
 const MAX_MODULE: u64 = 8 * 1024 * 1024;
@@ -35,8 +36,8 @@ struct OwnerApproval {
     grants: Vec<String>,
 }
 
-/// A review result, never an activation token. A future runner must re-open and
-/// re-hash the files and perform its own sandbox and grant enforcement.
+/// A review result, never an activation token. A future runner must use a
+/// fresh recheck and enforce its own sandbox, resource limits and grants.
 #[derive(Debug)]
 pub struct Review {
     pub name: String,
@@ -49,11 +50,24 @@ pub struct Review {
     pub module_inode: (u64, u64),
 }
 
+/// Immutable bytes from a fresh approved identity recheck. This is not an
+/// executable handle: DOXA has no module runner or grant implementation.
+#[derive(Debug)]
+pub struct RecheckedPackage {
+    review: Review,
+    module: Vec<u8>,
+}
+
+impl RecheckedPackage {
+    pub fn review(&self) -> &Review { &self.review }
+    pub fn module_bytes(&self) -> &[u8] { &self.module }
+}
+
 impl Review {
     pub fn report(&self) -> String {
         let grants = if self.requested_grants.is_empty() { "none".to_owned() }
             else { self.requested_grants.join(", ") };
-        format!("Package: {} {}\nFormat: wasm-core-v1\nManifest SHA-256: {}\nModule SHA-256: {}\nRequested grants: {}\nOwner approval: {}\nOpened inodes (device:inode): manifest {}:{}, module {}:{}\nExecution: unavailable (no plugin runner)\n",
+        format!("Package: {} {}\nFormat: wasm-core-v1 (fully validated WebAssembly 1.0, no imports or start)\nManifest SHA-256: {}\nModule SHA-256: {}\nRequested grants: {}\nOwner approval: {}\nOpened inodes (device:inode): manifest {}:{}, module {}:{}\nExecution: unavailable (no plugin runner)\n",
             self.name, self.version, self.manifest_sha256, self.module_sha256,
             grants, if self.owner_approved { "exact identity and grants match" } else { "review required" },
             self.manifest_inode.0, self.manifest_inode.1, self.module_inode.0, self.module_inode.1)
@@ -69,6 +83,26 @@ fn valid_digest(value: &str) -> bool {
 fn valid_grants(grants: &[String]) -> bool {
     grants.len() <= GRANTS.len() && grants.iter().all(|grant| GRANTS.contains(&grant.as_str()))
         && grants.iter().collect::<HashSet<_>>().len() == grants.len()
+}
+
+fn validate_module(bytes: &[u8]) -> io::Result<()> {
+    if !bytes.starts_with(WASM_CORE_V1) {
+        return Err(invalid("plugin package artifact is not a WebAssembly core module"));
+    }
+    Validator::new_with_features(WasmFeatures::WASM1).validate_all(bytes)
+        .map_err(|_| invalid("invalid or unsupported WebAssembly 1.0 module"))?;
+    // No host ABI exists. Keep implicit startup and host imports out of the
+    // approved contract until a separate runner defines them explicitly.
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload.map_err(|_| invalid("invalid WebAssembly payload"))? {
+            Payload::ImportSection(_) =>
+                return Err(invalid("plugin module imports are unsupported")),
+            Payload::StartSection { .. } =>
+                return Err(invalid("plugin module start function is unsupported")),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn stable(file: &File, before: &Metadata) -> io::Result<()> {
@@ -110,7 +144,7 @@ fn approvals(home: &File) -> io::Result<Vec<OwnerApproval>> {
 
 /// Review only the package named by the operator. No directory enumeration,
 /// repository lookup, provider inference, or executable invocation occurs.
-pub fn preflight(home: &Path, name: &str) -> io::Result<Review> {
+fn review_package(home: &Path, name: &str) -> io::Result<(Review, Vec<u8>)> {
     if !identifier(name) { return Err(invalid("invalid plugin package name")); }
     let home_dir = open_dir(home)?;
     private(&home_dir.metadata()?, true, true)?;
@@ -134,9 +168,7 @@ pub fn preflight(home: &Path, name: &str) -> io::Result<Review> {
     let (module_file, module_bytes, module_meta) =
         open_child(&package, "module.wasm", false, true, MAX_MODULE)?;
     stable(&module_file, &module_meta)?;
-    if !module_bytes.starts_with(WASM_CORE_V1) {
-        return Err(invalid("plugin package artifact is not a WebAssembly core module"));
-    }
+    validate_module(&module_bytes)?;
     let manifest_sha256 = digest(&manifest_bytes);
     let module_sha256 = digest(&module_bytes);
     let owner_approved = if let Some(row) = approved.iter().find(|row| row.name == name) {
@@ -146,10 +178,32 @@ pub fn preflight(home: &Path, name: &str) -> io::Result<Review> {
         }
         true
     } else { false };
-    Ok(Review { name: manifest.name, version: manifest.version, manifest_sha256,
+    let review = Review { name: manifest.name, version: manifest.version, manifest_sha256,
         module_sha256, requested_grants: manifest.requested_grants, owner_approved,
         manifest_inode: (manifest_meta.dev(), manifest_meta.ino()),
-        module_inode: (module_meta.dev(), module_meta.ino()) })
+        module_inode: (module_meta.dev(), module_meta.ino()) };
+    Ok((review, module_bytes))
+}
+
+pub fn preflight(home: &Path, name: &str) -> io::Result<Review> {
+    review_package(home, name).map(|(review, _)| review)
+}
+
+/// Re-open and validate both files and current owner approval, then return the
+/// exact checked bytes. A later runner must consume these bytes, not re-open a
+/// path after this check. No execution or grant follows from this result.
+pub fn recheck_approved(home: &Path, expected: &Review) -> io::Result<RecheckedPackage> {
+    if !expected.owner_approved { return Err(invalid("plugin package has no owner approval")); }
+    let (review, module) = review_package(home, &expected.name)?;
+    if !review.owner_approved || review.version != expected.version
+        || review.manifest_sha256 != expected.manifest_sha256
+        || review.module_sha256 != expected.module_sha256
+        || review.requested_grants != expected.requested_grants
+        || review.manifest_inode != expected.manifest_inode
+        || review.module_inode != expected.module_inode {
+        return Err(invalid("plugin package identity changed since review"));
+    }
+    Ok(RecheckedPackage { review, module })
 }
 
 #[cfg(test)]
@@ -201,7 +255,7 @@ mod tests {
         let dir = fixture();
         write(&dir.path().join("config.toml"), approval());
         let module = dir.path().join("native-plugin-packages/demo/module.wasm");
-        write(&module, [MODULE, b"different"].concat());
+        write(&module, [MODULE, b"\x00\x04\x03foo"].concat()); // valid custom section
         assert!(preflight(dir.path(), "demo").unwrap_err().to_string().contains("approval"));
         write(&module, MODULE);
         let manifest = dir.path().join("native-plugin-packages/demo/manifest.toml");
@@ -244,6 +298,65 @@ mod tests {
         assert!(preflight(dir.path(), "demo").is_err());
         write(&dir.path().join("config.toml"), approval().replace("name = 'demo'", "name = 'demo'\nexec = '/bin/sh'"));
         assert!(preflight(dir.path(), "demo").is_err());
+    }
+
+    #[test]
+    fn validates_complete_wasm1_module_not_just_magic() {
+        let dir = fixture();
+        let module = dir.path().join("native-plugin-packages/demo/module.wasm");
+        for invalid_module in [
+            [MODULE, b"\x01\x02\x01"].concat(), // truncated section
+            [MODULE, b"\x01\x06\x01\x60\x00\x02\x7f\x7f"].concat(), // multi-value
+            [MODULE, b"\x01\x04\x01\x60\x00\x00\x03\x02\x01\x00\x0a\x04\x01\x02\x00\xff"].concat(), // opcode
+        ] {
+            write(&module, invalid_module);
+            assert!(preflight(dir.path(), "demo").is_err());
+        }
+        write(&module, MODULE);
+        assert!(preflight(dir.path(), "demo").is_ok());
+    }
+
+    #[test]
+    fn rejects_valid_modules_with_implicit_start_or_unreviewed_imports() {
+        let dir = fixture();
+        let module = dir.path().join("native-plugin-packages/demo/module.wasm");
+        let ty = b"\x01\x04\x01\x60\x00\x00";
+        let imported = [MODULE, ty, b"\x02\x07\x01\x01x\x01f\x00\x00"].concat();
+        write(&module, imported);
+        assert!(preflight(dir.path(), "demo").unwrap_err().to_string().contains("imports"));
+        let started = [MODULE, ty,
+            b"\x03\x02\x01\x00\x08\x01\x00\x0a\x04\x01\x02\x00\x0b"].concat();
+        write(&module, started);
+        assert!(preflight(dir.path(), "demo").unwrap_err().to_string().contains("start"));
+    }
+
+    #[test]
+    fn recheck_returns_exact_validated_bytes_and_rejects_stale_identity() {
+        let dir = fixture();
+        let config = dir.path().join("config.toml");
+        write(&config, approval());
+        let reviewed = preflight(dir.path(), "demo").unwrap();
+        let checked = recheck_approved(dir.path(), &reviewed).unwrap();
+        assert_eq!(checked.module_bytes(), MODULE);
+        assert_eq!(checked.review().module_sha256, reviewed.module_sha256);
+
+        let module = dir.path().join("native-plugin-packages/demo/module.wasm");
+        std::fs::remove_file(&module).unwrap();
+        write(&module, MODULE); // identical content, different opened inode
+        assert!(preflight(dir.path(), "demo").unwrap().owner_approved);
+        assert!(recheck_approved(dir.path(), &reviewed).unwrap_err()
+            .to_string().contains("identity changed"));
+
+        let fresh = preflight(dir.path(), "demo").unwrap();
+        let manifest = dir.path().join("native-plugin-packages/demo/manifest.toml");
+        std::fs::remove_file(&manifest).unwrap();
+        write(&manifest, MANIFEST);
+        assert!(recheck_approved(dir.path(), &fresh).is_err());
+
+        let latest = preflight(dir.path(), "demo").unwrap();
+        write(&config, "");
+        assert!(recheck_approved(dir.path(), &latest).is_err());
+        assert!(recheck_approved(dir.path(), &preflight(dir.path(), "demo").unwrap()).is_err());
     }
 
     #[test]
