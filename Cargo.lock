@@ -784,6 +784,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "doxa-router"
+version = "2.0.0-beta.43"
+dependencies = [
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "doxa-runtime"
 version = "2.0.0-beta.43"
 dependencies = [

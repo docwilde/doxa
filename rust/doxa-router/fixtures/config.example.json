@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "jev_model": "jev-1.13.0",
+  "criteria_version": "synthetic-smoke-v1",
+  "candidates": [
+    {
+      "id": "fast",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "effort": "none",
+      "description": "Use for direct extraction, simple formatting, short factual transformations and routine shallow coding. Operator assumption only, not measured capability.",
+      "context_tokens": 8000,
+      "max_output_tokens": 1000,
+      "supports_tools": true,
+      "input_usd_micros_per_million": 1000000,
+      "output_usd_micros_per_million": 1000000
+    },
+    {
+      "id": "deliberate",
+      "provider": "glm",
+      "model": "glm-5.3-flash",
+      "effort": "high",
+      "description": "Use for multi-step reasoning, debugging interacting failures, architectural tradeoffs and nontrivial correctness arguments. Operator assumption only, not measured capability.",
+      "context_tokens": 8000,
+      "max_output_tokens": 1000,
+      "supports_tools": true,
+      "input_usd_micros_per_million": 1000000,
+      "output_usd_micros_per_million": 1000000
+    }
+  ],
+  "fallback_id": "deliberate",
+  "confidence_threshold": 0.5,
+  "max_calls": 20,
+  "max_spend_usd_micros": 10000,
+  "max_input_bytes": 6000,
+  "deadline_ms": 5000
+}
