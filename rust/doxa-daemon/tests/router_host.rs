@@ -194,7 +194,11 @@ mod tests {
         let cfg=config();let first=make_host(&env,cfg.clone(),&server,false,Some(0.01));
         assert_eq!(prompt(&first,"too little allowance")[0]["type"],"turn_refused");
         assert!(server.bodies().is_empty());assert_eq!(env.state()["router"]["calls"],0);
-        first.shutdown();drop(first);
+        let before=env.state();first.shutdown();drop(first);
+        let requests=server.requests.lock().unwrap().len();
+        let resumed=make_host(&env,cfg.clone(),&server,true,Some(0.01));
+        assert_eq!(env.state(),before);assert_eq!(server.requests.lock().unwrap().len(),requests);
+        resumed.shutdown();drop(resumed);
         let mut wrong=cfg;wrong.candidates[0].input_usd_micros_per_million=1;
         assert!(RouterHost::new(wrong.clone(),&env.cwd(),"routed",true,Some(0.01),Some(server.endpoint.clone())).is_err());
         let underpriced=RouterHost::new(wrong,&env.cwd(),"underpriced",false,None,Some(server.endpoint.clone())).unwrap();
@@ -215,6 +219,24 @@ mod tests {
         let mut secret=cfg;secret.candidates[0].description="jev-fixture-key-1234".into();
         assert!(RouterHost::new(secret,&env.cwd(),"secret",false,None,Some(server.endpoint.clone())).is_err());
         assert!(server.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_router_conversation_resumes_without_allowance_reset_or_http() {
+        let env=Env::new();let server=Server::new(|_,_|panic!("Empty resume must not send HTTP"));
+        let cfg=config();let first=make_host(&env,cfg.clone(),&server,false,Some(2.0));
+        first.call("set_model",&json!({"model":"glm"})).unwrap();
+        let before=env.state();first.shutdown();drop(first);
+        assert!(RouterHost::new(cfg.clone(),&env.cwd(),"routed",false,Some(2.0),Some(server.endpoint.clone())).is_err());
+        let resumed=make_host(&env,cfg.clone(),&server,true,Some(2.0));
+        assert_eq!(resumed.initial_model(),Some("glm".into()));assert_eq!(env.state(),before);
+        assert_eq!(resumed.billing_snapshot().unwrap()["session_cost_usd"],0.0);
+        resumed.shutdown();drop(resumed);
+        assert!(RouterHost::new(cfg,&env.cwd(),"routed",true,Some(1.0),Some(server.endpoint.clone())).is_err());
+        assert!(server.requests.lock().unwrap().is_empty());
+        let project=fs::read_dir(env.root.path().join("projects")).unwrap().next().unwrap().unwrap().path();
+        let messages:Value=serde_json::from_slice(&fs::read(project.join("routed.messages.json")).unwrap()).unwrap();
+        assert_eq!(messages,json!({"engine":"router","session_id":"routed","model":"router-conversation-v1","messages":[]}));
     }
 
     #[test]
@@ -242,31 +264,32 @@ mod tests {
             if method=="GET"{gets+=1;let(mut kind,body,mut delay)=catalog();if gets==1{delay=Duration::from_millis(200);}kind.push_str("");return(kind,body,delay);}
             if body["model"]==doxa_router::JEV_MODEL{return choice(body,"ds");}worker(body,false)
         });
-        let first=Arc::new(make_host(&env,config(),&server,false,Some(2.0)));let running=first.clone();
+        let cfg=config();let first=Arc::new(make_host(&env,cfg.clone(),&server,false,Some(2.0)));let running=first.clone();
         let thread=std::thread::spawn(move||prompt(&running,"cancel catalog"));
         let deadline=Instant::now()+Duration::from_secs(2);
         while server.requests.lock().unwrap().is_empty(){assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(2));}
         let started=Instant::now();first.call("interrupt",&json!({})).unwrap();
         assert_eq!(thread.join().unwrap()[0]["type"],"turn_refused");assert!(started.elapsed()<Duration::from_millis(100));
         assert_eq!(env.state()["incomplete"],false);assert_eq!(env.state()["router"]["calls"],0);
-        let events=prompt(&first,"valid next turn");assert_eq!(events.last().unwrap()["data"]["is_error"],false,"{events:?}");
-        first.call("stop",&json!({})).unwrap();assert_eq!(prompt(&first,"after stop")[0]["type"],"turn_refused");
+        assert!(server.bodies().is_empty());let before=env.state();first.shutdown();drop(first);
+        let count=server.requests.lock().unwrap().len();
+        let resumed=make_host(&env,cfg,&server,true,Some(2.0));
+        assert_eq!(env.state(),before);assert_eq!(server.requests.lock().unwrap().len(),count);
+        let events=prompt(&resumed,"valid next turn");assert_eq!(events.last().unwrap()["data"]["is_error"],false,"{events:?}");
+        resumed.call("stop",&json!({})).unwrap();assert_eq!(prompt(&resumed,"after stop")[0]["type"],"turn_refused");
     }
 
     #[test]
     fn attempted_jev_and_worker_cancellation_retain_unknown_usage_and_block_resume_replay() {
         for during_jev in [true,false] {
             let env=Env::new();
-            let mut turns=0;
             let server=Server::new(move|method,body| {
                 if method=="GET" {return catalog();}
                 let is_jev=body["model"]==doxa_router::JEV_MODEL;
-                if is_jev {turns+=1;}
                 let (kind,text,_) = if is_jev {choice(body,"ds")} else {worker(body,false)};
-                (kind,text,if turns>1 && is_jev==during_jev {Duration::from_millis(400)} else {Duration::ZERO})
+                (kind,text,if is_jev==during_jev {Duration::from_millis(400)} else {Duration::ZERO})
             });
             let cfg=config();let first=Arc::new(make_host(&env,cfg.clone(),&server,false,Some(2.0)));
-            assert_eq!(prompt(&first,"committed first turn").last().unwrap()["data"]["is_error"],false);
             let prior=server.bodies().len();
             let running=first.clone();let thread=std::thread::spawn(move||prompt(&running,"cancel active HTTP"));
             let deadline=Instant::now()+Duration::from_secs(3);

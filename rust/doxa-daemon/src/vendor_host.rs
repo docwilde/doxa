@@ -263,6 +263,31 @@ impl VendorHost {
         if self.routed { "router-conversation-v1" } else { model }
     }
 
+    /// Establish replay identity before the router's first completed journal.
+    /// This only initializes a fresh empty conversation; it cannot reset one.
+    pub(super) fn initialize_router_conversation(&self) -> Result<(), String> {
+        let active = self.active.lock().unwrap();
+        let history = self.history.lock().unwrap();
+        if !self.routed || active.is_some() || !history.is_empty()
+            || self.closing.load(Ordering::Acquire) || self.storage_uncertain.load(Ordering::Acquire) {
+            return Err("Router initialization requires a fresh idle conversation".into());
+        }
+        let initialized = (|| {
+            if self.store.read_vendor_messages("router", "router-conversation-v1")?.is_some() {
+                return Err(std::io::Error::other("Router conversation already exists"));
+            }
+            self.store.verify_vendor_transcript("router", &history)?;
+            self.store.try_write_vendor_messages("router", "router-conversation-v1", &history,
+                |text|self.scrub(text).map_err(|_|std::io::Error::other("Router scrub failed")))?;
+            Ok::<_,std::io::Error>(())
+        })();
+        if initialized.is_err() {
+            self.storage_uncertain.store(true, Ordering::Release);
+            return Err("Router initial conversation could not be safely saved".into());
+        }
+        Ok(())
+    }
+
     pub(super) fn select_route(&self, vendor: Vendor, model: &str, effort: &str,
         metadata: Value, limits: doxa_vendors::TurnLimits) -> Result<(), String> {
         let active = self.active.lock().unwrap();

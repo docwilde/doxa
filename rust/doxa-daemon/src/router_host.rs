@@ -175,6 +175,7 @@ impl RouterHost {
         for text in texts {
             if inner.public_prompt(text)? != *text { return Err("Router configuration contains redacted data".into()); }
         }
+        if !resume { inner.initialize_router_conversation()?; }
         journal.write(&state).map_err(|_| "Router initial accounting could not be persisted")?;
         Ok(Self { inner, config, ceiling_micros, journal, state: Mutex::new(state),
             turn_lock: Mutex::new(()), active: AtomicBool::new(false), cancel: AtomicBool::new(false), closing: AtomicBool::new(false),
