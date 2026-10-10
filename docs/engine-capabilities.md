@@ -48,7 +48,7 @@ Claude and Codex context and usage figures come from their reported telemetry. D
 
 ## Platform limits
 
-Linux has bounded live verification for all four engines. macOS builds and transport tests run in CI, but authenticated provider sessions need live checks. Protected Codex is Linux-only because its process ownership and compaction contract have no macOS equivalent. Windows is unsupported. See [platform verification](platform-verification.md) and the [provider verification record](live-provider-verification-2026-10-04.md).
+Linux has bounded live verification for the four direct engines: Claude, Codex, DeepSeek and GLM. macOS builds and transport tests run in CI, but authenticated provider sessions need live checks. Protected Codex is Linux-only because its process ownership and compaction contract have no macOS equivalent. Windows is unsupported. See [platform verification](platform-verification.md) and the [provider verification record](live-provider-verification-2026-10-04.md).
 
 Router currently supports native API sessions only. Its local fixtures do not
 establish authenticated Jev or worker routing quality, account availability or
