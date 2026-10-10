@@ -1,0 +1,320 @@
+{
+  "benchmark": "explicit_alternating_query_cache",
+  "cache_cold_definition": "empty answer cache; filesystem cache is uncontrolled",
+  "comparison": "same normalized answers and complete source inventory across every sample; non-atomic byte observations",
+  "elapsed_ms": 13530.833446999999,
+  "file": "rust/doxa-codegraph/src/main.rs",
+  "phases": [
+    {
+      "phase": "fresh",
+      "samples": [
+        {
+          "answer_sha256_without_read_times": "3d8de8fa17dc0ea85249425f3b112165dc5d3b8b89652d04bbbb2fcd9d3cc987",
+          "elapsed_ms": 828.5611550000001,
+          "observed_unix_ms": 1791658572390,
+          "origin": "fresh",
+          "query": "file",
+          "round": 1
+        },
+        {
+          "answer_sha256_without_read_times": "d49a82a10db9f7adf2bbe7363ec6d59314100ed7b973f72673a3e3ee2599688d",
+          "elapsed_ms": 821.043175,
+          "observed_unix_ms": 1791658573220,
+          "origin": "fresh",
+          "query": "calls",
+          "round": 1
+        },
+        {
+          "answer_sha256_without_read_times": "aa622505d96b6efca4c721f3434e54e6c13200cd9eb4814b5d69a775b40a9fd9",
+          "elapsed_ms": 801.290683,
+          "observed_unix_ms": 1791658574042,
+          "origin": "fresh",
+          "query": "imports",
+          "round": 1
+        },
+        {
+          "answer_sha256_without_read_times": "3d8de8fa17dc0ea85249425f3b112165dc5d3b8b89652d04bbbb2fcd9d3cc987",
+          "elapsed_ms": 532.671214,
+          "observed_unix_ms": 1791658574844,
+          "origin": "fresh",
+          "query": "file",
+          "round": 2
+        },
+        {
+          "answer_sha256_without_read_times": "d49a82a10db9f7adf2bbe7363ec6d59314100ed7b973f72673a3e3ee2599688d",
+          "elapsed_ms": 531.283752,
+          "observed_unix_ms": 1791658575370,
+          "origin": "fresh",
+          "query": "calls",
+          "round": 2
+        },
+        {
+          "answer_sha256_without_read_times": "aa622505d96b6efca4c721f3434e54e6c13200cd9eb4814b5d69a775b40a9fd9",
+          "elapsed_ms": 553.7366390000001,
+          "observed_unix_ms": 1791658575907,
+          "origin": "fresh",
+          "query": "imports",
+          "round": 2
+        },
+        {
+          "answer_sha256_without_read_times": "3d8de8fa17dc0ea85249425f3b112165dc5d3b8b89652d04bbbb2fcd9d3cc987",
+          "elapsed_ms": 550.658161,
+          "observed_unix_ms": 1791658576465,
+          "origin": "fresh",
+          "query": "file",
+          "round": 3
+        },
+        {
+          "answer_sha256_without_read_times": "d49a82a10db9f7adf2bbe7363ec6d59314100ed7b973f72673a3e3ee2599688d",
+          "elapsed_ms": 550.330058,
+          "observed_unix_ms": 1791658577019,
+          "origin": "fresh",
+          "query": "calls",
+          "round": 3
+        },
+        {
+          "answer_sha256_without_read_times": "aa622505d96b6efca4c721f3434e54e6c13200cd9eb4814b5d69a775b40a9fd9",
+          "elapsed_ms": 555.486165,
+          "observed_unix_ms": 1791658577562,
+          "origin": "fresh",
+          "query": "imports",
+          "round": 3
+        },
+        {
+          "answer_sha256_without_read_times": "3d8de8fa17dc0ea85249425f3b112165dc5d3b8b89652d04bbbb2fcd9d3cc987",
+          "elapsed_ms": 620.645626,
+          "observed_unix_ms": 1791658578124,
+          "origin": "fresh",
+          "query": "file",
+          "round": 4
+        },
+        {
+          "answer_sha256_without_read_times": "d49a82a10db9f7adf2bbe7363ec6d59314100ed7b973f72673a3e3ee2599688d",
+          "elapsed_ms": 564.736551,
+          "observed_unix_ms": 1791658578744,
+          "origin": "fresh",
+          "query": "calls",
+          "round": 4
+        },
+        {
+          "answer_sha256_without_read_times": "aa622505d96b6efca4c721f3434e54e6c13200cd9eb4814b5d69a775b40a9fd9",
+          "elapsed_ms": 596.953768,
+          "observed_unix_ms": 1791658579316,
+          "origin": "fresh",
+          "query": "imports",
+          "round": 4
+        },
+        {
+          "answer_sha256_without_read_times": "3d8de8fa17dc0ea85249425f3b112165dc5d3b8b89652d04bbbb2fcd9d3cc987",
+          "elapsed_ms": 795.637131,
+          "observed_unix_ms": 1791658579908,
+          "origin": "fresh",
+          "query": "file",
+          "round": 5
+        },
+        {
+          "answer_sha256_without_read_times": "d49a82a10db9f7adf2bbe7363ec6d59314100ed7b973f72673a3e3ee2599688d",
+          "elapsed_ms": 566.314405,
+          "observed_unix_ms": 1791658580700,
+          "origin": "fresh",
+          "query": "calls",
+          "round": 5
+        },
+        {
+          "answer_sha256_without_read_times": "aa622505d96b6efca4c721f3434e54e6c13200cd9eb4814b5d69a775b40a9fd9",
+          "elapsed_ms": 571.980308,
+          "observed_unix_ms": 1791658581268,
+          "origin": "fresh",
+          "query": "imports",
+          "round": 5
+        }
+      ],
+      "summary": {
+        "max_ms": 828.5611550000001,
+        "min_ms": 531.283752,
+        "n": 15,
+        "p50_ms": 566.314405,
+        "p95_ms": 828.5611550000001
+      }
+    },
+    {
+      "phase": "cache_empty",
+      "samples": [
+        {
+          "answer_sha256_without_read_times": "3d8de8fa17dc0ea85249425f3b112165dc5d3b8b89652d04bbbb2fcd9d3cc987",
+          "elapsed_ms": 708.264134,
+          "observed_unix_ms": 1791658581880,
+          "origin": "fresh",
+          "query": "file",
+          "round": 1
+        },
+        {
+          "answer_sha256_without_read_times": "d49a82a10db9f7adf2bbe7363ec6d59314100ed7b973f72673a3e3ee2599688d",
+          "elapsed_ms": 786.717177,
+          "observed_unix_ms": 1791658582681,
+          "origin": "fresh",
+          "query": "calls",
+          "round": 1
+        },
+        {
+          "answer_sha256_without_read_times": "aa622505d96b6efca4c721f3434e54e6c13200cd9eb4814b5d69a775b40a9fd9",
+          "elapsed_ms": 856.830993,
+          "observed_unix_ms": 1791658583471,
+          "origin": "fresh",
+          "query": "imports",
+          "round": 1
+        }
+      ],
+      "summary": {
+        "max_ms": 856.830993,
+        "min_ms": 708.264134,
+        "n": 3,
+        "p50_ms": 786.717177,
+        "p95_ms": 856.830993
+      }
+    },
+    {
+      "phase": "cache_warmed",
+      "samples": [
+        {
+          "answer_sha256_without_read_times": "3d8de8fa17dc0ea85249425f3b112165dc5d3b8b89652d04bbbb2fcd9d3cc987",
+          "elapsed_ms": 105.895017,
+          "observed_unix_ms": 1791658581880,
+          "origin": "revalidated",
+          "query": "file",
+          "round": 1
+        },
+        {
+          "answer_sha256_without_read_times": "d49a82a10db9f7adf2bbe7363ec6d59314100ed7b973f72673a3e3ee2599688d",
+          "elapsed_ms": 108.569021,
+          "observed_unix_ms": 1791658582681,
+          "origin": "revalidated",
+          "query": "calls",
+          "round": 1
+        },
+        {
+          "answer_sha256_without_read_times": "aa622505d96b6efca4c721f3434e54e6c13200cd9eb4814b5d69a775b40a9fd9",
+          "elapsed_ms": 122.937244,
+          "observed_unix_ms": 1791658583471,
+          "origin": "revalidated",
+          "query": "imports",
+          "round": 1
+        },
+        {
+          "answer_sha256_without_read_times": "3d8de8fa17dc0ea85249425f3b112165dc5d3b8b89652d04bbbb2fcd9d3cc987",
+          "elapsed_ms": 114.944521,
+          "observed_unix_ms": 1791658581880,
+          "origin": "revalidated",
+          "query": "file",
+          "round": 2
+        },
+        {
+          "answer_sha256_without_read_times": "d49a82a10db9f7adf2bbe7363ec6d59314100ed7b973f72673a3e3ee2599688d",
+          "elapsed_ms": 116.357414,
+          "observed_unix_ms": 1791658582681,
+          "origin": "revalidated",
+          "query": "calls",
+          "round": 2
+        },
+        {
+          "answer_sha256_without_read_times": "aa622505d96b6efca4c721f3434e54e6c13200cd9eb4814b5d69a775b40a9fd9",
+          "elapsed_ms": 121.657892,
+          "observed_unix_ms": 1791658583471,
+          "origin": "revalidated",
+          "query": "imports",
+          "round": 2
+        },
+        {
+          "answer_sha256_without_read_times": "3d8de8fa17dc0ea85249425f3b112165dc5d3b8b89652d04bbbb2fcd9d3cc987",
+          "elapsed_ms": 119.843706,
+          "observed_unix_ms": 1791658581880,
+          "origin": "revalidated",
+          "query": "file",
+          "round": 3
+        },
+        {
+          "answer_sha256_without_read_times": "d49a82a10db9f7adf2bbe7363ec6d59314100ed7b973f72673a3e3ee2599688d",
+          "elapsed_ms": 127.624187,
+          "observed_unix_ms": 1791658582681,
+          "origin": "revalidated",
+          "query": "calls",
+          "round": 3
+        },
+        {
+          "answer_sha256_without_read_times": "aa622505d96b6efca4c721f3434e54e6c13200cd9eb4814b5d69a775b40a9fd9",
+          "elapsed_ms": 117.02136,
+          "observed_unix_ms": 1791658583471,
+          "origin": "revalidated",
+          "query": "imports",
+          "round": 3
+        },
+        {
+          "answer_sha256_without_read_times": "3d8de8fa17dc0ea85249425f3b112165dc5d3b8b89652d04bbbb2fcd9d3cc987",
+          "elapsed_ms": 111.52234,
+          "observed_unix_ms": 1791658581880,
+          "origin": "revalidated",
+          "query": "file",
+          "round": 4
+        },
+        {
+          "answer_sha256_without_read_times": "d49a82a10db9f7adf2bbe7363ec6d59314100ed7b973f72673a3e3ee2599688d",
+          "elapsed_ms": 109.702012,
+          "observed_unix_ms": 1791658582681,
+          "origin": "revalidated",
+          "query": "calls",
+          "round": 4
+        },
+        {
+          "answer_sha256_without_read_times": "aa622505d96b6efca4c721f3434e54e6c13200cd9eb4814b5d69a775b40a9fd9",
+          "elapsed_ms": 112.463508,
+          "observed_unix_ms": 1791658583471,
+          "origin": "revalidated",
+          "query": "imports",
+          "round": 4
+        },
+        {
+          "answer_sha256_without_read_times": "3d8de8fa17dc0ea85249425f3b112165dc5d3b8b89652d04bbbb2fcd9d3cc987",
+          "elapsed_ms": 126.04225299999999,
+          "observed_unix_ms": 1791658581880,
+          "origin": "revalidated",
+          "query": "file",
+          "round": 5
+        },
+        {
+          "answer_sha256_without_read_times": "d49a82a10db9f7adf2bbe7363ec6d59314100ed7b973f72673a3e3ee2599688d",
+          "elapsed_ms": 109.734892,
+          "observed_unix_ms": 1791658582681,
+          "origin": "revalidated",
+          "query": "calls",
+          "round": 5
+        },
+        {
+          "answer_sha256_without_read_times": "aa622505d96b6efca4c721f3434e54e6c13200cd9eb4814b5d69a775b40a9fd9",
+          "elapsed_ms": 110.343789,
+          "observed_unix_ms": 1791658583471,
+          "origin": "revalidated",
+          "query": "imports",
+          "round": 5
+        }
+      ],
+      "summary": {
+        "max_ms": 127.624187,
+        "min_ms": 105.895017,
+        "n": 15,
+        "p50_ms": 114.944521,
+        "p95_ms": 127.624187
+      }
+    }
+  ],
+  "root": "/home/docwilde/Schreibtisch/Ampiric/repo/doxa/.worktrees/codegraph-next",
+  "runs": 5,
+  "source_basis": {
+    "enumerated_files": 863,
+    "parsed_python_files": 35,
+    "parsed_rust_files": 243,
+    "python": "9dd6d3fc5fd3cf0fd356bf7448b00b24fe128789f00d19133d058dbd16537b30",
+    "requested_source": "b6c60e703979262e8fa112747aeae754b34c72c5e7665be706af0c208415d022",
+    "rust": "f16a0c1e2a31b00f4f2ae8583fbad9f18a1e5f6dfce99df44e101c791102773f"
+  },
+  "version": "2.0.0-beta.42"
+}

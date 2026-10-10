@@ -146,9 +146,13 @@ that read.
 
 ## Repeated explicit TUI queries
 
-The TUI keeps at most one prior `file`, `symbol`, `imports`, or `calls` syntax
-answer in process memory for an identical `/codegraph` query in the same
-canonical worktree. Module queries always scan afresh: their structural
+The TUI keeps up to eight prior `file`, `symbol`, `imports`, or `calls` syntax
+answers in process memory for exact `/codegraph` queries in one canonical
+worktree. The combined serialized-answer budget is 256 KiB, in addition to
+the Rust values' allocation overhead and bounded query/root metadata.
+Entries are evicted in least-recently-used order when either bound is reached.
+This supports explicit alternating queries, such as `file`, `calls`, `imports`,
+then `file` again. Module queries always scan afresh and clear the cache: their structural
 candidate checks also probe ignored and unlisted paths. Before reuse, it re-enumerates
 the complete Git path list and reads every listed Rust and Python source three
 times: one inventory pass and two hash rechecks. The check is capped at 64 MiB
@@ -156,8 +160,13 @@ per language per pass and a ten-second elapsed check between reads, with the
 same no-symlink reader as a fresh query. A stalled filesystem read fails the
 two-second source deadline and disables the reader for this process. It
 compares both language digests and the whole path listing;
-any mismatch triggers a fresh query. Skipped or unparseable inputs are never
-cached. The viewer labels a reused answer and preserves its original observed
+any mismatch or failed check discards every answer from that inventory and
+triggers a fresh query. Changing worktree roots, failed queries, or a fresh
+scan with skipped or unparseable inputs also clears every entry. An ignored
+source entering the tracked inventory invalidates the generation even if
+the displayed query names a different file. Skipped or unparseable inputs are never
+cached. New answers enter the cache only after their complete source digests
+and Git listing match another bounded revalidation. The viewer labels a reused answer and preserves its original observed
 time, so a cache hit is not presented as a newly parsed graph. The CLI and
 reviewed LORE snapshot path do not use this cache.
 
@@ -167,11 +176,13 @@ snapshot. Changes restored between reads can escape detection. Cold-cache
 tails and representative larger repositories still need measurement before
 any automatic turn path or multi-query index is justified.
 
-For the explicit repeated-query path, the warm DOXA target is p95 below
-100 ms. Five same-process no-hit `symbol` samples with the release build on
-this branch measured fresh p50/p95 at 417.8/421.1 ms and revalidated reuse at
-29.8/30.4 ms. Other desktop load was uncontrolled; this says nothing about
-cold-cache tails or larger repositories.
+For the explicit repeated-query path, the warmed-answer-cache DOXA target is
+p95 below 100 ms. The [alternating-query measurement](../codegraph-query-cache-benchmark-2026-10-10.md)
+compares fresh scans, an initially empty answer cache, and a primed answer
+cache against the same normalized answers and complete source inventory.
+An empty answer cache is not a cold filesystem cache. Filesystem cache state
+and other desktop load are uncontrolled; cold-filesystem tails, representative
+larger repositories, and automatic query frequency remain open.
 
 ## Explicit snapshot export
 
@@ -268,5 +279,7 @@ is read-only and creates no second memory authority.
   binding remain outside the shipped syntax slice.
 - The [warm-cache scan benchmark](../codegraph-scan-benchmark-2026-10-09.md)
   measured 0.371 s median on DOXA and 1.641 s on a 6,944-file Python-heavy
-  checkout. Define a repeated-query latency budget and measure cold-cache
-  tails before adding an automatic turn path or a persistent multi-query index.
+  checkout. The explicit TUI answer cache now supports bounded alternating
+  queries under a warmed-answer p95 target of 100 ms. Measure query frequency,
+  cold-filesystem tails, and representative larger repositories before adding
+  an automatic turn path or a persistent parsed-source index.
