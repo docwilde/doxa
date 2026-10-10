@@ -91,6 +91,37 @@ fn stream_body(receiver:mpsc::Receiver<Bytes>)->Body{
         receiver.recv().await.map(|bytes|(Ok::<_,Infallible>(Frame::data(bytes)),receiver))
     });StreamBody::new(stream).boxed_unsync()
 }
+async fn forward_stream(state:Arc<Mutex<Hub>>,sender:mpsc::Sender<Bytes>,owner:String,
+    host:String,session:String,mut cursor:u64,identity:(Value,Value)){
+    let hello=json!({"type":"hello","engine":"remote","model":null,"incarnation":identity.0});
+    if sender.send(sse(&hello,None)).await.is_err(){return;}
+    let mut quiet=0u8;
+    loop{
+        if !policy::evaluate("read_transcript",Some(&owner),true,None).allowed{break;}
+        let batch=state.lock().ok().and_then(|mut hub|hub.history(&owner,&host,&session,cursor).ok());
+        let Some(batch)=batch else{break};
+        if batch["replay_gap"]==true || batch["incarnation"]!=identity.0 || batch["encrypted"]!=identity.1 {
+            let gap=json!({"type":"event","seq":cursor,"turn":null,"event":{"type":"replay_gap","data":{}}});
+            let _=sender.send(sse(&gap,None)).await;
+            // Clients must obtain a new host snapshot before consuming events
+            // or answering a request from a different state.
+            break;
+        }
+        for frame in batch["events"].as_array().into_iter().flatten(){
+            let seq=frame["seq"].as_u64();
+            if sender.send(sse(frame,seq)).await.is_err(){return;}
+            if let Some(next)=seq.and_then(|seq|seq.checked_add(1)){cursor=next;}
+        }
+        if batch["events"].as_array().is_some_and(|events|events.is_empty()) {
+            quiet=quiet.saturating_add(1);
+            if quiet>=15 {
+                if sender.send(Bytes::from_static(b": ping\n\n")).await.is_err(){break;}
+                quiet=0;
+            }
+        } else {quiet=0;}
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
 async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool,push:Option<Arc<push::Runtime>>,fcm:Option<Arc<fcm::Runtime>>)->Response<Body>{
     let origin=extension_origin(request.headers());
     if request.method()==Method::OPTIONS {
@@ -134,36 +165,10 @@ async fn handle_inner(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:b
         let Some((host,session))=id.split_once('~').filter(|(host,session)|valid_id(host)&&valid_id(session)) else{return bad("invalid session target")};
         let (host,session)=(host.to_owned(),session.to_owned());
         let available=state.lock().ok().and_then(|mut hub|hub.history(&owner,&host,&session,cursor).ok());
-        if available.is_none(){return unavailable("session offline");}
+        let Some(available)=available else{return unavailable("session offline");};
+        let identity=(available["incarnation"].clone(),available["encrypted"].clone());
         let (sender,receiver)=mpsc::channel(64);
-        tokio::spawn(async move{
-            let hello=json!({"type":"hello","engine":"remote","model":null});
-            if sender.send(sse(&hello,None)).await.is_err(){return;}
-            let mut cursor=cursor;
-            let mut quiet=0u8;
-            loop{
-                if !policy::evaluate("read_transcript",Some(&owner),true,None).allowed{break;}
-                let batch=state.lock().ok().and_then(|mut hub|hub.history(&owner,&host,&session,cursor).ok());
-                let Some(batch)=batch else{break};
-                if batch["replay_gap"]==true {
-                    let gap=json!({"type":"event","seq":cursor,"turn":null,"event":{"type":"replay_gap","data":{}}});
-                    if sender.send(sse(&gap,None)).await.is_err(){break;}
-                }
-                for frame in batch["events"].as_array().into_iter().flatten(){
-                    let seq=frame["seq"].as_u64();
-                    if sender.send(sse(frame,seq)).await.is_err(){return;}
-                    if let Some(next)=seq.and_then(|seq|seq.checked_add(1)){cursor=next;}
-                }
-                if batch["events"].as_array().is_some_and(|events|events.is_empty()) {
-                    quiet=quiet.saturating_add(1);
-                    if quiet>=15 {
-                        if sender.send(Bytes::from_static(b": ping\n\n")).await.is_err(){break;}
-                        quiet=0;
-                    }
-                } else { quiet=0; }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        });
+        tokio::spawn(forward_stream(state,sender,owner,host,session,cursor,identity));
         return Response::builder().status(StatusCode::OK).header(header::CONTENT_TYPE,"text/event-stream")
             .header(header::CACHE_CONTROL,"no-store").header("x-accel-buffering","no")
             .body(stream_body(receiver)).expect("fixed SSE response");
@@ -383,6 +388,35 @@ async fn main()->io::Result<()> {
         format!("POST {path} HTTP/1.1\r\nHost: hub.test\r\nOrigin: https://hub.test\r\nTailscale-User-Login: {identity}\r\nContent-Length: {}\r\n{extra}\r\n{body}",body.len())
     }
     fn json_body(reply:&str)->Value{serde_json::from_str(reply.split("\r\n\r\n").nth(1).unwrap()).unwrap()}
+    #[tokio::test]async fn active_stream_fences_replacement_before_sending_lower_sequence(){
+        let _guard=ENV.lock().unwrap();
+        let vars=["DOXA_REMOTE_ENABLED","DOXA_REMOTE_ALLOWED_LOGINS"];
+        let old=vars.map(std::env::var_os);
+        std::env::set_var(vars[0],"1");std::env::set_var(vars[1],"owner@example.com");
+        let mut hub=Hub::new();
+        let sessions=state::bounded_sessions(&json!([{"id":"session","incarnation":"first"}])).unwrap();
+        let lease=hub.register("owner@example.com","host",sessions,None).unwrap()["lease"].as_str().unwrap().to_owned();
+        hub.event("owner@example.com","host",&lease,"session",json!({"type":"event","seq":30,"event":{"type":"turn_done","data":{}}})).unwrap();
+        let state=Arc::new(Mutex::new(hub));
+        let (sender,mut receiver)=mpsc::channel(8);
+        let task=tokio::spawn(forward_stream(state.clone(),sender,"owner@example.com".into(),"host".into(),"session".into(),31,(json!("first"),json!(false))));
+        let hello=receiver.recv().await.unwrap();
+        assert!(String::from_utf8(hello.to_vec()).unwrap().contains("\"incarnation\":\"first\""));
+        {
+            let mut hub=state.lock().unwrap();
+            let replacement=state::bounded_sessions(&json!([{"id":"session","incarnation":"second"}])).unwrap();
+            hub.register("owner@example.com","host",replacement,Some(&lease)).unwrap();
+            hub.event("owner@example.com","host",&lease,"session",json!({"type":"event","seq":0,"event":{"type":"needs_input","data":{"id":"new-question"}}})).unwrap();
+        }
+        let gap=tokio::time::timeout(Duration::from_secs(3),receiver.recv()).await.unwrap().unwrap();
+        let gap=String::from_utf8(gap.to_vec()).unwrap();
+        assert!(gap.contains("replay_gap"));assert!(!gap.contains("new-question"));
+        assert!(!gap.starts_with("id:"));
+        assert!(receiver.recv().await.is_none());task.await.unwrap();
+        for (name,original) in vars.into_iter().zip(old){
+            if let Some(value)=original{std::env::set_var(name,value)}else{std::env::remove_var(name)}
+        }
+    }
     #[tokio::test]async fn extension_preflight_is_scoped_and_post_still_requires_proxy_identity(){
         let _guard=ENV.lock().unwrap();
         let vars=["DOXA_REMOTE_ENABLED","DOXA_REMOTE_ALLOWED_LOGINS","DOXA_REMOTE_EXTENSION_ORIGINS"];

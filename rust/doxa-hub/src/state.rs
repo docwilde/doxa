@@ -483,18 +483,27 @@ impl Hub {
     }
     pub fn history(&mut self,owner:&str,host:&str,session:&str,cursor:u64)->Result<Value,&'static str>{
         self.reap();let active=self.hosts.get(&(owner.to_owned(),host.to_owned())).ok_or("host offline")?;
-        if !active.sessions.iter().any(|item|item["id"]==session){return Err("session offline");}
+        let identity=active.sessions.iter().find(|item|item["id"]==session).ok_or("session offline")?;
         let ring=self.events.get(&(owner.into(),host.into(),session.into()));
         let oldest=ring.and_then(|ring|ring.front()).and_then(|frame|frame["seq"].as_u64());
-        let gap=oldest.is_some_and(|oldest|cursor<oldest);
+        let mut gap=oldest.is_some_and(|oldest|cursor<oldest);
         let mut events=Vec::new();let mut bytes=0usize;
+        let mut expected=cursor;
         for frame in ring.into_iter().flat_map(|ring|ring.iter()).filter(|frame|frame["seq"].as_u64().is_some_and(|seq|seq>=cursor)){
             let length=serde_json::to_vec(frame).map(|raw|raw.len()).unwrap_or(0);
             if events.len()>=128 || (bytes+length>512*1024&&!events.is_empty()){break;}
+            let seq=frame["seq"].as_u64().unwrap();
+            if seq!=expected {gap=true;break;}
+            expected=seq.checked_add(1).unwrap_or(seq);
             bytes+=length;events.push(frame.clone());
         }
+        // Never present a partial batch as complete state. A cursor ahead of
+        // the buffered tail is valid after a newer host snapshot; wait for the
+        // connector instead of inventing a gap from forwarding latency.
+        if gap {events.clear();}
         let next=events.last().and_then(|frame|frame["seq"].as_u64()).and_then(|seq|seq.checked_add(1)).unwrap_or(cursor);
-        Ok(json!({"events":events,"replay_gap":gap,"next_seq":next}))
+        Ok(json!({"events":events,"replay_gap":gap,"next_seq":next,
+            "incarnation":identity["incarnation"],"encrypted":identity["encrypted"]}))
     }
 }
 
@@ -614,7 +623,27 @@ impl Hub {
         hub.event("user","host",&lease,"session",json!({"type":"event","seq":5,"event":{"type":"turn_done","data":{}}})).unwrap();
         assert_eq!(hub.event("user","host",&lease,"session",json!({"type":"event","seq":5,"event":{}})).unwrap()["duplicate"],true);
         let history=hub.history("user","host","session",0).unwrap();
-        assert_eq!(history["replay_gap"],true);assert_eq!(history["next_seq"],6);
+        assert_eq!(history["replay_gap"],true);assert_eq!(history["next_seq"],0);
+        assert_eq!(history["events"],json!([]));
+    }
+    #[test]fn replay_interior_hole_requires_snapshot_but_ahead_cursor_waits_for_host(){
+        let mut hub=Hub::new();
+        let lease=hub.register("user","host",bounded_sessions(&json!([{"id":"session","incarnation":"first"}])).unwrap(),None).unwrap()["lease"].as_str().unwrap().to_owned();
+        for seq in [5,6,8] {
+            hub.event("user","host",&lease,"session",json!({"type":"event","seq":seq,"event":{"type":"text_delta","data":{}}})).unwrap();
+        }
+        let gap=hub.history("user","host","session",5).unwrap();
+        assert_eq!(gap["replay_gap"],true);
+        assert_eq!(gap["events"],json!([]));
+        assert_eq!(gap["next_seq"],5);
+        assert_eq!(gap["incarnation"],"first");
+        let later=hub.history("user","host","session",8).unwrap();
+        assert_eq!(later["replay_gap"],false);
+        assert_eq!(later["next_seq"],9);
+        let ahead=hub.history("user","host","session",20).unwrap();
+        assert_eq!(ahead["replay_gap"],false);
+        assert_eq!(ahead["events"],json!([]));
+        assert_eq!(ahead["next_seq"],20);
     }
     #[test]fn restarted_session_expires_old_commands_and_resets_event_sequence(){
         let mut hub=Hub::new();

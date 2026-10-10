@@ -142,7 +142,8 @@ async fn handle(request: Request<Incoming>, app: Arc<App>, attested: bool) -> Re
         (Method::GET, ["remote.css"]) => response(StatusCode::OK,"text/css; charset=utf-8",include_str!("../assets/remote.css")),
         (Method::GET, ["api","sessions"]) => match app.sessions() {
             Ok(entries) => json_response(StatusCode::OK,json!({"sessions":entries.into_iter().map(|p|json!({
-                "id":p.session_id,"title":p.title,"engine":p.engine,"model":p.model,"clients":p.clients
+                "id":p.session_id,"title":p.title,"engine":p.engine,"model":p.model,"clients":p.clients,
+                "incarnation":p.incarnation.as_deref().unwrap_or(&p.started_at)
             })).collect::<Vec<_>>()})),
             Err(_) => error(StatusCode::SERVICE_UNAVAILABLE,"session registry unavailable"),
         },
@@ -162,8 +163,12 @@ async fn handle(request: Request<Incoming>, app: Arc<App>, attested: bool) -> Re
             let entry = match app.session(id) { Ok(Some(entry))=>entry, Ok(None)=>return error(StatusCode::NOT_FOUND,"session not found"), Err(_)=>return error(StatusCode::SERVICE_UNAVAILABLE,"session registry unavailable") };
             let client = match connect(&app,&entry,None,None).await { Ok(client)=>client, Err(_)=>return error(StatusCode::SERVICE_UNAVAILABLE,"session unavailable") };
             let transcript_app = app.clone();
+            let incarnation=entry.incarnation.as_deref().unwrap_or(&entry.started_at).to_owned();
             let result = tokio::task::spawn_blocking(move || {
                 let mut history = daemon::transcript_page(&client.hello,before)?;
+                history["pending_inputs"]=client.hello["pending_inputs"].clone();
+                history["pending_inputs_complete"]=client.hello["pending_inputs_complete"].clone();
+                history["incarnation"]=json!(incarnation);
                 scrub_data(&mut history, &transcript_app.lore)?;
                 Ok::<_,io::Error>(uplink::bounded_history(history))
             }).await;
@@ -176,11 +181,13 @@ async fn handle(request: Request<Incoming>, app: Arc<App>, attested: bool) -> Re
             let mut client = match connect(&app,&entry,Some(&login),cursor).await { Ok(client)=>client, Err(_)=>return error(StatusCode::SERVICE_UNAVAILABLE,"session unavailable") };
             let (sender,receiver) = mpsc::channel(64);
             let events_app = app.clone();
+            let incarnation=entry.incarnation.as_deref().unwrap_or(&entry.started_at).to_owned();
             tokio::task::spawn_blocking(move || {
                 let _ = client.idle_timeout();
                 let mut hello = json!({"type":"hello","session_id":client.hello["session_id"],
                     "engine":client.hello["engine"],"model":client.hello["model"],
-                    "pending_inputs":client.hello["pending_inputs"]});
+                    "pending_inputs":client.hello["pending_inputs"],"pending_inputs_complete":client.hello["pending_inputs_complete"],
+                    "incarnation":incarnation});
                 if scrub_data(&mut hello["pending_inputs"], &events_app.lore).is_err()
                     || sender.blocking_send(sse(&hello,None)).is_err() { return; }
                 loop {
@@ -208,6 +215,10 @@ async fn handle(request: Request<Incoming>, app: Arc<App>, attested: bool) -> Re
             let is_prompt = *operation == "prompt";
             let entry = match app.session(id) { Ok(Some(entry))=>entry, Ok(None)=>return error(StatusCode::NOT_FOUND,"session not found"), Err(_)=>return error(StatusCode::SERVICE_UNAVAILABLE,"session registry unavailable") };
             let input = match body_json(request).await { Ok(value)=>value, Err(reply)=>return reply };
+            if input.get("incarnation").is_some()
+                && input["incarnation"].as_str()!=Some(entry.incarnation.as_deref().unwrap_or(&entry.started_at)) {
+                return denied("session incarnation changed");
+            }
             if is_prompt && !input["text"].as_str().is_some_and(|text| !text.trim().is_empty() && text.len() <= 58_000) {
                 return error(StatusCode::BAD_REQUEST,"invalid prompt");
             }
@@ -227,6 +238,9 @@ async fn handle(request: Request<Incoming>, app: Arc<App>, attested: bool) -> Re
                     let Some(reviewed) = state["pending_inputs"].as_array().and_then(|items|items.iter().find(|item|item["id"]==input["id"])) else {
                         return Err(io::Error::new(io::ErrorKind::PermissionDenied,"input request expired"));
                     };
+                    if input.get("reviewed_request").is_some() && input.get("reviewed_request")!=Some(reviewed) {
+                        return Err(io::Error::new(io::ErrorKind::PermissionDenied,"reviewed input changed"));
+                    }
                     client.call("answer_needs_input",json!({"id":input["id"],"answer":input["answer"],"reviewed_request":reviewed}))
                 }
             }).await;

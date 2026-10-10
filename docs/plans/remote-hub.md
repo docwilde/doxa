@@ -62,6 +62,33 @@ transcript snapshot. The hub keeps a short in-memory event buffer for
 reconnection, but the host transcript is authoritative. Presence leases expire after missed heartbeats,
 and stale sessions disappear from the active list rather than accepting writes.
 
+Replay batches must be contiguous from the requested cursor. An interior hole
+or a cursor before retained history emits `replay_gap` and ends that stream
+without delivering a partial batch. A stream is bound to the incarnation and
+encryption setting it opened; replacing either also ends it with a gap before
+any replacement events are forwarded. A snapshot cursor ahead of the hub's
+buffer is valid while the host connector catches up.
+
+The browser closes its stream and removes approval controls immediately on
+disconnect, malformed or missing events, a gap, or an incarnation mismatch. It
+then obtains a fresh inventory and host snapshot, verifies the snapshot's
+incarnation and complete pending inputs against a second inventory, and only
+then enables prompts and newly rendered approvals. The unsent draft survives
+this read-only recovery; no prompt or answer is replayed automatically. A
+failed refresh leaves controls disabled until the user selects the session to
+retry. Browser writes carry that incarnation, and answers carry the exact
+displayed pending input for host-side comparison. The native TUI also refreshes
+its snapshot after every disconnected stream because a restarted volatile hub
+may have no events left to expose a replay gap.
+
+Local broker, SSE and browser fixtures cover missing interior events, a cursor
+ahead of the connector, replacement during streaming, stale approval callbacks,
+and failed snapshot recovery. Run the browser fixtures with
+`node scripts/tests/test_remote_browser_recovery.mjs` and the Rust broker and
+connector tests with `cargo test --locked -p doxa-hub -p doxa-remote` using a
+private real-disk `TMPDIR`. These fixtures do not establish two-host tailnet or
+provisioned-device/FCM delivery evidence; those release gates remain open.
+
 Initial REST/SSE surface:
 
 | Caller | Operation | Result |
