@@ -1,7 +1,8 @@
 # Jev router plan
 
 Status: first native API slice implemented for integration on 2026-10-10;
-fixture validation is recorded below. Live routing evaluation remains open.
+fixture validation and a measured synthetic smoke are recorded below. Real-task
+routing evaluation remains open.
 
 ## Implemented scope
 
@@ -35,8 +36,9 @@ The private UI worktree passed 21 focused checks: 12 router controls/refusals,
 seven settings regressions, one history-resume boundary and one aggregate
 billing restore/unknown-cost fixture. The frontend binaries compiled offline.
 The integrated
-branch passed 730 TUI tests (six existing ignored), 63 daemon tests, four
-transcript tests, 14 vendor tests and nine credential tests. The daemon checks
+branch passed 730 TUI tests (six existing ignored), 63 daemon tests, 20
+transcript tests and 14 vendor library tests (including nine credential tests).
+The router core and evaluator passed 11 tests. The daemon checks
 include router CLI target/config validation, same-session resume and refusal
 of effort/sandbox/child/Docker combinations. The router host passed 31 local
 integration fixtures, the canonical vendor-message integration passed five,

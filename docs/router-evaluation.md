@@ -154,3 +154,47 @@ bounds and observed tiny-sample behavior. It cannot establish real-task routing
 quality, worker success, comparative worker costs or broad latency guarantees.
 No real user transcripts, live fleet or paid worker-provider evaluation are
 part of this procedure.
+
+## Observed synthetic smoke
+
+The authorized smoke completed on 2026-10-10 at 21:53:58 UTC against pinned
+`jev-1.13.0`, using implementation commit `5722eae8`. The six machine-authored
+inputs and labels were committed before the calls and frozen with the example
+configuration. The run made six HTTP calls with no retries. All responses
+passed strict model, Choice, probability, confidence and usage validation.
+
+| Split | Cases | Label agreement | Fallbacks / transport or schema errors | p50 / p95 / max |
+| --- | ---: | ---: | ---: | --- |
+| Development | 4 | 4/4 | 0 / 0 | 372 / 412 / 412 ms |
+| Separate synthetic holdout group | 2 | 2/2 | 0 / 0 | 359 / 473 / 473 ms |
+
+Both targets were selected: development had two `fast` and two `deliberate`
+agreements; holdout had one of each. Across the six calls, latency ranged from
+350 to 473 ms. Reported usage was 3,269 input and 204 output tokens. Cumulative
+reservations were 574 USD micros ($0.000574); the per-call rounded router
+charge estimate was 139 USD micros ($0.000139). All reservations settled with
+known usage. No worker executed, so worker cost and total cost remain unknown.
+
+The [captured report](../rust/doxa-router/fixtures/synthetic-live-01.report.json)
+and [recorded cases](../rust/doxa-router/fixtures/synthetic-live-01.recordings.jsonl)
+retain the closed responses, per-request and criteria hashes, token usage and
+observed latency. Offline replay reproduces the live ledger, outcomes, metrics
+and router charge exactly. Copy the recorded cases and unchanged example
+config into private `0600` files to replay them with the offline command above.
+The private durable journal is retained separately; its SHA-256 is
+`d0ad0119f25c684c803e7ac42af787d24ea6274f6a7dc59f1de8ca794cce5a2d`.
+
+| Artifact identity | SHA-256 |
+| --- | --- |
+| Canonical configuration | `acaab4869d04981b92fa1be5ffbf43cb7bb407b959555fffd17d132f992bda84` |
+| Frozen live input JSONL | `601bb7ccaa1f2ff87a439b77461d70fc5421f61fff2cb40231262c9e376193a1` |
+| Recorded replay JSONL | `a88950081bace19bde2928b51d830e3ec13119496d9dc98050ba12f7507a5ce5` |
+| Captured report | `f3c7e56b2b9fcce5ec54addd4d429f2268e0cbd4ea171bbfa844187cfc6e64da` |
+
+This is evidence of typed transport and captured-response replay for six toy
+cases. The two holdout cases have machine-authored labels; they are not human
+holdout evidence or real quality validation. Every returned confidence was
+1.0, so this run does not calibrate the threshold. It also does not measure
+worker success, comparative worker cost, real-task routing accuracy or broad
+latency guarantees. `real_quality_validated` remains `false`. Consented,
+independently labeled real tasks and bounded worker execution remain open.

@@ -50,10 +50,11 @@ Claude and Codex context and usage figures come from their reported telemetry. D
 
 Linux has bounded live verification for the four direct engines: Claude, Codex, DeepSeek and GLM. macOS builds and transport tests run in CI, but authenticated provider sessions need live checks. Protected Codex is Linux-only because its process ownership and compaction contract have no macOS equivalent. Windows is unsupported. See [platform verification](platform-verification.md) and the [provider verification record](live-provider-verification-2026-10-04.md).
 
-Router currently supports native API sessions only. Its local fixtures do not
-establish authenticated Jev or worker routing quality, account availability or
-macOS live behavior. Docker, CLI handoffs and fleet/child config inheritance are
-unavailable in the first slice.
+Router currently supports native API sessions only. An authenticated six-call
+[synthetic Jev smoke](router-evaluation.md#observed-synthetic-smoke) verified
+typed transport and recorded-response replay. Worker success, real-task routing
+quality and macOS live behavior remain unmeasured. Docker, CLI handoffs and
+fleet/child config inheritance are unavailable in the first slice.
 
 ## Where to go next
 

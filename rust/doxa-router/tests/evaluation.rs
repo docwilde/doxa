@@ -35,3 +35,21 @@ fn missing_credential_is_measured_zero_calls_and_a_reported_limitation() {
     assert!(report.results.iter().all(|row|!row.outcome.attempted));
     let serialized:Value=serde_json::to_value(&report).unwrap();assert_eq!(serialized["total_cost_usd_micros"],Value::Null);
 }
+
+#[test]
+fn captured_jev_wire_replays_with_bound_provenance_and_observed_usage() {
+    // These six closed responses were observed in the authorized synthetic smoke,
+    // unlike fixture_recordings' invented usage and latency. This test makes no HTTP calls.
+    let recorded=include_str!("../fixtures/synthetic-live-01.recordings.jsonl");
+    let observed:Value=serde_json::from_str(include_str!("../fixtures/synthetic-live-01.report.json")).unwrap();
+    let report=evaluation::evaluate(&config(),recorded,false,None,&AtomicBool::new(false)).unwrap();
+    let replay=serde_json::to_value(&report).unwrap();
+    for field in ["model","config_sha256","ledger","development","holdout","router_cost_usd_micros","results"] {
+        assert_eq!(replay[field],observed[field],"captured replay field {field}");
+    }
+    assert_eq!(report.input_sha256,"a88950081bace19bde2928b51d830e3ec13119496d9dc98050ba12f7507a5ce5");
+    assert_eq!(report.ledger.calls,6);assert_eq!(report.router_cost_usd_micros,Some(139));
+    assert!(report.results.iter().all(|row|row.outcome.reason==Reason::Selected && row.outcome.verified_response.is_some()));
+    assert!(!report.real_quality_validated);
+    assert!(report.worker_execution_cost_usd_micros.is_none() && report.total_cost_usd_micros.is_none());
+}
