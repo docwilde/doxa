@@ -48,7 +48,7 @@ main() {
     trap - EXIT HUP INT TERM
     if [ "$installing" -eq 1 ]; then
       restore_failed=0
-      for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker doxa-plugin-worker lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
+      for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker doxa-plugin-worker doxa-router-eval lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
         rm -f "$bin_dir/$name" || { restore_failed=1; continue; }
         if [ -e "$stage/backup/$name" ] || [ -L "$stage/backup/$name" ]; then
           mv "$stage/backup/$name" "$bin_dir/$name" || restore_failed=1
@@ -76,6 +76,7 @@ main() {
   daemon_manifest="$checkout/rust/doxa-daemon/Cargo.toml"
   remote_manifest="$checkout/rust/doxa-remote/Cargo.toml"
   isolation_manifest="$checkout/rust/doxa-isolation/Cargo.toml"
+  router_manifest="$checkout/rust/doxa-router/Cargo.toml"
   for required_file in "$tui_manifest" "$daemon_manifest" "$remote_manifest" "$isolation_manifest" "$checkout/Cargo.lock"; do
     [ -f "$required_file" ] || { printf 'doxa-install: missing %s\n' "$required_file" >&2; exit 1; }
   done
@@ -94,6 +95,13 @@ main() {
   CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$remote_manifest" --bin doxa-remote || exit 1
   CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$isolation_manifest" --bin doxa-isolation-worker || exit 1
   CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --package lore-core --bin lore-rs || exit 1
+  router_eval_bin=""
+  # Older explicitly selected refs predate the optional router engine.
+  if [ -f "$router_manifest" ]; then
+    CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$router_manifest" --bin doxa-router-eval || exit 1
+    router_eval_bin="$build_dir/$host_target/release/doxa-router-eval"
+    [ -f "$router_eval_bin" ] || { printf 'doxa-install: Rust build produced no router evaluator\n' >&2; exit 1; }
+  fi
   lore_bin="$build_dir/$host_target/release/lore-rs"
   tui_bin="$build_dir/$host_target/release/doxa-rs"
   plugin_worker_bin="$build_dir/$host_target/release/doxa-plugin-worker"
@@ -120,7 +128,7 @@ main() {
   fi
 
   mkdir -p "$bin_dir" || exit 1
-  for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker doxa-plugin-worker lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
+  for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker doxa-plugin-worker doxa-router-eval lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
     [ ! -d "$bin_dir/$name" ] || [ -L "$bin_dir/$name" ] || { printf 'doxa-install: %s is a directory\n' "$bin_dir/$name" >&2; exit 1; }
   done
   stage=$(mktemp -d "$bin_dir/.doxa-install.XXXXXXXX") || exit 1
@@ -130,6 +138,10 @@ main() {
   cp "$remote_bin" "$stage/doxa-remote" || exit 1
   cp "$isolation_bin" "$stage/doxa-isolation-worker" || exit 1
   cp "$lore_bin" "$stage/lore-rs" || exit 1
+  if [ -n "$router_eval_bin" ]; then
+    cp "$router_eval_bin" "$stage/doxa-router-eval" || exit 1
+    chmod 755 "$stage/doxa-router-eval" || exit 1
+  fi
   chmod 755 "$stage/doxa-rs" "$stage/doxa-plugin-worker" "$stage/doxa-daemon-rs" "$stage/doxa-remote" "$stage/doxa-isolation-worker" "$stage/lore-rs" || exit 1
   cat > "$stage/doxa" <<'SH'
 #!/bin/sh
@@ -143,14 +155,15 @@ SH
   chmod 755 "$stage/doxa" || exit 1
   printf '%s\n' "$sha" > "$stage/.doxa-install-sha" || exit 1
   mkdir "$stage/backup" || exit 1
-  for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker doxa-plugin-worker lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
+  for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker doxa-plugin-worker doxa-router-eval lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
     if [ -e "$bin_dir/$name" ] || [ -L "$bin_dir/$name" ]; then
       cp -Pp "$bin_dir/$name" "$stage/backup/$name" || exit 1
     fi
   done
 
   installing=1
-  for name in doxa-rs doxa-plugin-worker doxa-daemon-rs doxa-remote doxa-isolation-worker lore-rs .doxa-install-sha doxa; do
+  for name in doxa-rs doxa-plugin-worker doxa-daemon-rs doxa-remote doxa-isolation-worker doxa-router-eval lore-rs .doxa-install-sha doxa; do
+    if [ "$name" = doxa-router-eval ] && [ -z "$router_eval_bin" ]; then continue; fi
     # mv can treat a symlink to a directory as the destination directory,
     # leaving the old launcher pointer in place and writing inside its target.
     if [ -L "$bin_dir/$name" ]; then

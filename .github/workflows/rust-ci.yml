@@ -115,6 +115,7 @@ jobs:
           (cd / && "$smoke_dir/bin/doxa" --version)
           "$smoke_dir/bin/doxa-isolation-worker" --self-test
           test -x "$smoke_dir/bin/doxa-plugin-worker"
+          "$smoke_dir/bin/doxa-router-eval" --help
           test ! -e "$smoke_dir/home/sidecars"
           test ! -e "$smoke_dir/bin/.doxa-sidecar-current"
           HOME="$smoke_dir/owned-home" "$smoke_dir/bin/lore-rs" memory show
