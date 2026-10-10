@@ -96,6 +96,20 @@ def prepare_source(cache):
     actual = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
     if actual != SOURCE:
         raise ValueError("provider source is not the pinned official commit")
+    previous_patch = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary"])
+    if hashlib.sha256(previous_patch).hexdigest() == LEGACY_PATCH_SHA256:
+        if subprocess.check_output(["git", "-C", str(source), "ls-files", "--others", "--exclude-standard"]):
+            raise ValueError("provider source has untracked files")
+        # Preserve the exact reviewed legacy checkout, its index and artifacts.
+        # A patch-specific worktree lets the default cache upgrade without
+        # resetting source files or accepting arbitrary local edits.
+        updated_source = cache / ("source-" + PATCH_SHA256)
+        if not updated_source.exists():
+            run(["git", "-C", str(source), "worktree", "add", "--detach", str(updated_source), SOURCE])
+        source = updated_source
+        actual = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        if actual != SOURCE:
+            raise ValueError("provider source is not the pinned official commit")
     reverse = subprocess.run(["git", "-C", str(source), "apply", "--reverse", "--check", str(PATCH)],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if reverse.returncode:
