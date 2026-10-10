@@ -163,7 +163,12 @@ SH
 
   installing=1
   for name in doxa-rs doxa-plugin-worker doxa-daemon-rs doxa-remote doxa-isolation-worker doxa-router-eval lore-rs .doxa-install-sha doxa; do
-    if [ "$name" = doxa-router-eval ] && [ -z "$router_eval_bin" ]; then continue; fi
+    if [ "$name" = doxa-router-eval ] && [ -z "$router_eval_bin" ]; then
+      # A pinned older release must not retain a newer optional component.
+      # Its backup participates in the same rollback as every other binary.
+      rm -f "$bin_dir/$name" || exit 1
+      continue
+    fi
     # mv can treat a symlink to a directory as the destination directory,
     # leaving the old launcher pointer in place and writing inside its target.
     if [ -L "$bin_dir/$name" ]; then
