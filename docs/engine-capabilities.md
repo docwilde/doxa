@@ -27,7 +27,7 @@ Provider tool features depend on the installed CLI, model, and account. `/model`
 
 Codex `on-request` reviews protected commands, file changes, and permission profiles inline. `auto` retains its sandbox; `full-access` removes that sandbox. DOXA peer and LORE tools keep their own human review in every mode. DeepSeek and GLM have no provider permission mode; their peer and LORE calls are individually reviewed. Optional vendor workspace reads are off by default.
 
-With the updated private provider, Codex can switch from `on-request` to `auto`
+With beta.43 and the updated private provider, Codex can switch from `on-request` to `auto`
 during an active turn. The waiting provider escalation is declined so the model
 can retry inside the existing sandbox; questions and DOXA reviews stay open.
 Other permission or sandbox transitions require idle. A development
