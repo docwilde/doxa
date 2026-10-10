@@ -64,6 +64,7 @@ jobs:
       - name: Verify packaged remote browser client
         run: |
           node --test browser-extension/tests/*.test.mjs
+          node scripts/tests/test_remote_browser_recovery.mjs
           mkdir -p target
           scripts/package-browser-extension.sh "$GITHUB_WORKSPACE/target/doxa-remote-extension-ci.zip"
           unzip -tqq target/doxa-remote-extension-ci.zip

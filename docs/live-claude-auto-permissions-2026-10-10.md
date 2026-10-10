@@ -60,5 +60,5 @@ explicit ask rules, organization limits, fresh classifier refusals, and the
 independent spawn gate remain interactive.
 
 The reported `resolve_reviewed.py` invocation was not executed; that file was
-unavailable in this environment. A synthetic `python3 /absolute/path/marker.py`
-command exercised the same Bash invocation shape with disposable data.
+unavailable in this environment. The test requested a synthetic
+`python3 /absolute/path/marker.py` Bash invocation with disposable data.

@@ -89,6 +89,14 @@ connector tests with `cargo test --locked -p doxa-hub -p doxa-remote` using a
 private real-disk `TMPDIR`. These fixtures do not establish two-host tailnet or
 provisioned-device/FCM delivery evidence; those release gates remain open.
 
+On 2026-10-10, 56 relevant tests passed: 29 hub tests, 12 connector tests,
+four native remote client tests, and 11 browser recovery fixtures. The native
+HTTP/SSE fixture requires a fresh host snapshot with changed pending inputs
+after stream EOF and confirms that reconnect submits no prompts. Browser
+fixtures include changed and resolved inputs in the initial local hello,
+incomplete or malformed pending snapshots, and hub hello frames without a
+pending snapshot. These results exercise local fixtures only.
+
 Initial REST/SSE surface:
 
 | Caller | Operation | Result |
