@@ -60,7 +60,7 @@ Start with `--isolation native|docker-open|docker-offline` or choose a profile i
 
 Tab reaches the project rail when visible. `/split`, `/vsplit`, `/pane`, and `/movepane` manage up to 16 pane groups and 256 tabs. Divider dragging preserves minimum sizes. `/settings` → **Keys** remaps window shortcuts immediately; `doxa settings set key_new_tab Alt+N` applies on the next launch. Duplicate or malformed chords are refused.
 
-Typing `/` shows completion; unsupported DOXA commands stay in the draft with an error. `/model`, `/effort`, `/mode`, and `/engine` show supported choices. Live model and mode changes require an idle session and empty queue; selecting another engine starts a new session. `/queue` previews or cancels waiting prompts. `/cd PATH` opens a tab in a verified directory without moving an existing daemon.
+Typing `/` shows completion; unsupported DOXA commands stay in the draft with an error. `/model`, `/effort`, `/mode`, and `/engine` show supported choices. Live model changes require an idle session and empty queue. Claude permission-mode changes also apply during an active turn; switching to `auto` retries ordinary waiting approvals under Claude's classifier. Selecting another engine starts a new session. `/queue` previews or cancels waiting prompts. `/cd PATH` opens a tab in a verified directory without moving an existing daemon.
 
 The session rail groups uncollected sessions by project and keeps named
 collections in saved order. `/collection new` suggests a name from the active

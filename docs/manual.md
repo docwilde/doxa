@@ -948,6 +948,14 @@ table, not invented by DOXA.
 | `bypassPermissions` | `⏵⏵` **bold red** | every tool call runs unapproved; nothing asks | Shift+Tab, `/mode`, but only on a session launched with `allow_bypass` armed |
 | `dontAsk` | `⏵⏵` **bold red** | anything not pre-approved is denied, with no prompt shown | `/mode` only, with a confirmation dialog — never on the Shift+Tab cycle |
 
+Native Claude sessions accept permission changes during a response. Switching
+to `auto` closes an ordinary approval waiting under the previous mode and tells
+Claude to retry the tool through its classifier. Questions and explicit ask
+rules stay interactive. DOXA does not add a second approval for a canonical
+tool Claude already approved in `auto`; session spawning still requires its
+independent operator approval. If Claude requests a new approval in `auto`,
+the card shows its reason so a classifier refusal or policy rule is visible.
+
 **`bypassPermissions` needs a session launched for it.** The `claude` CLI
 arms that capability with `--allow-dangerously-skip-permissions` at launch
 and refuses it at runtime otherwise. DOXA spawns that flag only when
@@ -971,17 +979,16 @@ Four distinct sets govern what a given session can reach (`doxa/engine.py`):
   per-session, visible (a red chip, a transcript line) and lasts one
   session; a stored default would be silent and apply to every future
   session in every repo opened afterward.
-- **Unasked modes** (`auto`, `bypassPermissions`, `dontAsk`): the modes
-  where DOXA stops asking about tool calls at all — what the chip's red
-  coloring warns about.
+- **Automatic tool decisions** (`auto`, `bypassPermissions`, `dontAsk`):
+  ordinary tool checks use the classifier, bypass, or automatic denial.
+  Questions and explicit policy asks can still require interaction.
 
 `available_modes(armed)` is the one function every surface (cycle, chip
 picker, `/mode`'s listing and validation) derives from: a mode this
 session cannot reach is not shown at all, never shown-and-refused.
 
 Entering `auto` or `bypassPermissions` writes a line into the transcript,
-not just the chip, naming what stopped ("there is nothing left to
-decline").
+not just the chip, naming the selected tool policy.
 
 **Session-scoped, never saved by the hotkey.** `/mode` and Shift+Tab
 change only the current session; the persistent default lives in its own

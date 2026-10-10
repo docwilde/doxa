@@ -887,6 +887,7 @@ impl InputRequest {
             for (label, field) in [
                 ("Display name", "display_name"),
                 ("Description", "description"),
+                ("Reason", "decision_reason"),
             ] {
                 if let Some(value) = data[field].as_str().filter(|value| !value.is_empty()) {
                     text.push_str(&format!("{label}: {value}\n"));
