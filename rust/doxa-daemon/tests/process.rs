@@ -325,9 +325,9 @@ impl Process {
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_SESSION_BUDGET_USD");
         if let Some(budget) = budget { command.env("DOXA_SESSION_BUDGET_USD", budget); }
-        let child = command.spawn().unwrap();
+        let mut child = command.spawn().unwrap();
         let registry = runtime.join("registry").join(format!("{CLAUDE_SESSION}.json"));
-        wait_until(|| registry.exists());
+        wait_for_registry(&mut child, &registry);
         let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
         let socket = PathBuf::from(entry["daemon_socket"].as_str().unwrap());
         Self {
@@ -1782,7 +1782,7 @@ fn claude_legacy_resume_requires_owned_provider_and_lore_source_then_verifies_li
 fn claude_controls_verify_effective_settings_and_broadcast_changes() {
     let dir=tempfile::tempdir().unwrap();let script=dir.path().join("claude-controls");
     claude_fixture(&script,"root.joinpath('pid').write_text(str(os.getpid()))",r#"if frame['type']=='user':
-  emit({'type':'control_request','request_id':'q','request':{'subtype':'can_use_tool','tool_name':'Bash','tool_use_id':'bash-1','input':{'command':'true'}}})
+  emit({'type':'control_request','request_id':'q','request':{'subtype':'can_use_tool','tool_name':'AskUserQuestion','tool_use_id':'question-1','input':{'questions':[{'question':'Continue?','options':[{'label':'Yes'}]}]}}})
  elif frame['type']=='control_response': result()
 "#);
     let mut process=Process::start_claude(dir.path(),&script);let (mut reader,mut socket)=process.connect();let hello=receive(&mut reader);
@@ -1802,7 +1802,7 @@ fn claude_controls_verify_effective_settings_and_broadcast_changes() {
     let mode=claude_receive_until(&mut reader,|f|f["id"]==7);assert_eq!(mode["ok"],true);assert_eq!(mode["mode"],"auto");
     let changed=claude_receive_until(&mut reader,|f|f["event"]["type"]=="permission_mode_changed");assert_eq!(changed["event"]["data"]["mode"],"auto");
     send(&mut socket,json!({"type":"call","id":8,"method":"set_effort","params":{"effort":"high"}}));assert_eq!(receive(&mut reader)["ok"],false);
-    send(&mut socket,json!({"type":"call","id":9,"method":"answer_needs_input","params":{"id":"q","answer":{"decision":"allow"}}}));
+    send(&mut socket,json!({"type":"call","id":9,"method":"answer_needs_input","params":{"id":"q","answer":{"answers":{"Continue?":"Yes"}}}}));
     claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");
     send(&mut socket,json!({"type":"call","id":10,"method":"stop","params":{}}));assert_eq!(claude_receive_until(&mut reader,|f|f["id"]==10)["ok"],true);wait_until(||process.exited());
 }

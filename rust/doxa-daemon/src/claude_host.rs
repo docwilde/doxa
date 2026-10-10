@@ -5,7 +5,7 @@ use doxa_runtime::{Host, PeerToolHandler};
 use doxa_transcript::TranscriptStore;
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     path::{Path, PathBuf},
     sync::{
@@ -684,6 +684,49 @@ enum PendingInput {
     Tool(Value),
     Mcp(Value),
 }
+// A tools/call message reaches the SDK MCP server after Claude's permission
+// decision. Keep the host-owned tool's validation and independent spawn gate,
+// but do not ask for a second approval in auto mode.
+fn dispatch_mcp(
+    shared: &Arc<Shared>,
+    tx: &Sender<(String, Value)>,
+    in_flight: &mut HashSet<String>,
+    id: &str,
+    request: Value,
+    allowed: bool,
+) -> bool {
+    if in_flight.len() >= 32 || !in_flight.insert(id.into()) {
+        return false;
+    }
+    let owned = shared.clone();
+    let tx = tx.clone();
+    let id = id.to_owned();
+    thread::spawn(move || {
+        let result = if allowed {
+            owned.tool(
+                request["message"]["params"]["name"].as_str().unwrap_or(""),
+                &request["message"]["params"]["arguments"],
+            )
+        } else {
+            Err("Tool permission denied".into())
+        };
+        let response = match result {
+            Ok(v) => match owned.scrub(&v.to_string()) {
+                Ok(text) => json!({"content":[{"type":"text","text":text}]}),
+                Err(_) => json!({"isError":true,"content":[{"type":"text","text":"Canonical tool scrub failed"}]}),
+            },
+            Err(_) => json!({"isError":true,"content":[{"type":"text","text":"Tool request refused or failed; no success was verified"}]}),
+        };
+        let _ = tx.send((id, json!({"mcp_response":{"jsonrpc":"2.0","id":request["message"]["id"],"result":response}})));
+    });
+    true
+}
+fn retry_under_auto(request: &Value) -> bool {
+    request["tool_name"] != "AskUserQuestion"
+        && request["requires_user_interaction"] != true
+        && request["matched_ask_rule"].is_null()
+        && request["decision_reason_code"] != "org_ask_ceiling"
+}
 fn send_event(sink: &Option<SyncSender<Value>>, value: Value) -> bool {
     sink.as_ref().is_some_and(|s| s.try_send(value).is_ok())
 }
@@ -1095,6 +1138,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
     let mut durable = DurableTurn::default();
     let mut operations: HashMap<String, Operation> = HashMap::new();
     let mut inputs: HashMap<String, PendingInput> = HashMap::new();
+    let mut mcp_in_flight = HashSet::new();
     let mut events = None;
     let mut overflow = false;
     let mut provider_failure: Option<String> = None;
@@ -1158,37 +1202,11 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                                         resolve(&mut cli, id, &request, &params["answer"]).is_ok()
                                 }
                                 PendingInput::Mcp(request) => {
-                                    applied = true;
-                                    let allowed = params["answer"]["decision"] == "allow";
-                                    let name = request["message"]["params"]["name"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .to_owned();
-                                    let args = request["message"]["params"]["arguments"].clone();
-                                    let rid = id.to_owned();
-                                    let owned = shared.clone();
-                                    let tx = async_tx.clone();
-                                    thread::spawn(move || {
-                                        let result = if allowed {
-                                            owned.tool(&name, &args)
-                                        } else {
-                                            Err("Tool permission denied".into())
-                                        };
-                                        let response = match result {
-                                            Ok(v) => match owned.scrub(&v.to_string()) {
-                                                Ok(text) => {
-                                                    json!({"content":[{"type":"text","text":text}]})
-                                                }
-                                                Err(_) => {
-                                                    json!({"isError":true,"content":[{"type":"text","text":"Canonical tool scrub failed"}]})
-                                                }
-                                            },
-                                            Err(_) => {
-                                                json!({"isError":true,"content":[{"type":"text","text":"Tool request refused or failed; no success was verified"}]})
-                                            }
-                                        };
-                                        let _=tx.send((rid,json!({"mcp_response":{"jsonrpc":"2.0","id":request["message"]["id"],"result":response}})));
-                                    });
+                                    applied = dispatch_mcp(&shared, &async_tx, &mut mcp_in_flight,
+                                        id, request, params["answer"]["decision"] == "allow");
+                                    if !applied {
+                                        let _ = cli.respond(id, Err("too many tool calls"));
+                                    }
                                 }
                             }
                             send_event(
@@ -1242,6 +1260,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
             }
         }
         while let Ok((id, value)) = async_rx.try_recv() {
+            mcp_in_flight.remove(&id);
             if cli.respond(&id, Ok(value)).is_err() {
                 return;
             }
@@ -1374,9 +1393,16 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                     continue;
                 };
                 if frame["response"]["subtype"] != "success" {
+                    let detail = frame["response"]["error"].as_str()
+                        .and_then(|text| shared.scrub(text).ok())
+                        .map(|text| text.chars().filter(|c| !c.is_control() || *c == '\n').take(2048).collect::<String>())
+                        .filter(|text| !text.trim().is_empty());
                     let _ = op
                         .reply
-                        .send(Err("Claude refused setting or control request".into()));
+                        .send(Err(detail.map_or_else(
+                            || "Claude refused setting or control request".into(),
+                            |text| format!("Claude refused setting or control request: {text}"),
+                        )));
                     continue;
                 }
                 let value = &frame["response"]["response"];
@@ -1434,8 +1460,40 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         {
                             Err("Claude permission mode was not verified".into())
                         } else {
-                            shared.selection.lock().unwrap().2 = mode.into();
-                            Ok(json!({"mode":mode}))
+                            let previous = std::mem::replace(&mut shared.selection.lock().unwrap().2, mode.into());
+                            let mut resumed = true;
+                            if mode == "auto" && previous != "auto" {
+                                let stale = inputs.iter().filter_map(|(id, pending)| match pending {
+                                    PendingInput::Tool(request) if retry_under_auto(request) => Some(id.clone()),
+                                    PendingInput::Mcp(_) => Some(id.clone()),
+                                    _ => None,
+                                }).collect::<Vec<_>>();
+                                for id in stale {
+                                    let pending = inputs.remove(&id).unwrap();
+                                    let result = match pending {
+                                        PendingInput::Tool(request) => {
+                                            // Never approve a call using a decision from the old
+                                            // mode. Claude can retry it through its auto classifier.
+                                            cli.respond(&id, Ok(json!({"behavior":"deny","message":"Permission mode changed to auto. Retry this tool under the current permission mode.","interrupt":false,"toolUseID":request["tool_use_id"]})))
+                                        }
+                                        PendingInput::Mcp(request) => {
+                                            if dispatch_mcp(&shared, &async_tx, &mut mcp_in_flight, &id, request, true) {
+                                                Ok(())
+                                            } else {
+                                                cli.respond(&id, Err("too many tool calls"))
+                                            }
+                                        }
+                                    };
+                                    resumed &= result.is_ok();
+                                    send_event(&events, json!({"type":"needs_input_resolved","data":{"id":id}}));
+                                }
+                            }
+                            if resumed {
+                                Ok(json!({"mode":mode}))
+                            } else {
+                                shared.failed.store(true, Ordering::Release);
+                                Err("Claude mode changed but pending permission requests could not be resumed".into())
+                            }
                         }
                     }
                     "interrupt" => Ok(json!({})),
@@ -1446,7 +1504,8 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
             }
             Some("control_request") => {
                 let id = frame["request_id"].as_str().unwrap_or("").to_owned();
-                if id.is_empty() || id.len() > 128 || inputs.len() >= 32 {
+                if id.is_empty() || id.len() > 128 || inputs.len() + mcp_in_flight.len() >= 32
+                    || inputs.contains_key(&id) || mcp_in_flight.contains(&id) {
                     let _ = cli.respond(&id, Err("invalid request"));
                     continue;
                 }
@@ -1468,7 +1527,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         let data = if request["tool_name"] == "AskUserQuestion" {
                             json!({"id":id,"kind":"ask_user","tool_name":"AskUserQuestion","questions":clean["input"]["questions"]})
                         } else {
-                            json!({"id":id,"kind":"permission","tool_name":clean["tool_name"],"title":clean["title"],"display_name":clean["display_name"],"description":clean["description"],"input_summary":clean["input"].to_string(),"require_full_review":true})
+                            json!({"id":id,"kind":"permission","tool_name":clean["tool_name"],"title":clean["title"],"display_name":clean["display_name"],"description":clean["description"],"decision_reason":clean["decision_reason"],"decision_reason_code":clean["decision_reason_code"],"input_summary":clean["input"].to_string(),"require_full_review":true})
                         };
                         if send_event(&events, json!({"type":"needs_input","data":data})) {
                             inputs.insert(id, PendingInput::Tool(request.clone()));
@@ -1494,6 +1553,12 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                             let name = clean["message"]["params"]["name"].as_str().unwrap_or("");
                             if !shared.tools().iter().any(|r| r["name"] == name) {
                                 let _ = cli.respond(&id, Err("unavailable tool"));
+                                continue;
+                            }
+                            if shared.selection.lock().unwrap().2 == "auto" {
+                                if !dispatch_mcp(&shared, &async_tx, &mut mcp_in_flight, &id, request.clone(), true) {
+                                    let _ = cli.respond(&id, Err("too many tool calls"));
+                                }
                                 continue;
                             }
                             let data = json!({"id":id,"kind":"permission","tool_name":format!("mcp__doxa__{name}"),"title":"Approve this canonical DOXA tool once?","input_summary":clean["message"]["params"]["arguments"].to_string(),"require_full_review":true});
@@ -2428,6 +2493,145 @@ for line in sys.stdin:
                     .unwrap()["applied"],
                     false
                 );
+            }
+        });
+        assert!(asked);
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn switching_to_auto_retries_pending_bash_without_a_human_approval() {
+        let (_dir, host) = fixture(&format!(r#"if row['type']=='user':
+  emit({{'type':'control_request','request_id':'pending-bash','request':{{'subtype':'can_use_tool','tool_use_id':'bash-1','tool_name':'Bash','input':{{'command':'python3 resolve_reviewed.py'}}}}}})
+ elif row['type']=='control_response':
+  assert row['response']['request_id']=='pending-bash'
+  answer=row['response']['response']
+  assert answer['behavior']=='deny' and answer['interrupt']==False
+  assert answer['toolUseID']=='bash-1' and 'Retry this tool' in answer['message']
+  # The provider's retry passes its auto classifier and never calls the host
+  # permission callback. Successful completion needs no human tool approval.
+  emit({{'type':'result','session_id':'{SESSION}','is_error':False}})
+"#));
+        let mut asked = 0;
+        let mut resolved = false;
+        let mut done = false;
+        host.prompt("run the reviewed script", &mut |event| {
+            match event["type"].as_str() {
+                Some("needs_input") => {
+                    asked += 1;
+                    assert_eq!(host.call("set_permission_mode", &json!({"mode":"auto"})).unwrap()["mode"], "auto");
+                    assert_eq!(host.call("answer_needs_input", &json!({"id":"pending-bash","answer":{"decision":"allow"}})).unwrap()["applied"], false);
+                }
+                Some("needs_input_resolved") => {
+                    assert_eq!(event["data"]["id"], "pending-bash");
+                    resolved = true;
+                }
+                Some("turn_done") => { assert_ne!(event["data"]["is_error"], true); done = true; }
+                _ => {},
+            }
+        });
+        assert_eq!(asked, 1);
+        assert!(resolved && done);
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn auto_keeps_questions_and_explicit_ask_rules_interactive() {
+        for extra in [
+            json!({"tool_name":"AskUserQuestion","input":{"questions":[{"question":"Choose","options":[{"label":"A"}]}]}}),
+            json!({"tool_name":"Bash","input":{"command":"true"},"matched_ask_rule":{"source":"policySettings","tool_name":"Bash"}}),
+            json!({"tool_name":"mcp__external__interactive","input":{},"requires_user_interaction":true}),
+            json!({"tool_name":"Bash","input":{"command":"true"},"decision_reason_code":"org_ask_ceiling"}),
+        ] {
+            let mut request = extra;
+            request["subtype"] = json!("can_use_tool");
+            request["tool_use_id"] = json!("interactive-1");
+            let (_dir, host) = fixture(&format!(r#"if row['type']=='user':
+  emit({{'type':'control_request','request_id':'interactive','request':json.loads({:?})}})
+ elif row['type']=='control_response':
+  assert row['response']['request_id']=='interactive'
+  assert row['response']['response']['behavior']=='deny'
+  assert row['response']['response']['message']=='User declined this tool request'
+  emit({{'type':'result','session_id':'{SESSION}','is_error':False}})
+"#, request.to_string()));
+            host.prompt("interactive request", &mut |event| {
+                if event["type"] == "needs_input" {
+                    host.call("set_permission_mode", &json!({"mode":"auto"})).unwrap();
+                    assert_eq!(host.call("answer_needs_input", &json!({"id":"interactive","answer":{"decision":"deny"}})).unwrap()["applied"], true);
+                }
+            });
+            assert!(host.shutdown());
+        }
+    }
+    #[test]
+    fn auto_does_not_add_a_second_permission_to_provider_approved_mcp_calls() {
+        let (_dir, host) = fixture(&format!(r#"if row['type']=='user':
+  emit({{'type':'control_request','request_id':'mcp-call','request':{{'subtype':'mcp_message','server_name':'doxa','message':{{'jsonrpc':'2.0','id':17,'method':'tools/call','params':{{'name':'spawn_session','arguments':{{'task':'review only'}}}}}}}}}})
+ elif row['type']=='control_response':
+  assert row['response']['request_id']=='mcp-call'
+  reply=row['response']['response']['mcp_response']
+  assert reply['id']==17 and reply['result']['isError']==True
+  emit({{'type':'result','session_id':'{SESSION}','is_error':False}})
+"#));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        assert!(host.set_session_tool_handler(Arc::new(move |name, args| {
+            assert_eq!(name, doxa_engines::session_tools::SPAWN);
+            assert_eq!(args, &json!({"task":"review only"}));
+            counted.fetch_add(1, Ordering::SeqCst);
+            // The independent operator gate still refuses the spawn.
+            Err("The spawn needs an independent human decision".into())
+        })));
+        host.call("set_permission_mode", &json!({"mode":"auto"})).unwrap();
+        let mut asks = 0;
+        host.prompt("auto call", &mut |event| {
+            if event["type"] == "needs_input" {
+                asks += 1;
+                host.call("answer_needs_input", &json!({"id":"mcp-call","answer":{"decision":"allow"}})).unwrap();
+            }
+        });
+        assert_eq!(asks, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        host.call("set_permission_mode", &json!({"mode":"default"})).unwrap();
+        host.prompt("manual call", &mut |event| {
+            if event["type"] == "needs_input" {
+                asks += 1;
+                host.call("answer_needs_input", &json!({"id":"mcp-call","answer":{"decision":"allow"}})).unwrap();
+            }
+        });
+        assert_eq!(asks, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let mut resolved = false;
+        host.prompt("switch the pending manual call to auto", &mut |event| {
+            if event["type"] == "needs_input" {
+                asks += 1;
+                host.call("set_permission_mode", &json!({"mode":"auto"})).unwrap();
+                assert_eq!(host.call("answer_needs_input", &json!({"id":"mcp-call","answer":{"decision":"allow"}})).unwrap()["applied"], false);
+            } else if event["type"] == "needs_input_resolved" {
+                resolved = true;
+            }
+        });
+        assert_eq!(asks, 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(resolved);
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn auto_does_not_override_a_fresh_provider_permission_request() {
+        let (_dir, host) = fixture(&format!(r#"if row['type']=='user':
+  emit({{'type':'control_request','request_id':'provider-ask','request':{{'subtype':'can_use_tool','tool_use_id':'bash-1','tool_name':'Bash','input':{{'command':'python3 resolve_reviewed.py'}},'decision_reason':'The classifier requires review','decision_reason_code':'classifier'}}}})
+ elif row['type']=='control_response':
+  assert row['response']['request_id']=='provider-ask'
+  assert row['response']['response']['behavior']=='deny'
+  assert row['response']['response']['message']=='User declined this tool request'
+  emit({{'type':'result','session_id':'{SESSION}','is_error':False}})
+"#));
+        host.call("set_permission_mode", &json!({"mode":"auto"})).unwrap();
+        let mut asked = false;
+        host.prompt("native classifier refusal", &mut |event| {
+            if event["type"] == "needs_input" {
+                asked = true;
+                assert_eq!(event["data"]["decision_reason"], "The classifier requires review");
+                host.call("set_permission_mode", &json!({"mode":"auto"})).unwrap();
+                assert_eq!(host.call("answer_needs_input", &json!({"id":"provider-ask","answer":{"decision":"deny"}})).unwrap()["applied"], true);
             }
         });
         assert!(asked);
