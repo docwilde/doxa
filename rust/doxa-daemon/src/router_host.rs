@@ -60,6 +60,10 @@ impl State {
     fn unknown(&self) -> bool {
         self.incomplete || self.router.accounting_unknown || self.worker.accounting_unknown
     }
+    fn estimated_spent(&self) -> Option<u64> {
+        if self.unknown() { return None; }
+        self.router.actual_usd_micros.checked_add(self.worker.estimated_actual_usd_micros)
+    }
 }
 
 struct Journal { path: PathBuf }
@@ -163,8 +167,14 @@ impl RouterHost {
             #[cfg(feature = "local-test-server")] endpoint.clone())?;
         // Configuration labels/descriptions cannot smuggle a known credential
         // into Jev payloads, public controls or exact persisted target IDs.
-        let serialized = serde_json::to_string(&config).map_err(|_| "Router config unavailable")?;
-        if inner.public_prompt(&serialized)? != serialized { return Err("Router configuration contains redacted data".into()); }
+        // Scrub prose and identity strings separately. Numeric bounds and JSON
+        // syntax are not prose; text scrubbers may classify them as private IDs.
+        let texts = [&config.jev_model, &config.criteria_version, &config.fallback_id].into_iter()
+            .chain(config.candidates.iter().flat_map(|candidate| [&candidate.id,
+                &candidate.model, &candidate.effort, &candidate.description]));
+        for text in texts {
+            if inner.public_prompt(text)? != *text { return Err("Router configuration contains redacted data".into()); }
+        }
         journal.write(&state).map_err(|_| "Router initial accounting could not be persisted")?;
         Ok(Self { inner, config, ceiling_micros, journal, state: Mutex::new(state),
             turn_lock: Mutex::new(()), active: AtomicBool::new(false), cancel: AtomicBool::new(false), closing: AtomicBool::new(false),
@@ -347,6 +357,13 @@ impl RouterHost {
                 event["data"]["engine"] = json!(vendor(candidate.provider).engine_id());
                 event["data"]["routing"] = state.selection.clone().unwrap_or(Value::Null);
                 event["data"]["router_usage"] = json!(&outcome.usage);
+                let turn_cost = if state.unknown() { None } else { usage
+                    .and_then(|(input,output)|priced(input,output,candidate))
+                    .zip(outcome.router_cost_usd_micros).and_then(|(worker,router)|worker.checked_add(router)) };
+                event["data"]["cost_usd"] = json!(turn_cost.map(|sum|sum as f64/1_000_000.0));
+                event["data"]["session_cost_usd"] = json!(state.estimated_spent().map(|sum|sum as f64/1_000_000.0));
+                event["data"]["cost_is_estimate"] = json!(true);
+                event["data"]["cost_basis"] = json!("aggregate_upper_rates");
                 event["data"]["aggregate_held_usd"] = json!(state.held().map(|sum|sum as f64/1_000_000.0));
                 event["data"]["accounting_unknown"] = json!(state.unknown());
                 completed = Some(());
@@ -416,6 +433,9 @@ impl Host for RouterHost {
     fn billing_snapshot(&self)->Option<Value> {
         let state = self.state.lock().ok()?;
         Some(json!({"mode":"api","routing":state.selection,"router_usage":state.router,"worker_usage":state.worker,
+            "cost_usd":state.estimated_spent().map(|sum|sum as f64/1_000_000.0),
+            "session_cost_usd":state.estimated_spent().map(|sum|sum as f64/1_000_000.0),
+            "cost_is_estimate":true,"cost_basis":"aggregate_upper_rates",
             "budget":{"ceiling_usd":self.ceiling_micros.map(|sum|sum as f64/1_000_000.0),
                 "aggregate_held_usd":state.held().map(|sum|sum as f64/1_000_000.0),
                 "accounting_unknown":state.unknown(),"durable":true,"cost_basis":"aggregate_upper_rates"}}))

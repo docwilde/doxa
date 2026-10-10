@@ -120,9 +120,11 @@ mod tests {
             worker_step+=1; worker(body,worker_step%2==1)
         });
         let cfg=config(); let host=make_host(&env,cfg.clone(),&server,false,Some(2.0));
+        let mut final_events=Vec::new();
         for text in ["first worker-fixture-key-1234 task","second task"] {
             let events=prompt(&host,text); assert_eq!(events.last().unwrap()["type"],"turn_done");
             assert_eq!(events.last().unwrap()["data"]["is_error"],false,"{events:?}");
+            final_events.push(events.last().unwrap().clone());
         }
         let bodies=server.bodies();
         assert_eq!(bodies.iter().filter(|row|row["model"]==doxa_router::JEV_MODEL).count(),2);
@@ -139,6 +141,14 @@ mod tests {
         let state=env.state(); assert_eq!(state["router"]["calls"],2); assert_eq!(state["worker"]["input_tokens"],12);
         assert_eq!(state["worker"]["output_tokens"],16); assert_eq!(state["incomplete"],false);
         assert_eq!(state["receipts"][0]["selection"]["engine"],"glm"); assert_eq!(state["receipts"][1]["selection"]["engine"],"deepseek");
+        let spent=state["router"]["actual_usd_micros"].as_u64().unwrap()+state["worker"]["estimated_actual_usd_micros"].as_u64().unwrap();
+        assert!(state["router"]["actual_usd_micros"].as_u64().unwrap()>0);
+        assert_eq!(final_events[1]["data"]["session_cost_usd"],json!(spent as f64/1_000_000.0));
+        assert_eq!(host.billing_snapshot().unwrap()["session_cost_usd"],final_events[1]["data"]["session_cost_usd"]);
+        let last=&state["receipts"][1];
+        let last_cost=(6*300000u64+8*1200000).div_ceil(1_000_000)+last["router"]["router_cost_usd_micros"].as_u64().unwrap();
+        assert_eq!(final_events[1]["data"]["cost_usd"],json!(last_cost as f64/1_000_000.0));
+        assert_eq!(final_events[1]["data"]["cost_is_estimate"],true);
         host.shutdown(); drop(host);
         let resumed=make_host(&env,cfg.clone(),&server,true,Some(2.0));
         resumed.call("set_model",&json!({"model":"thinking"})).unwrap();
@@ -193,6 +203,18 @@ mod tests {
         let empty=Server::new(|method,_|{assert_eq!(method,"GET");("application/json".into(),"{\"data\":[]}".into(),Duration::ZERO)});
         let other=RouterHost::new(config(),&env.cwd(),"empty",false,None,Some(empty.endpoint.clone())).unwrap();
         assert_eq!(prompt(&other,"catalog unknown")[0]["type"],"turn_refused");assert!(empty.bodies().is_empty());other.shutdown();
+    }
+
+    #[test]
+    fn config_numeric_caps_survive_scrubbing_and_known_credentials_are_refused() {
+        let env=Env::new();let server=Server::new(|_,_|catalog());
+        let cfg=config();let host=make_host(&env,cfg.clone(),&server,false,None);
+        assert_eq!(host.initial_model(),Some("auto".into()));
+        host.call("set_model",&json!({"model":"glm"})).unwrap();
+        assert_eq!(host.initial_model(),Some("glm".into()));host.shutdown();
+        let mut secret=cfg;secret.candidates[0].description="jev-fixture-key-1234".into();
+        assert!(RouterHost::new(secret,&env.cwd(),"secret",false,None,Some(server.endpoint.clone())).is_err());
+        assert!(server.requests.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -255,6 +277,8 @@ mod tests {
             let events=thread.join().unwrap();
             assert!(events.iter().any(|event|event["type"]=="turn_refused" || event["type"]=="turn_done" && event["data"]["is_error"]==true));
             assert_eq!(first.billing_snapshot().unwrap()["budget"]["accounting_unknown"],true);
+            assert!(first.billing_snapshot().unwrap()["session_cost_usd"].is_null());
+            for event in &events {if event["type"]=="turn_done" {assert!(event["data"]["cost_usd"].is_null());assert!(event["data"]["session_cost_usd"].is_null());}}
             assert!(env.state()["incomplete"]==true);
             first.shutdown();drop(first);
             let resumed=make_host(&env,cfg,&server,true,Some(2.0));
