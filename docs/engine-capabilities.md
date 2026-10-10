@@ -27,6 +27,12 @@ Provider tool features depend on the installed CLI, model, and account. `/model`
 
 Codex `on-request` reviews protected commands, file changes, and permission profiles inline. `auto` retains its sandbox; `full-access` removes that sandbox. DOXA peer and LORE tools keep their own human review in every mode. DeepSeek and GLM have no provider permission mode; their peer and LORE calls are individually reviewed. Optional vendor workspace reads are off by default.
 
+Codex permission changes require the current turn and queued prompts to finish.
+An installed beta.42 [live check](live-codex-auto-permissions-2026-10-10.md)
+verified a switch between turns on the same provider thread and two subsequent
+commands without approval cards. Switching while a command approval was pending
+was rejected and left that card open.
+
 Claude and Codex context and usage figures come from their reported telemetry. DeepSeek and GLM display estimates from token counts and dated rates; cache discounts or off-peak billing can change the final bill. Missing quota or component counts remain unknown. Budgeted fleets require complete accounting for the selected model and basis. `BudgetHost` exposes its dated static price bound and keeps the actual billed tier and charge unknown. See [fleet supervision](fleet-supervision.md).
 
 ## Platform limits
