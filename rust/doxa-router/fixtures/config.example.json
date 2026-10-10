@@ -8,12 +8,12 @@
       "provider": "deepseek",
       "model": "deepseek-flash",
       "effort": "none",
-      "description": "Use for direct extraction, simple formatting, short factual transformations and routine shallow coding. Operator assumption only, not measured capability.",
+      "description": "Use for direct extraction, simple formatting, short factual transformations and routine shallow code explanation. Operator assumption only, not measured capability; no workspace editing is promised.",
       "context_tokens": 8000,
       "max_output_tokens": 1000,
       "supports_tools": true,
-      "input_usd_micros_per_million": 1000000,
-      "output_usd_micros_per_million": 1000000
+      "input_usd_micros_per_million": 300000,
+      "output_usd_micros_per_million": 1200000
     },
     {
       "id": "deliberate",
@@ -24,8 +24,8 @@
       "context_tokens": 8000,
       "max_output_tokens": 1000,
       "supports_tools": true,
-      "input_usd_micros_per_million": 1000000,
-      "output_usd_micros_per_million": 1000000
+      "input_usd_micros_per_million": 150000,
+      "output_usd_micros_per_million": 500000
     }
   ],
   "fallback_id": "deliberate",

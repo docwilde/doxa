@@ -10,7 +10,7 @@ fn response()->Value {json!({"model":JEV_MODEL,"answers":{"target":{"type":"choi
 fn deterministic_eligibility_cost_and_fallback_never_enlarge_candidate_set() {
     let cfg=config();let mut request=input();let prepared=prepare(&cfg,&request).unwrap();
     assert_eq!(prepared.eligible_ids,["fast","deliberate"]);
-    assert_eq!(candidate_cost(&cfg.candidates[0],&request).unwrap(),800);
+    assert_eq!(candidate_cost(&cfg.candidates[0],&request).unwrap(),690);
     assert_eq!(token_cost(1,0,1,0).unwrap(),1);
     request.allowed_candidate_ids=vec!["deliberate".into()];
     let only=prepare(&cfg,&request).unwrap();
@@ -89,7 +89,7 @@ fn malformed_zero_unknown_duplicate_and_private_config_inputs_are_refused() {
 mod http {
     use super::*;
     use std::{io::{Read,Write},net::TcpListener,thread,time::{Duration,Instant},sync::{Arc,atomic::Ordering}};
-    fn server(body: String,delay:Duration)->(String,thread::JoinHandle<()>) {
+    fn mock_server(body: String,delay:Duration)->(String,thread::JoinHandle<()>) {
         let listener=TcpListener::bind("127.0.0.1:0").unwrap();let endpoint=format!("http://{}/v1/systemone",listener.local_addr().unwrap());
         let thread=thread::spawn(move|| {
             let (mut stream,_)=listener.accept().unwrap();stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -106,7 +106,7 @@ mod http {
     fn actual_choice_http_transport_is_strict_and_bounded() {
         let cfg=config();let prepared=prepare(&cfg,&input()).unwrap();
         for body in [response().to_string(),response().to_string().replacen("\"model\":", "\"model\":\"jev-1.13.0\",\"model\":",1),"x".repeat(65537)] {
-            let valid=body==response().to_string();let (endpoint,server)=server(body,Duration::ZERO);
+            let valid=body==response().to_string();let (endpoint,server)=mock_server(body,Duration::ZERO);
             let result=call_at(&cfg,&prepared,"fixture-key",&AtomicBool::new(false),&endpoint);server.join().unwrap();
             assert_eq!(result.reason,if valid{Reason::Selected}else{Reason::InvalidResponse});
             if !valid {assert!(result.verified_response.is_none());}
@@ -116,9 +116,9 @@ mod http {
     #[test]
     fn in_flight_cancel_and_deadline_return_without_worker_authority() {
         let mut cfg=config();cfg.deadline_ms=100;let prepared=prepare(&cfg,&input()).unwrap();
-        let (endpoint,server)=server(response().to_string(),Duration::from_millis(300));let started=Instant::now();
+        let (endpoint,server)=mock_server(response().to_string(),Duration::from_millis(300));let started=Instant::now();
         let out=call_at(&cfg,&prepared,"fixture-key",&AtomicBool::new(false),&endpoint);assert_eq!(out.reason,Reason::Unavailable);assert!(started.elapsed()<Duration::from_millis(250));server.join().unwrap();
-        cfg.deadline_ms=2000;let prepared=prepare(&cfg,&input()).unwrap();let (endpoint,server)=server(response().to_string(),Duration::from_millis(300));
+        cfg.deadline_ms=2000;let prepared=prepare(&cfg,&input()).unwrap();let (endpoint,server)=mock_server(response().to_string(),Duration::from_millis(300));
         let flag=Arc::new(AtomicBool::new(false));let other=flag.clone();let stop=thread::spawn(move||{thread::sleep(Duration::from_millis(50));other.store(true,Ordering::Release);});
         let started=Instant::now();let out=call_at(&cfg,&prepared,"fixture-key",&flag,&endpoint);stop.join().unwrap();assert_eq!(out.reason,Reason::Cancelled);assert!(out.attempted);assert!(out.router_cost_usd_micros.is_none());assert!(started.elapsed()<Duration::from_millis(200));server.join().unwrap();
     }

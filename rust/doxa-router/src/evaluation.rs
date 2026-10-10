@@ -159,6 +159,13 @@ fn recorded(config: &Config, prepared: &Prepared, record: &Recording) -> io::Res
 /// Live is restricted to predeclared machine-authored synthetic cases, <=20
 /// requests and <=$0.01 cumulative reservations. It never runs a worker provider.
 pub fn evaluate(config: &Config, text: &str, live: bool, key: Option<&str>, cancel: &AtomicBool) -> io::Result<Report> {
+    evaluate_observed(config,text,live,key,cancel,|_,_,_|Ok(()))
+}
+
+/// The live CLI uses this hook to sync every reservation before HTTP and every
+/// bounded outcome afterward. An observer failure prevents the next call.
+pub fn evaluate_observed(config: &Config, text: &str, live: bool, key: Option<&str>, cancel: &AtomicBool,
+    mut observer: impl FnMut(&Ledger,Option<&Reservation>,Option<&Outcome>)->io::Result<()>) -> io::Result<Report> {
     config.validate()?;
     let cases=parse_cases(text)?;
     if live && (cases.len()>20 || cases.iter().any(|row|row.origin!=Origin::Synthetic || row.recording.is_some())) {
@@ -181,6 +188,7 @@ pub fn evaluate(config: &Config, text: &str, live: bool, key: Option<&str>, canc
         } else {
             match crate::reserve(config,&mut ledger,prepared) {
                 Ok(hold)=>{
+                    observer(&ledger,Some(&hold),None)?;
                     let out=if live { crate::call(config,prepared,key.unwrap(),cancel) }
                         else {recorded(config,prepared,case.recording.as_ref().unwrap())?};
                     crate::settle(&mut ledger,&hold,&out)?;
@@ -189,6 +197,8 @@ pub fn evaluate(config: &Config, text: &str, live: bool, key: Option<&str>, canc
                 Err(_)=>crate::fallback(config,prepared,if ledger.accounting_unknown{Reason::AccountingUnknown}else{Reason::Budget}),
             }
         };
+        observer(&ledger,reservation.as_ref(),Some(&outcome))?;
+        if cancel.load(std::sync::atomic::Ordering::Acquire) { return Err(invalid("router evaluation cancelled; inspect durable call journal")); }
         if live {
             let mut row=case.clone();
             row.recording=Some(Recording{config_sha256:prepared.config_sha256.clone(),criteria_sha256:prepared.criteria_sha256.clone(),
