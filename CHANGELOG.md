@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.42 — 2026-10-10
+
+**Claude permissions**
+
+- Fix **`ClaudeHost`** mode changes during active turns: retry ordinary pending tool approvals under `auto` and remove DOXA's second approval for provider-approved canonical tools.
+- Preserve questions, explicit policy asks, fresh classifier refusals and the independent spawn gate. Show Claude's decision reason in **`InputRequest::from_event`**.
+
+**Verification**
+
+- Pass 33 targeted daemon, process and TUI tests. Claude Code 2.1.296 accepted the mode change without a model turn; authenticated Bash classification remains unverified.
+
 ## 2.0.0-beta.41 — 2026-10-09
 
 **Native plugin runner**
