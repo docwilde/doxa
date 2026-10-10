@@ -168,6 +168,9 @@ impl SessionTelemetry {
 
     pub(super) fn update_billing(&mut self, billing: &serde_json::Value) {
         if let Some(routing) = billing.get("routing") { self.routing = RoutingStatus::from_value(routing); }
+        if billing.get("session_cost_usd").is_some() || billing.get("cost_usd").is_some() {
+            self.update_turn(billing);
+        }
         self.billing_mode = match billing["mode"].as_str() {
             Some("api") => Some("api".into()),
             Some("subscription") => Some("subscription".into()),
@@ -322,6 +325,24 @@ mod tests {
         }
         telemetry.update_status(&json!({"routing":null}));
         assert!(telemetry.routing.is_none());
+    }
+    #[test]
+    fn router_billing_restore_preserves_aggregate_estimate_and_clears_unknown_cost() {
+        let mut telemetry=SessionTelemetry::default();
+        telemetry.update_status(&json!({"ctx_tokens":55,"ctx_max_tokens":1000,"usage":{"input_tokens":55,"num_turns":2}}));
+        let routing=json!({"target_id":"glm-fixture","engine":"glm","model":"glm-5.3-flash","effort":"high",
+            "route_mode":"auto","fallback_reason":null,"latency_ms":10,"cost_usd":0.000004});
+        telemetry.update_status(&json!({"billing":{"mode":"api","session_cost_usd":0.125,"cost_usd":0.125,
+            "cost_is_estimate":true,"cost_basis":"aggregate_upper_rates","routing":routing}}));
+        assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$0.1250 est"));
+        assert_eq!(telemetry.session_cost.as_deref(),Some("$0.1250 est"));
+        assert_eq!(telemetry.input_tokens,Some(55));assert_eq!(telemetry.turns,Some(2));
+        assert_eq!(telemetry.context.as_deref(),Some("55/1000"));
+        assert!(telemetry.routing.as_ref().unwrap().label().contains("glm-5.3-flash"));
+        telemetry.update_billing(&json!({"mode":"api","session_cost_usd":null,"cost_usd":null,"cost_is_estimate":true}));
+        assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$?"));
+        assert!(telemetry.session_cost.is_none());
+        assert_eq!(telemetry.input_tokens,Some(55));assert_eq!(telemetry.context.as_deref(),Some("55/1000"));
     }
 
     #[test]

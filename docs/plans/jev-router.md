@@ -31,11 +31,14 @@ low-confidence fallback are separate cases.
 
 ## Validation record
 
-Focused CLI/UI fixture results will be recorded after integrated compilation.
-Core/host tests are owned by their implementation workers and reconciled during
-integration. No authenticated router/worker request or paid evaluation was sent
-for this implementation. `TYPESAFE_API_KEY` was absent in the integration
-environment. Source-dated worker price bounds are estimates, not live invoices.
+The private UI worktree passed 20 focused checks: 12 router controls/refusals,
+seven settings regressions and one history-resume boundary. The integrated
+branch passed 730 TUI tests (six existing ignored), 63 daemon tests, four
+transcript tests, 14 vendor tests and nine credential tests. The daemon checks
+include router CLI target/config validation, same-session resume and refusal
+of effort/sandbox/child/Docker combinations. These are local fixture results.
+Core/host tests and external evaluation evidence are recorded during integration.
+Source-dated worker price bounds are estimates, not live invoices.
 
 ## Open work
 

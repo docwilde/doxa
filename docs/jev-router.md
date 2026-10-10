@@ -45,11 +45,18 @@ does not verify a live catalog or send a Jev/worker request.
 
 ## Candidate configuration
 
-This is an illustrative template, not an evaluated recommendation. The $10 per
-million token rows below are example conservative bounds, not current prices.
+This is an illustrative template, not an evaluated recommendation. Its worker
+rate bounds match the exact-model registry rows checked on 2026-10-10: DeepSeek
+$0.30 input/$1.20 output and GLM $0.15 input/$0.50 output per million tokens.
+They are dated bounds, not account availability or billed-tier evidence.
 Review exact model IDs, context/output caps, tool/effort support and sourced
 price bounds for your account before using it. [Model facts](plans/model-registry.md)
-have per-field dates; dated bounds and estimates are not provider invoices.
+have per-field dates; estimates are not provider invoices.
+
+The `131072` context cap below is an operator-selected conservative bound for
+wire bytes and token reservations, not a verified GLM model context window.
+It leaves room for the host's fixed routing/tool/context overhead; a smaller
+cap can make every target ineligible. Unknown provider windows remain unknown.
 
 ```json
 {
@@ -69,11 +76,11 @@ have per-field dates; dated bounds and estimates are not provider invoices.
       "model": "deepseek-flash",
       "effort": "none",
       "description": "Operator policy: use for ordinary API chat when eligible.",
-      "context_tokens": 16384,
+      "context_tokens": 131072,
       "max_output_tokens": 1024,
       "supports_tools": true,
-      "input_usd_micros_per_million": 10000000,
-      "output_usd_micros_per_million": 10000000
+      "input_usd_micros_per_million": 300000,
+      "output_usd_micros_per_million": 1200000
     },
     {
       "id": "glm-chat",
@@ -81,11 +88,11 @@ have per-field dates; dated bounds and estimates are not provider invoices.
       "model": "glm-5.3-flash",
       "effort": "high",
       "description": "Operator policy: default fallback API chat target.",
-      "context_tokens": 16384,
+      "context_tokens": 131072,
       "max_output_tokens": 1024,
       "supports_tools": true,
-      "input_usd_micros_per_million": 10000000,
-      "output_usd_micros_per_million": 10000000
+      "input_usd_micros_per_million": 150000,
+      "output_usd_micros_per_million": 500000
     }
   ]
 }
@@ -160,7 +167,7 @@ development use `cargo run -p doxa-router --bin doxa-router-eval -- …`.
 doxa-router-eval fixture /absolute/config.json /absolute/synthetic-cases.jsonl
 doxa-router-eval offline /absolute/config.json /absolute/recorded-cases.jsonl
 # Separate, explicit opt-in: paid Jev calls on predeclared synthetic rows only.
-doxa-router-eval live /absolute/config.json /absolute/synthetic-cases.jsonl --live-synthetic
+doxa-router-eval live /absolute/config.json /absolute/synthetic-cases.jsonl --live-synthetic --journal /absolute/new-private-journal.jsonl
 ```
 
 Inputs must be private owner regular files. Case JSONL is bounded to 2 MiB and
@@ -180,6 +187,12 @@ reservations, subject to tighter config limits. Missing credentials or incomplet
 calls yield an incomplete report and nonzero exit. The report separates
 development/holdout confusion, errors, fallbacks, failures, latency and Jev cost.
 Worker quality, worker execution cost and total execution cost remain unmeasured.
+
+Live smoke requires a new absolute journal path in an owner directory without
+shared writes. The exclusive `0600` journal saves and syncs each reservation
+before HTTP and the outcome afterward; an existing journal cannot be reused.
+SIGINT/SIGTERM cancels the bounded call while retaining admitted reservations.
+See [evaluation format and evidence](router-evaluation.md) for reproducible cases.
 
 Local fixtures cover launch/control and accounting boundaries. No paid Jev or
 worker evaluation has been run for this feature. `TYPESAFE_API_KEY` was absent
