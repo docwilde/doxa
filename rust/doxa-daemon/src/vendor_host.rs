@@ -291,7 +291,7 @@ impl VendorHost {
         // payload before selection. Full request bytes are checked at transport.
         let definitions = self.agent_tools.as_ref().map(|tools| tools.vendor_definitions()).unwrap_or_default();
         let input_bytes = serde_json::to_vec(&self.context_messages(&history)).map_err(|_| "Router history unavailable")?.len()
-            .saturating_add(prompt.len()).saturating_add(MAX_CONTEXT_BYTES)
+            .saturating_add(prompt.len()).saturating_add(if self.lore_enabled { MAX_CONTEXT_BYTES } else { 0 })
             .saturating_add(serde_json::to_vec(&definitions).map_err(|_| "Router tools unavailable")?.len())
             .saturating_add(16 * 1024);
         let mut summary = String::new();
@@ -471,7 +471,7 @@ impl VendorHost {
         final_data["cost_basis"] = json!("priced_conservative");
         final_data["cost_is_estimate"] = json!(true);
         final_data["price_source"] = json!(crate::budget_host::vendor_price(self.vendor().engine_id(), &model).map(|price| price.source));
-        final_data["price_read_on"] = json!("2026-09-30");
+        final_data["price_read_on"] = json!(crate::budget_host::vendor_price(self.vendor().engine_id(), &model).map(|price| price.as_of));
         emit(json!({"type":"turn_done","data":final_data}));
     }
 }
@@ -799,7 +799,7 @@ impl Host for VendorHost {
                         "cost_usd":turn_cost,"session_cost_usd":session_cost,
                         "cost_basis":"priced_conservative","cost_is_estimate":true,
                         "price_source":crate::budget_host::vendor_price(self.vendor().engine_id(), &selected_model).map(|price| price.source),
-                        "price_read_on":"2026-09-30",
+                        "price_read_on":crate::budget_host::vendor_price(self.vendor().engine_id(), &selected_model).map(|price| price.as_of),
                         "ctx_percentage":null,"ctx_tokens":null,"ctx_max_tokens":null}}));
                 } else {
                     emit(done("LORE scrub failed; provider output withheld"));

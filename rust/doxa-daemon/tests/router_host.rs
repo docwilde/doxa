@@ -186,7 +186,10 @@ mod tests {
         assert!(server.bodies().is_empty());assert_eq!(env.state()["router"]["calls"],0);
         first.shutdown();drop(first);
         let mut wrong=cfg;wrong.candidates[0].input_usd_micros_per_million=1;
-        assert!(RouterHost::new(wrong,&env.cwd(),"routed",true,Some(0.01),Some(server.endpoint.clone())).is_err());
+        assert!(RouterHost::new(wrong.clone(),&env.cwd(),"routed",true,Some(0.01),Some(server.endpoint.clone())).is_err());
+        let underpriced=RouterHost::new(wrong,&env.cwd(),"underpriced",false,None,Some(server.endpoint.clone())).unwrap();
+        assert_eq!(prompt(&underpriced,"underpriced fallback")[0]["type"],"turn_refused");
+        assert!(server.bodies().is_empty());underpriced.shutdown();
         let empty=Server::new(|method,_|{assert_eq!(method,"GET");("application/json".into(),"{\"data\":[]}".into(),Duration::ZERO)});
         let other=RouterHost::new(config(),&env.cwd(),"empty",false,None,Some(empty.endpoint.clone())).unwrap();
         assert_eq!(prompt(&other,"catalog unknown")[0]["type"],"turn_refused");assert!(empty.bodies().is_empty());other.shutdown();
@@ -232,16 +235,20 @@ mod tests {
     fn attempted_jev_and_worker_cancellation_retain_unknown_usage_and_block_resume_replay() {
         for during_jev in [true,false] {
             let env=Env::new();
+            let mut turns=0;
             let server=Server::new(move|method,body| {
                 if method=="GET" {return catalog();}
                 let is_jev=body["model"]==doxa_router::JEV_MODEL;
+                if is_jev {turns+=1;}
                 let (kind,text,_) = if is_jev {choice(body,"ds")} else {worker(body,false)};
-                (kind,text,if is_jev==during_jev {Duration::from_millis(400)} else {Duration::ZERO})
+                (kind,text,if turns>1 && is_jev==during_jev {Duration::from_millis(400)} else {Duration::ZERO})
             });
             let cfg=config();let first=Arc::new(make_host(&env,cfg.clone(),&server,false,Some(2.0)));
+            assert_eq!(prompt(&first,"committed first turn").last().unwrap()["data"]["is_error"],false);
+            let prior=server.bodies().len();
             let running=first.clone();let thread=std::thread::spawn(move||prompt(&running,"cancel active HTTP"));
             let deadline=Instant::now()+Duration::from_secs(3);
-            while !server.bodies().iter().any(|body|(body["model"]==doxa_router::JEV_MODEL)==during_jev) {
+            while !server.bodies().iter().skip(prior).any(|body|(body["model"]==doxa_router::JEV_MODEL)==during_jev) {
                 assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(2));
             }
             first.call("interrupt",&json!({})).unwrap();

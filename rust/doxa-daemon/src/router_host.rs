@@ -294,11 +294,17 @@ impl RouterHost {
                 return Err("Aggregate router and worker reservation exceeds the session ceiling".into());
             }
             let facts = doxa_engines::model_registry::lookup(vendor(candidate.provider).engine_id(), &candidate.model);
+            let provider_window = match facts.context_window.provenance {
+                doxa_engines::model_registry::Provenance::Static { source, as_of } =>
+                    json!({"value":facts.context_window.value,"source":source,"read_on":as_of}),
+                doxa_engines::model_registry::Provenance::Unknown =>
+                    json!({"value":null,"source":null,"read_on":null}),
+            };
             let selection = json!({"turn":state.turn,"target_id":candidate.id,"engine":vendor(candidate.provider).engine_id(),
                 "model":candidate.model,"effort":candidate.effort,"route_mode":if pinned.is_some(){"pinned"}else{"auto"},
                 "fallback_reason":if outcome.reason == Reason::Selected { Value::Null } else { serde_json::to_value(&outcome.reason).unwrap() },
                 "latency_ms":outcome.latency_ms,"cost_usd":outcome.router_cost_usd_micros.map(|cost|cost as f64 / 1_000_000.0),
-                "cost_is_estimate":true,"context_basis":"operator_request_byte_cap","provider_window":facts.context_window,
+                "cost_is_estimate":true,"context_basis":"operator_request_byte_cap","provider_window":provider_window,
                 "input_cap_bytes":candidate.context_tokens-candidate.max_output_tokens,"output_cap_tokens":candidate.max_output_tokens});
             state.worker.retained_reservation_usd_micros = state.worker.retained_reservation_usd_micros.checked_add(reserve).ok_or("Worker allowance overflow")?;
             state.selection = Some(selection.clone());
