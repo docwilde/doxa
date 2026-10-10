@@ -532,6 +532,8 @@ impl TranscriptStore {
         temp.as_file().sync_all()?;
         temp.persist(self.vendor_messages_path())
             .map_err(|error| error.error)?;
+        fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&self.dir)?.sync_all()?;
         Ok(clean)
     }
 
