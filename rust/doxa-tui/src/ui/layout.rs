@@ -569,6 +569,7 @@ impl App {
                         | "fleet_review"
                         | "fleet_dependency_review"
                         | "isolation"
+                        | "routing"
                         | "native_plugin"
                         | "native_status"
                 ) {
@@ -663,11 +664,18 @@ impl App {
         } else {
             chips.push(("model", "Model".to_owned()));
         }
+        if identity.and_then(|pair| pair.0.as_deref()) == Some("router") {
+            if let Some(routing) = telemetry.and_then(|value| value.routing.as_ref()) {
+                chips.push(("routing", routing.label()));
+            }
+        }
         let effort = id
             .and_then(|id| self.session_efforts.get(id))
             .map(String::as_str)
             .unwrap_or("?");
-        chips.push(("effort", effort.to_owned()));
+        if identity.and_then(|pair| pair.0.as_deref()) != Some("router") {
+            chips.push(("effort", effort.to_owned()));
+        }
         if let Some(value)=telemetry.and_then(|t|t.isolation.as_ref()) {
             chips.push(("isolation",value["label"].as_str().unwrap_or("unavailable").into()));
         }
@@ -738,7 +746,7 @@ impl App {
         if let Some(label) = telemetry
             .and_then(|value| value.billing_label(engine))
             .or_else(|| match engine {
-                Some("deepseek" | "glm") => Some("$?".into()),
+                Some("deepseek" | "glm" | "router") => Some("$?".into()),
                 _ => None,
             })
         {
@@ -1131,7 +1139,11 @@ impl App {
             .find(|(candidate, _)| *candidate == kind)
             .map(|(_, label)| label)
             .unwrap_or_default();
-        let lines = if kind == "native_status" { self.native_status.ledger_lines() } else { Vec::new() };
+        let lines = if kind == "native_status" { self.native_status.ledger_lines() }
+            else if kind == "routing" { self.groups[group].active_id()
+                .and_then(|id| self.session_telemetry.get(id)).and_then(|t| t.routing.as_ref())
+                .map(|routing| routing.lines()).unwrap_or_default() }
+            else { Vec::new() };
         if kind == "repo" {
             if let Some(detail) = self.repo_detail(group) {
                 label.push_str(" · ");
@@ -1144,7 +1156,8 @@ impl App {
             label,
             lines,
             scroll: 0,
-            owner: None,
+            owner: (kind == "routing").then(|| self.groups[group].active_id()
+                .map(|id| (id.to_owned(), String::new()))).flatten(),
         });
         if self.active_chooser_rect().is_none() {
             self.chip_info = None;

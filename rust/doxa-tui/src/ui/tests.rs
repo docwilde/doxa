@@ -6,6 +6,79 @@ use super::*;
     use serde_json::json;
 
     #[test]
+    fn router_events_preserve_auto_and_display_effective_identity_without_private_fields() {
+        let mut app=App::default();
+        app.handle(Event::Resize(160,36));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"route-1","engine":"router","model":"auto","can_set_model":true}));
+        let data=json!({"target_id":"ds-fixture","engine":"deepseek","model":"deepseek-flash","effort":"high",
+            "route_mode":"auto","fallback_reason":"low_confidence","latency_ms":24,"cost_usd":0.000004,"cost_is_estimate":true,
+            "router_input":"private prompt","credentials":"private secret","error":"private diagnostic"});
+        assert!(app.apply_daemon_frame(&json!({"type":"event","session_id":"route-1","event":{"type":"routing_fallback","data":data}})));
+        assert_eq!(app.session_identity["route-1"],(Some("router".into()),Some("auto".into())));
+        let chips=app.chips(0);
+        assert!(chips.contains(&("model","auto".into())));
+        assert!(chips.contains(&("routing","ds-fixture · deepseek/deepseek-flash · high".into())));
+        assert!(!chips.iter().any(|(kind,_)|matches!(*kind,"effort"|"permission")));
+        let transcript=&app.sessions.iter().find(|s|s.id=="route-1").unwrap().transcript;
+        assert!(transcript.contains("24 ms"));
+        assert!(!transcript.contains("private"));
+        app.open_chip_info("routing",0);
+        let lines=app.chip_info.as_ref().unwrap().lines.join("\n");
+        assert!(lines.contains("low_confidence") && lines.contains("$0.000004 est"));
+        assert!(!lines.contains("private"));
+        app.chip_info=None;
+        app.open_model_picker();
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"route-1","ok":true,"models":["auto","ds-fixture","glm-fixture"]}));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected,0);
+        app.model_picker.as_mut().unwrap().selected=1;
+        app.select_model();
+        assert_eq!(app.pending_model_changes.last(),Some(&("route-1".into(),"ds-fixture".into())));
+        assert_eq!(app.session_identity["route-1"].1.as_deref(),Some("auto"));
+    }
+
+    #[test]
+    fn router_target_form_rotates_only_configured_ids_and_refuses_docker() {
+        let mut app=App::default();
+        app.new_session=Some(NewSession{engine:launch::Engine::Router,router_config:Some(PathBuf::from("/private/router.json")),
+            isolation:doxa_isolation::Profile::Native,model:"auto".into(),models:vec!["auto".into(),"ds-fixture".into()],
+            model_efforts:HashMap::new(),catalog_note:"Configured targets".into(),catalog_pending:false,effort:None,
+            prompt:String::new(),field:0,launch_error:None,retry_allowed:true});
+        app.new_session_key(KeyEvent::new(KeyCode::Char('x'),KeyModifiers::NONE));
+        assert_eq!(app.new_session.as_ref().unwrap().model,"auto");
+        app.new_session_key(KeyEvent::new(KeyCode::Right,KeyModifiers::NONE));
+        assert_eq!(app.new_session.as_ref().unwrap().model,"ds-fixture");
+        app.new_session.as_mut().unwrap().field=1;
+        app.new_session_key(KeyEvent::new(KeyCode::Right,KeyModifiers::NONE));
+        assert_eq!(app.new_session.as_ref().unwrap().isolation,doxa_isolation::Profile::Native);
+        app.new_session.as_mut().unwrap().field=2;
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        let (options,_,_)=app.pending_launches.pop().unwrap();
+        assert_eq!(options.engine,launch::Engine::Router);
+        assert_eq!(options.model.as_deref(),Some("ds-fixture"));
+        assert_eq!(options.router_config.as_deref(),Some(Path::new("/private/router.json")));
+        assert!(options.effort.is_none());
+    }
+
+    #[test]
+    fn router_clear_cd_and_effort_never_launch_a_different_engine() {
+        let root=tempfile::tempdir().unwrap();
+        let mut app=App::default();
+        app.clear_preflight_error=None;
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"route-1","engine":"router","model":"auto","cwd":root.path()}));
+        app.local_clear("");
+        assert!(app.notice.contains("--router-config"));
+        app.local_cd(root.path().to_str().unwrap());
+        assert!(app.notice.contains("--router-config"));
+        app.open_effort_picker();
+        app.open_permission_picker();
+        assert!(app.effort_picker.is_none() && app.permission_picker.is_none());
+        assert!(app.pending_launches.is_empty());
+        assert_eq!(app.groups[0].active_id(),Some("route-1"));
+        let config:toml::Table="[models]\nrouter='configured-target'\n".parse().unwrap();
+        assert_eq!(new_session_preferences(launch::Engine::Router,&config,Some("global-model"),Some("max")),("configured-target".into(),None));
+    }
+
+    #[test]
     fn dependency_release_modal_requires_contiguous_read_arm_and_confirm() {
         let mut app = App::default();
         app.handle(Event::Resize(84, 28));
@@ -1859,7 +1932,7 @@ for line in sys.stdin:
         assert!(app.manual_tab_available());
         // A form opened earlier must also recheck admission at submission.
         app.killed_this_run.clear();
-        app.new_session = Some(NewSession { isolation:doxa_isolation::Profile::Native,engine:launch::Engine::Codex,model:"model".into(),models:Vec::new(),
+        app.new_session = Some(NewSession { isolation:doxa_isolation::Profile::Native,engine:launch::Engine::Codex,router_config:None,model:"model".into(),models:Vec::new(),
             model_efforts:HashMap::new(),catalog_note:String::new(),catalog_pending:false,launch_error:None,retry_allowed:true,effort:None,prompt:String::new(),field:1 });
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert!(app.pending_launches.is_empty()); assert!(app.new_session.is_some());

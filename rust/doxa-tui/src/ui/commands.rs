@@ -706,7 +706,7 @@ impl App {
                         self.input_cursor = 0;
                     } else {
                         self.notice =
-                            "Unknown engine · choose claude, codex, deepseek or glm".into();
+                            "Unknown engine · choose claude, codex, deepseek, glm or router".into();
                     }
                     return true;
                 }

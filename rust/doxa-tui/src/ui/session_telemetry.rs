@@ -2,8 +2,67 @@
 
 use super::safe_label;
 
+/// Effective turn identity. Never replaces the session's Auto/target selection.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RoutingStatus {
+    target_id: String,
+    engine: String,
+    model: String,
+    effort: String,
+    route_mode: String,
+    fallback_reason: Option<String>,
+    latency_ms: u64,
+    cost_usd: Option<f64>,
+}
+
+impl RoutingStatus {
+    pub(super) fn from_value(data: &serde_json::Value) -> Option<Self> {
+        fn identifier(data: &serde_json::Value, key: &str, limit: usize) -> Option<String> {
+            let value = data[key].as_str()?;
+            (!value.is_empty() && value.len() <= limit
+                && value.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.:".contains(&c)))
+                .then(|| value.to_owned())
+        }
+        let engine = data["engine"].as_str().filter(|v| matches!(*v, "deepseek" | "glm"))?;
+        let effort = data["effort"].as_str().filter(|v| matches!(*v, "none" | "low" | "medium" | "high" | "xhigh" | "max"))?;
+        let mode = data["route_mode"].as_str().filter(|v| matches!(*v, "auto" | "pinned"))?;
+        let reason = match data.get("fallback_reason") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => Some(value.as_str().filter(|v| matches!(*v,
+                "selected" | "low_confidence" | "unavailable" | "invalid_response" | "budget"
+                | "cancelled" | "single_eligible" | "accounting_unknown"))?.to_owned()),
+        };
+        let cost = match data.get("cost_usd") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => Some(value.as_f64().filter(|v| v.is_finite() && *v >= 0.0)?),
+        };
+        Some(Self {
+            target_id: identifier(data, "target_id", 48)?,
+            engine: engine.into(), model: identifier(data, "model", 128)?, effort: effort.into(),
+            route_mode: mode.into(), fallback_reason: reason,
+            latency_ms: data["latency_ms"].as_u64()?, cost_usd: cost,
+        })
+    }
+
+    pub(super) fn label(&self) -> String {
+        format!("{} · {}/{} · {}", self.target_id, self.engine, self.model, self.effort)
+    }
+
+    pub(super) fn summary(&self) -> String {
+        let reason = self.fallback_reason.as_deref().unwrap_or("selected");
+        let cost = self.cost_usd.map(|v| format!("${v:.6} est")).unwrap_or_else(|| "unknown cost".into());
+        format!("Route {} · {} · {reason} · {} ms · {cost}", self.route_mode, self.label(), self.latency_ms)
+    }
+
+    pub(super) fn lines(&self) -> Vec<String> {
+        vec![self.summary(), "Cost covers this routing decision; session cost includes worker calls.".into(),
+            "Auto/target selection is controlled by /model; effort is configured per target.".into()]
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct SessionTelemetry {
+    pub(super) routing: Option<RoutingStatus>,
     pub(super) isolation: Option<serde_json::Value>,
     pub(super) account: Option<serde_json::Value>,
     pub(super) context: Option<String>,
@@ -60,6 +119,7 @@ impl SessionTelemetry {
     }
 
     pub(super) fn update_turn(&mut self, data: &serde_json::Value) {
+        if let Some(routing) = data.get("routing") { self.routing = RoutingStatus::from_value(routing); }
         let context = data["ctx_percentage"]
             .as_f64()
             .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
@@ -107,6 +167,7 @@ impl SessionTelemetry {
     }
 
     pub(super) fn update_billing(&mut self, billing: &serde_json::Value) {
+        if let Some(routing) = billing.get("routing") { self.routing = RoutingStatus::from_value(routing); }
         self.billing_mode = match billing["mode"].as_str() {
             Some("api") => Some("api".into()),
             Some("subscription") => Some("subscription".into()),
@@ -133,6 +194,7 @@ impl SessionTelemetry {
     }
 
     pub(super) fn update_status(&mut self, status: &serde_json::Value) {
+        if let Some(routing) = status.get("routing") { self.routing = RoutingStatus::from_value(routing); }
         if let Some(value)=status.get("isolation") {
             self.isolation=super::isolation_controls::verified_status(value);
         }
@@ -214,7 +276,7 @@ impl SessionTelemetry {
 
     pub(super) fn billing_label(&self, engine: Option<&str>) -> Option<String> {
         match engine {
-            Some("deepseek" | "glm") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
+            Some("deepseek" | "glm" | "router") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
             Some("codex" | "claude") => match self.billing_mode.as_deref() {
                 Some("api") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
                 Some("subscription") => {
@@ -243,6 +305,24 @@ impl SessionTelemetry {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn router_restore_uses_bounded_identity_and_unknown_cost_stays_unknown() {
+        let mut telemetry=SessionTelemetry::default();
+        let value=json!({"target_id":"ds-fixture","engine":"deepseek","model":"deepseek-flash","effort":"high",
+            "route_mode":"pinned","fallback_reason":null,"latency_ms":0,"cost_usd":null,"private":"hidden"});
+        telemetry.update_status(&json!({"routing":value}));
+        let status=telemetry.routing.as_ref().unwrap();
+        assert!(status.summary().contains("unknown cost"));
+        assert!(status.summary().contains("pinned"));
+        assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$?"));
+        for (key,bad) in [("fallback_reason",json!("provider secret error")),("engine",json!("claude")),("target_id",json!("bad\u{1b}target")),("cost_usd",json!(-1.0)),("route_mode",json!("autoPermissions"))] {
+            let mut malformed=value.clone();malformed[key]=bad;
+            assert!(RoutingStatus::from_value(&malformed).is_none(),"{key}");
+        }
+        telemetry.update_status(&json!({"routing":null}));
+        assert!(telemetry.routing.is_none());
+    }
 
     #[test]
     fn vendor_estimate_displays_session_sum_and_partial_turn() {

@@ -97,7 +97,7 @@ const REVIEW_BODY_RESERVE: u16 = 10;
 
 use commands::COMMANDS;
 
-const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
+const ENGINE_CHOICES: [&str; 5] = ["codex", "claude", "deepseek", "glm", "router"];
 // Fallback model IDs measured from the vendors' catalogues in Python 1.19.
 // Unknown models get no effort choices until a verified capability arrives.
 const DEEPSEEK_MODELS: [&str; 2] = ["deepseek-flash", "deepseek-v4-pro"];
@@ -141,6 +141,7 @@ fn engine_name(engine: launch::Engine) -> &'static str {
         launch::Engine::Claude => "claude",
         launch::Engine::DeepSeek => "deepseek",
         launch::Engine::Glm => "glm",
+        launch::Engine::Router => "router",
         launch::Engine::Fixture => "fixture",
     }
 }
@@ -150,6 +151,11 @@ fn new_session_preferences(
     model_override: Option<&str>,
     effort_override: Option<&str>,
 ) -> (String, Option<String>) {
+    if engine==launch::Engine::Router {
+        let model=config.get("models").and_then(|models|models.get("router")).and_then(toml::Value::as_str)
+            .filter(|id|!id.trim().is_empty()).unwrap_or("auto").to_owned();
+        return (model,None);
+    }
     let configured_model = crate::settings::raw_from(
         config,
         crate::settings::find("model").unwrap(),
@@ -338,6 +344,7 @@ struct LorePicker {
 struct NewSession {
     isolation: doxa_isolation::Profile,
     engine: launch::Engine,
+    router_config: Option<std::path::PathBuf>,
     model: String,
     models: Vec<String>,
     model_efforts: HashMap<String, Vec<String>>,
@@ -498,6 +505,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "permission" => "Permission mode for this session · click to choose",
         "engine" => "Engine for new sessions · click to choose",
         "model" => "Model for this session · click to choose",
+        "routing" => "Effective API target for this turn · click for routing latency and cost",
         "repo" => "Choose a known directory for a new session tab",
         "directory" => "Choose a known directory for a new session tab",
         "effort" => "Effort · current session; click to select the next turn when idle",

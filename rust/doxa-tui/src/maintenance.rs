@@ -9,7 +9,7 @@ pub fn run(kind: &str, engine: Option<&str>, cancel: &AtomicBool) -> io::Result<
 
 fn run_at(exe: &Path, kind: &str, engine: Option<&str>, cancel: &AtomicBool, timeout: Duration) -> io::Result<String> {
     if !matches!(kind, "doctor" | "update") { return Err(io::Error::other("Unsupported maintenance operation")); }
-    if engine.is_some_and(|engine| !matches!(engine, "claude" | "codex" | "deepseek" | "glm")) {
+    if engine.is_some_and(|engine| !matches!(engine, "claude" | "codex" | "deepseek" | "glm" | "router")) {
         return Err(io::Error::other("Unknown doctor engine"));
     }
     let mut command = Command::new(exe);

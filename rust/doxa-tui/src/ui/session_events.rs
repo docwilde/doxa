@@ -704,6 +704,19 @@ impl App {
                     self.request_auto_diff(&id);
                 }
                 match event_type {
+                    "routing_selected" | "routing_fallback" => {
+                        if !self.sessions.iter().any(|session| session.id == id)
+                            || self.session_identity.get(&id).and_then(|pair| pair.0.as_deref()) != Some("router") {
+                            return false;
+                        }
+                        let Some(routing) = super::session_telemetry::RoutingStatus::from_value(data) else { return false; };
+                        let summary = super::transcript_events::event_field(&routing.summary());
+                        self.session_telemetry.entry(id.clone()).or_default().routing = Some(routing);
+                        let clipped = self.sessions.iter_mut().find(|s| s.id == id)
+                            .is_some_and(|session| append_transcript(session, &format!("\n\n*{summary}*\n")));
+                        self.transcript_evicted(&id, clipped);
+                        true
+                    }
                     "billing" => {
                         if !self.sessions.iter().any(|session| session.id == id) {
                             return false;

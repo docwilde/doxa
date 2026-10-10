@@ -25,6 +25,7 @@ doxa-worktrees = { path = "../doxa-worktrees" }
 doxa-vendors = { path = "../doxa-vendors" }
 doxa-lore = { path = "../doxa-lore" }
 doxa-remote-wire = { path = "../doxa-remote-wire" }
+doxa-router = { path = "../doxa-router" }
 crossterm = "0.28"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 ratatui-image = { version = "=8.0.2", default-features = false, features = ["crossterm"] }

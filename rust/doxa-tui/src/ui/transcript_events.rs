@@ -8,7 +8,7 @@ const MAX_EVENT_FIELD_CHARS: usize = 320;
 // Structured event fields are untrusted Markdown as well as terminal text.
 // Keep ordinary event rows small. A queued prompt uses the input budget so
 // the submitted text remains visible while the current turn is running.
-fn event_field(value: &str) -> String {
+pub(super) fn event_field(value: &str) -> String {
     event_field_with_limit(value, MAX_EVENT_FIELD_CHARS)
 }
 
