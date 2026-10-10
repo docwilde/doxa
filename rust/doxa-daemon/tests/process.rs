@@ -106,8 +106,12 @@ sys.stdin.readline();c.rollback();c.close()
 impl Drop for NativeWriterLock {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
 
 #[track_caller]
-fn wait_until(mut predicate: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+fn wait_until(predicate: impl FnMut() -> bool) {
+    wait_until_with_timeout(Duration::from_secs(10), predicate);
+}
+#[track_caller]
+fn wait_until_with_timeout(timeout: Duration, mut predicate: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
     while !predicate() {
         assert!(
             Instant::now() < deadline,
@@ -3472,7 +3476,7 @@ fn codex_live_auto_preserves_a_partially_read_provider_frame() {
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(&mut socket, json!({"type":"prompt","id":1,"text":"partial frame fixture"}));
-    wait_until(|| dir.path().join("partial-ready").exists());
+    wait_until_with_timeout(CODEX_PREPARATION_TIMEOUT, || dir.path().join("partial-ready").exists());
     let mut frames = Vec::new();
     let changed = codex_auto_rpc(&mut reader, &mut socket, 10, "set_permission_mode", json!({"mode":"auto"}), &mut frames);
     assert_eq!(changed["ok"], true, "{changed}");
