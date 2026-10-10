@@ -297,6 +297,17 @@ label fields are operator attestations; the scorer cannot verify them. No
 consented real-message corpus is shipped with DOXA, so these metrics remain
 unmeasured on real fleet traffic.
 
+For a fixed acceptance check, first run `doxa fleet evaluate-development
+/absolute/private/development.jsonl --message-judge jev:jev-1.13.0` on development
+rows only. Freeze an owner-reviewed model, threshold, limits and the returned
+development hash before opening a holdout. Then run `evaluate-messages` with
+`--gate /absolute/private/judge-gate.json`. The report checks real provenance,
+minimum message and fleet coverage, observed miss/false-pause rates and latency
+at that one threshold. Synthetic or insufficient samples fail; a failing gate
+returns a nonzero exit status. This check makes no model calls and never changes
+admission. See [the gate procedure](fleet-message-gate.md) for the private-file
+schema, approval attestations and limits on the result.
+
 After a supervised native run finishes, `doxa fleet debrief RUN --root /absolute/fleet/root`
 reads the owned manifest and private host guard journal. It reports worker
 completion admission only when its recorded diff and passing test receipts

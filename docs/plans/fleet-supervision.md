@@ -6,8 +6,12 @@ typed admission, shared review budgets and an immutable charter. See [the operat
 remaining limits. The native dependency slice adds reviewed predecessor edges,
 durable waiting slots and a human-owned release after a typed coordinator
 handoff. An offline labeled-verdict threshold report and a private
-labeled-message holdout scorer are available. A consented, human-labeled
-real-message corpus and measured real-judge gate remain open. Automatic trusted
+labeled-message holdout scorer are available. Development-only review and an
+owner-declared acceptance gate bind a fixed model and threshold to the exact
+development subset, then check observed real holdout coverage, errors and
+latency without enabling enforcement; see [the procedure](../fleet-message-gate.md).
+A consented, human-labeled real-message corpus and measured real-judge
+acceptance result remain open. Automatic trusted
 test-evidence collection is opt-in when the charter freezes an offline Docker
 recipe; host-observed completed turns queue bounded receipts. The manual test
 command remains available, and neither path releases a dependency. Beta.16
