@@ -31,18 +31,32 @@ low-confidence fallback are separate cases.
 
 ## Validation record
 
-The private UI worktree passed 20 focused checks: 12 router controls/refusals,
-seven settings regressions and one history-resume boundary. The integrated
+The private UI worktree passed 21 focused checks: 12 router controls/refusals,
+seven settings regressions, one history-resume boundary and one aggregate
+billing restore/unknown-cost fixture. The frontend binaries compiled offline.
+The integrated
 branch passed 730 TUI tests (six existing ignored), 63 daemon tests, four
 transcript tests, 14 vendor tests and nine credential tests. The daemon checks
 include router CLI target/config validation, same-session resume and refusal
-of effort/sandbox/child/Docker combinations. These are local fixture results.
-Core/host tests and external evaluation evidence are recorded during integration.
-Source-dated worker price bounds are estimates, not live invoices.
+of effort/sandbox/child/Docker combinations. The router host passed 31 local
+integration fixtures, the canonical vendor-message integration passed five,
+and the bounded vendor turn checks passed two fixtures.
+These are local fixture results.
+The [evaluation record](../router-evaluation.md) binds an authorized six-call
+`jev-1.13.0` synthetic smoke on 2026-10-10 to exact config/input hashes and
+recorded responses. Development agreement was 4/4 and separate synthetic
+holdout agreement was 2/2, with no fallback or schema/transport failure. All
+labels were machine-authored. Routing usage was 3,269 input/204 output tokens;
+estimated router cost was $0.000139 and reservations were $0.000574. Observed
+latency was 350–473 ms (development p50/p95 372/412 ms; holdout 359/473 ms).
+No worker executed. Worker quality, worker/total execution cost and real-task
+quality validation remain unmeasured. Source-dated worker price bounds and Jev
+usage-based cost are estimates, not live invoices.
 
 ## Open work
 
-- [ ] Authorized synthetic Jev transport smoke with complete usage evidence.
+- [x] Authorized bounded synthetic Jev transport smoke with complete usage evidence;
+  six cases passed on 2026-10-10. This is not a real-task quality gate.
 - [ ] Consented, scrubbed real cases with independent human development/holdout
   labels, representative routing mistakes and direct-selection baselines.
 - [ ] Worker task success, latency and aggregate execution cost measurements;

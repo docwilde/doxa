@@ -130,8 +130,11 @@ answers and outages must not be assumed to be free or safe to retry.
 
 The session journal records reservations before calls and retains them on
 failure or cancellation. A session budget combines routing and worker holds;
-the fixed-price `BudgetHost` wrapper is not used for router sessions. Token-based
-estimates and conservative reservations are not billed tier or invoice facts.
+the fixed-price `BudgetHost` wrapper is not used for router sessions. Worker
+holds conservatively cover up to 25 bounded requests and the aggregate output
+allowance. Displayed aggregate cost combines reported Jev usage and worker
+estimates at the checked upper rates; retained reservations are shown separately.
+Token-based estimates and conservative reservations are not billed tier or invoice facts.
 An interrupted/incomplete journal pauses further work rather than replaying an
 uncertain turn.
 
@@ -142,7 +145,8 @@ doxa new --engine router --router-config /home/you/.doxa/router-candidates.json 
 ```
 
 Resume requires the same reviewed config hash and preserves Auto or the pinned
-target, canonical messages and aggregate allowance. Transcripts retain engine
+target, canonical messages and aggregate allowance. A fresh empty router
+conversation can also resume; it does not require a prior paid turn. Transcripts retain engine
 `router` and per-turn routing metadata; the replay envelope uses the stable
 `router-conversation-v1` model identity. The allowance/selection journal lives
 at `$DOXA_HOME/router/ID.router.json`.
@@ -194,8 +198,17 @@ before HTTP and the outcome afterward; an existing journal cannot be reused.
 SIGINT/SIGTERM cancels the bounded call while retaining admitted reservations.
 See [evaluation format and evidence](router-evaluation.md) for reproducible cases.
 
-Local fixtures cover launch/control and accounting boundaries. No paid Jev or
-worker evaluation has been run for this feature. `TYPESAFE_API_KEY` was absent
-in the integration environment on 2026-10-10. A consented real holdout and a
-comparison against direct target selection remain open; no quality or speed
-claim should be inferred from the fixture suite. See the [router plan](plans/jev-router.md).
+Local fixtures cover launch/control and accounting boundaries. On 2026-10-10,
+an authorized six-call smoke against pinned `jev-1.13.0` returned six valid
+responses: 4/4 development and 2/2 separate synthetic holdout label agreement,
+with no fallback, schema or transport failures. All labels were machine-authored.
+Reported usage was 3,269 input and 204 output tokens; the routing cost estimate
+was 139 USD micros ($0.000139), with 574 USD micros reserved. Observed latency
+was 350–473 ms; development p50/p95 was 372/412 ms and the two-case holdout was
+359/473 ms. See the [bound evidence and replay record](router-evaluation.md).
+
+No paid worker provider was executed. Worker task quality, worker execution cost
+and total execution cost remain unmeasured; `real_quality_validated` is false.
+A consented real holdout and a comparison against direct target selection remain
+open. Neither artificial fixtures nor this tiny synthetic sample establish
+real-task quality or a broad speed guarantee. See the [router plan](plans/jev-router.md).
