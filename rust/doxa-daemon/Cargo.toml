@@ -6,6 +6,7 @@ publish = false
 license = "AGPL-3.0-only"
 
 [dependencies]
+doxa-router = { path = "../doxa-router" }
 doxa-fleet = { path = "../doxa-fleet" }
 doxa-isolation = { path = "../doxa-isolation" }
 doxa-state = { path = "../doxa-state" }
@@ -22,6 +23,7 @@ sha2 = "0.10"
 time = { version = "0.3", features = ["parsing"] }
 futures-util = "0.3"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "time", "sync", "net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -31,4 +33,4 @@ tempfile = "3"
 doxa-tui = { path = "../doxa-tui" }
 
 [features]
-local-test-server = ["doxa-vendors/local-test-server"]
+local-test-server = ["doxa-vendors/local-test-server", "doxa-router/test-transport"]

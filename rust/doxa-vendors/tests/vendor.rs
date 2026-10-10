@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use doxa_vendors::{
-    request_body, run_turn_local, stream_once_local, Accumulator, Delta, Error, SseDecoder,
+    request_body, run_turn_local, run_turn_limited_local, TurnLimits, stream_once_local, Accumulator, Delta, Error, SseDecoder,
     ToolCall, ToolGate, Vendor, STREAM_LINE_MAX,
 };
 use futures_util::future::BoxFuture;
@@ -30,6 +30,44 @@ async fn credential_guard() -> CredentialGuard {
     std::env::remove_var("DEEPSEEK_API_KEY");
     std::env::remove_var("ZAI_API_KEY");
     CredentialGuard { _lock: lock, _home: home, previous }
+}
+
+#[tokio::test]
+async fn bounded_turn_shares_output_allowance_across_continuations() {
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
+    let tool = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n";
+    let answer = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"done\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
+    let (url, task) = multi_server(vec![tool,answer]);
+    let mut history = Vec::new();let mut gate = LookupGate{calls:Vec::new()};let (_,cancel)=watch::channel(false);
+    let outcome=run_turn_limited_local(Vendor::DeepSeek,&url,"deepseek-flash","none",&mut history,"question",
+        Some(&mut gate),cancel,Duration::from_secs(3),|_|{},TurnLimits{input_bytes:16384,output_tokens:10}).await.unwrap();
+    let requests=task.join().unwrap().0;
+    assert_eq!(requests[0]["max_tokens"],10);assert_eq!(requests[1]["max_tokens"],7);
+    assert_eq!(outcome.usage.completion_tokens,7);assert_eq!(gate.calls,["1"]);
+}
+
+#[tokio::test]
+async fn bounded_turn_checks_usage_and_model_before_tools_and_refuses_oversized_requests() {
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
+    for (model,usage) in [("deepseek-flash",json!({"prompt_tokens":2})),
+        ("different-model",json!({"prompt_tokens":2,"completion_tokens":3})),
+        ("deepseek-flash",json!({"prompt_tokens":2,"completion_tokens":11}))] {
+        let body=format!("data: {}\n\ndata: [DONE]\n\n",json!({"model":model,
+            "choices":[{"finish_reason":"tool_calls","delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"lookup","arguments":"{\"x\":1}"}}]}}],"usage":usage}));
+        let (url,task)=multi_server(vec![Box::leak(body.into_boxed_str())]);
+        let mut history=Vec::new();let mut gate=LookupGate{calls:Vec::new()};let (_,cancel)=watch::channel(false);
+        let result=run_turn_limited_local(Vendor::DeepSeek,&url,"deepseek-flash","none",&mut history,"question",
+            Some(&mut gate),cancel,Duration::from_secs(3),|_|{},TurnLimits{input_bytes:16384,output_tokens:10}).await;
+        assert!(matches!(result,Err(Error::IncompleteStream)));assert!(gate.calls.is_empty());assert!(history.is_empty());
+        assert_eq!(task.join().unwrap().0.len(),1);
+    }
+    let listener=TcpListener::bind("127.0.0.1:0").unwrap();listener.set_nonblocking(true).unwrap();
+    let mut history=Vec::new();let (_,cancel)=watch::channel(false);
+    let result=run_turn_limited_local(Vendor::DeepSeek,&format!("http://{}/chat",listener.local_addr().unwrap()),"deepseek-flash","none",
+        &mut history,"too large",None,cancel,Duration::from_secs(3),|_|{},TurnLimits{input_bytes:1,output_tokens:10}).await;
+    assert!(matches!(result,Err(Error::HistoryTooLarge)));assert!(listener.accept().is_err());
 }
 
 fn accept(listener: &TcpListener) -> std::net::TcpStream {

@@ -20,6 +20,12 @@ pub const MAX_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_HISTORY_MESSAGES: usize = 512;
 pub const MAX_TOOL_RESULT_BYTES: usize = 1024 * 1024;
 pub const MAX_TURN_DURATION: Duration = Duration::from_secs(3600);
+
+/// Optional routed-turn transport bounds. Input bytes include the complete
+/// serialized request (including tools), not an estimated token count. The
+/// output allowance is shared across every request in the tool loop.
+#[derive(Clone, Copy, Debug)]
+pub struct TurnLimits { pub input_bytes: usize, pub output_tokens: u64 }
 const BALANCE_URL: &str = "https://api.deepseek.com/user/balance";
 const BALANCE_BODY_MAX: usize = 4096;
 
@@ -204,6 +210,13 @@ impl ModelCapability {
 pub async fn catalog_models(vendor: Vendor) -> Option<Vec<ModelCapability>> {
     let key = credentials::resolve(vendor).ok()??;
     catalog_models_at(vendor, vendor.models_endpoint(), &key).await
+}
+
+#[cfg(feature = "local-test-server")]
+pub async fn catalog_models_local(vendor: Vendor, endpoint: &str) -> Option<Vec<ModelCapability>> {
+    validate_local_endpoint(endpoint).ok()?;
+    let key = credentials::resolve(vendor).ok()??;
+    catalog_models_at(vendor, endpoint, &key).await
 }
 
 async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<Vec<ModelCapability>> {
@@ -798,6 +811,7 @@ pub async fn run_turn(
         cancel,
         deadline,
         on_delta,
+        None,
     )
     .await
 }
@@ -819,9 +833,29 @@ pub async fn run_turn_local(
 ) -> Result<TurnOutcome, Error> {
     validate_local_endpoint(endpoint)?;
     run_turn_at(
-        vendor, endpoint, model, effort, history, prompt, gate, cancel, deadline, on_delta,
+        vendor, endpoint, model, effort, history, prompt, gate, cancel, deadline, on_delta, None,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_turn_limited(vendor: Vendor, model: &str, effort: &str,
+    history: &mut Vec<Value>, prompt: &str, gate: Option<&mut dyn ToolGate>,
+    cancel: watch::Receiver<bool>, deadline: Duration, on_delta: impl FnMut(Delta),
+    limits: TurnLimits) -> Result<TurnOutcome, Error> {
+    run_turn_at(vendor, vendor.endpoint(), model, effort, history, prompt, gate,
+        cancel, deadline, on_delta, Some(limits)).await
+}
+
+#[cfg(feature = "local-test-server")]
+#[allow(clippy::too_many_arguments)]
+pub async fn run_turn_limited_local(vendor: Vendor, endpoint: &str, model: &str, effort: &str,
+    history: &mut Vec<Value>, prompt: &str, gate: Option<&mut dyn ToolGate>,
+    cancel: watch::Receiver<bool>, deadline: Duration, on_delta: impl FnMut(Delta),
+    limits: TurnLimits) -> Result<TurnOutcome, Error> {
+    validate_local_endpoint(endpoint)?;
+    run_turn_at(vendor, endpoint, model, effort, history, prompt, gate,
+        cancel, deadline, on_delta, Some(limits)).await
 }
 
 fn validate_tool_definitions(definitions: &[Value]) -> Result<(), Error> {
@@ -886,6 +920,7 @@ async fn run_turn_at(
     mut cancel: watch::Receiver<bool>,
     deadline: Duration,
     mut on_delta: impl FnMut(Delta),
+    limits: Option<TurnLimits>,
 ) -> Result<TurnOutcome, Error> {
     let deadline = deadline.min(MAX_TURN_DURATION);
     let started = Instant::now();
@@ -932,9 +967,19 @@ async fn run_turn_at(
             return Err(Error::Timeout);
         }
         let mut body = request_body(vendor, model, &messages, effort)?;
+        if let Some(limits) = limits {
+            let remaining = limits.output_tokens.checked_sub(outcome.usage.completion_tokens)
+                .filter(|tokens| *tokens > 0).ok_or(Error::ToolLimit)?;
+            body["max_tokens"] = json!(remaining);
+        }
         if !definitions.is_empty() {
             body["tools"] = Value::Array(definitions.clone());
             body["tool_choice"] = json!("auto");
+        }
+        if let Some(limits) = limits {
+            if serde_json::to_vec(&body).map_err(|_| Error::HistoryTooLarge)?.len() > limits.input_bytes {
+                return Err(Error::HistoryTooLarge);
+            }
         }
         let mut completion = stream_at_with_key(
             vendor,
@@ -968,6 +1013,15 @@ async fn run_turn_at(
                 && usage.get("completion_tokens").and_then(Value::as_u64).is_some()
         });
         outcome.usage.add(completion.usage.as_ref())?;
+        if let Some(limits) = limits {
+            if !outcome.usage_complete || !outcome.model_consistent
+                || outcome.usage.completion_tokens > limits.output_tokens {
+                return Err(Error::IncompleteStream);
+            }
+            if !completion.tool_calls.is_empty() && outcome.usage.completion_tokens == limits.output_tokens {
+                return Err(Error::ToolLimit);
+            }
+        }
         outcome.model = completion.model.or(outcome.model);
         outcome.text.push_str(&completion.text);
         outcome.reasoning.push_str(&completion.reasoning);
