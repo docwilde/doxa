@@ -27,7 +27,7 @@
 
 ## Install and start
 
-Install the [latest Rust prerelease](https://github.com/docwilde/doxa/releases):
+Install the [latest Rust beta release](https://github.com/docwilde/doxa/releases/latest):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
