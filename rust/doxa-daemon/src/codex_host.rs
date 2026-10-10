@@ -1,5 +1,5 @@
 use doxa_engines::codex_driver::{CodexCliDriver, DriverError, DriverOptions};
-use doxa_engines::codex_appserver::{AppServerDriver, AppServerOptions, AppServerError, CodexPermission};
+use doxa_engines::codex_appserver::{AppServerDriver, AppServerOptions, AppServerError, CodexPermission, LiveAutoRequest};
 use doxa_lore::{LoreClient, LoreError};
 use doxa_runtime::Host;
 use doxa_transcript::TranscriptStore;
@@ -64,6 +64,8 @@ pub struct CodexHost {
     cwd: String,
     selection: Mutex<(Option<String>, Option<String>)>,
     permission: Mutex<CodexPermission>,
+    permission_control: Mutex<Option<tokio::sync::mpsc::Sender<LiveAutoRequest>>>,
+    thread_record_lock: Mutex<()>,
     catalog: Mutex<Vec<Value>>,
     catalog_options: AppServerOptions,
     billing: Mutex<Option<Value>>,
@@ -306,6 +308,8 @@ impl CodexHost {
             cwd,
             selection: Mutex::new(selection),
             permission: Mutex::new(permission),
+            permission_control: Mutex::new(None),
+            thread_record_lock: Mutex::new(()),
             catalog: Mutex::new(Vec::new()),
             catalog_options,
             billing: Mutex::new(None),
@@ -347,6 +351,7 @@ impl CodexHost {
     }
 
     fn persist(&self, record: Value) -> io::Result<()> {
+        let _guard = self.thread_record_lock.lock().unwrap();
         let result = self.store.try_append(record, "codex", |text| {
             self.lore.lock().unwrap().scrub(text).map_err(|_| {
                 self.scrub_failed.store(true, Ordering::Release);
@@ -361,6 +366,11 @@ impl CodexHost {
     }
 
     fn persist_thread(&self, thread_id: &str, turn_incomplete: bool) -> io::Result<()> {
+        let _guard = self.thread_record_lock.lock().unwrap();
+        self.persist_thread_locked(thread_id, turn_incomplete)
+    }
+
+    fn persist_thread_locked(&self, thread_id: &str, turn_incomplete: bool) -> io::Result<()> {
         let mut rollout = self.rollout_path.lock().unwrap();
         if rollout.as_ref().is_some_and(|path| codex_context::size(path, thread_id).is_none()) {
             *rollout = None;
@@ -506,6 +516,11 @@ impl Host for CodexHost {
     fn model_change_requires_idle(&self) -> bool { true }
     fn can_set_permission_mode(&self) -> bool { self.transport == "app-server" }
     fn permission_change_requires_idle(&self) -> bool { true }
+    fn can_set_permission_mode_while_running(&self, mode: &str) -> bool {
+        mode == "auto" && self.transport == "app-server"
+            && self.catalog_options.sandbox != doxa_engines::codex_driver::SandboxMode::DangerFullAccess
+            && matches!(*self.permission.lock().unwrap(), CodexPermission::OnRequest | CodexPermission::Auto)
+    }
     fn initial_permission_mode(&self) -> String {
         if self.transport == "app-server" { self.permission.lock().unwrap().mode() } else { "never" }.to_owned()
     }
@@ -546,6 +561,8 @@ impl Host for CodexHost {
             return;
         }
         let token = CancellationToken::new();
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(1);
+        *self.permission_control.lock().unwrap() = if compaction { None } else { Some(control_tx) };
         *self.active.lock().unwrap() = Some(token.clone());
         if self.closing.load(Ordering::Acquire) {
             *self.active.lock().unwrap() = None;
@@ -707,9 +724,11 @@ impl Host for CodexHost {
                         } else {
                             let selected = self.selection.lock().unwrap().clone();
                             active.as_mut().expect("spawn succeeded").set_selection(selected.0, selected.1);
+                            options.permission = *self.permission.lock().unwrap();
+                            active.as_mut().expect("spawn succeeded").set_permission(options.permission);
                             let outcome = if compaction {
                                 runtime.block_on(active.as_mut().expect("spawn succeeded").compact(&token, &mut handle_event))
-                            } else { runtime.block_on(active.as_mut().expect("spawn succeeded").run_turn_interactive(
+                            } else { runtime.block_on(active.as_mut().expect("spawn succeeded").run_turn_controlled(
                                 &provider_prompt, &token, &mut handle_event,
                                 |frame| {
                                     let scrub = |text: &str| {
@@ -736,6 +755,7 @@ impl Host for CodexHost {
                                     } else { Ok(Some(pending)) }
                                     })
                                 },
+                                Some(&mut control_rx),
                             )) }.map_err(|error| match error {
                                 AppServerError::CompactionCancelled => {
                                     compact_blocked.set(true);
@@ -757,6 +777,8 @@ impl Host for CodexHost {
                     }
                 }
         };
+        self.permission_control.lock().unwrap().take();
+        drop(control_rx);
         if result.is_ok() {
             let runtime = self.runtime.lock().unwrap();
             let mut driver = self.driver.lock().unwrap();
@@ -937,12 +959,57 @@ impl Host for CodexHost {
             }
             "set_permission_mode" => {
                 if self.transport != "app-server" { return Err(LEGACY_READ_ONLY.into()); }
-                if self.active.lock().unwrap().is_some() || self.closing.load(Ordering::Acquire) {
+                if self.closing.load(Ordering::Acquire) {
                     return Err("Codex permissions require an idle session; retry after the turn completes".into());
                 }
                 if self.persistence_failed.load(Ordering::Acquire) { return Err("Codex persistence failed".into()); }
                 let mode = params["mode"].as_str().and_then(CodexPermission::from_mode)
                     .ok_or("Unsupported Codex permission mode")?;
+                let active_token = self.active.lock().unwrap().clone();
+                if let Some(token) = active_token {
+                    if !self.can_set_permission_mode_while_running(mode.mode()) {
+                        return Err("This Codex permission or sandbox transition requires an idle session".into());
+                    }
+                    if *self.permission.lock().unwrap() == mode { return Ok(json!({"mode":mode.mode()})); }
+                    let control = self.permission_control.lock().unwrap().clone()
+                        .ok_or("Codex live permissions are unavailable during this operation")?;
+                    let (reply, outcome) = mpsc::sync_channel(1);
+                    control.try_send(LiveAutoRequest { expires: Instant::now() + Duration::from_secs(8), reply })
+                        .map_err(|_| "Codex active turn is no longer accepting permission changes")?;
+                    let applied_thread = match outcome.recv_timeout(Duration::from_secs(12)) {
+                        Ok(Ok(thread)) => thread,
+                        Ok(Err(reason)) => return Err(reason.into()),
+                        Err(_) => {
+                            self.persistence_failed.store(true, Ordering::Release);
+                            token.cancel();
+                            return Err("Codex live permission update was not acknowledged; session cannot safely continue".into());
+                        }
+                    };
+                    // Read and preserve the current checkpoint guard under the
+                    // same lock as turn-start and turn-completion writes.
+                    let saved = (|| -> Result<(), String> {
+                        let _guard = self.thread_record_lock.lock().unwrap();
+                        let record = self.store.read_thread().map_err(|_| "Codex permission checkpoint unavailable")?
+                            .ok_or("Codex permission checkpoint missing")?;
+                        let id = record["thread_id"].as_str().ok_or("Codex permission checkpoint has no thread")?;
+                        if id != applied_thread || record["session_id"] != self.session_id || record["transport"] != "app-server" {
+                            return Err("Codex permission checkpoint identity changed".into());
+                        }
+                        let incomplete = record["turn_incomplete"].as_bool().ok_or("Codex permission checkpoint has no turn guard")?;
+                        let previous = std::mem::replace(&mut *self.permission.lock().unwrap(), mode);
+                        if self.persist_thread_locked(id, incomplete).is_err() {
+                            *self.permission.lock().unwrap() = previous;
+                            return Err("Codex permission persistence failed".into());
+                        }
+                        Ok(())
+                    })();
+                    if let Err(reason) = saved {
+                        self.persistence_failed.store(true, Ordering::Release);
+                        token.cancel();
+                        return Err(reason);
+                    }
+                    return Ok(json!({"mode":mode.mode(),"verified":true}));
+                }
                 let previous = std::mem::replace(&mut *self.permission.lock().unwrap(), mode);
                 let mut driver = self.driver.lock().unwrap();
                 let verified_id = match &*driver {

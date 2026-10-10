@@ -110,6 +110,36 @@ sys.stdin.read()
         with self.assertRaisesRegex(ValueError, "fingerprints"):
             installer.verified_artifacts(self.root, self.binary, self.helper, helper)
 
+    def test_verified_patch_upgrade_keeps_the_previous_provider_immutable(self):
+        self.install()
+        receipt_path = self.destination / "receipt.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["patch_sha256"] = installer.LEGACY_PATCH_SHA256
+        receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n")
+        old = self.root / "providers" / (installer.PROVIDER + "-" + installer.digest(receipt_path))
+        self.destination.rename(old)
+        pointer = self.root / "providers/codex-current"
+        pointer.unlink()
+        pointer.symlink_to(old.name)
+        before = {file.name: file.read_bytes() for file in old.iterdir()}
+        with self.assertRaisesRegex(ValueError, "verified build provenance"):
+            self.install()
+        self.assertEqual(pointer.resolve(), old)
+        identity = {"source_commit": installer.SOURCE, "patch_sha256": installer.PATCH_SHA256,
+                    "profile": "dev-small", "toolchain": "1.95.0"}
+        helper = dict(identity, product="codex-code-mode-host", v8_inputs={"fixture": "reviewed"})
+        for filename, value in (("build.json", dict(identity, binary_sha256=installer.digest(self.binary))),
+                                ("code-mode-host-build.json", dict(helper, binary_sha256=installer.digest(self.helper)))):
+            path = self.root / filename
+            path.write_text(json.dumps(value))
+            path.chmod(0o600)
+        verified = installer.verified_artifacts(self.root, self.binary, self.helper, helper)
+        result = installer.install(self.binary, self.root / "providers", Path("/usr/bin/true"),
+                                   self.launcher, self.helper, helper, verified)
+        self.assertNotEqual(result.parent, old)
+        self.assertEqual(before, {file.name: file.read_bytes() for file in old.iterdir()})
+        self.assertEqual(pointer.resolve(), result.parent)
+
     def test_cargo_mode_is_accepted_only_for_verified_build_outputs(self):
         identity = {"source_commit": installer.SOURCE, "patch_sha256": installer.PATCH_SHA256,
                     "profile": "dev-small", "toolchain": "1.95.0"}

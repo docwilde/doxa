@@ -23,8 +23,9 @@ SOURCE = "b412ff32c417f855c2b2d1581b77058eed87c84b"
 CONTRACT = "doxa-precompact-fail-closed-v1"
 PROVIDER = "codex-0.156.1-precompact-v1"
 PATCH = Path(__file__).resolve().parent / "codex-protected/precompact.patch"
-PATCH_SHA256 = "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b"
-AGENT_PREFIX = "doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; "
+PATCH_SHA256 = "23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d"
+LEGACY_PATCH_SHA256 = "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b"
+AGENT_PREFIX = "doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; "
 
 
 def digest(path):
@@ -80,6 +81,8 @@ def locked_directory(directory):
 
 
 def run(arguments, **kwargs):
+    # Keep newly built artifacts private even under a group-writable shell umask.
+    kwargs.setdefault("umask", 0o077)
     subprocess.run(arguments, check=True, **kwargs)
 
 
@@ -301,9 +304,10 @@ def verified_artifacts(cache, binary, code_mode_host, helper_identity):
 
 def verify_installed(destination, previous):
     """Never repair or replace an installation whose own receipt does not match."""
-    expected = {"contract": CONTRACT, "source_commit": SOURCE, "patch_sha256": PATCH_SHA256,
+    expected = {"contract": CONTRACT, "source_commit": SOURCE,
                 "profile": "dev-small", "toolchain": "1.95.0"}
-    if any(previous.get(key) != value for key, value in expected.items()):
+    if (any(previous.get(key) != value for key, value in expected.items())
+            or previous.get("patch_sha256") not in {PATCH_SHA256, LEGACY_PATCH_SHA256}):
         raise ValueError("installed provider provenance differs from reviewed source")
     helper_keys = ("code_mode_host_sha256", "code_mode_host_source_commit", "code_mode_host_dispatcher_sha256")
     if any(key in previous for key in helper_keys) and not all(key in previous for key in helper_keys):

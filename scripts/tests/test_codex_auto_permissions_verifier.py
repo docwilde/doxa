@@ -101,14 +101,14 @@ class CodexVerifierTests(unittest.TestCase):
                     "pending_preserved_after_refusal": True, "baseline_approved_once": True,
                     "pending_card_resolved": True}
         receipt = {"baseline": baseline, "first_auto": success(), "second_auto": success(),
-                   "same_provider_thread": True, "auto_mode_persisted": True,
+                   "same_provider_thread": True, "auto_mode_persisted": True, "sandbox_write_blocked": True,
                    "idle_switch_verified": True, "stop_exited": True}
         self.assertEqual(verifier.summarize(copy.deepcopy(receipt))["status"], "partial")
         for name in ("pending_card_resolved", "active_switch_rejected", "baseline_approved_once"):
             missing = copy.deepcopy(receipt)
             del missing["baseline"][name]
             self.assertEqual(verifier.summarize(missing)["status"], "unknown", name)
-        for name in ("same_provider_thread", "auto_mode_persisted", "stop_exited"):
+        for name in ("same_provider_thread", "auto_mode_persisted", "sandbox_write_blocked", "stop_exited"):
             missing = copy.deepcopy(receipt)
             del missing[name]
             self.assertEqual(verifier.summarize(missing)["status"], "unknown", name)
@@ -121,7 +121,7 @@ class CodexVerifierTests(unittest.TestCase):
         baseline = {**success(), "command_approvals": 1,
                     "active_switch_verified": True, "pending_card_resolved": True}
         receipt = {"baseline": baseline, "first_auto": success(), "second_auto": success(),
-                   "same_provider_thread": True, "auto_mode_persisted": True,
+                   "same_provider_thread": True, "auto_mode_persisted": True, "sandbox_write_blocked": True,
                    "idle_switch_verified": True, "stop_exited": True}
         self.assertEqual(verifier.summarize(copy.deepcopy(receipt))["status"], "passed")
         receipt["first_auto"]["command_approvals"] = 1

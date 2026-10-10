@@ -219,6 +219,9 @@ impl Process {
         Self::start_codex_appserver_with_review(runtime,codex,resume,false)
     }
     fn start_codex_appserver_with_review(runtime: &Path, codex: &Path, resume: bool, review_enabled: bool) -> Self {
+        Self::start_codex_appserver_with_settings(runtime, codex, resume, review_enabled, false)
+    }
+    fn start_codex_appserver_with_settings(runtime: &Path, codex: &Path, resume: bool, review_enabled: bool, peer_tools: bool) -> Self {
         // Inline peers retain their existing protocol/adversarial behavior
         // after the same protected owner admission as the common turn peer.
         let source = fs::read_to_string(codex).unwrap();
@@ -235,6 +238,7 @@ impl Process {
         ]).stdout(Stdio::null()).stderr(Stdio::piped())
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_CODEX_APPSERVER");
+        command.env("DOXA_AGENT_PEER_SEND", if peer_tools { "1" } else { "0" });
         if resume { command.env("DOXA_CODEX_APPSERVER", "0"); }
         if review_enabled {
             // Reach pre-review source preparation while preventing inference
@@ -3335,6 +3339,190 @@ for line in sys.stdin: pass
     let transcript = fs::read_to_string(native_transcript(dir.path(), "codex-session.jsonl")).unwrap();
     assert!(!transcript.contains("sk-ownedCanonicalFixtureSecret1234567890"));
     assert!(transcript.contains("[REDACTED:api-key] answer"));
+}
+
+fn codex_auto_rpc(reader: &mut BufReader<UnixStream>, socket: &mut UnixStream,
+    id: u64, method: &str, params: Value, frames: &mut Vec<Value>) -> Value {
+    send(socket, json!({"type":"call","id":id,"method":method,"params":params}));
+    for _ in 0..256 {
+        let row = receive(reader);
+        if row["type"] == "reply" && row["id"] == id { return row; }
+        frames.push(row);
+    }
+    panic!("control reply exceeded the event bound");
+}
+
+fn codex_auto_fixture(root: &Path, scenario: &str) -> PathBuf {
+    let codex = root.join("auto-provider");
+    executable(&codex, &include_str!("fixtures/codex_live_auto.py")
+        .replace("__SCENARIO__", scenario)
+        .replace("__RELEASE__", root.join("release").to_str().unwrap())
+        .replace("__LOG__", root.join("auto-rpcs.jsonl").to_str().unwrap()));
+    codex
+}
+
+fn codex_auto_pending(reader: &mut BufReader<UnixStream>, socket: &mut UnixStream) -> String {
+    send(socket, json!({"type":"attach","cursor":null}));
+    send(socket, json!({"type":"prompt","id":1,"text":"synthetic auto fixture"}));
+    for _ in 0..256 {
+        let row = receive(reader);
+        if row["event"]["type"] == "needs_input" {
+            return row["event"]["data"]["id"].as_str().unwrap().into();
+        }
+        assert_ne!(row["event"]["type"], "turn_done", "{row}");
+    }
+    panic!("approval did not arrive");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn codex_live_auto_pending_command_persists_guard_and_future_turns() {
+    for scenario in ["command", "late"] {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = codex_auto_fixture(dir.path(), scenario);
+        let mut process = Process::start_codex_appserver(dir.path(), &codex, Path::new("python3"), false);
+        let (mut reader, mut socket) = process.connect();
+        reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+        assert_eq!(receive(&mut reader)["permission_mode"], "on-request");
+        let pending = codex_auto_pending(&mut reader, &mut socket);
+        let mut frames = Vec::new();
+        let changed = codex_auto_rpc(&mut reader, &mut socket, 10, "set_permission_mode", json!({"mode":"auto"}), &mut frames);
+        assert_eq!(changed["ok"], true, "{scenario}: {changed}");
+        assert_eq!(changed["verified"], true);
+        let checkpoint = native_transcript(dir.path(), "codex-session.codex.json");
+        let saved: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+        assert_eq!(saved["permission_mode"], "auto");
+        assert_eq!(saved["turn_incomplete"], true, "live switch cleared the restart guard");
+        let state = codex_auto_rpc(&mut reader, &mut socket, 11, "get_state", json!({}), &mut frames);
+        assert_eq!(state["pending_inputs_complete"], true);
+        assert_eq!(state["pending_inputs"], json!([]));
+        assert!(frames.iter().any(|row| row["event"]["type"] == "needs_input_resolved" && row["event"]["data"]["id"] == pending));
+        assert!(!frames.iter().any(|row| row["event"]["type"] == "needs_input"), "auto showed another approval");
+        assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 12, "answer_needs_input",
+            json!({"id":pending,"answer":{"decision":"allow"}}), &mut frames)["ok"], false, "stale approval succeeded");
+        assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 13, "set_permission_mode",
+            json!({"mode":"on-request"}), &mut frames)["ok"], false, "reverse active transition was allowed");
+        fs::write(dir.path().join("release"), "continue").unwrap();
+        loop {
+            let row = receive(&mut reader);
+            assert_ne!(row["event"]["type"], "needs_input");
+            if row["event"]["type"] == "turn_done" { assert_eq!(row["event"]["data"]["is_error"], false, "{row}"); break; }
+        }
+        send(&mut socket, json!({"type":"prompt","id":2,"text":"another automatic turn"}));
+        loop {
+            let row = receive(&mut reader);
+            assert_ne!(row["event"]["type"], "needs_input");
+            if row["event"]["type"] == "turn_done" { assert_eq!(row["event"]["data"]["is_error"], false, "{row}"); break; }
+        }
+        let saved: Value = serde_json::from_slice(&fs::read(checkpoint).unwrap()).unwrap();
+        assert_eq!(saved["thread_id"], "thread-auto");
+        assert_eq!(saved["permission_mode"], "auto");
+        assert_eq!(saved["turn_incomplete"], false);
+        assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 14, "stop", json!({}), &mut frames)["ok"], true);
+        wait_until(|| process.exited());
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn codex_live_auto_preserves_independent_inputs_and_rejected_updates() {
+    for scenario in ["old", "rejected", "gone", "question", "operator", "fullaccess"] {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = codex_auto_fixture(dir.path(), scenario);
+        let mut process = Process::start_codex_appserver_with_settings(dir.path(), &codex, false, false, scenario == "operator");
+        let (mut reader, mut socket) = process.connect();
+        reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+        receive(&mut reader);
+        let mut frames = Vec::new();
+        if scenario == "fullaccess" {
+            send(&mut socket, json!({"type":"attach","cursor":null}));
+            let initial = codex_auto_rpc(&mut reader, &mut socket, 9, "set_permission_mode",
+                json!({"mode":"full-access"}), &mut frames);
+            assert_eq!(initial["ok"], true, "{initial}");
+        }
+        let pending = codex_auto_pending(&mut reader, &mut socket);
+        let changed = codex_auto_rpc(&mut reader, &mut socket, 10, "set_permission_mode", json!({"mode":"auto"}), &mut frames);
+        let success = matches!(scenario, "question" | "operator");
+        assert_eq!(changed["ok"], success, "{scenario}: {changed}");
+        let state = codex_auto_rpc(&mut reader, &mut socket, 11, "get_state", json!({}), &mut frames);
+        assert_eq!(state["pending_inputs_complete"], true);
+        assert_eq!(state["pending_inputs"][0]["id"], pending, "{scenario}: independent or refused request disappeared");
+        assert!(!frames.iter().any(|row| row["event"]["type"] == "needs_input_resolved"));
+        let status = codex_auto_rpc(&mut reader, &mut socket, 12, "status", json!({}), &mut frames);
+        assert_eq!(status["status"]["permission_mode"], if success {"auto"} else if scenario == "fullaccess" {"full-access"} else {"on-request"});
+        let answer = if matches!(scenario, "question" | "fullaccess") { json!({"answers":{"q":"yes"}}) } else { json!({"decision":"deny"}) };
+        assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 13, "answer_needs_input", json!({"id":pending,"answer":answer}), &mut frames)["ok"], true);
+        loop {
+            let row = receive(&mut reader);
+            if row["event"]["type"] == "turn_done" { assert_eq!(row["event"]["data"]["is_error"], false, "{row}"); break; }
+        }
+        assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 14, "stop", json!({}), &mut frames)["ok"], true);
+        wait_until(|| process.exited());
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn codex_live_auto_preserves_a_partially_read_provider_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = codex_auto_fixture(dir.path(), "partial");
+    let mut process = Process::start_codex_appserver(dir.path(), &codex, Path::new("python3"), false);
+    let (mut reader, mut socket) = process.connect();
+    reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"partial frame fixture"}));
+    wait_until(|| dir.path().join("partial-ready").exists());
+    let mut frames = Vec::new();
+    let changed = codex_auto_rpc(&mut reader, &mut socket, 10, "set_permission_mode", json!({"mode":"auto"}), &mut frames);
+    assert_eq!(changed["ok"], true, "{changed}");
+    fs::write(dir.path().join("release"), "continue").unwrap();
+    while !frames.iter().any(|row| row["event"]["type"] == "turn_done") {
+        frames.push(receive(&mut reader));
+    }
+    assert!(!frames.iter().any(|row| row["event"]["type"] == "needs_input"));
+    assert!(frames.iter().any(|row| row["event"]["type"] == "turn_done" && row["event"]["data"]["is_error"] == false));
+    let text: String = frames.iter().filter(|row| row["event"]["type"] == "text_delta")
+        .filter_map(|row| row["event"]["data"]["text"].as_str()).collect();
+    assert_eq!(text, "partial fixture completed");
+    assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 11, "stop", json!({}), &mut frames)["ok"], true);
+    wait_until(|| process.exited());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn codex_live_auto_checkpoint_failure_cancels_the_changed_provider() {
+    for damage in ["unreadable", "identity"] {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = codex_auto_fixture(dir.path(), "corrupt");
+    let mut process = Process::start_codex_appserver(dir.path(), &codex, Path::new("python3"), false);
+    let (mut reader, mut socket) = process.connect();
+    reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+    receive(&mut reader);
+    codex_auto_pending(&mut reader, &mut socket);
+    let checkpoint = native_transcript(dir.path(), "codex-session.codex.json");
+    let saved: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    assert_eq!(saved["turn_incomplete"], true);
+    if damage == "identity" {
+        let mut wrong = saved;
+        wrong["thread_id"] = json!("different-provider-thread");
+        fs::write(&checkpoint, serde_json::to_vec(&wrong).unwrap()).unwrap();
+    } else {
+        fs::remove_file(&checkpoint).unwrap();
+        fs::create_dir(&checkpoint).unwrap();
+    }
+    let mut frames = Vec::new();
+    let changed = codex_auto_rpc(&mut reader, &mut socket, 10, "set_permission_mode", json!({"mode":"auto"}), &mut frames);
+    assert_eq!(changed["ok"], false, "{changed}");
+    assert_eq!(changed["error"], if damage == "identity" { "Codex permission checkpoint identity changed" } else { "Codex permission checkpoint unavailable" });
+    while !frames.iter().any(|row| row["event"]["type"] == "turn_done") {
+        frames.push(receive(&mut reader));
+    }
+    assert!(frames.iter().any(|row| row["event"]["type"] == "turn_done" && row["event"]["data"]["is_error"] == true));
+    assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 11, "set_permission_mode", json!({"mode":"auto"}), &mut frames)["error"], "Codex persistence failed");
+    assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 12, "stop", json!({}), &mut frames)["ok"], true);
+    wait_until(|| process.exited());
+    }
 }
 
 #[test]

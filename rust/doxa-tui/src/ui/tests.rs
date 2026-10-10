@@ -652,6 +652,38 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn codex_live_auto_picker_keeps_review_until_the_exact_provider_resolution() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 24));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"codex-live",
+            "engine":"codex", "permission_mode":"on-request", "running":true, "queued":0,
+            "can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["codex-live".into()];
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"codex-live",
+            "event":{"type":"needs_input", "data":{"id":"command-approval", "kind":"permission",
+                "title":"Approve command?", "tool_name":"command_execution", "input_summary":"python3 marker.py"}}}));
+        app.open_permission_picker();
+        app.permission_picker.as_mut().unwrap().1 = 1;
+        app.select_permission_mode();
+        assert_eq!(app.pending_permission_changes, vec![("codex-live".into(), "auto".into())]);
+        assert_eq!(app.permission_modes["codex-live"], "on-request");
+        assert_eq!(app.input_requests.len(), 1);
+        app.apply_daemon_frame(&json!({"type":"set_permission_mode_reply", "session_id":"codex-live",
+            "ok":true, "mode":"auto", "verified":true}));
+        assert_eq!(app.input_requests.len(), 1);
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"codex-live",
+            "event":{"type":"needs_input_resolved", "data":{"id":"unrelated-request"}}}));
+        assert_eq!(app.input_requests.len(), 1);
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"codex-live",
+            "event":{"type":"needs_input_resolved", "data":{"id":"command-approval"}}}));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"codex-live",
+            "event":{"type":"permission_mode_changed", "data":{"mode":"auto"}}}));
+        assert!(app.input_requests.is_empty());
+        assert_eq!(app.permission_modes["codex-live"], "auto");
+        assert!(app.pending_answers.is_empty());
+    }
+
+    #[test]
     fn chip_strip_keeps_permission_classifier_vendor_model_and_context_distinct() {
         let mut app = App::default();
         app.handle(Event::Resize(220, 30));

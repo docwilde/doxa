@@ -89,6 +89,7 @@ impl Host for IsolationHost {
     fn model_change_requires_idle(&self)->bool{self.inner.model_change_requires_idle()}
     fn can_set_permission_mode(&self)->bool{self.inner.can_set_permission_mode()}
     fn permission_change_requires_idle(&self)->bool{self.inner.permission_change_requires_idle()}
+    fn can_set_permission_mode_while_running(&self,mode:&str)->bool{self.inner.can_set_permission_mode_while_running(mode)}
     fn set_peer_tool_handler(&self,handler:PeerToolHandler)->bool{self.inner.set_peer_tool_handler(handler)}
     fn set_session_tool_handler(&self,handler:PeerToolHandler)->bool{self.inner.set_session_tool_handler(handler)}
     fn peer_tools_ready(&self)->bool{self.inner.peer_tools_ready()}

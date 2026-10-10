@@ -3,7 +3,8 @@
 """Opt-in Codex permission verification through the native DOXA daemon.
 
 At most three synthetic turns. Test a pending command switch, then an idle
-same-session switch and two ordinary sandboxed commands. Only the exact
+same-session switch and two ordinary sandboxed commands. The last command
+probes one disposable path outside the workspace and temporary-directory roots. Only the exact
 disposable baseline command may receive one approval if the active switch is
 refused. Auto turns are never approved. Receipts exclude account/provider text.
 """
@@ -47,16 +48,21 @@ def turn(wire, command, marker, token, *, baseline=False):
                 "active_switch_verified": False, "active_switch_rejected": False,
                 "pending_preserved_after_refusal": False, "pending_card_resolved": False,
                 "marker_verified": False, "turn_completed": False,
-                "turn_succeeded": False, "exact_reply": False}
+                "turn_succeeded": False, "exact_reply": False, "tool_calls": 0,
+                "tool_failures": 0, "sandbox_probe_unexpectedly_writable": False,
+                "tool_permission_error": False}
     wire.counter += 1
     prompt_id = wire.counter
     instruction = ("For this permission UI verification, request sandbox_permissions "
                    "require_escalated with justification 'Disposable marker verification'. "
+                   "If the approval policy changes to never before execution, retry the exact same "
+                   "command once using the normal sandbox, without escalation. "
                    if baseline else "Use the normal sandbox; do not request escalation. ")
     wire.send({"type": "prompt", "id": prompt_id, "text":
-        "Use exec_command to execute exactly this command once: " + command + ". "
+        "Use exec_command to attempt this exact command: " + command + ". "
         + instruction + "The command only creates a disposable marker and prints a token. "
-        "Use no other commands or tools. Reply only with its printed token."})
+        "For normal sandbox execution, run it once. Use no other commands or tools. "
+        "Reply only with its printed token."})
     deadline = time.monotonic() + TURN_TIMEOUT
     pending_id = None
     reply = ""
@@ -68,6 +74,15 @@ def turn(wire, command, marker, token, *, baseline=False):
             reply += data.get("text", "")
             if len(reply) > 65536:
                 raise RuntimeError("reply_overflow")
+        elif kind == "tool_call":
+            evidence["tool_calls"] += 1
+        elif kind == "tool_result":
+            evidence["tool_failures"] += int(data.get("is_error") is True)
+        elif kind == "tool_result_detail":
+            detail = data.get("text", "")
+            if isinstance(detail, str):
+                evidence["sandbox_probe_unexpectedly_writable"] |= "sandbox probe unexpectedly writable" in detail
+                evidence["tool_permission_error"] |= "PermissionError" in detail
         elif kind == "needs_input":
             evidence["command_approvals"] += 1
             if not baseline or pending_id is not None or data.get("tool_name") != "command_execution" \
@@ -135,9 +150,10 @@ def summarize(result):
     automatic = all(successful(turn) and type(turn.get("command_approvals")) is int
                     and turn["command_approvals"] == 0 for turn in turns[1:])
     continuity = result.get("same_provider_thread") is True and result.get("auto_mode_persisted") is True
-    result["auto_commands"] = "passed" if automatic and continuity else "unknown"
+    sandbox = result.get("sandbox_write_blocked") is True
+    result["auto_commands"] = "passed" if automatic and continuity and sandbox else "unknown"
     result["same_session_idle_switch"] = "passed" if result.get("idle_switch_verified") is True \
-        and automatic and continuity else "unknown"
+        and automatic and continuity and sandbox else "unknown"
     first = turns[0]
     if successful(first) and first.get("pending_card_resolved") is True and first.get("active_switch_verified") is True:
         result["pending_command_switch"] = "passed"
@@ -166,7 +182,8 @@ def run(daemon, codex, lore, auth_home, parent, model):
             or parent.stat().st_mode & 0o077 or len(str(parent)) > 30:
         return {**result, "reason": "short_private_tmpdir_required"}
     result["daemon_sha256"] = hashlib.sha256(daemon.read_bytes()).hexdigest()
-    with tempfile.TemporaryDirectory(prefix="cx-", dir=parent) as directory:
+    with tempfile.TemporaryDirectory(prefix="cx-", dir=parent) as directory, \
+            tempfile.TemporaryDirectory(prefix=".doxa-codex-sandbox-", dir=Path.home()) as outside_directory:
         root = Path(directory)
         root.chmod(0o700)
         workspace = root / "w"
@@ -186,7 +203,15 @@ def run(daemon, codex, lore, auth_home, parent, model):
         script.write_text("from pathlib import Path\nimport sys\n"
             "assert sys.argv[1] in ('baseline', 'first_auto', 'second_auto')\n"
             "with Path(sys.argv[1]).open('x') as marker:\n"
-            "    marker.write(sys.argv[2])\nprint(sys.argv[2])\n")
+            "    marker.write(sys.argv[2])\n"
+            "if sys.argv[1] == 'second_auto':\n"
+            "    try:\n        Path(sys.argv[3]).write_text('disposable sandbox probe')\n"
+            "    except OSError as error:\n"
+            "        if error.errno not in (1, 13, 30):\n            raise\n"
+            "        Path('sandbox-blocked').write_text(sys.argv[2])\n"
+            "        Path('sandbox-errno').write_text(str(error.errno))\n"
+            "    else:\n        raise RuntimeError('sandbox probe unexpectedly writable')\n"
+            "print(sys.argv[2])\n")
         script.chmod(0o600)
         environment = {"HOME": str(Path.home()), "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "TMPDIR": str(parent), "DOXA_HOME": str(root / "doxa"), "CODEX_HOME": str(private_codex),
@@ -224,7 +249,17 @@ def run(daemon, codex, lore, auth_home, parent, model):
                         return {**result, "reason": "idle_switch_refused"}
                 result["submitted_turns"] += 1
                 shell = "python3 " + shlex.quote(str(script)) + " " + name + " " + token
+                if name == "second_auto":
+                    shell += " " + shlex.quote(str(Path(outside_directory) / "marker"))
                 result[name] = turn(wire, shell, workspace / name, token, baseline=name == "baseline")
+                if name == "second_auto":
+                    blocked = workspace / "sandbox-blocked"
+                    result["sandbox_write_blocked"] = blocked.is_file() and blocked.read_text() == token \
+                        and not (Path(outside_directory) / "marker").exists()
+                    result["sandbox_outside_marker_absent"] = not (Path(outside_directory) / "marker").exists()
+                    denied = workspace / "sandbox-errno"
+                    if denied.is_file() and denied.read_text() in ("1", "13", "30"):
+                        result["sandbox_denial_errno"] = int(denied.read_text())
                 if not successful(result[name]) or result[name].get("reason"):
                     return {**result, "reason": "command_execution_unverified"}
                 idle(wire)
@@ -233,6 +268,9 @@ def run(daemon, codex, lore, auth_home, parent, model):
                     thread_id = saved.get("thread_id")
                 elif not thread_id or saved.get("thread_id") != thread_id:
                     return {**result, "reason": "provider_thread_changed"}
+            blocked = workspace / "sandbox-blocked"
+            result["sandbox_write_blocked"] = blocked.is_file() and blocked.read_text() == token \
+                and not (Path(outside_directory) / "marker").exists()
             result["same_provider_thread"] = bool(thread_id)
             result["auto_mode_persisted"] = saved.get("permission_mode") == "auto"
             stop_and_wait(wire, process)

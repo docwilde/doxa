@@ -215,6 +215,7 @@ impl Host for BudgetHost {
     fn can_set_model(&self) -> bool { self.pricing.is_none() && self.inner.can_set_model() }
     fn can_set_permission_mode(&self) -> bool { self.inner.can_set_permission_mode() }
     fn permission_change_requires_idle(&self) -> bool { self.inner.permission_change_requires_idle() }
+    fn can_set_permission_mode_while_running(&self, mode: &str) -> bool { self.inner.can_set_permission_mode_while_running(mode) }
     fn account_snapshot(&self) -> Option<Value> { self.inner.account_snapshot() }
     fn billing_snapshot(&self) -> Option<Value> {
         // The prompt holds the accounting lock during provider execution;
