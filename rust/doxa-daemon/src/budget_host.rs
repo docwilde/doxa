@@ -300,7 +300,7 @@ mod tests {
         host.prompt("hello", &mut |event| events.push(event));
         assert_eq!(events[0]["data"]["cost_usd"], 1.5);
         assert_eq!(events[0]["data"]["cost_basis"], "priced_conservative");
-        assert_eq!(events[0]["data"]["price_read_on"], "2026-09-30");
+        assert_eq!(events[0]["data"]["price_read_on"], "2026-10-10");
         assert_eq!(events[1]["type"], "turn_refused");
         assert!(host.call("set_model", &json!({"model":"glm-5-turbo"})).is_err());
         assert!(!host.can_set_model());
