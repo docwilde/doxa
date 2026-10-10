@@ -91,6 +91,8 @@ jobs:
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_lore_bump.py -v
           python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_claude_auto_permissions_verifier.py -v
+          python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_session_image_package.py -v
           python3 -W error::ResourceWarning scripts/test_docker_quota_preflight.py -v
           python3 -W error::ResourceWarning scripts/test_docker_hard_quota_probe.py -v
