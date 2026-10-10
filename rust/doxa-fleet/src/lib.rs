@@ -3,6 +3,7 @@
 pub mod judge;
 pub mod calibration;
 pub mod message_eval;
+pub mod message_gate;
 pub mod evidence;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

@@ -191,6 +191,9 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
     if android && !android_incarnation_matches(&entry,&payload) {
         return json!({"ok":false,"error":"Android session incarnation changed"});
     }
+    if payload.get("incarnation").is_some() && payload["incarnation"].as_str()!=Some(remote_incarnation(&entry)) {
+        return json!({"ok":false,"error":"session incarnation changed"});
+    }
     let client=match connect(app,&entry,None,None).await{Ok(client)=>client,Err(_)=>return json!({"ok":false,"error":"session unavailable"})};
     let transcript_identity=(entry.session_id.clone(),entry.started_at.clone(),entry.incarnation.clone(),entry.pid,entry.daemon_socket.clone());
     let op=op.to_owned();let app=app.clone();
@@ -212,8 +215,8 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
                 if state["pending_inputs_complete"]!=true{return Err(invalid("pending review incomplete"));}
                 let reviewed=state["pending_inputs"].as_array().and_then(|items|items.iter().find(|item|item["id"]==id))
                     .ok_or_else(||invalid("input request changed or expired"))?;
-                if android && !reviewed_android_input_is_current(&payload,reviewed) {
-                    return Err(invalid("Android reviewed input changed"));
+                if (android || payload.get("reviewed_request").is_some()) && !reviewed_android_input_is_current(&payload,reviewed) {
+                    return Err(invalid("reviewed input changed"));
                 }
                 client.call("answer_needs_input",json!({"id":id,"answer":payload["answer"],"reviewed_request":reviewed}))
             },

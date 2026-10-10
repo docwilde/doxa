@@ -110,6 +110,36 @@ sys.stdin.read()
         with self.assertRaisesRegex(ValueError, "fingerprints"):
             installer.verified_artifacts(self.root, self.binary, self.helper, helper)
 
+    def test_verified_patch_upgrade_keeps_the_previous_provider_immutable(self):
+        self.install()
+        receipt_path = self.destination / "receipt.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["patch_sha256"] = installer.LEGACY_PATCH_SHA256
+        receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n")
+        old = self.root / "providers" / (installer.PROVIDER + "-" + installer.digest(receipt_path))
+        self.destination.rename(old)
+        pointer = self.root / "providers/codex-current"
+        pointer.unlink()
+        pointer.symlink_to(old.name)
+        before = {file.name: file.read_bytes() for file in old.iterdir()}
+        with self.assertRaisesRegex(ValueError, "verified build provenance"):
+            self.install()
+        self.assertEqual(pointer.resolve(), old)
+        identity = {"source_commit": installer.SOURCE, "patch_sha256": installer.PATCH_SHA256,
+                    "profile": "dev-small", "toolchain": "1.95.0"}
+        helper = dict(identity, product="codex-code-mode-host", v8_inputs={"fixture": "reviewed"})
+        for filename, value in (("build.json", dict(identity, binary_sha256=installer.digest(self.binary))),
+                                ("code-mode-host-build.json", dict(helper, binary_sha256=installer.digest(self.helper)))):
+            path = self.root / filename
+            path.write_text(json.dumps(value))
+            path.chmod(0o600)
+        verified = installer.verified_artifacts(self.root, self.binary, self.helper, helper)
+        result = installer.install(self.binary, self.root / "providers", Path("/usr/bin/true"),
+                                   self.launcher, self.helper, helper, verified)
+        self.assertNotEqual(result.parent, old)
+        self.assertEqual(before, {file.name: file.read_bytes() for file in old.iterdir()})
+        self.assertEqual(pointer.resolve(), result.parent)
+
     def test_cargo_mode_is_accepted_only_for_verified_build_outputs(self):
         identity = {"source_commit": installer.SOURCE, "patch_sha256": installer.PATCH_SHA256,
                     "profile": "dev-small", "toolchain": "1.95.0"}
@@ -229,6 +259,40 @@ sys.stdin.read()
         cargo, environment = installer.toolchain(self.root, str(self.root / "cargo"))
         self.assertEqual(str(self.root / "cargo"), cargo)
         self.assertEqual(str(self.root / "rustc"), environment["RUSTC"])
+
+    def test_legacy_cache_upgrade_preserves_source_and_rejects_unreviewed_changes(self):
+        source = self.root / "source"
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "Fixture"], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email", "fixture@example.invalid"], check=True)
+        gate = source / "codex-rs/core/src/doxa_precompact.rs"
+        gate.parent.mkdir(parents=True)
+        gate.write_text("original\n")
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm", "test: fixture source"], check=True)
+        head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        gate.write_text("new reviewed patch\n")
+        reviewed = self.root / "fixture.patch"
+        reviewed.write_bytes(subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary"]))
+        gate.write_text("legacy reviewed patch\n")
+        legacy = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary"])
+        unknown = source / "unknown"
+        unknown.write_text("unreviewed\n")
+        with patch.multiple(installer, SOURCE=head, PATCH=reviewed,
+                            PATCH_SHA256=installer.digest(reviewed),
+                            LEGACY_PATCH_SHA256=hashlib.sha256(legacy).hexdigest()):
+            with self.assertRaisesRegex(ValueError, "untracked files"):
+                installer.prepare_source(self.root)
+            unknown.unlink()
+            updated = installer.prepare_source(self.root)
+            self.assertNotEqual(source, updated)
+            self.assertEqual("new reviewed patch\n", (updated / gate.relative_to(source)).read_text())
+            self.assertEqual(legacy, subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary"]))
+            self.assertEqual(updated, installer.prepare_source(self.root))
+            (updated / gate.relative_to(source)).write_text("unreviewed edit\n")
+            with self.assertRaisesRegex(ValueError, "unrelated changes"):
+                installer.prepare_source(self.root)
+            self.assertEqual("legacy reviewed patch\n", gate.read_text())
 
     def test_source_verification_rejects_unrelated_staged_changes(self):
         source = self.root / "source"

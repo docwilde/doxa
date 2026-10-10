@@ -108,10 +108,28 @@ impl From<io::Error> for AppServerError {
     fn from(value: io::Error) -> Self { Self::Io(value) }
 }
 
+/// Bounded control lane independent of the driver mutex held by a running turn.
+pub struct LiveAutoRequest {
+    pub expires: std::time::Instant,
+    pub reply: std::sync::mpsc::SyncSender<Result<String, &'static str>>,
+}
+
+async fn next_live_auto(control: &mut Option<&mut tokio::sync::mpsc::Receiver<LiveAutoRequest>>) -> Option<LiveAutoRequest> {
+    match control {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn provider_approval(method: &Value) -> bool {
+    matches!(method.as_str(), Some("item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/permissions/requestApproval"))
+}
+
 pub struct AppServerDriver {
     options: AppServerOptions,
     effort: Option<String>,
     interactive: bool,
+    live_auto_supported: bool,
     peer_tools: bool,
     agent_tools: Vec<Value>,
     dynamic_tool_names: Vec<(String, String)>,
@@ -126,6 +144,7 @@ pub struct AppServerDriver {
     supervised: bool,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    frame_buffer: Vec<u8>,
     next_id: u64,
     thread_id: Option<String>,
     turn_id: Option<String>,
@@ -269,7 +288,7 @@ impl AppServerDriver {
         let scrub = std::sync::Arc::new(scrub);
         let tool_scrub = scrub.clone();
         let mut driver = Self {
-            options, effort: None, interactive: false, peer_tools: false, agent_tools: Vec::new(), dynamic_tool_names: Vec::new(), compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, owner_control: owner_control.take(), supervised: false, stdin, stdout, next_id: 0,
+            options, effort: None, interactive: false, live_auto_supported: false, peer_tools: false, agent_tools: Vec::new(), dynamic_tool_names: Vec::new(), compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, owner_control: owner_control.take(), supervised: false, stdin, stdout, frame_buffer: Vec::new(), next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
             assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None, effective_model: None,
@@ -283,6 +302,8 @@ impl AppServerDriver {
             driver.supervised = true;
         }
         let initialized = driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
+        driver.live_auto_supported = initialized["userAgent"].as_str().is_some_and(|agent|
+            agent.starts_with(crate::codex_compact::PROTECTED_AGENT_PREFIX) && agent.contains("; doxa-midturn-auto-v1; "));
         driver.send(json!({"method":"initialized"})).await?;
         if driver.compact_gate.is_some() {
             // The server's build version is authoritative. The client version
@@ -443,8 +464,19 @@ impl AppServerDriver {
     /// emitted. Waiting for a user remains cancellable and time bounded.
     pub async fn run_turn_interactive(
         &mut self, prompt: &str, cancel: &CancellationToken,
+        emit: impl FnMut(EngineEvent),
+        request: impl FnMut(&Value) -> Result<Option<(EngineEvent, tokio::sync::oneshot::Receiver<Value>)>, String>,
+    ) -> Result<(), AppServerError> {
+        self.run_turn_controlled(prompt, cancel, emit, request, None).await
+    }
+
+    /// Only the private provider can acknowledge the live tightening. Other
+    /// mode and sandbox changes remain idle operations.
+    pub async fn run_turn_controlled(
+        &mut self, prompt: &str, cancel: &CancellationToken,
         mut emit: impl FnMut(EngineEvent),
         mut request: impl FnMut(&Value) -> Result<Option<(EngineEvent, tokio::sync::oneshot::Receiver<Value>)>, String>,
+        mut control: Option<&mut tokio::sync::mpsc::Receiver<LiveAutoRequest>>,
     ) -> Result<(), AppServerError> {
         if prompt.split_whitespace().next() == Some("/compact") {
             return Err(AppServerError::Protocol("Use the reviewed compaction operation; slash compaction cannot pass through a provider turn"));
@@ -480,6 +512,11 @@ impl AppServerDriver {
                 frame
             } else {
                 tokio::select! {
+                    biased;
+                    Some(change) = next_live_auto(&mut control) => {
+                        self.apply_live_auto(change, cancel, deadline).await?;
+                        continue;
+                    }
                     value = self.read_frame() => value?,
                     _ = cancel.cancelled() => {
                         let _ = self.send_request_bounded("turn/interrupt", json!({"threadId":thread_id,"turnId":turn_id}), None, tokio::time::Instant::now() + Duration::from_millis(200)).await;
@@ -510,8 +547,12 @@ impl AppServerDriver {
                     if let Some(item) = self.review_items.iter().find(|item| item["id"] == frame["params"]["itemId"]) {
                         frame["doxa_item"] = item.clone();
                     }
+                    if self.options.permission == CodexPermission::Auto && provider_approval(&frame["method"]) {
+                        self.decline_auto_approval(&frame, cancel, deadline).await?;
+                        continue;
+                    }
                     let pending = request(&frame).map_err(|message| AppServerError::Server((self.scrub)(&message)))?;
-                    if let Some((event, receiver)) = pending {
+                    if let Some((event, mut receiver)) = pending {
                         let request_id = event.data["id"].clone();
                         let is_peer = frame["method"] == "item/tool/call";
                         if is_peer {
@@ -519,13 +560,25 @@ impl AppServerDriver {
                             emit(EngineEvent::new("tool_call", json!({"id":frame["params"]["callId"],"name":frame["params"]["tool"],"input":input})));
                         }
                         emit(event);
-                        let answer = tokio::select! {
+                        let mut deny_after_switch = false;
+                        let answer = loop { tokio::select! {
                             biased;
-                            _ = cancel.cancelled() => Err(AppServerError::Cancelled),
-                            _ = tokio::time::sleep_until(deadline) => Err(AppServerError::TimedOut),
-                            value = receiver => value.map_err(|_| AppServerError::Server("Codex input request was closed".into())),
-                        };
+                            _ = cancel.cancelled() => break Err(AppServerError::Cancelled),
+                            _ = tokio::time::sleep_until(deadline) => break Err(AppServerError::TimedOut),
+                            Some(change) = next_live_auto(&mut control) => {
+                                if self.apply_live_auto(change, cancel, deadline).await? && provider_approval(&frame["method"]) {
+                                    deny_after_switch = true;
+                                    break Ok(json!(null));
+                                }
+                            }
+                            value = &mut receiver => break value.map_err(|_| AppServerError::Server("Codex input request was closed".into())),
+                        }};
+                        drop(receiver);
                         emit(EngineEvent::new("needs_input_resolved", json!({"id":request_id})));
+                        if deny_after_switch {
+                            self.decline_auto_approval(&frame, cancel, deadline).await?;
+                            continue;
+                        }
                         let answer = answer?;
                         if is_peer {
                             emit(EngineEvent::new("tool_result", json!({"id":frame["params"]["callId"],"is_error":answer["success"] != true})));
@@ -694,6 +747,38 @@ impl AppServerDriver {
         }
     }
 
+    async fn apply_live_auto(&mut self, change: LiveAutoRequest, cancel: &CancellationToken,
+        turn_deadline: tokio::time::Instant) -> Result<bool, AppServerError> {
+        let refusal = if change.expires <= std::time::Instant::now() {
+            Some("Codex auto request expired before application")
+        } else if !self.live_auto_supported {
+            Some("Codex mid-turn auto requires an updated protected provider; rebuild with scripts/install_codex_protected.py")
+        } else if self.options.permission != CodexPermission::OnRequest
+            || self.options.sandbox == SandboxMode::DangerFullAccess {
+            Some("This Codex permission or sandbox transition requires an idle session")
+        } else { None };
+        if let Some(reason) = refusal { let _ = change.reply.send(Err(reason)); return Ok(false); }
+        let deadline = turn_deadline.min(tokio::time::Instant::now() + Duration::from_secs(8));
+        let id = self.send_request_bounded("turn/settings/update", json!({
+            "threadId":self.thread_id(),"turnId":self.turn_id,"doxaAuto":true
+        }), Some(cancel), deadline).await?;
+        match self.wait_response(id, Some(cancel), deadline, true).await {
+            Ok(result) if result["status"] == "applied" => {
+                self.options.permission = CodexPermission::Auto;
+                let _ = change.reply.send(Ok(self.thread_id().to_owned()));
+                Ok(true)
+            }
+            Ok(_) | Err(AppServerError::Server(_)) => {
+                let _ = change.reply.send(Err("Codex provider did not apply the active auto policy"));
+                Ok(false)
+            }
+            Err(error) => {
+                let _ = change.reply.send(Err("Codex live permission update could not be verified"));
+                Err(error)
+            }
+        }
+    }
+
     fn emit_assistant_message(&mut self, text: &str, emit: &mut impl FnMut(EngineEvent)) -> Result<(), AppServerError> {
         if text.is_empty() { return Ok(()); }
         // Scrub the whole provider message before adding a display separator;
@@ -745,20 +830,21 @@ impl AppServerDriver {
     }
 
     async fn read_frame(&mut self) -> Result<Value, AppServerError> {
-        let mut line = Vec::new();
+        // A control message can interrupt this read after partial bytes have
+        // arrived. Retain them across dropped read futures.
         loop {
             let available = self.stdout.fill_buf().await?;
             if available.is_empty() { return Err(AppServerError::Protocol("app-server closed stdout")); }
             let take = available.iter().position(|byte| *byte == b'\n').map_or(available.len(), |at| at + 1);
-            if line.len().saturating_add(take) > MAX_FRAME_BYTES {
+            if self.frame_buffer.len().saturating_add(take) > MAX_FRAME_BYTES {
                 return Err(AppServerError::Protocol("app-server frame too large"));
             }
             let done = available[take - 1] == b'\n';
-            line.extend_from_slice(&available[..take]);
+            self.frame_buffer.extend_from_slice(&available[..take]);
             self.stdout.consume(take);
             if done { break; }
         }
-        serde_json::from_slice(&line).map_err(|_| AppServerError::Protocol("invalid app-server JSON frame"))
+        serde_json::from_slice(&std::mem::take(&mut self.frame_buffer)).map_err(|_| AppServerError::Protocol("invalid app-server JSON frame"))
     }
 
     async fn wait_response(&mut self, id: u64, cancel: Option<&CancellationToken>, deadline: tokio::time::Instant, queue_requests: bool) -> Result<Value, AppServerError> {
@@ -783,6 +869,17 @@ impl AppServerDriver {
                 self.pending_notifications.push_back((frame, bytes));
             }
         }
+    }
+
+    /// Auto refusals are tool results: the model can retry within its sandbox.
+    async fn decline_auto_approval(&mut self, frame: &Value, cancel: &CancellationToken,
+        deadline: tokio::time::Instant) -> Result<(), AppServerError> {
+        let result = match frame["method"].as_str() {
+            Some("item/commandExecution/requestApproval" | "item/fileChange/requestApproval") => json!({"decision":"decline"}),
+            Some("item/permissions/requestApproval") => json!({"permissions":{},"scope":"turn"}),
+            _ => return Err(AppServerError::Protocol("invalid automatic approval refusal")),
+        };
+        self.send_bounded(json!({"id":frame["id"],"result":result}), Some(cancel), deadline).await
     }
 
     /// Noninteractive sessions explicitly deny provider approval requests.

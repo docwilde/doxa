@@ -45,6 +45,9 @@ pub trait Host: Send + Sync + 'static {
     fn model_change_requires_idle(&self) -> bool { false }
     fn can_set_permission_mode(&self) -> bool { false }
     fn permission_change_requires_idle(&self) -> bool { false }
+    /// A host may support a specific live transition without supporting live
+    /// sandbox changes. The host must verify provider application before success.
+    fn can_set_permission_mode_while_running(&self, _mode: &str) -> bool { false }
     /// Called once before prompt admission. Returns true only when the host
     /// can expose these bounded, same-scope tools to its actual provider.
     fn set_peer_tool_handler(&self, _: PeerToolHandler) -> bool { false }
@@ -718,7 +721,8 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             let state = inner.state.lock().unwrap();
             state.busy || !state.prompts.is_empty() || inner.stopping.load(Ordering::Acquire)
         };
-        let refuse_permission = method == "set_permission_mode" && inner.host.permission_change_requires_idle() && {
+        let refuse_permission = method == "set_permission_mode" && inner.host.permission_change_requires_idle()
+            && !inner.host.can_set_permission_mode_while_running(params["mode"].as_str().unwrap_or("")) && {
             let state = inner.state.lock().unwrap();
             state.busy || !state.prompts.is_empty() || inner.stopping.load(Ordering::Acquire)
         };

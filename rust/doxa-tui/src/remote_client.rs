@@ -270,7 +270,7 @@ async fn session_stream(session: SessionInfo, http: Client, base: Url,
                         next=tokio::time::timeout(Duration::from_secs(45), stream.next())=>next,
                     };
                     let Some(Ok(chunk)) = next.ok().flatten() else { break };
-                    let decoded = match decoder.push(&chunk) { Ok(frames) => frames, Err(_) => { cursor=None; break } };
+                    let decoded = match decoder.push(&chunk) { Ok(frames) => frames, Err(_) => break };
                     for frame in decoded {
                         if frame["event"]["type"] == "replay_gap" { cursor=None; break; }
                         if frame["type"] != "event" { continue; }
@@ -298,6 +298,10 @@ async fn session_stream(session: SessionInfo, http: Client, base: Url,
                 }
             }
         }
+        // The hub's replay ring is volatile. A disconnect may have lost its
+        // whole buffer even if no subsequent frame exists to expose a gap.
+        // Refresh transcript and pending inputs before the next subscription.
+        cursor = None;
         let _ = frames.send(WorkerFrame::RemoteConnectivity { session_id: session.id.clone(), status: "Remote reconnecting".into() }).await;
         tokio::select! { _=cancel.changed()=>return, _=tokio::time::sleep(Duration::from_secs(2))=>{} }
     }
@@ -590,17 +594,24 @@ mod tests {
         let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         let sends = Arc::new(AtomicUsize::new(0));
         let server_sends = sends.clone();
+        let snapshots = Arc::new(AtomicUsize::new(0));
+        let server_snapshots = snapshots.clone();
         let server = tokio::spawn(async move {
             loop {
                 let Ok((socket, _)) = listener.accept().await else { break };
                 let sends = server_sends.clone();
+                let snapshots = server_snapshots.clone();
                 tokio::spawn(async move {
                     let service = service_fn(move |request: Request<hyper::body::Incoming>| {
                         let sends = sends.clone();
+                        let snapshots = snapshots.clone();
                         async move {
                         let path = request.uri().path();
                         let body = match path {
-                            "/api/sessions/host~session/transcript" => json!({"command_id":"command-1"}).to_string(),
+                            "/api/sessions/host~session/transcript" => {
+                                snapshots.fetch_add(1, Ordering::SeqCst);
+                                json!({"command_id":"command-1"}).to_string()
+                            },
                             "/api/sessions/host~session/prompt" => {
                                 sends.fetch_add(1, Ordering::SeqCst);
                                 json!({"command_id":"command-2"}).to_string()
@@ -608,7 +619,7 @@ mod tests {
                             "/api/sessions/host~session/answer" => json!({"command_id":"command-3"}).to_string(),
                             "/api/commands/command-1" => json!({"status":"accepted","result":{
                                 "ok":true,"turns":[{"prompt":"hello","text":"answer","tools":[]}],
-                                "pending_inputs":[{"id":"ask-1","kind":"permission"}],
+                                "pending_inputs":[{"id":if snapshots.load(Ordering::SeqCst)==1 {"ask-1"} else {"ask-2"},"kind":"permission"}],
                                 "pending_inputs_complete":true,"next_seq":7}}).to_string(),
                             "/api/commands/command-2" | "/api/commands/command-3" =>
                                 json!({"status":"accepted","result":{"ok":true}}).to_string(),
@@ -640,6 +651,13 @@ mod tests {
         let third = tokio::time::timeout(Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
         assert!(matches!(third, WorkerFrame::Daemon { ref frame, .. }
             if frame["seq"] == 7 && frame["session_id"] == "host~session"), "{third:?}");
+        let disconnected=tokio::time::timeout(Duration::from_secs(5),received.recv()).await.unwrap().unwrap();
+        assert!(matches!(disconnected,WorkerFrame::RemoteConnectivity{status,..} if status=="Remote reconnecting"));
+        let refreshed=tokio::time::timeout(Duration::from_secs(5),received.recv()).await.unwrap().unwrap();
+        assert!(matches!(refreshed,WorkerFrame::RemoteSnapshot{pending_inputs,pending_inputs_complete:true,..}
+            if pending_inputs[0]["id"]=="ask-2"));
+        assert_eq!(snapshots.load(Ordering::SeqCst),2);
+        assert_eq!(sends.load(Ordering::SeqCst),0);
         cancel.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
         let available = Arc::new(Mutex::new(HashSet::from(["host~session".to_owned()])));

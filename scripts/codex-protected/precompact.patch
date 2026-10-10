@@ -1377,8 +1377,23 @@ index 52bb0e3..cc9ad06 100644
  dependencies = [
   "anyhow",
   "assert_cmd",
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/turn.rs b/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
+index f938d17..cc2e731 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/turn.rs
+@@ -48,6 +48,10 @@ pub enum TurnStatus {
+ pub struct TurnSettingsUpdateParams {
+     pub thread_id: String,
+     pub turn_id: String,
++    /// Private DOXA contract: tighten this live turn to never ask for approval.
++    /// This cannot change the sandbox or be combined with other settings.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub doxa_auto: bool,
+     /// Changes the active turn's reviewer without changing future thread settings.
+     /// Already captured steps and pending approvals retain their original reviewer.
+     #[ts(optional = nullable)]
 diff --git a/codex-rs/app-server/src/request_processors/initialize_processor.rs b/codex-rs/app-server/src/request_processors/initialize_processor.rs
-index 493867c..c38fec7 100644
+index 493867c..75ac6d1 100644
 --- a/codex-rs/app-server/src/request_processors/initialize_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/initialize_processor.rs
 @@ -190,7 +190,8 @@ impl InitializeRequestProcessor {
@@ -1387,10 +1402,34 @@ index 493867c..c38fec7 100644
  
 -        let user_agent = get_codex_user_agent();
 +        // This is an explicitly identified private DOXA build, not stock Codex.
-+        let user_agent = format!("doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; {})", get_codex_user_agent());
++        let user_agent = format!("doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; {})", get_codex_user_agent());
          let response = InitializeResponse {
              user_agent,
              codex_home,
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index df3b049..6a4b700 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -224,6 +224,7 @@ impl TurnRequestProcessor {
+             Op::TurnSettings {
+                 turn_id: params.turn_id,
+                 update: TurnSettingsUpdate {
++                    doxa_auto: params.doxa_auto,
+                     approvals_reviewer: params
+                         .approvals_reviewer
+                         .map(codex_app_server_protocol::ApprovalsReviewer::to_core),
+diff --git a/codex-rs/app-server/tests/suite/v2/turn_settings_update.rs b/codex-rs/app-server/tests/suite/v2/turn_settings_update.rs
+index 1bab64b..2d3d12b 100644
+--- a/codex-rs/app-server/tests/suite/v2/turn_settings_update.rs
++++ b/codex-rs/app-server/tests/suite/v2/turn_settings_update.rs
+@@ -338,6 +338,7 @@ async fn turn_settings_update_reports_unavailable_without_starting_or_changing_a
+         .request(|request_id| ClientRequest::TurnSettingsUpdate {
+             request_id,
+             params: TurnSettingsUpdateParams {
++                doxa_auto: false,
+                 turn_id: completed_turn_id,
+                 ..update
+             },
 diff --git a/codex-rs/core/src/doxa_precompact.rs b/codex-rs/core/src/doxa_precompact.rs
 new file mode 100644
 index 0000000..ead8b47
@@ -1468,6 +1507,395 @@ index eb1fc55..1bca794 100644
  mod image_preparation;
  mod installation_id;
  pub(crate) mod mcp;
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index a4b4ba0..5dbeb70 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2805,6 +2805,9 @@ impl Session {
+         available_decisions: Option<Vec<ReviewDecision>>,
+         plugin_attribution_override: Option<PluginCommandAttribution>,
+     ) -> ReviewDecision {
++        if turn_context.doxa_switched_to_auto() {
++            return ReviewDecision::denied("Approval policy changed to never (DOXA auto). Retry the command using the normal sandbox, without requesting escalation.");
++        }
+         let _elicitation = self.services.elicitations.register();
+         //  command-level approvals use `call_id`.
+         // `approval_id` identifies subcommand callbacks and stdin writes.
+@@ -2876,7 +2879,12 @@ impl Session {
+             parsed_cmd,
+         });
+         self.send_event(turn_context, event).await;
+-        rx_approve.await.unwrap_or(ReviewDecision::Abort)
++        let decision = rx_approve.await.unwrap_or(ReviewDecision::Abort);
++        if turn_context.doxa_switched_to_auto() {
++            ReviewDecision::denied("Approval policy changed to never (DOXA auto). Retry the command using the normal sandbox, without requesting escalation.")
++        } else {
++            decision
++        }
+     }
+ 
+     #[expect(
+@@ -2891,6 +2899,9 @@ impl Session {
+         reason: Option<String>,
+         grant_root: Option<PathBuf>,
+     ) -> ReviewDecision {
++        if turn_context.doxa_switched_to_auto() {
++            return ReviewDecision::denied("Approval policy changed to never (DOXA auto). Retry file changes within the configured workspace; additional permissions are unavailable.");
++        }
+         let _elicitation = self.services.elicitations.register();
+         // Add the tx_approve callback to the map before sending the request.
+         let (tx_approve, rx_approve) = oneshot::channel();
+@@ -2918,7 +2929,12 @@ impl Session {
+             grant_root,
+         });
+         self.send_event(turn_context, event).await;
+-        rx_approve.await.unwrap_or(ReviewDecision::Abort)
++        let decision = rx_approve.await.unwrap_or(ReviewDecision::Abort);
++        if turn_context.doxa_switched_to_auto() {
++            ReviewDecision::denied("Approval policy changed to never (DOXA auto). Retry file changes within the configured workspace; additional permissions are unavailable.")
++        } else {
++            decision
++        }
+     }
+ 
+     #[expect(
+diff --git a/codex-rs/core/src/session/step_activation.rs b/codex-rs/core/src/session/step_activation.rs
+index 1086d93..64dcb83 100644
+--- a/codex-rs/core/src/session/step_activation.rs
++++ b/codex-rs/core/src/session/step_activation.rs
+@@ -18,6 +18,7 @@ use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
+ use codex_protocol::openai_models::ModelInfo;
+ use codex_protocol::protocol::TurnSettingsUpdate;
+ use codex_protocol::protocol::TurnSettingsUpdateOutcome;
++use codex_protocol::protocol::AskForApproval;
+ use std::sync::Arc;
+ 
+ /// Temporary restrictions while approvals and Guardian still read the admitted
+@@ -227,12 +228,23 @@ impl Session {
+         turn_id: &str,
+         update: TurnSettingsUpdate,
+     ) -> TurnSettingsUpdateOutcome {
++        let permission_only = update.doxa_auto
++            && update.approvals_reviewer.is_none()
++            && update.model.is_none()
++            && update.effort.is_none()
++            && update.summary.is_none()
++            && update.service_tier.is_none();
++        if update.doxa_auto && !permission_only {
++            return TurnSettingsUpdateOutcome::Rejected {
++                reason: "DOXA auto cannot be combined with other turn settings".into(),
++            };
++        }
+         let reviewer_only = update.approvals_reviewer.is_some()
+             && update.model.is_none()
+             && update.effort.is_none()
+             && update.summary.is_none()
+             && update.service_tier.is_none();
+-        if !reviewer_only && !self.features.enabled(Feature::StepModelSwitching) {
++        if !permission_only && !reviewer_only && !self.features.enabled(Feature::StepModelSwitching) {
+             return TurnSettingsUpdateOutcome::Rejected {
+                 reason: "turn settings updates require the step_model_switching feature"
+                     .to_string(),
+@@ -260,13 +272,21 @@ impl Session {
+             return TurnSettingsUpdateOutcome::TargetUnavailable;
+         };
+         let TurnSettingsUpdate {
++            doxa_auto,
+             approvals_reviewer,
+             model,
+             effort,
+             summary,
+             service_tier,
+         } = update;
++        if doxa_auto && !(current.settings.approval_policy() == AskForApproval::OnRequest
++            || (current.settings.approval_policy() == AskForApproval::Never && current.settings.doxa_auto_override)) {
++            return TurnSettingsUpdateOutcome::Rejected {
++                reason: "DOXA auto requires on-request or an existing DOXA auto override".into(),
++            };
++        }
+         let update = StepSettingsUpdate {
++            approval_policy: doxa_auto.then_some(AskForApproval::Never),
+             approvals_reviewer,
+             model,
+             effort,
+@@ -294,10 +314,11 @@ impl Session {
+         {
+             return TurnSettingsUpdateOutcome::TargetUnavailable;
+         }
+-        let destination = match prepared {
++        let mut destination = match prepared {
+             Ok(destination) => destination,
+             Err(reason) => return TurnSettingsUpdateOutcome::Rejected { reason },
+         };
++        destination.doxa_auto_override = current.settings.doxa_auto_override || permission_only;
+         // Managed requirements can change during resolution. Keep the live
+         // authorization and safety checks atomic with publication under state
+         // and active_turn; no asynchronous preparation runs under these locks.
+@@ -312,7 +333,7 @@ impl Session {
+             .and_then(|()| {
+                 // A reviewer-only patch cannot change any model-owned authority.
+                 // Managed reviewer restrictions were checked above.
+-                if reviewer_only {
++                if reviewer_only || permission_only {
+                     return Ok(());
+                 }
+                 check_legacy_turn_safety(
+diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
+index 27b9a31..84fa33a 100644
+--- a/codex-rs/core/src/session/step_activation_tests.rs
++++ b/codex-rs/core/src/session/step_activation_tests.rs
+@@ -363,6 +363,10 @@ struct ActivationFixture {
+ }
+ 
+ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
++    activation_fixture_with_model_switching(models, true).await
++}
++
++async fn activation_fixture_with_model_switching(models: Vec<ModelInfo>, model_switching: bool) -> ActivationFixture {
+     let (session, _) = make_session_and_context().await;
+     let mut session = Arc::new(session);
+     let mutable = Arc::get_mut(&mut session).expect("unshared test session");
+@@ -373,6 +377,7 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
+         Feature::FastMode,
+         Feature::TokenBudget,
+     ] {
++        if feature == Feature::StepModelSwitching && !model_switching { continue; }
+         mutable
+             .features
+             .enable(feature)
+@@ -390,6 +395,10 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
+     );
+     settings.reasoning_summary = Some(ReasoningSummary::Concise);
+     settings.service_tier = None;
++    if !model_switching {
++        settings.approval_policy = crate::config::Constrained::allow_any(AskForApproval::OnRequest);
++        config.permissions.approval_policy = settings.approval_policy.clone();
++    }
+     let prepared = session
+         .new_turn_with_default_settings("step-activation-turn".to_string(), Default::default())
+         .await;
+@@ -413,6 +422,61 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
+     }
+ }
+ 
++#[tokio::test]
++async fn doxa_auto_tightens_captured_steps_without_changing_sandbox_or_thread_defaults() {
++    let ActivationFixture { session, turn, .. } = activation_fixture_with_model_switching(activation_models(), false).await;
++    let sandbox = turn.sandbox_policy();
++    let desired = desired_step_settings(&session).await;
++    let captured = session.capture_step_context(Arc::clone(&turn), &CancellationToken::new()).await.unwrap();
++    assert_eq!(captured.approval_policy(), AskForApproval::OnRequest);
++    assert_eq!(session.apply_turn_settings(&turn.sub_id, TurnSettingsUpdate { doxa_auto: true, ..Default::default() }).await,
++        TurnSettingsUpdateOutcome::Applied);
++    assert_eq!(captured.settings.approval_policy(), AskForApproval::OnRequest);
++    assert_eq!(captured.approval_policy(), AskForApproval::Never);
++    assert_eq!(turn.sandbox_policy(), sandbox);
++    assert_eq!(desired_step_settings(&session).await, desired);
++    assert_eq!(session.apply_turn_settings(&turn.sub_id, TurnSettingsUpdate { doxa_auto: true, ..Default::default() }).await,
++        TurnSettingsUpdateOutcome::Applied);
++    session.abort_all_tasks(TurnAbortReason::Replaced).await;
++}
++
++#[tokio::test]
++async fn doxa_auto_refuses_wrong_turn_mixed_settings_and_managed_policy() {
++    let ActivationFixture { session, turn, .. } = activation_fixture_with_model_switching(activation_models(), false).await;
++    let original = turn.next_step_input.load_full();
++    assert_eq!(session.apply_turn_settings("other-turn", TurnSettingsUpdate { doxa_auto: true, ..Default::default() }).await,
++        TurnSettingsUpdateOutcome::TargetUnavailable);
++    assert!(matches!(session.apply_turn_settings(&turn.sub_id,
++        TurnSettingsUpdate { doxa_auto: true, model: Some(MODEL_B.into()), ..Default::default() }).await,
++        TurnSettingsUpdateOutcome::Rejected { .. }));
++    let mut sourced = ConfigRequirementsWithSources::default();
++    sourced.allowed_approval_policies = Some(Sourced::new(vec![AskForApproval::OnRequest], RequirementSource::Unknown));
++    {
++        let mut state = session.state.lock().await;
++        let config = Arc::make_mut(&mut state.session_configuration.original_config_do_not_use);
++        config.config_layer_stack = ConfigLayerStack::new(
++            config.config_layer_stack.all_layers_low_to_high().cloned().collect(),
++            ConfigRequirements::try_from(sourced.clone()).unwrap(), sourced.into_toml()).unwrap();
++    }
++    assert!(matches!(session.apply_turn_settings(&turn.sub_id,
++        TurnSettingsUpdate { doxa_auto: true, ..Default::default() }).await, TurnSettingsUpdateOutcome::Rejected { .. }));
++    assert!(Arc::ptr_eq(&turn.next_step_input.load_full(), &original));
++    session.abort_all_tasks(TurnAbortReason::Replaced).await;
++}
++
++#[tokio::test]
++async fn doxa_auto_refuses_an_approval_answer_captured_before_the_switch() {
++    let ActivationFixture { session, turn, .. } = activation_fixture_with_model_switching(activation_models(), false).await;
++    let approval = session.request_patch_approval(&turn, "pending-patch".into(), Default::default(), None, None);
++    tokio::pin!(approval);
++    assert!(futures::poll!(&mut approval).is_pending());
++    assert_eq!(session.apply_turn_settings(&turn.sub_id, TurnSettingsUpdate { doxa_auto: true, ..Default::default() }).await,
++        TurnSettingsUpdateOutcome::Applied);
++    session.notify_approval("pending-patch", codex_protocol::protocol::ReviewDecision::Approved).await;
++    assert!(matches!(approval.await, codex_protocol::protocol::ReviewDecision::Denied { .. }));
++    session.abort_all_tasks(TurnAbortReason::Replaced).await;
++}
++
+ fn step_values(
+     step: &StepContext,
+ ) -> (
+diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
+index 080243f..bd412ca 100644
+--- a/codex-rs/core/src/session/step_context.rs
++++ b/codex-rs/core/src/session/step_context.rs
+@@ -46,6 +46,15 @@ pub(crate) struct StepContext {
+ }
+ 
+ impl StepContext {
++    /// DOXA may tighten the policy after this step was captured. All other
++    /// step settings and the admitted sandbox remain unchanged.
++    pub(crate) fn approval_policy(&self) -> codex_protocol::protocol::AskForApproval {
++        if self.turn.doxa_switched_to_auto() {
++            self.turn.doxa_approval_policy()
++        } else {
++            self.settings.approval_policy()
++        }
++    }
+     /// Persist the summary captured for this request, even after a live settings update.
+     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
+         let mut item = self.turn.to_turn_context_item();
+diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
+index c915037..c49a021 100644
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -39,6 +39,8 @@ pub(crate) struct StepSettings {
+ /// snapshot does not change steps or actions that have already captured it.
+ #[derive(Clone, Debug)]
+ pub(crate) struct ResolvedStepSettings {
++    /// Private DOXA tightening, retained when later sparse settings are resolved.
++    pub(crate) doxa_auto_override: bool,
+     /// Inputs for later sparse patches. Unset defaults and unsupported requested
+     /// tiers must not be reconstructed from the effective values below.
+     selected: Arc<StepSettings>,
+@@ -68,6 +70,7 @@ impl ResolvedStepSettings {
+             &model_info,
+         );
+         Self {
++            doxa_auto_override: false,
+             selected,
+             model_info,
+             reasoning_summary,
+@@ -141,6 +144,7 @@ impl ResolvedStepSettings {
+             Arc::new(selected.resolve_model_info(models_manager, overrides).await)
+         };
+         let mut next = Self::new(Arc::new(selected), model_info, fast_mode_enabled);
++        next.doxa_auto_override = self.doxa_auto_override;
+         next.mcp_approvals_reviewer_override = update
+             .approvals_reviewer
+             .or(self.mcp_approvals_reviewer_override);
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index 165be62..1d47614 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -490,11 +490,18 @@ impl TurnContext {
+     }
+ 
+     /// Legacy: returns the frozen initial-turn approval policy.
+-    /// Step-scoped consumers should use their captured `StepContext::settings`.
+     pub(crate) fn approval_policy(&self) -> AskForApproval {
+         self.config.permissions.approval_policy.value()
+     }
+ 
++    pub(crate) fn doxa_switched_to_auto(&self) -> bool {
++        self.next_step_input.load().settings.doxa_auto_override
++    }
++
++    pub(crate) fn doxa_approval_policy(&self) -> AskForApproval {
++        if self.doxa_switched_to_auto() { AskForApproval::Never } else { self.approval_policy() }
++    }
++
+     /// Legacy: returns the frozen initial-turn prefix-rule policy.
+     /// Step-scoped consumers should use their captured `StepContext::settings`.
+     pub(crate) fn allow_prefix_rules(&self) -> AllowPrefixRules {
+diff --git a/codex-rs/core/src/tools/approvals.rs b/codex-rs/core/src/tools/approvals.rs
+index 6cad5a9..e830d01 100644
+--- a/codex-rs/core/src/tools/approvals.rs
++++ b/codex-rs/core/src/tools/approvals.rs
+@@ -476,6 +476,20 @@ impl Session {
+         action: ApprovalAction,
+         ctx: ApprovalContext,
+     ) -> Result<ReviewDecision, ToolError> {
++        // Mandatory review of ordinary sandboxed work stays authoritative.
++        // A live auto switch cannot turn an earlier escalation approval into a grant.
++        let sandbox_review = ctx.strict_auto_review && ctx.retry_reason.is_none()
++            && ctx.approval_reason.is_none() && match &action {
++                ApprovalAction::ExecCommand { sandbox_permissions, additional_permissions, .. }
++                | ApprovalAction::WriteStdin { sandbox_permissions, additional_permissions, .. } =>
++                    !sandbox_permissions.requests_sandbox_override() && additional_permissions.is_none(),
++                ApprovalAction::ApplyPatch { .. } => true,
++                _ => false,
++            };
++        let live_auto_denial = || ToolError::Rejected("Approval policy changed to never (DOXA auto). Retry within the configured sandbox; escalation is unavailable.".into());
++        if ctx.review_context.turn().doxa_switched_to_auto() && !sandbox_review {
++            return Err(live_auto_denial());
++        }
+         // Stdin that exceeds current permissions needs a fresh sandbox approval.
+         // Strict review of ordinary input follows the same routing as ordinary exec.
+         let policy = ctx.review_context.turn().approval_policy();
+@@ -518,6 +532,9 @@ impl Session {
+             },
+             None => self.request_reviewer_approval(action, &ctx).await,
+         };
++        if ctx.review_context.turn().doxa_switched_to_auto() && !sandbox_review {
++            return Err(live_auto_denial());
++        }
+         // Network approvals record their final telemetry after validation and persistence.
+         if !is_network_approval {
+             record_resolution(&ctx, &resolution);
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+index bdf6877..f07b5f9 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+@@ -339,7 +339,7 @@ impl ExecCommandHandler {
+ 
+         // Sticky turn permissions have already been approved, so they should
+         // continue through the normal exec approval flow for the command.
+-        let approval_policy = context.step_context.settings.approval_policy();
++        let approval_policy = context.step_context.approval_policy();
+         if effective_additional_permissions
+             .sandbox_permissions
+             .requests_sandbox_override()
+diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
+index f17241a..b46db3c 100644
+--- a/codex-rs/core/src/tools/orchestrator.rs
++++ b/codex-rs/core/src/tools/orchestrator.rs
+@@ -129,7 +129,7 @@ impl ToolOrchestrator {
+         T: ToolRuntime<Rq, Out>,
+     {
+         let turn_ctx = tool_ctx.step_context.turn.as_ref();
+-        let approval_policy = tool_ctx.step_context.settings.approval_policy();
++        let approval_policy = tool_ctx.step_context.approval_policy();
+         let otel = turn_ctx.session_telemetry.clone();
+         let otel_tn = flat_tool_name(&tool_ctx.tool_name).into_owned();
+         let otel_ci = &tool_ctx.call_id;
+diff --git a/codex-rs/core/src/tools/runtimes/unified_exec.rs b/codex-rs/core/src/tools/runtimes/unified_exec.rs
+index 354e932..0ab6896 100644
+--- a/codex-rs/core/src/tools/runtimes/unified_exec.rs
++++ b/codex-rs/core/src/tools/runtimes/unified_exec.rs
+@@ -364,7 +364,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+                         ToolError::Codex(CodexErr::Io(io::Error::other(err.to_string())))
+                     })?;
+                 if routes_approval_policy_to_guardian(
+-                    ctx.step_context.settings.approval_policy(),
++                    ctx.step_context.approval_policy(),
+                     ctx.step_context.settings.approvals_reviewer(),
+                 ) && network
+                     .remote_policy_decider(launch.proxy.allow_local_binding)
+diff --git a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
+index 1849e8c..c9efaef 100644
+--- a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
++++ b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
+@@ -152,7 +152,7 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
+         environment_id: req.turn_environment.selection.environment_id.clone(),
+         source: GuardianCommandSource::UnifiedExec,
+         tool_name: ctx.tool_name.clone(),
+-        approval_policy: ctx.step_context.settings.approval_policy(),
++        approval_policy: ctx.step_context.approval_policy(),
+         permission_profile: exec_request.permission_profile.clone(),
+         sandbox_permissions: req.sandbox_permissions,
+         approval_sandbox_permissions: approval_sandbox_permissions(
 diff --git a/codex-rs/hooks/src/events/compact.rs b/codex-rs/hooks/src/events/compact.rs
 index 82bd6c6..31ce56d 100644
 --- a/codex-rs/hooks/src/events/compact.rs
@@ -1525,3 +1953,16 @@ index 82bd6c6..31ce56d 100644
      fn pre_request() -> super::PreCompactRequest {
          super::PreCompactRequest {
              session_id: ThreadId::from_string("00000000-0000-4000-8000-000000000001")
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 787d3e4..71b1218 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -493,6 +493,8 @@ pub struct ConversationSpeechParams {
+ /// task kind. Child sessions and consumers of frozen initial settings are unchanged.
+ #[derive(Debug, Clone, Default, PartialEq, Eq)]
+ pub struct TurnSettingsUpdate {
++    /// Private DOXA live transition to Never; sandbox settings stay unchanged.
++    pub doxa_auto: bool,
+     /// Changes the reviewer for subsequent approval requests, not pending reviews.
+     pub approvals_reviewer: Option<ApprovalsReviewer>,
+     pub model: Option<String>,

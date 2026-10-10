@@ -656,7 +656,21 @@ fn worktrees(args: &[String]) -> io::Result<()> {
 
 fn fleet(args: &[String]) -> io::Result<()> {
     if args.iter().any(|arg|matches!(arg.as_str(),"--help"|"-h")) {print!("{}",fleet_control::HELP);return Ok(());}
+    if let [command, path, flag, model, gate_flag, gate_path] = args {
+        if command == "evaluate-messages" && flag == "--message-judge" && gate_flag == "--gate" {
+            let model = doxa_fleet::judge::Model::parse(model)?;
+            let report = doxa_fleet::message_gate::evaluate_file(Path::new(path), &model, Path::new(gate_path))?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return if report.passed { Ok(()) } else { Err(invalid("recorded message holdout did not meet the declared gate")) };
+        }
+    }
     if let [command, path, flag, model] = args {
+        if command == "evaluate-development" && flag == "--message-judge" {
+            let model = doxa_fleet::judge::Model::parse(model)?;
+            let report = doxa_fleet::message_eval::evaluate_development_file(Path::new(path), &model)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
         if command == "evaluate-messages" && flag == "--message-judge" {
             let model = doxa_fleet::judge::Model::parse(model)?;
             let report = doxa_fleet::message_eval::evaluate_file(Path::new(path), &model)?;

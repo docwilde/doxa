@@ -5,6 +5,28 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.43 — 2026-10-10
+
+**Codex permissions**
+
+- Fix **`CodexHost`** switching from `on-request` to sandboxed `auto` during an active turn: resolve the waiting escalation and retry inside the existing sandbox on the same thread.
+- Keep questions and independent DOXA reviews interactive. Other permission and sandbox transitions require idle; install the updated daemon and private provider together.
+- Upgrade **`prepare_source`** through a separate reviewed checkout and publish an immutable provider artifact, preserving the previous cache and installation.
+
+**Code graph and fleet**
+
+- Retain eight exact answers within **`ReadOnlyQueryCache`**'s 256 KiB serialized budget, with complete source revalidation. Measured warmed p95 fell to 127.6 ms; the 100 ms target remains open.
+- Add **`message_gate::Gate`** for declared development identity, threshold, human-labeled holdout coverage, error rates and latency. Real-message acceptance and live fleet recovery remain open; enforcement stays disabled.
+- Fix **`SourceReader`** accepting a queued reply after its elapsed deadline when the caller was descheduled. Expired readers remain disabled.
+
+**Remote recovery**
+
+- Fix interrupted browser and native streams: reject incomplete replay, fence replacement streams, refresh authoritative host snapshots and clear stale approval controls. Failed refresh keeps controls read-only.
+
+**Verification**
+
+- Pass authenticated Claude and Codex Auto checks. Codex resolves a pending command, runs two later commands without approval and blocks an outside write on the same provider thread.
+
 ## 2.0.0-beta.42 — 2026-10-10
 
 **Claude permissions**

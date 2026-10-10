@@ -1,11 +1,19 @@
 const el = id => document.getElementById(id);
 let source = null, active = null, generation = 0, currentText = null;
+let activeIncarnation = null, sessionReady = false, eventCursor = null;
 let olderCursor = null, olderLoading = false;
 const pending = new Map();
 const pendingPrompts = new Map();
 let currentQuestion = null;
 let backgroundAlerts = false;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+function invalidateControls() {
+  sessionReady = false;
+  pending.clear(); currentQuestion = null;
+  el('question').replaceChildren(); el('question').hidden = true;
+  el('prompt').querySelector('button').disabled = true;
+}
+invalidateControls();
 async function confirmed(response) {
   const value = await response.json();
   if (!response.ok) throw new Error(value.error || 'Operation refused');
@@ -117,7 +125,8 @@ async function loadSessions() {
     const sessions = (await response.json()).sessions;
     if (sessions.some(session => session.id === active && session.encrypted)) {
       source?.close(); source = null; active = null;
-      el('turns').replaceChildren(); el('question').hidden = true;
+      generation++; invalidateControls();
+      el('turns').replaceChildren();
     }
     const nav = el('sessions'); nav.replaceChildren();
     for (const session of sessions) {
@@ -132,34 +141,41 @@ async function loadSessions() {
     }
     if (!sessions.length) {
       source?.close(); source = null; active = null;
+      generation++; invalidateControls();
       el('status').textContent = 'No live sessions';
     } else if (!sessions.some(session => session.id === active)) {
       const usable = sessions.find(session => !session.encrypted);
       if (usable) await selectSession(usable);
       else el('status').textContent = 'Encrypted sessions require a separately trusted native client';
+    } else if (sessionReady && sessions.find(session => session.id === active)?.incarnation !== activeIncarnation) {
+      await selectSession(sessions.find(session => session.id === active), true);
     }
   } catch (error) { el('status').textContent = error.message || 'Disconnected'; }
 }
 function showNextQuestion() {
+  if (!sessionReady) return;
   if (currentQuestion) return;
   const next = [...pending.values()].find(item => !item.answered);
   const box = el('question'); box.replaceChildren();
   if (!next) { box.hidden = true; return; }
   currentQuestion = next.id; box.hidden = false;
   const sessionId = active;
+  const mine = generation;
   const title = document.createElement('strong');
   title.textContent = next.title || next.input_summary || next.tool_name || 'Input needed';
   box.append(title);
   const answer = async value => {
+    if (!sessionReady || mine !== generation || active !== sessionId || pending.get(next.id) !== next) return;
     try {
       const encoded = JSON.stringify(value);
       const requestId = next.uncertain?.encoded === encoded ? next.uncertain.id : crypto.randomUUID();
       next.uncertain = {encoded, id: requestId};
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/answer`, {
-        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:next.id,answer:value,request_id:requestId})
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:next.id,answer:value,
+          request_id:requestId,incarnation:activeIncarnation,reviewed_request:next.reviewed})
       });
       await confirmed(response);
-      if (active !== sessionId) return;
+      if (mine !== generation || active !== sessionId) return;
       next.answered = true; currentQuestion = null; showNextQuestion();
     } catch (error) { line('error',error.message); }
   };
@@ -192,7 +208,10 @@ function showNextQuestion() {
 function handle(frame) {
   if (frame.type === 'hello') {
     el('status').textContent = `${frame.engine || 'session'} · ${frame.model || 'default'}`;
-    for (const item of frame.pending_inputs || []) pending.set(item.id,{...item,answered:false});
+    if (Array.isArray(frame.pending_inputs)) {
+      pending.clear(); currentQuestion = null;
+      for (const item of frame.pending_inputs) pending.set(item.id,{...item,reviewed:item,answered:false});
+    }
     showNextQuestion(); return;
   }
   if (frame.type !== 'event') return;
@@ -204,7 +223,10 @@ function handle(frame) {
     case 'turn_done': case 'turn_refused':
       currentText = null; if (data.error || data.reason) line('error',data.error || data.reason);
       announce('DOXA turn finished'); break;
-    case 'needs_input': pending.set(data.id,{...data,answered:false}); showNextQuestion(); announce('DOXA needs input'); break;
+    case 'needs_input':
+      pending.set(data.id,{...data,reviewed:data,answered:false});
+      if (currentQuestion === data.id) currentQuestion = null;
+      showNextQuestion(); announce('DOXA needs input'); break;
     case 'needs_input_resolved': pending.delete(data.id); if (currentQuestion === data.id) currentQuestion = null; showNextQuestion(); break;
     case 'tool_call': line('tool',data.name || data.tool_name || 'Tool'); break;
     case 'tool_result': if (data.result) line('tool',data.result); break;
@@ -244,12 +266,32 @@ async function loadOlder() {
     }
   }
 }
-async function selectSession(session) {
+async function refreshSession(session, mine) {
+  if (mine !== generation) return;
+  const refresh = ++generation;
+  source?.close(); source = null;
+  invalidateControls();
+  el('status').textContent = `${session.title} · refreshing transcript`;
+  try {
+    await pause(1500);
+    if (refresh !== generation) return;
+    const response = await fetch('/api/sessions', {cache:'no-store'});
+    if (!response.ok) throw new Error('Session inventory unavailable');
+    const current = (await response.json()).sessions.find(item => item.id === session.id && !item.encrypted);
+    if (refresh !== generation) return;
+    if (!current) throw new Error('Session is no longer available');
+    await selectSession(current, true);
+  } catch (error) {
+    if (refresh === generation) el('status').textContent = `${error.message}; select the session to retry`;
+  }
+}
+async function selectSession(session, keepDraft = false) {
   const mine = ++generation;
   source?.close(); source = null; active = session.id; currentText = null;
+  activeIncarnation = session.incarnation; eventCursor = null;
+  invalidateControls();
   olderCursor = null; olderLoading = false;
-  el('prompt-text').value = '';
-  pending.clear(); currentQuestion = null;
+  if (!keepDraft) el('prompt-text').value = '';
   el('turns').replaceChildren(); el('older').hidden = true;
   el('older').title = ''; el('question').hidden = true;
   for (const button of el('sessions').children)
@@ -262,7 +304,19 @@ async function selectSession(session) {
     });
     if (!response.ok) throw new Error('Transcript unavailable');
     const history = await confirmed(response); if (mine !== generation) return;
-    for (const item of history.pending_inputs || []) pending.set(item.id,{...item,answered:false});
+    if (history.ok === false || history.pending_inputs_complete !== true || !Array.isArray(history.pending_inputs)
+        || !Number.isSafeInteger(history.next_seq) || history.next_seq < 0
+        || !activeIncarnation || history.incarnation !== activeIncarnation)
+      throw new Error('Complete current session snapshot required');
+    const inventory = await fetch('/api/sessions', {cache:'no-store'});
+    if (!inventory.ok) throw new Error('Session inventory unavailable');
+    const current = (await inventory.json()).sessions.find(item => item.id === session.id);
+    if (mine !== generation) return;
+    if (!current || current.encrypted || current.incarnation !== activeIncarnation)
+      throw new Error('Session changed while loading transcript');
+    sessionReady = true;
+    el('prompt').querySelector('button').disabled = false;
+    for (const item of history.pending_inputs) pending.set(item.id,{...item,reviewed:item,answered:false});
     showNextQuestion();
     for (const turn of history.turns || [])
       for (const entry of turnBlocks(turn)) el('turns').append(entry);
@@ -270,29 +324,54 @@ async function selectSession(session) {
     olderCursor = history.has_more && Number.isSafeInteger(history.before) ? history.before : null;
     el('older').hidden = olderCursor === null;
     cursor = history.next_seq;
-  } catch (error) { if (mine !== generation) return; line('error',error.message); }
+  } catch (error) {
+    if (mine !== generation) return;
+    invalidateControls(); line('error',error.message);
+    el('status').textContent = `${session.title} · snapshot unavailable; select the session to retry`;
+    return;
+  }
   if (mine !== generation) return;
   const query = Number.isSafeInteger(cursor) ? `?cursor=${cursor}` : '';
   source = new EventSource(`/api/sessions/${encodeURIComponent(session.id)}/events${query}`);
-  source.onmessage = message => { if (mine === generation) { try { handle(JSON.parse(message.data)); } catch {} } };
-  source.onerror = () => { if (mine === generation) el('status').textContent = `${session.title} · reconnecting`; };
+  eventCursor = cursor;
+  source.onmessage = message => {
+    if (mine !== generation || !sessionReady) return;
+    try {
+      const frame = JSON.parse(message.data);
+      if (frame.type === 'hello' && frame.incarnation !== activeIncarnation)
+        return void refreshSession(session, mine);
+      if (frame.type === 'hello' && frame.pending_inputs !== undefined
+          && (!Array.isArray(frame.pending_inputs) || frame.pending_inputs_complete !== true))
+        return void refreshSession(session, mine);
+      if (frame.type === 'event') {
+        if (frame.event?.type === 'replay_gap' || !Number.isSafeInteger(frame.seq) || frame.seq < 0 || frame.seq === Number.MAX_SAFE_INTEGER)
+          return void refreshSession(session, mine);
+        if (frame.seq < eventCursor) return;
+        if (frame.seq !== eventCursor) return void refreshSession(session, mine);
+        eventCursor = frame.seq + 1;
+      }
+      handle(frame);
+    } catch { void refreshSession(session, mine); }
+  };
+  source.onerror = () => { void refreshSession(session, mine); };
 }
 el('older').onclick = loadOlder;
 el('prompt').onsubmit = async event => {
   event.preventDefault();
   const field = el('prompt-text'), text = field.value.trim();
-  if (!text || !active) return;
+  if (!text || !active || !sessionReady) return;
   const sessionId = active;
+  const mine = generation;
   const previous = pendingPrompts.get(sessionId);
   const requestId = previous?.text === text ? previous.id : crypto.randomUUID();
   pendingPrompts.set(sessionId,{text,id:requestId});
   try {
     const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/prompt`,{
-      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,request_id:requestId})
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,request_id:requestId,incarnation:activeIncarnation})
     });
     await confirmed(response);
     pendingPrompts.delete(sessionId);
-    if (active === sessionId) field.value = '';
+    if (mine === generation && active === sessionId) field.value = '';
   } catch (error) { line('error',error.message); }
 };
 loadSessions(); setInterval(loadSessions,30000);
