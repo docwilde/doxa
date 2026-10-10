@@ -57,9 +57,13 @@ calls. A durable restart with an unsettled reservation cannot silently replay
 it. `Ledger::held_usd_micros()` combines the cumulative reservation and actual
 estimate without charging the same settled cost twice.
 
-Low confidence or service/schema failure returns the configured eligible
-fallback. This grants no wider authority. Cancellation returns `cancelled` and
-the host must stop, never execute the fallback. In production, the endpoint is
+Low confidence or service/schema failure proposes the configured eligible
+fallback. The host executes it only when the router made no HTTP call or has
+verified usage and known accounting, and worker eligibility and aggregate
+budget still permit admission. An attempted HTTP call without verified usage
+pauses worker execution for reconciliation; an outage cannot silently spend a
+worker fallback turn. The proposal grants no wider authority. Cancellation
+returns `cancelled` and the host must stop, never execute the fallback. In production, the endpoint is
 fixed HTTPS with redirects disabled, bounded response bytes and a deadline.
 The `test-transport` feature exposes loopback-only HTTP for deterministic tests.
 
