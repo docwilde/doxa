@@ -17,6 +17,7 @@ the stable 2.0 release has not been cut.
 
 - Retain eight exact answers within **`ReadOnlyQueryCache`**'s 256 KiB serialized budget, with complete source revalidation. Measured warmed p95 fell to 127.6 ms; the 100 ms target remains open.
 - Add **`message_gate::Gate`** for declared development identity, threshold, human-labeled holdout coverage, error rates and latency. Real-message acceptance and live fleet recovery remain open; enforcement stays disabled.
+- Fix **`SourceReader`** accepting a queued reply after its elapsed deadline when the caller was descheduled. Expired readers remain disabled.
 
 **Remote recovery**
 

@@ -449,15 +449,19 @@ impl SourceReader {
     fn read_request(&mut self, root: &Path, relative: &str, max_bytes: u64,
         deadline: Duration, pause: Option<Duration>) -> Result<RawBytes, String> {
         if self.disabled { return Err("source reader disabled after a failed or timed-out read".into()); }
+        let started = Instant::now();
         let (reply, received) = mpsc::channel();
         let request = SourceReadRequest { root: root.to_path_buf(), relative: relative.into(), max_bytes, reply, pause };
         if self.requests.try_send(request).is_err() {
             self.disabled = true;
             return Err("source reader unavailable; subsequent source reads disabled".into());
         }
-        match received.recv_timeout(deadline) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+        // recv_timeout accepts an already queued reply even if the caller was
+        // descheduled past its budget. Count dispatch time and reject a late
+        // reply before returning source bytes, independently of channel timing.
+        match received.recv_timeout(deadline.saturating_sub(started.elapsed())) {
+            Ok(result) if started.elapsed() < deadline => result,
+            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.disabled = true;
                 Err("source open/read exceeded two-second deadline; subsequent source reads disabled".into())
             }
