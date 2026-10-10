@@ -46,6 +46,7 @@ jobs:
           cargo test --locked -p doxa-daemon --features local-test-server \
             --test codex_legacy_protection \
             --test lore_review_policy \
+            --test router_host \
             --test vendor_compaction \
             --test vendor_streaming
           cargo test --locked -p doxa-daemon --features local-test-server --test process
