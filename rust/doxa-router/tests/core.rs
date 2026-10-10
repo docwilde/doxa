@@ -74,6 +74,7 @@ fn malformed_zero_unknown_duplicate_and_private_config_inputs_are_refused() {
     let value=serde_json::to_value(&cfg).unwrap();
     for (pointer,new) in [("/jev_model",json!("jev-latest")),("/candidates/0/input_usd_micros_per_million",json!(0)),
         ("/candidates/0/context_tokens",json!(0)),("/candidates/0/id",json!("deliberate")),
+        ("/candidates/0/id",json!("auto")),
         ("/confidence_threshold",json!(null)),("/max_calls",json!(0)),("/deadline_ms",json!(12001)),("/candidates/0/description",json!(""))] {
         let mut bad=value.clone();*bad.pointer_mut(pointer).unwrap()=new;
         assert!(serde_json::from_value::<Config>(bad).and_then(|cfg|cfg.validate().map_err(serde::de::Error::custom)).is_err(),"{pointer}");

@@ -170,7 +170,7 @@ impl Config {
         }
         let mut ids = BTreeSet::new();
         for row in &self.candidates {
-            if !identifier(&row.id) || !ids.insert(&row.id) || !bounded(&row.model, 128)
+            if !identifier(&row.id) || row.id == "auto" || !ids.insert(&row.id) || !bounded(&row.model, 128)
                 || !matches!(row.effort.as_str(), "none" | "low" | "medium" | "high" | "xhigh" | "max")
                 || !bounded(&row.description, 1200) || !(1..=2_000_000).contains(&row.context_tokens)
                 || row.max_output_tokens == 0 || row.max_output_tokens > row.context_tokens
