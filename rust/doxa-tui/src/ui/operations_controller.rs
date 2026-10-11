@@ -1148,6 +1148,9 @@ impl App {
             if telemetry.is_some_and(|value|value.tracked_cost_only) {
                 lines.push("CLI account charges unknown and excluded; total session spend unknown.".into());
             }
+            if telemetry.is_some_and(|value| value.external_mcp_cost_unknown) {
+                lines.push("External MCP charges unknown and outside model allowance; total spend unknown.".into());
+            }
             if let Some(quota) = telemetry.and_then(|value| value.quota.as_deref()) {
                 lines.push(format!("quota    {}", safe_label(quota)));
             }

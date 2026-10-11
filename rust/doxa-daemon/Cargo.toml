@@ -6,6 +6,7 @@ publish = false
 license = "AGPL-3.0-only"
 
 [dependencies]
+doxa-mcp = { path = "../doxa-mcp" }
 doxa-router = { path = "../doxa-router" }
 doxa-fleet = { path = "../doxa-fleet" }
 doxa-isolation = { path = "../doxa-isolation" }

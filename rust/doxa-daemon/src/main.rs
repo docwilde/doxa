@@ -10,6 +10,7 @@ mod remote_bridge;
 mod session_title;
 mod vendor_host;
 mod vendor_tools;
+mod vendor_mcp;
 mod router_host;
 mod router_cli;
 mod isolation_host;

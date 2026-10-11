@@ -25,7 +25,7 @@ Provider tool features depend on the installed CLI, model, and account. `/model`
 
 ## Review and accounting
 
-Codex `on-request` reviews protected commands, file changes, and permission profiles inline. `auto` retains its sandbox; `full-access` removes that sandbox. DOXA peer and LORE tools keep their own human review in every mode. DeepSeek and GLM have no provider permission mode; their peer and LORE calls are individually reviewed. Optional vendor workspace reads are off by default.
+Codex `on-request` reviews protected commands, file changes, and permission profiles inline. `auto` retains its sandbox; `full-access` removes that sandbox. DOXA peer and LORE tools keep their own human review in every mode. DeepSeek and GLM have no provider permission mode; their peer and LORE calls are individually reviewed. Optional vendor workspace reads are off by default. Explicit external MCP tools are available to API workers, with mandatory one-call review, server-qualified names and scrubbed bounded results; native CLI workers retain their own MCP ownership. See [external API MCP tools](vendor-mcp.md). External MCP charges are unknown and outside the model allowance.
 
 Router Auto is a target-selection choice, separate from permission mode. It does
 not grant permissions. API workers keep their narrower tool surface; native

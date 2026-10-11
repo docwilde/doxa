@@ -7,6 +7,13 @@ effective target, provider, model and effort for each turn. API targets retain
 their narrower tools; CLI targets retain their native command/file permissions
 and DOXA reviews. Automatic routing does not approve tools.
 
+Explicit [external MCP tools](vendor-mcp.md) are inherited by API turns only;
+Claude/Codex targets retain native MCP ownership. Every external MCP call
+requires a one-call review, including with native permission Auto. External
+server charges are unknown and excluded from the tracked Jev/API allowance;
+the cost chip shows `MCP ?`. Managed compaction has no tools and does not
+connect or list MCP servers.
+
 Candidate descriptions express the operator's routing policy. They are not
 measured quality claims. Jev Choice confidence describes its returned choice
 distribution; it is not a probability that the worker will complete the task.

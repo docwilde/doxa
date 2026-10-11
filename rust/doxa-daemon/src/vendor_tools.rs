@@ -145,7 +145,7 @@ impl PeerDesk {
         let generation = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| ())?.as_nanos();
         let id = format!("vendor-peer-{}-{generation}-{}", std::process::id(), self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        let request = json!({"id":id,"kind":"permission","title":if tool.starts_with("lore_") { "Approve this LORE tool once?" } else { "Approve this peer tool once?" },
+        let request = json!({"id":id,"kind":"permission","title":if tool.starts_with("lore_") { "Approve this LORE tool once?" } else if tool.starts_with("mcp_ext_") { "Approve this external MCP tool once?" } else { "Approve this peer tool once?" },
             "tool_name":tool,"input_summary":summary,"require_full_review":true});
         *pending = Some(PeerPending { id, sender });
         Ok((request, receiver))
@@ -180,6 +180,7 @@ pub struct NativeVendorGate<'a> {
     workspace: Option<WorkspaceReadGate<'a>>,
     peer: Option<doxa_runtime::PeerToolHandler>,
     agent: Option<(Vec<Value>, doxa_runtime::PeerToolHandler)>,
+    mcp: Option<(Vec<crate::vendor_mcp::Binding>, Vec<Value>, std::sync::Arc<crate::vendor_mcp::Service>, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     desk: std::sync::Arc<PeerDesk>,
     scrub: &'a (dyn Fn(&str) -> Result<String, ()> + Sync),
     emit: &'a dyn Fn(Value),
@@ -189,10 +190,87 @@ impl<'a> NativeVendorGate<'a> {
     pub fn new(root: &'a Path, workspace: bool, peer: Option<doxa_runtime::PeerToolHandler>,
         desk: std::sync::Arc<PeerDesk>, scrub: &'a (dyn Fn(&str) -> Result<String, ()> + Sync),
         emit: &'a dyn Fn(Value), events: std::sync::Arc<std::sync::Mutex<Vec<Value>>>) -> Self {
-        Self { workspace:workspace.then(|| WorkspaceReadGate::new(root, scrub)), peer, agent:None, desk, scrub, emit, events }
+        Self { workspace:workspace.then(|| WorkspaceReadGate::new(root, scrub)), peer, agent:None, mcp:None, desk, scrub, emit, events }
     }
     pub fn with_agent(mut self, definitions: Vec<Value>, handler: doxa_runtime::PeerToolHandler) -> Self {
         self.agent = Some((definitions, handler)); self
+    }
+    pub(super) fn with_mcp(mut self, bindings: Vec<crate::vendor_mcp::Binding>, definitions: Vec<Value>,
+        service: std::sync::Arc<crate::vendor_mcp::Service>, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.mcp = Some((bindings, definitions, service, cancel)); self
+    }
+    fn execute_mcp<'b>(&'b mut self, call: &'b ToolCall, binding: crate::vendor_mcp::Binding,
+        service: std::sync::Arc<crate::vendor_mcp::Service>, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> BoxFuture<'b, Result<Value, ()>> {
+        let started = (|| {
+            let call_id = (self.scrub)(&call.id)?;
+            if call_id.len() > 256 { return Err(()); }
+            let arguments: Value = serde_json::from_str(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string())?).map_err(|_| ())?;
+            let review = json!({"server_id":binding.server_id,"tool_name":binding.tool_name,"arguments":arguments,
+                "boundary":"External MCP server on trusted host; tool arguments may leave this host; external charges are outside model allowance"});
+            let (mut request, reply) = self.desk.begin(&call.name, &review)?;
+            request["mcp_server_id"] = json!(binding.server_id);
+            request["mcp_tool_name"] = json!(binding.tool_name);
+            let guard = McpReviewGuard { resolve:ResolvePeer { desk:self.desk.clone(), id:request["id"].clone(), events:self.events.clone() },
+                call_id:call_id.clone(), tool_name:call.name.clone(), server:binding.server_id.clone(), original_tool:binding.tool_name.clone(),
+                submitted:false, completed:false, service:service.clone(), cancel:cancel.clone() };
+            (self.emit)(json!({"type":"tool_call","data":{"id":call_id,"name":call.name,"input":arguments,
+                "mcp_server_id":binding.server_id,"mcp_tool_name":binding.tool_name}}));
+            (self.emit)(json!({"type":"needs_input","data":request}));
+            Ok((arguments, reply, guard, call_id))
+        })();
+        let scrub = self.scrub; let events = self.events.clone(); let tool_name = call.name.clone();
+        Box::pin(async move {
+            let (arguments, reply, mut guard, call_id) = started?;
+            let allowed = reply.await.map_err(|_| ())?;
+            let completion_service=service.clone();
+            let result = if allowed {
+                guard.submitted = true;
+                match tokio::task::spawn_blocking(move || service.call(binding, arguments, cancel)).await.map_err(|_| ())? {
+                    Ok(value) => value,
+                    Err(error) => error.result(),
+                }
+            } else { json!({"is_error":true,"error":"MCP permission denied; arguments withheld","attempted":false}) };
+            let text = scrub(&result.to_string())?;
+            if text.len() > crate::vendor_mcp::MAX_RESULT_BYTES { return Err(()); }
+            let result: Value = serde_json::from_str(&text).map_err(|_| ())?;
+            if allowed {tokio::task::spawn_blocking(move||completion_service.complete()).await.map_err(|_|())?.map_err(|_|())?;}
+            let failed = !allowed || result["isError"] == true || result["is_error"] == true || result["error"].is_string();
+            if let Ok(mut events) = events.lock() {
+                events.push(json!({"type":"tool_result","data":{"id":call_id,"name":tool_name,
+                    "mcp_server_id":guard.server,"mcp_tool_name":guard.original_tool,"external_charge_usd":null,
+                    "result_summary":text.chars().take(1000).collect::<String>(),"is_error":failed}}));
+                let mut start = 0;
+                while start < text.len() {
+                    let mut end = (start + 8192).min(text.len()); while !text.is_char_boundary(end) { end -= 1; }
+                    if end == start { break; }
+                    events.push(json!({"type":"tool_result_detail","data":{"id":call_id,"text":&text[start..end]}})); start = end;
+                }
+            }
+            guard.completed = true;
+            Ok(result)
+        })
+    }
+}
+struct McpReviewGuard {
+    resolve: ResolvePeer, call_id: String, tool_name: String, server: String, original_tool: String,
+    submitted: bool, completed: bool,
+    service: std::sync::Arc<crate::vendor_mcp::Service>, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl Drop for McpReviewGuard {
+    fn drop(&mut self) {
+        if self.completed { return; }
+        if self.submitted {
+            self.cancel.store(true, std::sync::atomic::Ordering::Release);
+            self.service.abandon();
+        }
+        if let Ok(mut events) = self.resolve.events.lock() {
+            events.push(json!({"type":"tool_result","data":{"id":self.call_id,"name":self.tool_name,
+                "mcp_server_id":self.server,"mcp_tool_name":self.original_tool,"is_error":true,
+                "result_summary":if self.submitted {"MCP call interrupted or unsafe; outcome unknown; automatic replay withheld"}
+                    else {"MCP review cancelled; arguments withheld"},"external_charge_usd":null}}));
+        }
+        // ResolvePeer drops after this receipt, clearing the one-shot desk and
+        // publishing resolution before another approval/provider continuation.
     }
 }
 impl ToolGate for NativeVendorGate<'_> {
@@ -210,9 +288,16 @@ impl ToolGate for NativeVendorGate<'_> {
             }));
         }
         if let Some((rows, _)) = &self.agent { definitions.extend(rows.clone()); }
+        if let Some((_, rows, _, _)) = &self.mcp { definitions.extend(rows.clone()); }
         definitions
     }
     fn execute<'a>(&'a mut self, call: &'a ToolCall) -> BoxFuture<'a, Result<Value, ()>> {
+        if let Some((bindings, _, service, cancel)) = &self.mcp {
+            if let Some(binding) = bindings.iter().find(|binding| binding.provider_name == call.name) {
+                let (binding, service, cancel) = (binding.clone(), service.clone(), cancel.clone());
+                return self.execute_mcp(call, binding, service, cancel);
+            }
+        }
         if call.name == "workspace_read" {
             let result = self.workspace.as_ref().ok_or(()).and_then(|gate| gate.read(call));
             return Box::pin(async move { result });
