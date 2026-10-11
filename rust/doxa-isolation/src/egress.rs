@@ -712,11 +712,22 @@ mod tests {
             }) }), || {},
         ).unwrap();
         let mut client = UnixStream::connect(gateway.socket()).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        client.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n").unwrap();
+        // Connector rejection must happen before any request is required.
+        // Sending CONNECT or configuring socket timeouts after rejection can
+        // race the peer close on macOS; neither is necessary to prove this gate.
+        client.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
         let mut response = [0; 128];
-        let read = client.read(&mut response);
-        assert!(matches!(read, Ok(0) | Err(_)), "unauthorized connector received gateway bytes: {read:?}");
+        let read = loop {
+            assert!(Instant::now() < deadline, "unauthorized connector was not closed before the deadline");
+            match client.read(&mut response) {
+                Err(err) if matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {
+                    thread::sleep(Duration::from_millis(5));
+                },
+                result => break result,
+            }
+        };
+        assert_closed_without_response(read);
         assert_eq!(guard_calls.load(Ordering::Acquire), 1);
         assert_eq!(dns_calls.load(Ordering::Acquire), 0);
         assert_eq!(dial_calls.load(Ordering::Acquire), 0);
