@@ -208,7 +208,7 @@ impl App {
         {
             self.notice = match self.session_identity.get(&id).and_then(|identity| identity.0.as_deref()) {
                 Some("codex") => "This Codex transport cannot change permission modes".into(),
-                Some("deepseek" | "glm") =>
+                Some("deepseek" | "glm" | "router") =>
                     "API vendors have no provider permission mode; DOXA asks for peer and LORE tool calls".into(),
                 _ => "This session cannot change permission modes".into(),
             };
@@ -429,9 +429,26 @@ impl App {
             0 => launch::Engine::Codex,
             1 => launch::Engine::Claude,
             2 => launch::Engine::DeepSeek,
-            _ => launch::Engine::Glm,
+            3 => launch::Engine::Glm,
+            _ => launch::Engine::Router,
         };
         self.engine_picker = false;
+        self.new_session=None;
+        if engine==launch::Engine::Router {
+            let (path,config)=match launch::router_config(None) {
+                Ok(value)=>value,
+                Err(_)=>{self.notice="Router needs an explicit owner-private router_config in Settings or DOXA_ROUTER_CONFIG".into();return;}
+            };
+            let mut models=vec!["auto".to_owned()];
+            models.extend(config.candidates.iter().map(|candidate|candidate.id.clone()));
+            self.vendor_catalog_pending=None;
+            self.new_session=Some(NewSession {
+                isolation:doxa_isolation::Profile::Native,engine,router_config:Some(path),model:"auto".into(),models,
+                model_efforts:HashMap::new(),catalog_note:"Configured API targets; account eligibility checked before each turn".into(),
+                catalog_pending:false,launch_error:None,retry_allowed:true,effort:None,prompt:String::new(),field:0,
+            });
+            return;
+        }
         let models = vendor_models(engine);
         let engine_id = engine_name(engine);
         let config = crate::settings::config_path()
@@ -469,6 +486,7 @@ impl App {
         self.vendor_catalog_pending = None;
         let catalog_pending = self.request_vendor_catalog(engine);
         self.new_session = Some(NewSession {
+            router_config:None,
             isolation: doxa_isolation::home().and_then(|home|doxa_isolation::configured_profile(&home)).unwrap_or_default(),
             engine,
             model,
@@ -610,6 +628,7 @@ impl App {
         }
         let form = self.new_session.as_mut().unwrap();
         let vendor = !vendor_models(form.engine).is_empty();
+        let router = form.engine==launch::Engine::Router;
         let fields = if vendor { 4 } else { 3 };
         let isolation_field = fields - 2;
         let prompt_field = fields - 1;
@@ -618,10 +637,16 @@ impl App {
             KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
             KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
             KeyCode::Left | KeyCode::Right if form.field == isolation_field => {
+                if router {self.notice="Router API sessions currently require native isolation".into();return true;}
                 let profiles = [doxa_isolation::Profile::Native,doxa_isolation::Profile::DockerOpen,doxa_isolation::Profile::DockerOffline];
                 let current = profiles.iter().position(|p|*p==form.isolation).unwrap_or(0);
                 let next = if key.code==KeyCode::Right {(current+1)%profiles.len()}else{(current+profiles.len()-1)%profiles.len()};
                 form.isolation=profiles[next];
+            }
+            KeyCode::Left | KeyCode::Right if router && form.field==0 => {
+                let current=form.models.iter().position(|id|id==&form.model).unwrap_or(0);
+                let len=form.models.len();
+                if len>0 {let next=if key.code==KeyCode::Right {(current+1)%len}else{(current+len-1)%len};form.model=form.models[next].clone();}
             }
             KeyCode::Left | KeyCode::Right if vendor && form.field <= 1 => {
                 if form.field == 0 {
@@ -682,7 +707,7 @@ impl App {
             KeyCode::Backspace => {
                 if form.field == prompt_field {
                     form.prompt.pop();
-                } else if !vendor && form.field == 0 {
+                } else if !vendor && !router && form.field == 0 {
                     form.model.pop();
                 }
             }
@@ -696,7 +721,7 @@ impl App {
                     if form.prompt.len() + c.len_utf8() <= MAX_INPUT_BYTES {
                         form.prompt.push(c);
                     }
-                } else if !vendor && form.field == 0 && form.model.len() + c.len_utf8() <= 128 {
+                } else if !vendor && !router && form.field == 0 && form.model.len() + c.len_utf8() <= 128 {
                     form.model.push(c);
                 }
             }
@@ -724,10 +749,14 @@ impl App {
                 let mut options = launch::LaunchOptions {
                     isolation: Some(form.isolation),
                     engine: form.engine,
+                    router_config:form.router_config.clone(),
                     ..Default::default()
                 };
                 if !form.model.trim().is_empty() {
                     options.model = Some(form.model.trim().to_owned());
+                }
+                if router && (!form.models.contains(&form.model) || form.isolation!=doxa_isolation::Profile::Native || form.router_config.is_none()) {
+                    self.notice="Router target or native isolation changed; session was not started".into();return true;
                 }
                 if vendor {
                     let allowed = form

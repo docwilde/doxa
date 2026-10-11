@@ -39,7 +39,7 @@ fn stopped_claim(runtime:&Path,id:&str)->io::Result<File>{
 fn options(plan:&Value,manifest:&Manifest)->io::Result<LaunchOptions>{
     let record=&plan["launch"];
     let engine=match record["engine"].as_str(){Some("codex")=>Engine::Codex,Some("claude")=>Engine::Claude,
-        Some("deepseek")=>Engine::DeepSeek,Some("glm")=>Engine::Glm,_=>return Err(invalid("unsupported migration engine"))};
+        Some("deepseek")=>Engine::DeepSeek,Some("glm")=>Engine::Glm,Some("router")=>return Err(invalid("router isolation migration is unavailable")),_=>return Err(invalid("unsupported migration engine"))};
     Ok(LaunchOptions{isolation:Some(manifest.profile),engine,cwd:Some(manifest.checkout.clone()),resume:Some(manifest.session_id.clone()),
         model:plan["model"].as_str().map(str::to_owned),effort:plan["effort"].as_str().map(str::to_owned),
         linger:record["linger"].as_f64(),sandbox:record["sandbox"].as_str().map(str::to_owned),

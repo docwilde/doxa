@@ -62,6 +62,7 @@ fn choice(value: &str) -> io::Result<Choice> {
     let (engine, model) = body.split_once(':').map_or((body, None), |(engine, model)| (engine, Some(model.to_owned())));
     let engine = match engine { "claude" => launch::Engine::Claude, "codex" => launch::Engine::Codex,
         "deepseek" => launch::Engine::DeepSeek, "glm" => launch::Engine::Glm, "fixture" => launch::Engine::Fixture,
+        "router" => return Err(invalid("router fleet config inheritance is unavailable; start an explicit router session")),
         _ => return Err(invalid("unsupported native fleet engine")) };
     let weight: f64 = weight.parse().map_err(|_| invalid("invalid pool weight"))?;
     if !weight.is_finite() || weight <= 0.0 || model.as_deref().is_some_and(|model| model.is_empty() || model.len() > 128 || model.chars().any(char::is_control)) {
@@ -69,7 +70,7 @@ fn choice(value: &str) -> io::Result<Choice> {
     }
     Ok(Choice { engine, model, weight, lore: None })
 }
-fn engine_name(engine: launch::Engine) -> &'static str { match engine { launch::Engine::Claude => "claude", launch::Engine::Codex => "codex", launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture" } }
+fn engine_name(engine: launch::Engine) -> &'static str { match engine { launch::Engine::Claude => "claude", launch::Engine::Codex => "codex", launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture",launch::Engine::Router=>"router" } }
 
 pub struct Spec {
     preflight: fleet_plan::Preflight, isolation:doxa_isolation::Profile, pool: Vec<Choice>, prompt: String, cwd: PathBuf,
@@ -1615,6 +1616,12 @@ mod tests {
         let mut rejected = args; rejected.push("--unrecognized=argument".into());
         let message = Spec::parse(&rejected).err().unwrap().to_string();
         assert!(!message.contains("python"));
+    }
+    #[test]
+    fn router_pool_refuses_missing_config_inheritance() {
+        let args=["--pool=router:auto","--prompt=task","-n2","--allow-unbudgeted"]
+            .into_iter().map(str::to_owned).collect::<Vec<_>>();
+        assert!(Spec::parse(&args).err().unwrap().to_string().contains("router fleet config inheritance is unavailable"));
     }
     fn memory_spec(supervisor: bool, off: &str) -> Spec {
         let mut args = vec!["--pool".into(), "codex:model-a@3,claude:model-b@1".into(),

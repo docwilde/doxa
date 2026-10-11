@@ -7,6 +7,7 @@ pub mod credentials;
 use futures_util::{future::BoxFuture, StreamExt};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -20,6 +21,12 @@ pub const MAX_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_HISTORY_MESSAGES: usize = 512;
 pub const MAX_TOOL_RESULT_BYTES: usize = 1024 * 1024;
 pub const MAX_TURN_DURATION: Duration = Duration::from_secs(3600);
+
+/// Optional routed-turn transport bounds. Input bytes include the complete
+/// serialized request (including tools), not an estimated token count. The
+/// output allowance is shared across every request in the tool loop.
+#[derive(Clone, Copy, Debug)]
+pub struct TurnLimits { pub input_bytes: usize, pub output_tokens: u64 }
 const BALANCE_URL: &str = "https://api.deepseek.com/user/balance";
 const BALANCE_BODY_MAX: usize = 4096;
 
@@ -206,6 +213,13 @@ pub async fn catalog_models(vendor: Vendor) -> Option<Vec<ModelCapability>> {
     catalog_models_at(vendor, vendor.models_endpoint(), &key).await
 }
 
+#[cfg(feature = "local-test-server")]
+pub async fn catalog_models_local(vendor: Vendor, endpoint: &str) -> Option<Vec<ModelCapability>> {
+    validate_local_endpoint(endpoint).ok()?;
+    let key = credentials::resolve(vendor).ok()??;
+    catalog_models_at(vendor, endpoint, &key).await
+}
+
 async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<Vec<ModelCapability>> {
     let mut known = credentials::known_keys().ok()?;
     known.push(key.to_owned());
@@ -390,6 +404,7 @@ pub enum Error {
     MissingReasoningHistory,
     ToolResultTooLarge,
     UsageOverflow,
+    AdmissionDenied,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -451,6 +466,8 @@ pub struct Completion {
     pub text: String,
     pub reasoning: String,
     pub model: Option<String>,
+    /// A stream that changes its model cannot establish exact-model billing.
+    pub model_conflict: bool,
     pub usage: Option<Value>,
     pub finish_reason: Option<String>,
     pub tool_calls: Vec<ToolCall>,
@@ -506,7 +523,9 @@ impl Accumulator {
             return Ok(());
         };
         if let Some(model) = chunk.get("model").and_then(Value::as_str) {
-            self.completion.model = Some(scrub(model, key));
+            let model = scrub(model, key);
+            self.completion.model_conflict |= self.completion.model.as_ref().is_some_and(|previous| *previous != model);
+            self.completion.model = Some(model);
         }
         if let Some(usage) = chunk.get("usage").filter(|v| v.is_object()) {
             self.completion.usage = Some(scrub_json(usage.clone(), key));
@@ -713,6 +732,35 @@ pub async fn stream_once_local(
     stream_at(vendor, endpoint, body, cancel, timeout, on_delta).await
 }
 
+/// One request with durable host admission at the transport boundary. Known
+/// credential/client/body/pre-send cancellation failures never set attempted.
+pub async fn stream_once_admitted(vendor: Vendor, body: Value, cancel: watch::Receiver<bool>,
+    timeout: Duration, on_delta: impl FnMut(Delta),
+    admit: &mut (dyn FnMut(&Value) -> Result<(), ()> + Send), attempted: &AtomicBool) -> Result<Completion, Error> {
+    stream_admitted_at(vendor, vendor.endpoint(), body, cancel, timeout, on_delta, admit, attempted).await
+}
+
+#[cfg(feature = "local-test-server")]
+pub async fn stream_once_admitted_local(vendor: Vendor, endpoint: &str, body: Value,
+    cancel: watch::Receiver<bool>, timeout: Duration, on_delta: impl FnMut(Delta),
+    admit: &mut (dyn FnMut(&Value) -> Result<(), ()> + Send), attempted: &AtomicBool) -> Result<Completion, Error> {
+    validate_local_endpoint(endpoint)?;
+    stream_admitted_at(vendor, endpoint, body, cancel, timeout, on_delta, admit, attempted).await
+}
+
+struct RequestAdmission<'a> {
+    admit: &'a mut (dyn FnMut(&Value) -> Result<(), ()> + Send),
+    attempted: &'a AtomicBool,
+}
+async fn stream_admitted_at(vendor: Vendor, endpoint: &str, body: Value, cancel: watch::Receiver<bool>,
+    timeout: Duration, on_delta: impl FnMut(Delta),
+    admit: &mut (dyn FnMut(&Value) -> Result<(), ()> + Send), attempted: &AtomicBool) -> Result<Completion, Error> {
+    let key = credentials::resolve(vendor).map_err(|_| Error::CredentialStore)?
+        .ok_or(Error::MissingCredential(vendor.env_var()))?;
+    stream_at_with_key(vendor, endpoint, body, &key, cancel, timeout, on_delta,
+        Some(RequestAdmission { admit, attempted })).await
+}
+
 #[cfg(feature = "local-test-server")]
 fn validate_local_endpoint(endpoint: &str) -> Result<(), Error> {
     let url = reqwest::Url::parse(endpoint).map_err(|_| Error::InvalidEndpoint)?;
@@ -798,6 +846,7 @@ pub async fn run_turn(
         cancel,
         deadline,
         on_delta,
+        None,
     )
     .await
 }
@@ -819,9 +868,29 @@ pub async fn run_turn_local(
 ) -> Result<TurnOutcome, Error> {
     validate_local_endpoint(endpoint)?;
     run_turn_at(
-        vendor, endpoint, model, effort, history, prompt, gate, cancel, deadline, on_delta,
+        vendor, endpoint, model, effort, history, prompt, gate, cancel, deadline, on_delta, None,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_turn_limited(vendor: Vendor, model: &str, effort: &str,
+    history: &mut Vec<Value>, prompt: &str, gate: Option<&mut dyn ToolGate>,
+    cancel: watch::Receiver<bool>, deadline: Duration, on_delta: impl FnMut(Delta),
+    limits: TurnLimits) -> Result<TurnOutcome, Error> {
+    run_turn_at(vendor, vendor.endpoint(), model, effort, history, prompt, gate,
+        cancel, deadline, on_delta, Some(limits)).await
+}
+
+#[cfg(feature = "local-test-server")]
+#[allow(clippy::too_many_arguments)]
+pub async fn run_turn_limited_local(vendor: Vendor, endpoint: &str, model: &str, effort: &str,
+    history: &mut Vec<Value>, prompt: &str, gate: Option<&mut dyn ToolGate>,
+    cancel: watch::Receiver<bool>, deadline: Duration, on_delta: impl FnMut(Delta),
+    limits: TurnLimits) -> Result<TurnOutcome, Error> {
+    validate_local_endpoint(endpoint)?;
+    run_turn_at(vendor, endpoint, model, effort, history, prompt, gate,
+        cancel, deadline, on_delta, Some(limits)).await
 }
 
 fn validate_tool_definitions(definitions: &[Value]) -> Result<(), Error> {
@@ -886,6 +955,7 @@ async fn run_turn_at(
     mut cancel: watch::Receiver<bool>,
     deadline: Duration,
     mut on_delta: impl FnMut(Delta),
+    limits: Option<TurnLimits>,
 ) -> Result<TurnOutcome, Error> {
     let deadline = deadline.min(MAX_TURN_DURATION);
     let started = Instant::now();
@@ -932,9 +1002,19 @@ async fn run_turn_at(
             return Err(Error::Timeout);
         }
         let mut body = request_body(vendor, model, &messages, effort)?;
+        if let Some(limits) = limits {
+            let remaining = limits.output_tokens.checked_sub(outcome.usage.completion_tokens)
+                .filter(|tokens| *tokens > 0).ok_or(Error::ToolLimit)?;
+            body["max_tokens"] = json!(remaining);
+        }
         if !definitions.is_empty() {
             body["tools"] = Value::Array(definitions.clone());
             body["tool_choice"] = json!("auto");
+        }
+        if let Some(limits) = limits {
+            if serde_json::to_vec(&body).map_err(|_| Error::HistoryTooLarge)?.len() > limits.input_bytes {
+                return Err(Error::HistoryTooLarge);
+            }
         }
         let mut completion = stream_at_with_key(
             vendor,
@@ -944,6 +1024,7 @@ async fn run_turn_at(
             cancel.clone(),
             remaining,
             &mut on_delta,
+            None,
         )
         .await?;
         // Provider metadata can echo an inactive credential too. Mask the
@@ -962,12 +1043,21 @@ async fn run_turn_at(
             }
         }
         outcome.requests += 1;
-        outcome.model_consistent &= completion.model.as_deref() == Some(model);
+        outcome.model_consistent &= !completion.model_conflict && completion.model.as_deref() == Some(model);
         outcome.usage_complete &= completion.usage.as_ref().is_some_and(|usage| {
             usage.get("prompt_tokens").and_then(Value::as_u64).is_some()
                 && usage.get("completion_tokens").and_then(Value::as_u64).is_some()
         });
         outcome.usage.add(completion.usage.as_ref())?;
+        if let Some(limits) = limits {
+            if !outcome.usage_complete || !outcome.model_consistent
+                || outcome.usage.completion_tokens > limits.output_tokens {
+                return Err(Error::IncompleteStream);
+            }
+            if !completion.tool_calls.is_empty() && outcome.usage.completion_tokens == limits.output_tokens {
+                return Err(Error::ToolLimit);
+            }
+        }
         outcome.model = completion.model.or(outcome.model);
         outcome.text.push_str(&completion.text);
         outcome.reasoning.push_str(&completion.reasoning);
@@ -1064,7 +1154,7 @@ async fn stream_at(
 ) -> Result<Completion, Error> {
     let key = credentials::resolve(vendor).map_err(|_| Error::CredentialStore)?
         .ok_or(Error::MissingCredential(vendor.env_var()))?;
-    stream_at_with_key(vendor, endpoint, scrub_json(body, &key), &key, cancel, timeout, on_delta).await
+    stream_at_with_key(vendor, endpoint, scrub_json(body, &key), &key, cancel, timeout, on_delta, None).await
 }
 
 async fn stream_at_with_key(
@@ -1075,6 +1165,7 @@ async fn stream_at_with_key(
     mut cancel: watch::Receiver<bool>,
     timeout: Duration,
     mut on_delta: impl FnMut(Delta),
+    mut admission: Option<RequestAdmission<'_>>,
 ) -> Result<Completion, Error> {
     // Reuse the transport's exact-known-key masking for every string in the
     // request, including LORE snapshots, tool definitions and inactive vendors.
@@ -1087,12 +1178,20 @@ async fn stream_at_with_key(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| Error::Transport)?;
-    let run = async {
-        let response = client
+    let request = client
             .post(endpoint)
             .bearer_auth(key)
             .json(&body)
-            .send()
+            .build().map_err(|_| Error::Transport)?;
+    let request_cancel = cancel.clone();
+    let run = async {
+        if let Some(admission) = &mut admission {
+            if *request_cancel.borrow() { return Err(Error::Cancelled); }
+            (admission.admit)(&body).map_err(|_| Error::AdmissionDenied)?;
+            if *request_cancel.borrow() { return Err(Error::Cancelled); }
+            admission.attempted.store(true, Ordering::Release);
+        }
+        let response = client.execute(request)
             .await
             .map_err(map_transport)?;
         let status = response.status();

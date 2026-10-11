@@ -1,0 +1,628 @@
+{
+  "version": 1,
+  "mode": "live_synthetic",
+  "model": "jev-1.13.0",
+  "origin": "synthetic",
+  "label_source": "machine",
+  "config_sha256": "acaab4869d04981b92fa1be5ffbf43cb7bb407b959555fffd17d132f992bda84",
+  "input_sha256": "601bb7ccaa1f2ff87a439b77461d70fc5421f61fff2cb40231262c9e376193a1",
+  "ledger": {
+    "calls": 6,
+    "reserved_usd_micros": 574,
+    "actual_usd_micros": 139,
+    "accounting_unknown": false,
+    "last_settled_call": 6
+  },
+  "development": {
+    "cases": 4,
+    "correct": 4,
+    "errors": 0,
+    "error_rate": 0.0,
+    "fallback_count": 0,
+    "transport_or_schema_failures": 0,
+    "p50_ms": 372,
+    "p95_ms": 412,
+    "max_ms": 412,
+    "confusion": {
+      "deliberate": {
+        "deliberate": 2
+      },
+      "fast": {
+        "fast": 2
+      }
+    }
+  },
+  "holdout": {
+    "cases": 2,
+    "correct": 2,
+    "errors": 0,
+    "error_rate": 0.0,
+    "fallback_count": 0,
+    "transport_or_schema_failures": 0,
+    "p50_ms": 359,
+    "p95_ms": 473,
+    "max_ms": 473,
+    "confusion": {
+      "deliberate": {
+        "deliberate": 1
+      },
+      "fast": {
+        "fast": 1
+      }
+    }
+  },
+  "router_cost_usd_micros": 139,
+  "worker_execution_cost_usd_micros": null,
+  "total_cost_usd_micros": null,
+  "real_quality_validated": false,
+  "live_status": "completed",
+  "results": [
+    {
+      "id": "extract",
+      "split": "development",
+      "expected_candidate_id": "fast",
+      "correct": true,
+      "criteria_sha256": "ccb5b32672bb003e81560bf7370aff3fccd5decf62eefc855319c845a81defdc",
+      "reservation": {
+        "call": 1,
+        "request_sha256": "bb051bae53822b96c3fd7467556f2597fe2af616181fe074654589ba3d70c4d0",
+        "input_tokens": 2243,
+        "usd_micros": 95
+      },
+      "outcome": {
+        "candidate_id": "fast",
+        "reason": "selected",
+        "confidence": 1.0,
+        "usage": {
+          "input_tokens": 541,
+          "output_tokens": 33
+        },
+        "latency_ms": 412,
+        "model": "jev-1.13.0",
+        "request_sha256": "bb051bae53822b96c3fd7467556f2597fe2af616181fe074654589ba3d70c4d0",
+        "response_sha256": "1382f3eb2ad95ffca47fe37cf1a15f0000c8da1bf385098297c2c0d8063da25b",
+        "router_cost_usd_micros": 23,
+        "attempted": true,
+        "verified_response": {
+          "answers": {
+            "target": {
+              "choice": "fast",
+              "confidence": 1.0,
+              "probabilities": {
+                "deliberate": 0.0,
+                "fast": 1.0
+              },
+              "type": "choice"
+            }
+          },
+          "model": "jev-1.13.0",
+          "usage": {
+            "input_tokens": 541,
+            "output_tokens": 33
+          }
+        }
+      }
+    },
+    {
+      "id": "format",
+      "split": "development",
+      "expected_candidate_id": "fast",
+      "correct": true,
+      "criteria_sha256": "ccb5b32672bb003e81560bf7370aff3fccd5decf62eefc855319c845a81defdc",
+      "reservation": {
+        "call": 2,
+        "request_sha256": "501e75298e21d1f4e1fd5b1849c9ecfaecbcf910c30dc90ca2470137ed50140e",
+        "input_tokens": 2228,
+        "usd_micros": 94
+      },
+      "outcome": {
+        "candidate_id": "fast",
+        "reason": "selected",
+        "confidence": 1.0,
+        "usage": {
+          "input_tokens": 543,
+          "output_tokens": 33
+        },
+        "latency_ms": 379,
+        "model": "jev-1.13.0",
+        "request_sha256": "501e75298e21d1f4e1fd5b1849c9ecfaecbcf910c30dc90ca2470137ed50140e",
+        "response_sha256": "661d4f402f3635b9c1e3e4d7f44fd479b3b57657d8ae58d86007c66348079a5a",
+        "router_cost_usd_micros": 23,
+        "attempted": true,
+        "verified_response": {
+          "answers": {
+            "target": {
+              "choice": "fast",
+              "confidence": 1.0,
+              "probabilities": {
+                "deliberate": 0.0,
+                "fast": 1.0
+              },
+              "type": "choice"
+            }
+          },
+          "model": "jev-1.13.0",
+          "usage": {
+            "input_tokens": 543,
+            "output_tokens": 33
+          }
+        }
+      }
+    },
+    {
+      "id": "debug",
+      "split": "development",
+      "expected_candidate_id": "deliberate",
+      "correct": true,
+      "criteria_sha256": "ccb5b32672bb003e81560bf7370aff3fccd5decf62eefc855319c845a81defdc",
+      "reservation": {
+        "call": 3,
+        "request_sha256": "1cb98d1a263109f3b8bb97f6c7e93371ad34da72d393b70eb319088d950a51f9",
+        "input_tokens": 2299,
+        "usd_micros": 97
+      },
+      "outcome": {
+        "candidate_id": "deliberate",
+        "reason": "selected",
+        "confidence": 1.0,
+        "usage": {
+          "input_tokens": 548,
+          "output_tokens": 35
+        },
+        "latency_ms": 372,
+        "model": "jev-1.13.0",
+        "request_sha256": "1cb98d1a263109f3b8bb97f6c7e93371ad34da72d393b70eb319088d950a51f9",
+        "response_sha256": "312f67b3b62cd328b996532ca8141059cdd7a4e8ae42e3af5196dce9651e78df",
+        "router_cost_usd_micros": 24,
+        "attempted": true,
+        "verified_response": {
+          "answers": {
+            "target": {
+              "choice": "deliberate",
+              "confidence": 1.0,
+              "probabilities": {
+                "deliberate": 1.0,
+                "fast": 0.0
+              },
+              "type": "choice"
+            }
+          },
+          "model": "jev-1.13.0",
+          "usage": {
+            "input_tokens": 548,
+            "output_tokens": 35
+          }
+        }
+      }
+    },
+    {
+      "id": "proof",
+      "split": "development",
+      "expected_candidate_id": "deliberate",
+      "correct": true,
+      "criteria_sha256": "ccb5b32672bb003e81560bf7370aff3fccd5decf62eefc855319c845a81defdc",
+      "reservation": {
+        "call": 4,
+        "request_sha256": "673184fedc42b97335a4af4a5c129c28dba36547e61bb3a6e013fc5e0c8a1809",
+        "input_tokens": 2306,
+        "usd_micros": 97
+      },
+      "outcome": {
+        "candidate_id": "deliberate",
+        "reason": "selected",
+        "confidence": 1.0,
+        "usage": {
+          "input_tokens": 547,
+          "output_tokens": 35
+        },
+        "latency_ms": 350,
+        "model": "jev-1.13.0",
+        "request_sha256": "673184fedc42b97335a4af4a5c129c28dba36547e61bb3a6e013fc5e0c8a1809",
+        "response_sha256": "9ce141497b9c5e292ec3ebfc2b57554e03c951e26890c62bee24654e147fbbe6",
+        "router_cost_usd_micros": 23,
+        "attempted": true,
+        "verified_response": {
+          "answers": {
+            "target": {
+              "choice": "deliberate",
+              "confidence": 1.0,
+              "probabilities": {
+                "deliberate": 1.0,
+                "fast": 0.0
+              },
+              "type": "choice"
+            }
+          },
+          "model": "jev-1.13.0",
+          "usage": {
+            "input_tokens": 547,
+            "output_tokens": 35
+          }
+        }
+      }
+    },
+    {
+      "id": "hold-format",
+      "split": "holdout",
+      "expected_candidate_id": "fast",
+      "correct": true,
+      "criteria_sha256": "ccb5b32672bb003e81560bf7370aff3fccd5decf62eefc855319c845a81defdc",
+      "reservation": {
+        "call": 5,
+        "request_sha256": "e97ea4240b02e3c794f7f78eb72a6fde83f23046d3a449d0d8f52f772154c64c",
+        "input_tokens": 2225,
+        "usd_micros": 94
+      },
+      "outcome": {
+        "candidate_id": "fast",
+        "reason": "selected",
+        "confidence": 1.0,
+        "usage": {
+          "input_tokens": 543,
+          "output_tokens": 33
+        },
+        "latency_ms": 359,
+        "model": "jev-1.13.0",
+        "request_sha256": "e97ea4240b02e3c794f7f78eb72a6fde83f23046d3a449d0d8f52f772154c64c",
+        "response_sha256": "661d4f402f3635b9c1e3e4d7f44fd479b3b57657d8ae58d86007c66348079a5a",
+        "router_cost_usd_micros": 23,
+        "attempted": true,
+        "verified_response": {
+          "answers": {
+            "target": {
+              "choice": "fast",
+              "confidence": 1.0,
+              "probabilities": {
+                "deliberate": 0.0,
+                "fast": 1.0
+              },
+              "type": "choice"
+            }
+          },
+          "model": "jev-1.13.0",
+          "usage": {
+            "input_tokens": 543,
+            "output_tokens": 33
+          }
+        }
+      }
+    },
+    {
+      "id": "hold-architecture",
+      "split": "holdout",
+      "expected_candidate_id": "deliberate",
+      "correct": true,
+      "criteria_sha256": "ccb5b32672bb003e81560bf7370aff3fccd5decf62eefc855319c845a81defdc",
+      "reservation": {
+        "call": 6,
+        "request_sha256": "431e9f541551a2c82c722e9ae75638fc04b9965618df24f8473769426b6580e6",
+        "input_tokens": 2293,
+        "usd_micros": 97
+      },
+      "outcome": {
+        "candidate_id": "deliberate",
+        "reason": "selected",
+        "confidence": 1.0,
+        "usage": {
+          "input_tokens": 547,
+          "output_tokens": 35
+        },
+        "latency_ms": 473,
+        "model": "jev-1.13.0",
+        "request_sha256": "431e9f541551a2c82c722e9ae75638fc04b9965618df24f8473769426b6580e6",
+        "response_sha256": "9ce141497b9c5e292ec3ebfc2b57554e03c951e26890c62bee24654e147fbbe6",
+        "router_cost_usd_micros": 23,
+        "attempted": true,
+        "verified_response": {
+          "answers": {
+            "target": {
+              "choice": "deliberate",
+              "confidence": 1.0,
+              "probabilities": {
+                "deliberate": 1.0,
+                "fast": 0.0
+              },
+              "type": "choice"
+            }
+          },
+          "model": "jev-1.13.0",
+          "usage": {
+            "input_tokens": 547,
+            "output_tokens": 35
+          }
+        }
+      }
+    }
+  ],
+  "recordings": [
+    {
+      "version": 1,
+      "id": "extract",
+      "group_id": "dev-group",
+      "split": "development",
+      "origin": "synthetic",
+      "label_source": "machine",
+      "consented": true,
+      "scrubbed": true,
+      "input": {
+        "summary": "Extract the three lowercase color names from: blue, GREEN, red. Return a JSON array.",
+        "estimated_input_tokens": 300,
+        "max_output_tokens": 500,
+        "requires_tools": true,
+        "allowed_candidate_ids": [
+          "fast",
+          "deliberate"
+        ]
+      },
+      "expected_candidate_id": "fast",
+      "recording": {
+        "config_sha256": "acaab4869d04981b92fa1be5ffbf43cb7bb407b959555fffd17d132f992bda84",
+        "criteria_sha256": "ccb5b32672bb003e81560bf7370aff3fccd5decf62eefc855319c845a81defdc",
+        "request_sha256": "bb051bae53822b96c3fd7467556f2597fe2af616181fe074654589ba3d70c4d0",
+        "response": {
+          "answers": {
+            "target": {
+              "choice": "fast",
+              "confidence": 1.0,
+              "probabilities": {
+                "deliberate": 0.0,
+                "fast": 1.0
+              },
+              "type": "choice"
+            }
+          },
+          "model": "jev-1.13.0",
+          "usage": {
+            "input_tokens": 541,
+            "output_tokens": 33
+          }
+        },
+        "transport_error": null,
+        "latency_ms": 412,
+        "attempted": true,
+        "rejected_usage": null
+      }
+    },
+    {
+      "version": 1,
+      "id": "format",
+      "group_id": "dev-group",
+      "split": "development",
+      "origin": "synthetic",
+      "label_source": "machine",
+      "consented": true,
+      "scrubbed": true,
+      "input": {
+        "summary": "Reformat this tiny mapping as YAML: {\"port\":8080,\"enabled\":true}.",
+        "estimated_input_tokens": 300,
+        "max_output_tokens": 500,
+        "requires_tools": true,
+        "allowed_candidate_ids": [
+          "fast",
+          "deliberate"
+        ]
+      },
+      "expected_candidate_id": "fast",
+      "recording": {
+        "config_sha256": "acaab4869d04981b92fa1be5ffbf43cb7bb407b959555fffd17d132f992bda84",
+        "criteria_sha256": "ccb5b32672bb003e81560bf7370aff3fccd5decf62eefc855319c845a81defdc",
+        "request_sha256": "501e75298e21d1f4e1fd5b1849c9ecfaecbcf910c30dc90ca2470137ed50140e",
+        "response": {
+          "answers": {
+            "target": {
+              "choice": "fast",
+              "confidence": 1.0,
+              "probabilities": {
+                "deliberate": 0.0,
+                "fast": 1.0
+              },
+              "type": "choice"
+            }
+          },
+          "model": "jev-1.13.0",
+          "usage": {
+            "input_tokens": 543,
+            "output_tokens": 33
+          }
+        },
+        "transport_error": null,
+        "latency_ms": 379,
+        "attempted": true,
+        "rejected_usage": null
+      }
+    },
+    {
+      "version": 1,
+      "id": "debug",
+      "group_id": "dev-group",
+      "split": "development",
+      "origin": "synthetic",
+      "label_source": "machine",
+      "consented": true,
+      "scrubbed": true,
+      "input": {
+        "summary": "Explain and fix a race between a queue acknowledgement, crash recovery and durable dispatch. Compare two approaches and identify invariants.",
+        "estimated_input_tokens": 300,
+        "max_output_tokens": 500,
+        "requires_tools": true,
+        "allowed_candidate_ids": [
+          "fast",
+          "deliberate"
+        ]
+      },
+      "expected_candidate_id": "deliberate",
+      "recording": {
+        "config_sha256": "acaab4869d04981b92fa1be5ffbf43cb7bb407b959555fffd17d132f992bda84",
+        "criteria_sha256": "ccb5b32672bb003e81560bf7370aff3fccd5decf62eefc855319c845a81defdc",
+        "request_sha256": "1cb98d1a263109f3b8bb97f6c7e93371ad34da72d393b70eb319088d950a51f9",
+        "response": {
+          "answers": {
+            "target": {
+              "choice": "deliberate",
+              "confidence": 1.0,
+              "probabilities": {
+                "deliberate": 1.0,
+                "fast": 0.0
+              },
+              "type": "choice"
+            }
+          },
+          "model": "jev-1.13.0",
+          "usage": {
+            "input_tokens": 548,
+            "output_tokens": 35
+          }
+        },
+        "transport_error": null,
+        "latency_ms": 372,
+        "attempted": true,
+        "rejected_usage": null
+      }
+    },
+    {
+      "version": 1,
+      "id": "proof",
+      "group_id": "dev-group",
+      "split": "development",
+      "origin": "synthetic",
+      "label_source": "machine",
+      "consented": true,
+      "scrubbed": true,
+      "input": {
+        "summary": "Prove whether the given retry protocol prevents duplicate execution when persistence fails after a remote acknowledgement. Discuss counterexamples.",
+        "estimated_input_tokens": 300,
+        "max_output_tokens": 500,
+        "requires_tools": true,
+        "allowed_candidate_ids": [
+          "fast",
+          "deliberate"
+        ]
+      },
+      "expected_candidate_id": "deliberate",
+      "recording": {
+        "config_sha256": "acaab4869d04981b92fa1be5ffbf43cb7bb407b959555fffd17d132f992bda84",
+        "criteria_sha256": "ccb5b32672bb003e81560bf7370aff3fccd5decf62eefc855319c845a81defdc",
+        "request_sha256": "673184fedc42b97335a4af4a5c129c28dba36547e61bb3a6e013fc5e0c8a1809",
+        "response": {
+          "answers": {
+            "target": {
+              "choice": "deliberate",
+              "confidence": 1.0,
+              "probabilities": {
+                "deliberate": 1.0,
+                "fast": 0.0
+              },
+              "type": "choice"
+            }
+          },
+          "model": "jev-1.13.0",
+          "usage": {
+            "input_tokens": 547,
+            "output_tokens": 35
+          }
+        },
+        "transport_error": null,
+        "latency_ms": 350,
+        "attempted": true,
+        "rejected_usage": null
+      }
+    },
+    {
+      "version": 1,
+      "id": "hold-format",
+      "group_id": "hold-group",
+      "split": "holdout",
+      "origin": "synthetic",
+      "label_source": "machine",
+      "consented": true,
+      "scrubbed": true,
+      "input": {
+        "summary": "Sort these six words alphabetically: fox, cat, bee, ant, dog, elk.",
+        "estimated_input_tokens": 300,
+        "max_output_tokens": 500,
+        "requires_tools": true,
+        "allowed_candidate_ids": [
+          "fast",
+          "deliberate"
+        ]
+      },
+      "expected_candidate_id": "fast",
+      "recording": {
+        "config_sha256": "acaab4869d04981b92fa1be5ffbf43cb7bb407b959555fffd17d132f992bda84",
+        "criteria_sha256": "ccb5b32672bb003e81560bf7370aff3fccd5decf62eefc855319c845a81defdc",
+        "request_sha256": "e97ea4240b02e3c794f7f78eb72a6fde83f23046d3a449d0d8f52f772154c64c",
+        "response": {
+          "answers": {
+            "target": {
+              "choice": "fast",
+              "confidence": 1.0,
+              "probabilities": {
+                "deliberate": 0.0,
+                "fast": 1.0
+              },
+              "type": "choice"
+            }
+          },
+          "model": "jev-1.13.0",
+          "usage": {
+            "input_tokens": 543,
+            "output_tokens": 33
+          }
+        },
+        "transport_error": null,
+        "latency_ms": 359,
+        "attempted": true,
+        "rejected_usage": null
+      }
+    },
+    {
+      "version": 1,
+      "id": "hold-architecture",
+      "group_id": "hold-group",
+      "split": "holdout",
+      "origin": "synthetic",
+      "label_source": "machine",
+      "consented": true,
+      "scrubbed": true,
+      "input": {
+        "summary": "Choose a cache invalidation design for multiple hosts with partitions and concurrent writes. Derive consistency and failure tradeoffs.",
+        "estimated_input_tokens": 300,
+        "max_output_tokens": 500,
+        "requires_tools": true,
+        "allowed_candidate_ids": [
+          "fast",
+          "deliberate"
+        ]
+      },
+      "expected_candidate_id": "deliberate",
+      "recording": {
+        "config_sha256": "acaab4869d04981b92fa1be5ffbf43cb7bb407b959555fffd17d132f992bda84",
+        "criteria_sha256": "ccb5b32672bb003e81560bf7370aff3fccd5decf62eefc855319c845a81defdc",
+        "request_sha256": "431e9f541551a2c82c722e9ae75638fc04b9965618df24f8473769426b6580e6",
+        "response": {
+          "answers": {
+            "target": {
+              "choice": "deliberate",
+              "confidence": 1.0,
+              "probabilities": {
+                "deliberate": 1.0,
+                "fast": 0.0
+              },
+              "type": "choice"
+            }
+          },
+          "model": "jev-1.13.0",
+          "usage": {
+            "input_tokens": 547,
+            "output_tokens": 35
+          }
+        },
+        "transport_error": null,
+        "latency_ms": 473,
+        "attempted": true,
+        "rejected_usage": null
+      }
+    }
+  ],
+  "note": "Exploratory router-label agreement only. Machine-authored synthetic labels are not human holdout or real routing quality. Confidence measures Choice distribution concentration, not worker success. Worker execution/quality and total cost are unmeasured; usage-based router cost is not an invoice. Real labels/consent/scrubbing are operator attestations."
+}

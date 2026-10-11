@@ -704,6 +704,19 @@ impl App {
                     self.request_auto_diff(&id);
                 }
                 match event_type {
+                    "routing_selected" | "routing_fallback" => {
+                        if !self.sessions.iter().any(|session| session.id == id)
+                            || self.session_identity.get(&id).and_then(|pair| pair.0.as_deref()) != Some("router") {
+                            return false;
+                        }
+                        let Some(routing) = super::session_telemetry::RoutingStatus::from_value(data) else { return false; };
+                        let summary = super::transcript_events::event_field(&routing.summary());
+                        self.session_telemetry.entry(id.clone()).or_default().routing = Some(routing);
+                        let clipped = self.sessions.iter_mut().find(|s| s.id == id)
+                            .is_some_and(|session| append_transcript(session, &format!("\n\n*{summary}*\n")));
+                        self.transcript_evicted(&id, clipped);
+                        true
+                    }
                     "billing" => {
                         if !self.sessions.iter().any(|session| session.id == id) {
                             return false;
@@ -858,6 +871,13 @@ impl App {
                         self.unread_sessions.remove(&id);
                         self.streaming_text.remove(&id);
                         self.reasoning_streams.remove(&id);
+                        if data["operation"] == "compact"
+                            && data["compaction_semantics"] == "doxa_managed_summary"
+                            && self.session_identity.get(&id).and_then(|pair| pair.0.as_deref()) == Some("router")
+                        {
+                            self.session_telemetry.entry(id.clone()).or_default().compaction =
+                                super::session_telemetry::CompactionStatus::from_value(&data["compaction"]);
+                        }
                         if let Some(prompt) = data
                             .get("prompt")
                             .and_then(|v| v.as_str())
@@ -873,8 +893,32 @@ impl App {
                         self.session_activity.entry(id.clone()).or_default().0 = true;
                         self.apply_update(DaemonUpdate::Status {
                             id,
-                            text: "Running".into(),
+                            text: if data["operation"] == "compact" && data["compaction_semantics"] == "doxa_managed_summary" {
+                                "Reviewing compaction"
+                            } else { "Running" }.into(),
                         });
+                        true
+                    }
+                    "lore_review_completed" if data["before"] == "compaction" => {
+                        if self.session_identity.get(&id).and_then(|pair|pair.0.as_deref()) != Some("router")
+                            || !self.sessions.iter().any(|session|session.id == id) { return false; }
+                        self.apply_update(DaemonUpdate::Status {id:id.clone(),text:"Summarizing reviewed context".into()});
+                        let clipped=self.sessions.iter_mut().find(|session|session.id == id)
+                            .is_some_and(|session|append_transcript(session,"\n\n*LORE source review completed before managed summary.*\n"));
+                        self.transcript_evicted(&id,clipped);
+                        true
+                    }
+                    "compaction_done" => {
+                        if self.session_identity.get(&id).and_then(|pair|pair.0.as_deref()) != Some("router")
+                            || data["reviewed"] != true || data["compaction_semantics"] != "doxa_managed_summary"
+                            || !self.sessions.iter().any(|session|session.id == id) { return false; }
+                        let Some(compaction)=super::session_telemetry::CompactionStatus::from_value(&data["compaction"])
+                            .filter(|status|status.reviewed()) else { return false; };
+                        let summary=super::transcript_events::event_field(&compaction.summary());
+                        self.session_telemetry.entry(id.clone()).or_default().compaction=Some(compaction);
+                        let clipped=self.sessions.iter_mut().find(|session|session.id == id)
+                            .is_some_and(|session|append_transcript(session,&format!("\n\n*Reviewed managed compaction completed · {summary}*\n")));
+                        self.transcript_evicted(&id,clipped);
                         true
                     }
                     "turn_done" => {

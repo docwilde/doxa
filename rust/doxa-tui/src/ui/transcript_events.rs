@@ -8,7 +8,7 @@ const MAX_EVENT_FIELD_CHARS: usize = 320;
 // Structured event fields are untrusted Markdown as well as terminal text.
 // Keep ordinary event rows small. A queued prompt uses the input budget so
 // the submitted text remains visible while the current turn is running.
-fn event_field(value: &str) -> String {
+pub(super) fn event_field(value: &str) -> String {
     event_field_with_limit(value, MAX_EVENT_FIELD_CHARS)
 }
 
@@ -233,7 +233,7 @@ pub(super) fn structured_event(event_type: &str, data: &serde_json::Value) -> Op
                 .unwrap_or_else(|| "none".into())
         ),
         "turn_done" if data.get("is_error").and_then(|v| v.as_bool()) == Some(true) => {
-            format!("Turn failed: {}", field("error"))
+            format!("{} failed: {}",if data["operation"] == "compact" {"Compaction"} else {"Turn"},field("error"))
         }
         _ => return None,
     };

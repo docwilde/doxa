@@ -199,6 +199,9 @@ pub(crate) fn known_keys() -> io::Result<Vec<String>> {
             let saved = store.as_ref().and_then(|s| s.values.get(vendor.engine_id())).and_then(Value::as_str).map(str::to_owned);
             saved.into_iter().chain(environment(vendor))
         }).collect();
+        if let Ok(value) = std::env::var("TYPESAFE_API_KEY") {
+            if let Ok(key) = valid_key(&value) { keys.push(key.to_owned()); }
+        }
         keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
         keys.dedup();
         Ok(keys)
@@ -244,14 +247,15 @@ pub(crate) mod tests {
     pub(crate) fn fixture() -> (EnvironmentGuard, tempfile::TempDir) {
         let lock = ENV_LOCK.lock().unwrap();
         // Opaque snapshots are restored only, never resolved/asserted/displayed.
-        let previous = ["DOXA_HOME", "DEEPSEEK_API_KEY", "ZAI_API_KEY"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
+        let previous = ["DOXA_HOME", "DEEPSEEK_API_KEY", "ZAI_API_KEY", "TYPESAFE_API_KEY"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
         let guard = EnvironmentGuard { _lock: lock, previous };
         let dir = tempfile::tempdir().unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         std::env::set_var("DOXA_HOME", dir.path());
-        // Synthetic fixtures replace both inherited variables before resolution.
+        // Synthetic fixtures replace inherited credentials before resolution.
         std::env::set_var("DEEPSEEK_API_KEY", "inherited-deepseek-fixture");
         std::env::set_var("ZAI_API_KEY", "inherited-zai-fixture");
+        std::env::set_var("TYPESAFE_API_KEY", "inherited-typesafe-fixture");
         (guard, dir)
     }
     #[test]
@@ -362,8 +366,8 @@ pub(crate) mod tests {
         let (_guard, dir) = fixture();
         save(Vendor::DeepSeek, "saved-deepseek-fixture").unwrap();
         save(Vendor::Glm, "saved-zai-fixture").unwrap();
-        let text = "saved-deepseek-fixture inherited-deepseek-fixture saved-zai-fixture inherited-zai-fixture ordinary";
-        assert_eq!(redact(text).unwrap(), "*** *** *** *** ordinary");
+        let text = "saved-deepseek-fixture inherited-deepseek-fixture saved-zai-fixture inherited-zai-fixture inherited-typesafe-fixture ordinary";
+        assert_eq!(redact(text).unwrap(), "*** *** *** *** *** ordinary");
         assert!(is_credential_file(&File::open(dir.path().join(FILE_NAME)).unwrap()).unwrap());
         let other = dir.path().join("other");
         fs::write(&other, "ordinary").unwrap();

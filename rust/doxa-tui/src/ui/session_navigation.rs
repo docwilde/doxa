@@ -598,6 +598,7 @@ impl App {
             "claude" => launch::Engine::Claude,
             "deepseek" => launch::Engine::DeepSeek,
             "glm" => launch::Engine::Glm,
+            "router" => {self.notice="clear: start a new router session with an explicit --router-config path".into();return;},
             _ => {
                 self.notice = "clear: session engine cannot be relaunched".into();
                 return;
@@ -690,6 +691,7 @@ impl App {
             "codex" => launch::Engine::Codex,
             "deepseek" => launch::Engine::DeepSeek,
             "glm" => launch::Engine::Glm,
+            "router" => {self.notice="cd: start the router at that directory with an explicit --router-config path".into();return;},
             _ => {
                 self.notice = "cd: session engine cannot be launched here".into();
                 return;

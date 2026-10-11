@@ -37,7 +37,8 @@ bounds invalidate old journals rather than resuming with a different rate.
 
 The native budget table documents exact price rows for selected Codex,
 DeepSeek and GLM models. OpenAI Standard API prices were checked on 2026-10-09;
-the other vendor rows were checked on 2026-09-30. Values are USD per million
+the DeepSeek and GLM price rows were rechecked against their primary pricing
+pages on 2026-10-10; their rates were unchanged. Values are USD per million
 tokens. The picker labels the OpenAI prices as Standard API rates; they are not
 the rates used for budget admission.
 
@@ -161,15 +162,21 @@ per-request tier would allow tighter accounting in a later slice.
 
 ## Remaining work
 
+- Router candidate review follows the same exact-model evidence rules: inspect
+  the primary price page, refresh its registry row in a reviewed change, then
+  compare the candidate's declared rates with those bounds. Provider catalog
+  availability is checked separately. A configured request cap limits payloads;
+  it does not establish an unknown provider context window or model quality.
 - Continue filling unknown context and thinking fields only when primary
   provider sources state exact values for exact model IDs.
 - Ingest trustworthy provider-supplied capability metadata where available,
   preserving its own source and observation time. Do not replace an unknown
   with a guessed family value.
 - An operator-selected stale-fact review report exists, but it does not fetch
-  provider pages, update facts, or apply an automatic expiry rule. Before any
-  automatic task routing, add a source-verification and refresh workflow.
-  The budget status still exposes its review date and missing live billing
+  provider pages, update facts, or apply an automatic expiry rule. Router
+  candidate admission uses the manual primary-source review workflow above;
+  automatic source retrieval and refresh remain open. The budget status still
+  exposes its review date and missing live billing
   evidence. No quality or benchmark score is planned without a maintained,
   task-specific evaluation method.
 - Capture provider billing mode and per-request tier when available so a budget

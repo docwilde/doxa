@@ -5,6 +5,26 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.44 — 2026-10-11
+
+**Jev routing**
+
+- Add opt-in **`RouterHost`** sessions: Jev Choice selects configured DeepSeek/GLM targets at turn boundaries, with eligibility checks and durable aggregate reservations.
+- Add **`/model auto`**, target pins and separate effective worker status. Resume preserves canonical history, allowance and selection; unknown attempted spend blocks further work.
+- Package **`doxa-router-eval`** with recorded-response replay and an explicit synthetic live mode. CLI handoffs, child/fleet inheritance and Docker remain unavailable.
+
+**Reviewed compaction**
+
+- Add router **`/compact`** with mandatory canonical-source LORE review and a bounded summary. Preserve original messages and Auto/pin; select the pin, last worker or configured fallback without calling Jev.
+- Bind summary source, target and request before sending. Retain crash holds, settle verified usage on rejected summaries, and refuse missing usage, conflicting models or changed sources.
+- Restore separate summary identity and aggregate billing on reattach. Automatic compaction and authenticated summary quality remain open.
+
+**Verification and publication**
+
+- Pass 62 targeted host/vendor checks, including eight compaction tests across 22 fixture variants, and production compilation. Verify controlled native LORE review without changing originals.
+- Measure six synthetic Jev calls: 4/4 development and 2/2 holdout agreement, 350–473 ms latency and $0.000139 estimated routing cost. No workers ran; real-task quality remains unmeasured.
+- Publish the recommended beta through GitHub Latest while retaining the beta version suffix and warning.
+
 ## 2.0.0-beta.43 — 2026-10-10
 
 **Codex permissions**

@@ -476,6 +476,7 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
     let engine = match state["engine"].as_str() {
         Some("deepseek") => Engine::DeepSeek,
         Some("glm") => Engine::Glm,
+        Some("router") => return Err("router resume needs doxa new --engine router --router-config PATH --resume ID; automatic config inheritance is unavailable"),
         _ => return Err("unsupported or unknown saved engine"),
     };
     if state.get("session_id").is_some_and(|id| id.as_str() != Some(&entry.id)) {
@@ -865,6 +866,9 @@ for line in sys.stdin:
         assert_eq!(plan.engine, Engine::DeepSeek);
         assert_eq!(plan.cwd, Some(cwd));
         assert_eq!(plan.resume.as_deref(), Some("saved-1"));
+        fs::write(&replay, br#"{"engine":"router","session_id":"saved-1","model":"router-conversation-v1","messages":[]}"#).unwrap();
+        let error=resume_fixture(&entry,&script,&root,&temp.path().join("cli-projects")).unwrap_err();
+        assert!(error.contains("--router-config") && error.contains("inheritance is unavailable"));
         let mut wrong = entry.clone();
         wrong.project = "another-project".into();
         assert!(resume_fixture(&wrong, &script, &root, &temp.path().join("cli-projects")).is_err());

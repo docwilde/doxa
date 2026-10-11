@@ -87,7 +87,7 @@ impl ModelFacts {
     }
 }
 
-/// Exact-model API price facts. Legacy vendor rows were checked 2026-09-30;
+/// Exact-model API price facts. DeepSeek/GLM rates were rechecked 2026-10-10;
 /// OpenAI rows were refreshed 2026-10-09. No aliases are inherited.
 pub fn lookup(engine: &str, model: &str) -> ModelFacts {
     let (input, output, source, date) = match (engine, model) {
@@ -97,15 +97,15 @@ pub fn lookup(engine: &str, model: &str) -> ModelFacts {
         ("codex", "gpt-5.6-luna") => (0.2, 1.2, "https://developers.openai.com/api/docs/pricing", "2026-10-09"),
         ("codex", "gpt-5.5") => (5.0, 30.0, "https://developers.openai.com/api/docs/pricing", "2026-10-09"),
         ("codex", "gpt-5.3-codex") => (1.75, 14.0, "https://developers.openai.com/api/docs/pricing", "2026-10-09"),
-        ("deepseek", "deepseek-flash") => (0.3, 1.2, "https://api-docs.deepseek.com/quick_start/pricing", "2026-09-30"),
-        ("deepseek", "deepseek-v4-pro") => (1.32, 3.96, "https://api-docs.deepseek.com/quick_start/pricing", "2026-09-30"),
-        ("glm", "glm-5.3-flash") => (0.15, 0.5, "https://docs.z.ai/guides/overview/pricing", "2026-09-30"),
-        ("glm", "glm-5.3-flashx") => (0.37, 1.25, "https://docs.z.ai/guides/overview/pricing", "2026-09-30"),
-        ("glm", "glm-5.3" | "glm-5.2" | "glm-5.1") => (1.4, 4.4, "https://docs.z.ai/guides/overview/pricing", "2026-09-30"),
-        ("glm", "glm-5") => (1.0, 3.2, "https://docs.z.ai/guides/overview/pricing", "2026-09-30"),
-        ("glm", "glm-4.7" | "glm-4.6" | "glm-4.5") => (0.6, 2.2, "https://docs.z.ai/guides/overview/pricing", "2026-09-30"),
-        ("glm", "glm-4.7-flashx") => (0.07, 0.4, "https://docs.z.ai/guides/overview/pricing", "2026-09-30"),
-        ("glm", "glm-4.5-air") => (0.2, 1.1, "https://docs.z.ai/guides/overview/pricing", "2026-09-30"),
+        ("deepseek", "deepseek-flash") => (0.3, 1.2, "https://api-docs.deepseek.com/quick_start/pricing", "2026-10-10"),
+        ("deepseek", "deepseek-v4-pro") => (1.32, 3.96, "https://api-docs.deepseek.com/quick_start/pricing", "2026-10-10"),
+        ("glm", "glm-5.3-flash") => (0.15, 0.5, "https://docs.z.ai/guides/overview/pricing", "2026-10-10"),
+        ("glm", "glm-5.3-flashx") => (0.37, 1.25, "https://docs.z.ai/guides/overview/pricing", "2026-10-10"),
+        ("glm", "glm-5.3" | "glm-5.2" | "glm-5.1") => (1.4, 4.4, "https://docs.z.ai/guides/overview/pricing", "2026-10-10"),
+        ("glm", "glm-5") => (1.0, 3.2, "https://docs.z.ai/guides/overview/pricing", "2026-10-10"),
+        ("glm", "glm-4.7" | "glm-4.6" | "glm-4.5") => (0.6, 2.2, "https://docs.z.ai/guides/overview/pricing", "2026-10-10"),
+        ("glm", "glm-4.7-flashx") => (0.07, 0.4, "https://docs.z.ai/guides/overview/pricing", "2026-10-10"),
+        ("glm", "glm-4.5-air") => (0.2, 1.1, "https://docs.z.ai/guides/overview/pricing", "2026-10-10"),
         _ => return ModelFacts::unknown(),
     };
     let mut facts = ModelFacts {

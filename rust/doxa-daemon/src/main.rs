@@ -10,6 +10,7 @@ mod remote_bridge;
 mod session_title;
 mod vendor_host;
 mod vendor_tools;
+mod router_host;
 mod isolation_host;
 use claude_host::ClaudeHost;
 use budget_host::BudgetHost;
@@ -31,6 +32,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use vendor_host::VendorHost;
+use router_host::RouterHost;
 
 static TERMINATE: AtomicBool = AtomicBool::new(false);
 extern "C" fn signal_handler(_: libc::c_int) {
@@ -62,6 +64,7 @@ enum Engine {
     Claude,
     DeepSeek,
     Glm,
+    Router,
 }
 impl Engine {
     fn name(self) -> &'static str {
@@ -71,6 +74,7 @@ impl Engine {
             Self::Claude => "claude",
             Self::DeepSeek => "deepseek",
             Self::Glm => "glm",
+            Self::Router => "router",
         }
     }
     fn vendor(self) -> Option<Vendor> {
@@ -97,6 +101,7 @@ struct Options {
     resume: bool,
     model: Option<String>,
     effort: Option<String>,
+    router_config: Option<PathBuf>,
     #[cfg(feature = "local-test-server")]
     vendor_endpoint: Option<String>,
     sandbox: SandboxMode,
@@ -119,6 +124,9 @@ fn linger_duration(value: &str) -> io::Result<Duration> {
     Ok(Duration::from_secs_f64(seconds))
 }
 fn options() -> io::Result<Options> {
+    options_from(env::args_os().skip(1))
+}
+fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Result<Options> {
     let mut runtime = env::var_os("DOXA_RUNTIME_DIR")
         .map(PathBuf::from)
         .or_else(|| env::var_os("XDG_RUNTIME_DIR").map(|p| PathBuf::from(p).join("doxa")))
@@ -139,11 +147,14 @@ fn options() -> io::Result<Options> {
     let mut resume = false;
     let mut model = None;
     let mut effort = None;
+    let mut router_config = env::var_os("DOXA_ROUTER_CONFIG").filter(|value|!value.is_empty()).map(PathBuf::from);
+    let mut explicit_router_config=false;
     #[cfg(feature = "local-test-server")]
     let mut vendor_endpoint = None;
     let mut sandbox = SandboxMode::WorkspaceWrite;
+    let mut explicit_sandbox = false;
     let mut isolation = None;
-    let mut args = env::args_os().skip(1);
+    let mut args = arguments.into_iter();
     while let Some(arg) = args.next() {
         let value = args
             .next()
@@ -175,8 +186,10 @@ fn options() -> io::Result<Options> {
                 Some("fixture") => Engine::Fixture, Some("codex") => Engine::Codex,
                 Some("claude") => Engine::Claude,
                 Some("deepseek") => Engine::DeepSeek, Some("glm") => Engine::Glm,
-                _ => return Err(invalid("engine must be fixture, codex, claude, deepseek, or glm")),
+                Some("router") => Engine::Router,
+                _ => return Err(invalid("engine must be fixture, codex, claude, deepseek, glm, or router")),
             },
+            Some("--router-config") => {router_config=Some(PathBuf::from(value));explicit_router_config=true;},
             Some("--codex-bin") => codex_bin = Some(PathBuf::from(value)),
             Some("--claude-bin") => claude_bin = Some(PathBuf::from(value)),
             Some("--resume") => resume = match value.to_str() {
@@ -201,16 +214,16 @@ fn options() -> io::Result<Options> {
             Some("--vendor-endpoint") => {
                 vendor_endpoint = Some(value.into_string().map_err(|_| invalid("invalid test endpoint"))?);
             }
-            Some("--sandbox") => sandbox = match value.to_str() {
+            Some("--sandbox") => { explicit_sandbox = true; sandbox = match value.to_str() {
                 Some("read-only") => SandboxMode::ReadOnly,
                 Some("workspace-write") => SandboxMode::WorkspaceWrite,
                 Some("danger-full-access") => SandboxMode::DangerFullAccess,
                 _ => return Err(invalid("invalid sandbox")),
-            },
+            }; },
             Some("--linger") => {
                 linger = linger_duration(value.to_str().ok_or_else(|| invalid("invalid linger"))?)?;
             }
-            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--base-branch REF] [--linger SECONDS] [--engine fixture|codex|claude|deepseek|glm] [--codex-bin PATH --claude-bin PATH --model MODEL --effort EFFORT --sandbox MODE --resume true|false]")),
+            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--base-branch REF] [--linger SECONDS] [--engine fixture|codex|claude|deepseek|glm|router] [--router-config PATH] [--codex-bin PATH --claude-bin PATH --model MODEL --effort EFFORT --sandbox MODE --resume true|false]")),
         }
     }
     // Do not let registry entries claim an unvalidated path or identity.
@@ -246,7 +259,28 @@ fn options() -> io::Result<Options> {
         *requested = doxa_worktrees::resolve_base(&cwd, requested)
             .ok_or_else(|| invalid("--base-branch must name an existing local or remote-tracking branch"))?;
     }
-    if engine == Engine::Codex {
+    if engine != Engine::Router {
+        if explicit_router_config {return Err(invalid("--router-config requires --engine router"));}
+        router_config=None;
+    }
+    if engine == Engine::Router {
+        if codex_bin.is_some() || claude_bin.is_some() || effort.is_some() || explicit_sandbox {
+            return Err(invalid("router targets define their effort; CLI executables and sandbox overrides are unsupported"));
+        }
+        if isolation.is_some_and(|profile|profile!=doxa_isolation::Profile::Native) {
+            return Err(invalid("router currently requires native isolation"));
+        }
+        if spawn_depth != 0 || parent_session_id.is_some() {
+            return Err(invalid("router child-session config inheritance is unavailable"));
+        }
+        if resume && !explicit_session_id {return Err(invalid("router resume needs --session-id"));}
+        let path=router_config.as_ref().filter(|path|path.is_absolute())
+            .ok_or_else(||invalid("router needs an absolute --router-config PATH"))?;
+        let config=doxa_router::Config::load(path).map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
+        if model.as_deref().is_some_and(|id|id!="auto"&&config.candidate(id).is_none()) {
+            return Err(invalid("router model must be auto or an exact configured target ID"));
+        }
+    } else if engine == Engine::Codex {
         codex_bin = Some(executable(
             codex_bin.ok_or_else(|| invalid("Codex needs --codex-bin"))?,
         )?);
@@ -306,6 +340,7 @@ fn options() -> io::Result<Options> {
         resume,
         model,
         effort,
+        router_config,
         #[cfg(feature = "local-test-server")]
         vendor_endpoint,
         sandbox,
@@ -551,6 +586,7 @@ fn run() -> io::Result<()> {
         if path.exists() { Some(doxa_isolation::read_manifest(&path)?.profile) } else { None }
     } else { None };
     let profile = options.isolation.or(recorded_isolation).unwrap_or(doxa_isolation::configured_profile(&isolation_home)?);
+    if options.engine==Engine::Router && profile!=doxa_isolation::Profile::Native {return Err(invalid("router currently requires native isolation"));}
     if recorded_isolation.is_some_and(|saved| saved != profile) { return Err(invalid("resume isolation differs from saved manifest")); }
     let mut isolation = if profile.docker() {
         let runtime = doxa_isolation::Runtime::prepare(&isolation_home, &options.session_id, &options.cwd,
@@ -606,6 +642,7 @@ fn run() -> io::Result<()> {
     let mut codex_host = None;
     let mut claude_host = None;
     let mut vendor_host = None;
+    let mut router_host = None;
     let host: Arc<dyn Host> = match options.engine {
         Engine::Fixture => Arc::new(FixtureHost),
         Engine::Codex => {
@@ -663,6 +700,17 @@ fn run() -> io::Result<()> {
             vendor_host = Some(host.clone());
             host
         }
+        Engine::Router => {
+            let config=doxa_router::Config::load(options.router_config.as_deref().expect("validated router config"))
+                .map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
+            let host=Arc::new(RouterHost::new(config,&options.cwd,&options.session_id,options.resume,ceiling,
+                #[cfg(feature="local-test-server")] options.vendor_endpoint.clone()).map_err(io::Error::other)?);
+            if let Some(model)=options.model.as_deref() {
+                host.call("set_model",&json!({"model":model})).map_err(io::Error::other)?;
+            }
+            options.model = host.initial_model();
+            router_host=Some(host.clone());host
+        }
     };
     let host: Arc<dyn Host> = match &isolation {
         Some(runtime) => Arc::new(isolation_host::IsolationHost::new(host, runtime.clone(),json!({
@@ -675,7 +723,7 @@ fn run() -> io::Result<()> {
             "inbound":inbound_turns,"ceiling":ceiling,"lore":doxa_state::lore_enabled_default()}))),
         None => host,
     };
-    let host: Arc<dyn Host> = match ceiling {
+    let host: Arc<dyn Host> = match ceiling.filter(|_|options.engine!=Engine::Router) {
         Some(value) => {
             let budget = if options.engine.vendor().is_some() || options.engine == Engine::Codex {
             BudgetHost::new_priced(host, value, options.engine.name(), options.model.as_deref().expect("validated budget model"))
@@ -712,11 +760,11 @@ fn run() -> io::Result<()> {
     if let Some(path)=&options.claude_bin {
         provider_args.extend(["--claude-bin".into(),path.to_str().ok_or_else(||invalid("Claude executable must be UTF-8 for child launch"))?.into()]);
     }
-    peer_host.configure_spawner(session_spawn::SpawnConfig {
+    if options.engine!=Engine::Router {peer_host.configure_spawner(session_spawn::SpawnConfig {
         executable:env::current_exe()?,engine:options.engine.name().into(),
         runtime:options.runtime.clone(),cwd:options.cwd.clone(),
         session_id:options.session_id.clone(),depth:options.spawn_depth,provider_args,
-    })?;
+    })?;}
     peer_host.connect_provider_tools();
     let host: Arc<dyn Host> = peer_host.clone();
     let session = Session {
@@ -832,6 +880,7 @@ fn run() -> io::Result<()> {
     if let Some(host) = &vendor_host {
         host.shutdown();
     }
+    if let Some(host)=&router_host {host.shutdown();}
     handle.shutdown();
     if let Some(runtime) = &isolation { runtime.lock().unwrap().stop()?; }
     let preserve_checkout=isolation.as_ref().is_some_and(|runtime|runtime.lock().unwrap().preserves_native_checkout());
@@ -879,6 +928,54 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(args:&[&str])->io::Result<Options> {
+        options_from(args.iter().map(std::ffi::OsString::from))
+    }
+    #[test]
+    fn router_cli_refuses_unsupported_combinations_before_loading_private_config() {
+        for (flag,value,expected) in [
+            ("--effort","high","targets define their effort"),
+            ("--codex-bin","/missing","targets define their effort"),
+            ("--claude-bin","/missing","targets define their effort"),
+            ("--sandbox","workspace-write","sandbox overrides"),
+            ("--isolation","docker-open","native isolation"),
+            ("--spawn-depth","1","config inheritance"),
+            ("--parent-session-id","parent-1","config inheritance"),
+            ("--resume","true","resume needs --session-id"),
+        ] {
+            let error=parse(&["--engine","router","--router-config","/missing/private.json",flag,value]).err().unwrap().to_string();
+            assert!(error.contains(expected),"{flag}: {error}");
+        }
+        assert!(parse(&["--engine","fixture","--router-config","/missing/private.json"]).err().unwrap().to_string().contains("requires --engine router"));
+        assert!(parse(&["--engine","router","--router-config","relative.json"]).err().unwrap().to_string().contains("absolute --router-config"));
+    }
+    #[test]
+    fn router_cli_validates_config_target_and_same_session_resume() {
+        let dir=tempfile::tempdir().unwrap();
+        let path=dir.path().join("router.json");
+        let fixture=json!({"version":1,"jev_model":"jev-1.13.0","criteria_version":"fixture-v1",
+            "fallback_id":"ds-fixture","confidence_threshold":0.5,"max_calls":2,
+            "max_spend_usd_micros":1000,"max_input_bytes":2048,"deadline_ms":1000,
+            "candidates":[
+                {"id":"ds-fixture","provider":"deepseek","model":"deepseek-flash","effort":"high","description":"fixture only","context_tokens":65536,"max_output_tokens":1024,"supports_tools":true,"input_usd_micros_per_million":1000000,"output_usd_micros_per_million":2000000},
+                {"id":"glm-fixture","provider":"glm","model":"glm-5.3-flash","effort":"high","description":"fixture only","context_tokens":65536,"max_output_tokens":1024,"supports_tools":true,"input_usd_micros_per_million":1000000,"output_usd_micros_per_million":2000000}
+            ]});
+        fs::write(&path,serde_json::to_vec(&fixture).unwrap()).unwrap();
+        fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
+        let path=path.to_str().unwrap();
+        for target in ["auto","ds-fixture"] {
+            let options=parse(&["--engine","router","--router-config",path,"--model",target,"--isolation","native"]).unwrap();
+            assert!(options.engine==Engine::Router);
+            assert_eq!(options.model.as_deref(),Some(target));
+            assert!(options.codex_bin.is_none() && options.claude_bin.is_none() && options.effort.is_none());
+        }
+        assert!(parse(&["--engine","router","--router-config",path,"--model","deepseek-flash"]).err().unwrap().to_string().contains("exact configured target ID"));
+        let options=parse(&["--engine","router","--router-config",path,"--session-id","saved-1","--resume","true"]).unwrap();
+        assert_eq!(options.session_id,"saved-1");assert!(options.resume);
+        fs::write(path,b"private malformed input").unwrap();
+        assert_eq!(parse(&["--engine","router","--router-config",path]).err().unwrap().to_string(),"router config is missing, unsafe, or invalid");
+    }
 
     #[test]
     fn generated_session_id_is_canonical_uuid_v4() {
