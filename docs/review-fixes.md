@@ -73,6 +73,20 @@ live peer delivery, physical device, or deployed service was changed by these
 checks. macOS CI, real source installation, live Docker isolation, and live
 provider acceptance remain release/deployment gates.
 
+## User-reported follow-ups
+
+The integration also includes portable context and quota bars, session-bound
+last-context restoration, Codex belief-count forwarding, the Peers chip,
+Settings dismissal/focus handling, desktop-helper clipboard copy, and clearer
+canonical peer-send guidance. Verification of these follow-ups is recorded
+with their final test results below and in the detailed interface record.
+
+Mid-turn steering was investigated from the pinned Codex source and installed
+Claude CLI. Codex offers acknowledged `turn/steer`; Claude exposes a queued
+input path with an opportunity to fold at a model-loop boundary. DOXA does not
+yet expose either as a steering control. See the
+[feasibility and implementation plan](mid-turn-steering.md).
+
 ## Detailed records
 
 - [Backend changes](review-fixes-backend.md)

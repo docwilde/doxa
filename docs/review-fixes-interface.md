@@ -137,5 +137,46 @@ cargo test -p doxa-tui ui::session_telemetry::tests::quota_window_bars_use_only_
 cargo test -p doxa-tui ui::session_telemetry::tests::explicit_quota_window_durations_must_be_valid_for_their_slot -- --exact
 cargo test -p doxa-tui ui::tests::usage_submenu_renders_reported_session_and_weekly_quota_and_keeps_unknowns_clear -- --exact
 cargo test -p doxa-tui ui::tests::usage_submenu_keyboard_wheel_and_resize_reach_late_quota_rows -- --exact
-cargo test -p doxa-engines codex_appserver::tests::billing_uses_only_measured_codex_windows -- --exact
+cargo test -p doxa-engines --lib billing_uses_only_measured_codex_windows
 ```
+
+
+## Restored context reports
+
+A validated last context report is stored with its exact session ID in the
+project's existing UI tabset. Restoring that report labels the chip and context
+submenu as **Last reported**. A placeholder reconnect status preserves the
+historical report; a fresh authoritative report replaces it, and an
+authoritative report without valid context counts clears it. New sessions
+without a measurement remain explicitly unknown. Corrupt, cross-session,
+remote, oversized, and invalid records are rejected. The cache preserves only
+normalized token totals and validated categories, never prompt contents.
+
+## Beliefs and peers chips
+
+Codex now exposes the same cached LORE status through its host as the other
+engines, so the Beliefs chip can show its reported count. The Peers chip opens
+the local peer map for the exact active session. A peer count appears only
+after a complete owner-scoped roster; an incomplete roster or membership event
+invalidates the count instead of displaying a guessed zero.
+
+## Settings dismissal and prompt focus
+
+An outside left-click closes Settings and its transient text/credential
+editors and dropdown. The click can then select a normal pane or prompt. A
+nested New Session form keeps its own input and admission behavior. The
+regression uses an isolated test home, changes and saves a setting, dismisses
+both an editor and a dropdown, and checks typing and draft retention in two
+panes. No owner configuration is used as the test fixture.
+
+## Desktop clipboard copy
+
+Explicit selection copy tries a fixed desktop helper: `wl-copy` on Wayland,
+`xclip` on X11, or `pbcopy` on macOS. The writer runs outside the paint loop,
+bounds text to 64 KiB at a UTF-8 boundary, and cancels/kills/reaps a failed or
+slow process group. If no helper is available or it fails, DOXA sends the
+existing OSC52 sequence and reports that terminal-dependent fallback.
+GNOME Terminal users need `wl-clipboard` or `xclip` available for this desktop
+path. Warp's OSC52 path remains available. Tests write only to a private fake
+helper, including Unicode/control characters, bounds, failure and timeout;
+no system clipboard or live GNOME/Warp session was accessed.
