@@ -6844,7 +6844,7 @@ for line in sys.stdin:
                 "kind":"direct","in_reply_to":null,"message_id":"msg-sent"}});
         let origin = json!({"sender_session_id":sender,"sender_title":"Reviewer","message_id":"msg-received",
             "sent_at":"2026-10-11T13:25:00Z","from_repo":null,"remote_origin":null,"source":"peer_message"});
-        let transcript = format!("{}\n{}\n", json!({"type":"user",
+        let transcript = format!("{}\n{}\n", json!({"type":"user","sessionId":owner,
             "message":{"role":"user","content":"provider wrapper for received body"},
             "doxa_peer_origin":origin}), json!({"type":"assistant",
             "message":{"role":"assistant","content":[{"type":"text","text":"assistant response"}]}}));
@@ -6880,7 +6880,7 @@ for line in sys.stdin:
             .find(|message|message.message_id.as_deref()==Some("msg-received")).unwrap();
         assert!(received.starts_turn);
         assert_eq!(received.text, "RECEIVED_BODY");
-        let (expanded, sections) = transcript_tools::render(&session.transcript, 100, None, None);
+        let (_, sections) = transcript_tools::render(&session.transcript, 100, None, None);
         assert_eq!(sections.len(), 2);
         let opened = sections.into_iter().map(|section|section.index).collect::<HashSet<FoldKey>>();
         let (expanded, _) = transcript_tools::render(&session.transcript, 100, Some(&opened), None);
