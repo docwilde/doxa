@@ -346,7 +346,7 @@ fn bounded_git_output(program: &Path, root: &Path, args: &[&str], max_stdout: us
                 return Ok(output);
             }
             if Instant::now() >= deadline { return Err("exceeded deadline".into()); }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(1));
         }
     })();
     if group_id_reserved {
@@ -521,13 +521,63 @@ fn file_digest(root: &Path, relative: &str, max_bytes: u64) -> Result<(String, u
     Ok((digest, bytes.len() as u64))
 }
 
+fn open_source_file(directory: File, parts: &[CString]) -> Result<File, String> {
+    #[cfg(target_os = "linux")]
+    if let Some(file) = linux_source_open(&directory, parts)? { return Ok(file); }
+    walk_source_file(directory, parts)
+}
+
+// Linux can resolve the entire validated relative path in one syscall while
+// refusing symlinks in every component. Unsupported/filtered syscalls retain
+// the descriptor walk; source deadlines, byte caps and rereads are unchanged.
+#[cfg(target_os = "linux")]
+fn linux_source_open(directory: &File, parts: &[CString]) -> Result<Option<File>, String> {
+    #[repr(C)]
+    struct OpenHow { flags: u64, mode: u64, resolve: u64 }
+    const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+    const RESOLVE_BENEATH: u64 = 0x08;
+    let mut path = Vec::new();
+    for part in parts {
+        if !path.is_empty() { path.push(b'/'); }
+        path.extend_from_slice(part.as_bytes());
+    }
+    let path = CString::new(path).map_err(|_| "NUL in Git file path")?;
+    let how = OpenHow {
+        flags: (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK) as u64,
+        mode: 0,
+        resolve: RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH,
+    };
+    let fd = unsafe { libc::syscall(libc::SYS_openat2, directory.as_raw_fd(), path.as_ptr(),
+        &how as *const OpenHow, std::mem::size_of::<OpenHow>()) };
+    if fd >= 0 { return Ok(Some(unsafe { File::from_raw_fd(fd as i32) })); }
+    let error = std::io::Error::last_os_error();
+    if matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EINVAL | libc::EPERM)) {
+        return Ok(None);
+    }
+    Err(format!("file open: {error}"))
+}
+
+fn walk_source_file(mut directory: File, parts: &[CString]) -> Result<File, String> {
+    for (index, part) in parts.iter().enumerate() {
+        let last = index + 1 == parts.len();
+        let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW
+            | if last { libc::O_NONBLOCK } else { libc::O_DIRECTORY };
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), part.as_ptr(), flags) };
+        if fd < 0 { return Err(format!("file open: {}", std::io::Error::last_os_error())); }
+        let opened = unsafe { File::from_raw_fd(fd) };
+        if last { return Ok(opened); }
+        directory = opened;
+    }
+    Err("empty Git file path".into())
+}
+
 fn read_file_bytes(root: &Path, relative: &str, max_bytes: u64) -> Result<RawBytes, String> {
     // Anchor each component to an opened worktree descriptor. A repository
     // writer may replace a symlink between path validation and File::open;
     // canonicalize + symlink_metadata followed by a pathname open leaks the
     // target's bytes in that race.
     let expected_root = fs::metadata(root).map_err(|e| format!("worktree metadata: {e}"))?;
-    let mut directory = fs::OpenOptions::new().read(true)
+    let directory = fs::OpenOptions::new().read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(root).map_err(|e| format!("worktree open: {e}"))?;
     let opened_root = directory.metadata().map_err(|e| format!("worktree descriptor: {e}"))?;
@@ -540,17 +590,7 @@ fn read_file_bytes(root: &Path, relative: &str, max_bytes: u64) -> Result<RawByt
         _ => Err("unsafe Git file path".to_owned()),
     }).collect::<Result<Vec<_>, _>>()?;
     if parts.is_empty() { return Err("empty Git file path".into()); }
-    let mut file = None;
-    for (index, part) in parts.iter().enumerate() {
-        let last = index + 1 == parts.len();
-        let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW
-            | if last { libc::O_NONBLOCK } else { libc::O_DIRECTORY };
-        let fd = unsafe { libc::openat(directory.as_raw_fd(), part.as_ptr(), flags) };
-        if fd < 0 { return Err(format!("file open: {}", std::io::Error::last_os_error())); }
-        let opened = unsafe { File::from_raw_fd(fd) };
-        if last { file = Some(opened); } else { directory = opened; }
-    }
-    let mut file = file.expect("nonempty Git path");
+    let mut file = open_source_file(directory, &parts)?;
     let metadata = file.metadata().map_err(|e| format!("file metadata: {e}"))?;
     if !metadata.is_file() { return Err("not a regular file (symlinks are skipped)".into()); }
     if metadata.len() > max_bytes { return Err("file exceeds read limit".into()); }
@@ -2118,6 +2158,33 @@ mod tests {
         fs::create_dir(root.path().join("safe")).unwrap();
         fs::write(root.path().join("safe/real.rs"), "fn visible() {}\n").unwrap();
         assert!(file_bytes(root.path(), "safe/real.rs").unwrap().0.contains("visible"));
+    }
+
+    #[test]
+    fn optimized_and_portable_source_opens_read_same_bytes_and_refuse_symlinks() {
+        let root = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("safe/deep")).unwrap();
+        fs::write(root.path().join("safe/deep/real.rs"), "fn visible() {}\n").unwrap();
+        fs::write(outside.path().join("secret.rs"), "fn secret() {}\n").unwrap();
+        symlink(outside.path().join("secret.rs"), root.path().join("linked.rs")).unwrap();
+        symlink(outside.path(), root.path().join("parent")).unwrap();
+        for open in [open_source_file, walk_source_file] {
+            for (path, allowed) in [("safe/deep/real.rs", true), ("linked.rs", false),
+                ("parent/secret.rs", false), ("missing.rs", false)]
+            {
+                let directory = fs::OpenOptions::new().read(true)
+                    .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(root.path()).unwrap();
+                let parts = path.split('/').map(|part| CString::new(part).unwrap()).collect::<Vec<_>>();
+                let result = open(directory, &parts);
+                if allowed {
+                    let mut content = String::new();
+                    result.unwrap().read_to_string(&mut content).unwrap();
+                    assert_eq!(content, "fn visible() {}\n");
+                } else { assert!(result.is_err(), "opened unsafe/missing source {path}"); }
+            }
+        }
     }
 
     #[test]
