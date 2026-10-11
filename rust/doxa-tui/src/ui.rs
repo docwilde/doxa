@@ -41,6 +41,7 @@ pub use terminal_loop::{
 pub(crate) use terminal_loop::run_remote_with_worker_channels_layout;
 mod session_events;
 mod session_telemetry;
+mod glm_account;
 mod transcript_events;
 
 use session_telemetry::SessionTelemetry;
@@ -536,6 +537,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
         "cost" => "Provider billing and quota information",
+        "glm_account" => "GLM declared API profile, unknown cash/bundle remainder and external quota monitor",
         "balance" => "Current DeepSeek API account balance",
         "native_status" => "Owner-approved native status · click for refresh cost and failure ledger",
         "more" => "More chips · click to reveal hidden chips",

@@ -19,6 +19,16 @@ const MAX_STREAM_TEXT_BYTES: usize = 8 * 1024 * 1024;
 /// later turn estimates remain useful but the running session sum is unknown.
 struct CostEstimate { spent: f64, complete: bool }
 
+fn glm_reporting_options(profile: &str, monitor: &str) -> Result<(doxa_vendors::glm_billing::Profile, bool), ()> {
+    let profile = doxa_vendors::glm_billing::Profile::parse(profile).ok_or(())?;
+    let monitor = match monitor.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "off" | "no" => false,
+        "1" | "true" | "on" | "yes" => true,
+        _ => return Err(()),
+    };
+    Ok((profile, monitor))
+}
+
 struct RoutedCompaction<'a> {
     limits: doxa_vendors::TurnLimits,
     target: &'a Value,
@@ -99,6 +109,10 @@ pub struct VendorHost {
     balance: Arc<Mutex<Option<String>>>,
     balance_generation: Arc<AtomicU64>,
     balance_refreshing: Arc<AtomicBool>,
+    glm_quota: Arc<Mutex<doxa_vendors::glm_billing::QuotaSnapshot>>,
+    glm_quota_refreshing: Arc<AtomicBool>,
+    glm_quota_generation: Arc<AtomicU64>,
+    glm_quota_cancel: Arc<AtomicBool>,
     #[cfg(feature = "local-test-server")]
     endpoint: Option<String>,
 }
@@ -256,6 +270,10 @@ impl VendorHost {
             balance: Arc::new(Mutex::new(None)),
             balance_generation: Arc::new(AtomicU64::new(0)),
             balance_refreshing: Arc::new(AtomicBool::new(false)),
+            glm_quota: Arc::new(Mutex::new(doxa_vendors::glm_billing::QuotaSnapshot::not_checked())),
+            glm_quota_refreshing: Arc::new(AtomicBool::new(false)),
+            glm_quota_generation: Arc::new(AtomicU64::new(0)),
+            glm_quota_cancel: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "local-test-server")]
             endpoint,
         };
@@ -412,6 +430,67 @@ impl VendorHost {
         });
     }
 
+    fn glm_reporting_settings(&self) -> Result<(doxa_vendors::glm_billing::Profile, bool, bool), ()> {
+        let home = std::env::var_os("DOXA_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".doxa"));
+        if !home.is_absolute() { return Err(()); }
+        let config = doxa_state::load_config_checked(&home.join("config.toml")).map_err(|_| ())?;
+        let profile_env = std::env::var("DOXA_GLM_ACCOUNT_PROFILE").ok();
+        let monitor_env = std::env::var("DOXA_GLM_PLAN_MONITOR").ok();
+        if profile_env.as_ref().is_none_or(|value|value.trim().is_empty())
+            && config.get("glm_account_profile").is_some_and(|value|value.as_str().is_none()) {return Err(());}
+        let profile = doxa_state::raw_setting(profile_env.as_deref(), &config, "glm_account_profile");
+        let monitor = doxa_state::raw_setting(monitor_env.as_deref(), &config, "glm_plan_monitor");
+        let declared = profile_env.as_ref().is_some_and(|value| !value.trim().is_empty()) || config.contains_key("glm_account_profile");
+        let (profile, monitor) = glm_reporting_options(&profile, &monitor)?;
+        Ok((profile, monitor, declared))
+    }
+
+    fn glm_billing_snapshot(&self) -> Value {
+        use doxa_vendors::glm_billing::{account_report, QuotaSnapshot};
+        let (profile, monitor, declared) = match self.glm_reporting_settings() {
+            Ok(options) => options,
+            Err(()) => return account_report(None, false, false, &QuotaSnapshot::unavailable("invalid_config")),
+        };
+        let quota = self.glm_quota.lock().map(|quota| quota.clone()).unwrap_or_else(|_| QuotaSnapshot::unavailable("unavailable"));
+        account_report(Some(profile), declared, monitor, &quota)
+    }
+
+    fn refresh_glm_quota(&self) -> Result<Value, String> {
+        if self.closing.load(Ordering::Acquire) {return Err("Session is stopping".into());}
+        let (_, monitor, _) = self.glm_reporting_settings().map_err(|_| "GLM account reporting configuration is invalid")?;
+        if !monitor { return Ok(self.glm_billing_snapshot()); }
+        if self.glm_quota_refreshing.swap(true, Ordering::AcqRel) { return Ok(self.glm_billing_snapshot()); }
+        // A local chat fixture must never accidentally query the live monitor.
+        #[cfg(feature = "local-test-server")]
+        if self.endpoint.is_some() {
+            self.glm_quota_refreshing.store(false, Ordering::Release);
+            *self.glm_quota.lock().map_err(|_| "Quota status unavailable")? = doxa_vendors::glm_billing::QuotaSnapshot::unavailable("local_fixture");
+            return Ok(self.glm_billing_snapshot());
+        }
+        let quota = self.glm_quota.clone(); let flag = self.glm_quota_refreshing.clone();
+        self.glm_quota_cancel.store(false,Ordering::Release);
+        if self.closing.load(Ordering::Acquire) {
+            self.glm_quota_cancel.store(true,Ordering::Release);flag.store(false,Ordering::Release);
+            return Err("Session is stopping".into());
+        }
+        let cancel=self.glm_quota_cancel.clone();
+        let current = self.glm_quota_generation.clone(); let generation = current.load(Ordering::Acquire);
+        if let Ok(mut stored) = quota.lock() { *stored = doxa_vendors::glm_billing::QuotaSnapshot::refreshing(); }
+        else { flag.store(false, Ordering::Release); return Err("Quota status unavailable".into()); }
+        if std::thread::Builder::new().name("doxa-glm-quota".into()).spawn(move || {
+            let snapshot = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()
+                .map(|runtime| runtime.block_on(doxa_vendors::glm_billing::refresh_plan_quota(&cancel)))
+                .unwrap_or_else(|| doxa_vendors::glm_billing::QuotaSnapshot::unavailable("transport_unavailable"));
+            if current.load(Ordering::Acquire) == generation { if let Ok(mut quota) = quota.lock() { *quota = snapshot; } }
+            flag.store(false, Ordering::Release);
+        }).is_err() {
+            self.glm_quota_refreshing.store(false, Ordering::Release);
+            if let Ok(mut quota) = self.glm_quota.lock() { *quota = doxa_vendors::glm_billing::QuotaSnapshot::unavailable("transport_unavailable"); }
+        }
+        Ok(self.glm_billing_snapshot())
+    }
+
     fn scrub(&self, text: &str) -> Result<String, ()> {
         let result = doxa_vendors::credentials::redact(text).map_err(|_| ())
             .and_then(|text| self.lore.lock().map_err(|_| ())
@@ -439,6 +518,7 @@ impl VendorHost {
     }
 
     pub fn shutdown(&self) {
+        self.glm_quota_cancel.store(true,Ordering::Release);
         if self.finalized.swap(true, Ordering::AcqRel) { return; }
         self.closing.store(true, Ordering::Release);
         self.cancel();
@@ -459,6 +539,7 @@ impl VendorHost {
     }
 
     fn cancel(&self) {
+        self.glm_quota_cancel.store(true,Ordering::Release);
         self.peer_desk.clear();
         if let Ok(active) = self.active.lock() {
             if let Some(sender) = active.as_ref() {
@@ -665,7 +746,7 @@ impl Host for VendorHost {
     fn initial_model(&self) -> Option<String> { Some(self.model.lock().unwrap().clone()) }
     fn initial_effort(&self) -> Option<String> { Some(self.effort.lock().unwrap().clone()) }
     fn billing_snapshot(&self) -> Option<Value> {
-        if self.vendor() != Vendor::DeepSeek { return None; }
+        if self.vendor() == Vendor::Glm { return Some(self.glm_billing_snapshot()); }
         self.balance.lock().ok().and_then(|value| value.as_ref()
             .map(|label| json!({"mode":"api","balance":label})))
     }
@@ -986,11 +1067,14 @@ impl Host for VendorHost {
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "refresh_billing" if self.vendor() == Vendor::Glm => Ok(json!({"status":{"session_id":self.session_id,"billing":self.refresh_glm_quota()?}})),
             "answer_needs_input" => self.peer_desk.answer(params["id"].as_str().ok_or("Peer request ID required")?, &params["answer"]),
             "list_models" => {
                 // A setup mutation queues this call for attached sessions. The
                 // account-scoped catalog and displayed balance must refresh.
                 self.refresh_balance();
+                self.glm_quota_generation.fetch_add(1, Ordering::AcqRel);
+                if let Ok(mut quota) = self.glm_quota.lock() { *quota = doxa_vendors::glm_billing::QuotaSnapshot::not_checked(); }
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| "catalog runtime unavailable")?;
                 let catalog = runtime.block_on(doxa_vendors::catalog_models(self.vendor()));
                 let verified = catalog.is_some();
@@ -1071,6 +1155,16 @@ fn done(message: &str) -> Value {
 #[cfg(test)]
 mod stream_tests {
     use super::*;
+    #[test]
+    fn glm_reporting_defaults_and_monitor_do_not_select_plan_inference() {
+        use doxa_vendors::glm_billing::Profile;
+        assert_eq!(super::glm_reporting_options("",""),Ok((Profile::StandardApi,false)));
+        assert_eq!(super::glm_reporting_options("api_resource_bundle","true"),Ok((Profile::ApiResourceBundle,true)));
+        assert_eq!(super::glm_reporting_options("standard_api","off"),Ok((Profile::StandardApi,false)));
+        assert!(super::glm_reporting_options("coding_plan","true").is_err());
+        assert!(super::glm_reporting_options("standard_api","maybe").is_err());
+        assert_eq!(doxa_vendors::Vendor::Glm.endpoint(),"https://api.z.ai/api/paas/v4/chat/completions");
+    }
 
     #[test]
     fn published_vendor_rates_estimate_reasoning_as_output_once() {

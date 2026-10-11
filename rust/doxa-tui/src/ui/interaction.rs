@@ -866,6 +866,18 @@ impl App {
                     return true;
                 }
             }
+            if matches!(key.code,KeyCode::Char('r'|'R')) && self.chip_info.as_ref().is_some_and(|info|info.kind=="usage") {
+                if let Some((id,_))=self.chip_info.as_ref().and_then(|info|info.owner.clone()) {
+                    if self.groups[self.active_group].active_id()==Some(id.as_str())
+                        && self.session_identity.get(&id).and_then(|identity|identity.0.as_deref())==Some("glm") {
+                        if self.session_telemetry.get(&id).and_then(|value|value.glm_account.as_ref()).is_some_and(|account|account.monitor) {
+                            self.pending_queue_commands.push(crate::bridge::WorkerCommand::RefreshBilling(id));
+                            self.notice="Refreshing external Coding Plan monitor…".into();
+                        } else {self.notice="External Coding Plan monitor is off; enable it in /settings → Session".into();}
+                        return true;
+                    }
+                }
+            }
             let codegraph_area = self.active_chooser_rect();
             let context_rows = self.chip_info.as_ref().filter(|info| info.kind == "context")
                 .map(|_| self.context_info_lines(codegraph_area.map_or(1, |area| usize::from(area.width.saturating_sub(3)).max(1))).len());

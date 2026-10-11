@@ -6,6 +6,59 @@ use super::*;
     use serde_json::json;
 
     #[test]
+    fn glm_account_usage_refresh_is_explicit_and_restores_unknown_and_reported_state() {
+        use doxa_vendors::glm_billing::{account_report,Profile,QuotaSnapshot};
+        let mut app=App::default();app.handle(Event::Resize(190,48));
+        let report=account_report(Some(Profile::ApiResourceBundle),true,false,&QuotaSnapshot::not_checked());
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"glm-report","engine":"glm","model":"glm-5.3-flash","billing":report}));
+        assert!(app.chips(0).contains(&("glm_account","GLM bundle · remainder ?".into())));
+        assert!(app.pending_prompts.is_empty());assert!(app.pending_queue_commands.is_empty());
+        app.open_chip_info("glm_account",0);
+        assert_eq!(app.chip_info.as_ref().unwrap().kind,"usage");
+        assert!(app.chip_info.as_ref().unwrap().lines.join("\n").contains("owner-declared"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'),KeyModifiers::NONE)));
+        assert!(app.pending_queue_commands.is_empty());assert!(app.notice.contains("monitor is off"));
+
+        let mut report=account_report(Some(Profile::ApiResourceBundle),true,true,&QuotaSnapshot::not_checked());
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::Telemetry {session_id:"glm-report".into(),reply:json!({"status":{"billing":report}})});
+        assert!(app.chip_info.as_ref().unwrap().lines.join("\n").contains("not checked"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'),KeyModifiers::NONE)));
+        assert!(matches!(app.pending_queue_commands.as_slice(),[crate::bridge::WorkerCommand::RefreshBilling(id)] if id=="glm-report"));
+        assert!(app.pending_prompts.is_empty());
+        app.pending_queue_commands.clear();
+        let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        report["glm_account"]["plan_monitor"]["quota"]=json!({"status":"verified","observed_at":now,"limits":[{"kind":"provider_quota","used_percent":82}]});
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::Telemetry {session_id:"glm-report".into(),reply:json!({"status":{"billing":report,"total_cost_usd":0.125,"usage":{"cost_basis":"list_price"}}})});
+        let lines=app.chip_info.as_ref().unwrap().lines.join("\n");
+        assert!(lines.contains("82.0% used"));assert!(lines.contains("bundle remainder: unknown"));
+        assert!(lines.contains("$0.1250 est"));assert!(lines.contains("Actual provider charge: unknown"));
+        assert_eq!(app.session_telemetry["glm-report"].billing_mode.as_deref(),Some("api"));
+        assert!(app.session_telemetry["glm-report"].subscription_type.is_none());
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::TelemetryUnavailable {session_id:"glm-report".into()});
+        assert!(!app.chip_info.as_ref().unwrap().lines.join("\n").contains("82.0%"));
+        assert!(app.chip_info.as_ref().unwrap().lines.join("\n").contains("quota monitor: unavailable"));
+    }
+
+    #[test]
+    fn glm_profile_settings_choice_and_monitor_are_independent_production_controls() {
+        let mut app=App::default();app.handle(Event::Resize(180,40));
+        let rows=crate::settings::SETTINGS.iter().map(|setting|crate::settings::Row {setting,value:setting.default.into(),stored:setting.default.into(),source:"default".into(),shadowed:false}).collect::<Vec<_>>();
+        let selected=rows.iter().position(|row|row.setting.key=="glm_account_profile").unwrap();
+        app.settings_menu=Some(SettingsMenu {rows,selected,category:0,draft:None,edits:HashMap::new(),engine:"glm".into()});
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        let menu=app.settings_menu.as_ref().unwrap();
+        assert_eq!(menu.edits["glm_account_profile"].as_deref(),Some("api_resource_bundle"));
+        assert!(!menu.edits.contains_key("glm_plan_monitor"));
+        let selected=app.settings_menu.as_ref().unwrap().rows.iter().position(|row|row.setting.key=="glm_plan_monitor").unwrap();
+        app.settings_menu.as_mut().unwrap().selected=selected;
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert_eq!(app.settings_menu.as_ref().unwrap().edits["glm_plan_monitor"].as_deref(),Some("on"));
+        assert!(app.pending_prompts.is_empty());assert!(app.pending_queue_commands.is_empty());
+    }
+
+    #[test]
     fn router_events_preserve_auto_and_display_effective_identity_without_private_fields() {
         let mut app=App::default();
         app.handle(Event::Resize(160,36));

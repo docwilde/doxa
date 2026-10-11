@@ -3,6 +3,7 @@
 //! Tool execution deliberately belongs to a future gated engine integration.
 
 pub mod credentials;
+pub mod glm_billing;
 
 use futures_util::{future::BoxFuture, StreamExt};
 use serde_json::{json, Map, Value};

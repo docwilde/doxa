@@ -180,16 +180,20 @@ impl App {
             WorkerFrame::Telemetry { session_id, reply } => {
                 if let Some(status) = reply.get("status") {
                     self.session_telemetry
-                        .entry(session_id)
+                        .entry(session_id.clone())
                         .or_default()
                         .update_status(status);
+                    self.refresh_usage_info(&session_id);
                     true
                 } else {
                     false
                 }
             }
             WorkerFrame::TelemetryUnavailable { session_id } => {
-                self.session_telemetry.entry(session_id).or_default().lore = None;
+                let telemetry=self.session_telemetry.entry(session_id.clone()).or_default();
+                telemetry.lore = None;
+                if let Some(account)=telemetry.glm_account.as_mut().filter(|account|account.monitor) {account.unavailable();}
+                self.refresh_usage_info(&session_id);
                 true
             }
             WorkerFrame::RemoteSnapshot { session_id, markdown, pending_inputs, pending_inputs_complete,before,has_more } => {
@@ -733,9 +737,10 @@ impl App {
                             return false;
                         }
                         self.session_telemetry
-                            .entry(id)
+                            .entry(id.clone())
                             .or_default()
                             .update_billing(data);
+                        self.refresh_usage_info(&id);
                         true
                     }
                     "tool_result_detail" => tool_updated,
@@ -1420,6 +1425,7 @@ impl App {
                     .entry(id.to_owned())
                     .or_default()
                     .update_status(status);
+                self.refresh_usage_info(id);
                 true
             }
             "reply" => {
@@ -1435,6 +1441,7 @@ impl App {
                             .entry(id.to_owned())
                             .or_default()
                             .update_status(status);
+                        self.refresh_usage_info(id);
                         let identity = self.session_identity.entry(id.to_owned()).or_default();
                         if status.get("engine").is_some() {
                             identity.0 = status

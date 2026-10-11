@@ -127,6 +127,7 @@ pub(super) struct SessionTelemetry {
     pub(super) subscription_type: Option<String>,
     pub(super) quota: Option<String>,
     pub(super) balance: Option<String>,
+    pub(super) glm_account: Option<super::glm_account::GlmAccount>,
     pub(super) lore: Option<String>,
 }
 
@@ -227,6 +228,7 @@ impl SessionTelemetry {
     }
 
     pub(super) fn update_billing(&mut self, billing: &serde_json::Value) {
+        if let Some(account)=billing.get("glm_account") {self.glm_account=super::glm_account::GlmAccount::from_value(account);}
         if let Some(compaction) = billing.get("compaction") { self.compaction = CompactionStatus::from_value(compaction); }
         if let Some(routing) = billing.get("routing") { self.routing = RoutingStatus::from_value(routing); }
         self.update_cost_scope(billing);

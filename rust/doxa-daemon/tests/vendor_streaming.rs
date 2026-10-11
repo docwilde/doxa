@@ -120,3 +120,43 @@ fn run_case(case: &str) {
 #[test] fn incomplete_stream_does_not_commit_history() { run_case("incomplete"); }
 #[test] fn uncertain_lexical_span_fails_closed_without_history_commit() { run_case("uncertain"); }
 #[test] fn overflowing_lexical_span_cancels_without_history_commit() { run_case("overflow"); }
+
+#[test]
+fn glm_account_startup_and_status_are_cached_and_monitor_is_explicit() {
+    for monitor in [false,true] {
+        let root=tempfile::tempdir().unwrap();let root=root.path();
+        let doxa=root.join("doxa");fs::create_dir(&doxa).unwrap();fs::set_permissions(&doxa,fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(doxa.join("config.toml"),format!("glm_account_profile='api_resource_bundle'\nglm_plan_monitor={monitor}\n")).unwrap();
+        fs::set_permissions(doxa.join("config.toml"),fs::Permissions::from_mode(0o600)).unwrap();
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();listener.set_nonblocking(true).unwrap();
+        let endpoint=format!("http://{}/chat",listener.local_addr().unwrap());
+        let mut command=Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        command.env_clear().args(["--runtime-dir",root.to_str().unwrap(),"--cwd",root.to_str().unwrap(),"--session-id","glm-report","--engine","glm","--model","glm-5.3-flash","--effort","low","--vendor-endpoint",&endpoint,"--linger","20"])
+            .env("PATH","/usr/bin:/bin").env("TMPDIR",root).env("HOME",root.join("home")).env("DOXA_HOME",&doxa)
+            .env("LORE_ROOT",root.join("lore")).env("LORE_PROJECTS_DIR",root.join("projects"))
+            .env("LORE_SKILLS_DIR",root.join("skills")).env("LORE_DISABLE_SYNC","1").env("LORE_DISABLE_REVIEW","1")
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        if let Some(carrier)=std::env::var_os("DOXA_LORE_RS") {command.env("DOXA_LORE_RS",carrier);}
+        let mut daemon=Daemon(command.spawn().unwrap());
+        let registry=root.join("registry/glm-report.json");let deadline=Instant::now()+Duration::from_secs(10);
+        while !registry.exists() {assert!(daemon.0.try_wait().unwrap().is_none());assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(10));}
+        let record:Value=serde_json::from_slice(&fs::read(registry).unwrap()).unwrap();
+        let mut socket=UnixStream::connect(record["daemon_socket"].as_str().unwrap()).unwrap();socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut reader=BufReader::new(socket.try_clone().unwrap());let hello=frame(&mut reader);
+        let account=&hello["billing"]["glm_account"];
+        assert_eq!(account["profile"],"api_resource_bundle");assert_eq!(account["profile_source"],"owner_declared");
+        assert_eq!(account["cash_balance_status"],"unknown");assert_eq!(account["resource_bundle_remaining_status"],"unknown");
+        assert_eq!(account["plan_monitor"]["inference_uses_plan"],false);
+        assert_eq!(account["plan_monitor"]["quota"]["status"],if monitor {"not_checked"} else {"disabled"});
+        for (id,method) in [(1,"status"),(2,"refresh_billing"),(3,"status")] {
+            send(&mut socket,json!({"type":"call","id":id,"method":method,"params":{}}));
+            let reply=loop {let reply=frame(&mut reader);if reply["type"]=="reply" && reply["id"]==id {break reply;}};
+            assert_eq!(reply["ok"],true);let report=&reply["status"]["billing"]["glm_account"];
+            assert_eq!(report["provider_charge_status"],"unknown");
+            assert_eq!(report["inference_endpoint"],"https://api.z.ai/api/paas/v4/chat/completions");
+            assert_eq!(report["plan_monitor"]["quota"]["status"],if monitor && id>1 {"local_fixture"} else if monitor {"not_checked"} else {"disabled"});
+        }
+        assert_eq!(listener.accept().unwrap_err().kind(),std::io::ErrorKind::WouldBlock,"reporting issued model/catalog HTTP");
+        send(&mut socket,json!({"type":"call","id":4,"method":"stop","params":{}}));
+    }
+}

@@ -71,6 +71,8 @@ pub const SETTINGS: &[Setting] = &[
     key_setting!("key_lore", "LORE beliefs", "Alt+L"),
     key_setting!("key_stop", "stop session", "Ctrl+X"),
     key_setting!("key_delete_transcript", "delete session transcript", "Ctrl+Delete"),
+    Setting { key: "glm_account_profile", env: "DOXA_GLM_ACCOUNT_PROFILE", label: "GLM account reporting", category: "Session", kind: Kind::Choice, choices: &["standard_api", "api_resource_bundle"], default: "standard_api", read_only: false, help: "Declare standard API or an API resource bundle for reporting. Bundle ownership is owner-declared; cash balance, bundle remainder and actual charges remain unknown. Check the Z.ai billing console.", note: "GLM still uses the standard API endpoint. Session costs are list-price estimates, separate from actual prepaid charges." },
+    Setting { key: "glm_plan_monitor", env: "DOXA_GLM_PLAN_MONITOR", label: "external Coding Plan monitor", category: "Session", kind: Kind::Bool, choices: &[], default: "0", read_only: false, help: "Opt in to a separate read-only external Coding Plan quota monitor. Open /usage and press R to refresh using the GLM key. Availability stays unknown until a valid provider response.", note: "Monitor only: no Coding Plan entitlement or inference endpoint change. No query at startup or during model turns; quota failure does not block work." },
     Setting { key: "model", env: "DOXA_MODEL", label: "model", category: "Session", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Model preference for new sessions of this engine; /model switches the live session. Router uses auto or an exact configured target ID and ignores DOXA_MODEL.", note: "Router target choice is separate from the effective provider/model for each turn and from permission mode." },
     Setting { key: "effort", env: "DOXA_EFFORT", label: "effort", category: "Session", kind: Kind::Choice, choices: &["", "low", "medium", "high", "xhigh", "max"], default: "", read_only: false, help: "Default reasoning effort for new sessions; router effort is fixed per target in its candidate config. Use the effort chip or /effort on supported engines", note: "Supported current-session changes require an idle provider and verified capability. Claude resumes its existing provider conversation with the selected effort; Codex applies it to the next turn." },
     Setting { key: "allow_bypass", env: "DOXA_ALLOW_BYPASS", label: "allow bypass", category: "Session", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Let NEW sessions reach bypassPermissions at all (spawns their CLI with --allow-dangerously-skip-permissions)", note: "OFF by default, and the default is the point. The claude CLI arms this capability at LAUNCH, not at runtime: a session started without the flag cannot enter bypassPermissions, and no setting can retrofit one that is already running. While this is off, the mode is absent from the permission picker, the chip's picker and /mode's list rather than being offered and refused. Turning it on puts every session spawned afterwards one keystroke away from running tools unapproved, in every repository you open." },
@@ -333,6 +335,23 @@ pub(crate) fn save_with_review(path: &Path, edits: &[(String, Option<String>)], 
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn glm_account_settings_save_only_declarations_and_preserve_standard_inference() {
+        let profile=find("glm_account_profile").unwrap();let monitor=find("glm_plan_monitor").unwrap();
+        assert_eq!(profile.default,"standard_api");assert_eq!(monitor.default,"0");
+        assert!(coerce(profile,Some("coding_plan")).is_err());assert!(coerce(monitor,Some("maybe")).is_err());
+        let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path=dir.path().join("config.toml");
+        std::fs::write(&path,"engine='glm'\nfuture='keep'\n[models]\nglm='glm-5.3-flash'\n").unwrap();
+        save(&path,&[(profile.key.into(),Some("api_resource_bundle".into())),(monitor.key.into(),Some("on".into()))],"glm").unwrap();
+        let config=doxa_state::load_config_checked(&path).unwrap();
+        assert_eq!(config[profile.key].as_str(),Some("api_resource_bundle"));assert_eq!(config[monitor.key].as_bool(),Some(true));
+        assert_eq!(config["engine"].as_str(),Some("glm"));assert_eq!(config["models"]["glm"].as_str(),Some("glm-5.3-flash"));
+        assert_eq!(config["future"].as_str(),Some("keep"));assert!(!config.contains_key("endpoint"));
+        assert_eq!(raw_from(&config,profile,Some("standard_api"),"glm"),"standard_api");
+        assert_eq!(raw_from(&config,monitor,Some("off"),"glm"),"off");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode()&0o777,0o600);
+    }
     #[test]
     fn router_settings_keep_target_selection_and_private_config_explicit() {
         let config: toml::Table = "[models]\nrouter='reviewed-target'\n".parse().unwrap();

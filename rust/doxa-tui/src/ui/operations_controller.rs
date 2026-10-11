@@ -1079,6 +1079,17 @@ impl App {
         }
     }
 
+    pub(super) fn refresh_usage_info(&mut self, id: &str) {
+        let scroll=self.chip_info.as_ref().filter(|info|info.kind=="usage"
+            && info.owner.as_ref().is_some_and(|owner|owner.0==id)).map(|info|info.scroll);
+        if let Some(scroll)=scroll {
+            if self.groups[self.active_group].active_id()==Some(id) {
+                self.open_diagnostic("usage");
+                if let Some(info)=self.chip_info.as_mut() {info.scroll=scroll.min(info.lines.len().saturating_sub(1));}
+            }
+        }
+    }
+
     pub(super) fn open_diagnostic(&mut self, kind: &'static str) {
         let Some(id) = self.groups[self.active_group]
             .active_id()
@@ -1140,6 +1151,7 @@ impl App {
             if let Some(quota) = telemetry.and_then(|value| value.quota.as_deref()) {
                 lines.push(format!("quota    {}", safe_label(quota)));
             }
+            if let Some(account)=telemetry.and_then(|value|value.glm_account.as_ref()) {lines.extend(account.lines());}
         }
         let used = telemetry.and_then(|value| value.context_tokens);
         let limit = telemetry.and_then(|value| value.context_limit);
