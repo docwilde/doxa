@@ -306,7 +306,7 @@ impl TranscriptStore {
             .create(true)
             .append(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(self.transcript_path())?;
         checked_file(&file)?;
         if file.metadata()?.len().saturating_add(bytes.len() as u64) > MAX_VENDOR_TRANSCRIPT_BYTES {
@@ -558,7 +558,7 @@ impl TranscriptStore {
             .create(true)
             .append(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(self.transcript_path())?;
         checked_file(&file)?;
         // Python 1.x may have created this file under a permissive umask.
@@ -590,7 +590,7 @@ impl TranscriptStore {
             .create(true)
             .append(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(self.transcript_path())?;
         checked_file(&file)?;
         if file.metadata()?.permissions().mode() & 0o077 != 0 {
