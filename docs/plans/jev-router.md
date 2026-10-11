@@ -2,8 +2,8 @@
 
 Status: first native API slice implemented for integration on 2026-10-10;
 fixture validation and a measured synthetic smoke are recorded below. Real-task
-routing evaluation remains open. Reviewed managed compaction is being integrated
-on 2026-10-11 with local verification.
+routing evaluation remains open. Reviewed managed compaction was implemented
+and locally verified on 2026-10-11. The feature remains unreleased in draft PR #249.
 
 ## Implemented scope
 
@@ -59,6 +59,16 @@ identity, known-failure/unknown-cost handling without false completion, and
 bounded billing restoration. The lifecycle fixture retains completed summary
 status after a later ordinary turn changes its routed worker. Both frontend
 binaries passed `cargo check --locked --offline -p doxa-tui --bins`.
+
+The integrated host passed eight native compaction tests across 22 controlled
+fixture variants, 31 routed-host tests, two fixed-vendor compaction tests and
+19 vendor transport tests. These cover success and subsequent turns, resume,
+review/budget refusal, cancellation and crash reservations, invalid or missing
+usage/model identity, source changes during review/catalog/provider work, and
+serialized request caps. A full TUI run passed 733 tests with six ignored and
+one stale help-text assertion; that assertion was updated and passed separately.
+The production daemon, frontend and router compiled without test transports.
+No paid calls were made for this compaction verification.
 
 The controlled native LORE carrier verification passed two review-policy tests:
 reviewer invocation on canonical router records, unchanged originals and stale
