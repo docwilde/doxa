@@ -106,6 +106,10 @@ Settings has numbered category tabs: **1 Session · 2 Fleet · 3 Memory · 4 App
 
 Choice fields in Settings and New Session open dropdowns with a click or Enter. Use Up/Down, the mouse wheel, Home/End or Page Up/Down to browse; click or Enter selects, and Escape cancels. Tab moves between New Session fields. Settings text edits and dropdown selections are staged until Ctrl+S saves; Escape from Settings discards unsaved changes.
 
+New Session loads Claude and Codex model choices from their connected CLI catalogs and vendor models from the vendor catalog. An open model dropdown updates as the live list arrives; press R inside it to refresh. Loading and lookup failures appear in the form and dropdown. Router target choices come from the owner's router configuration.
+
+Ctrl+Delete confirms removal of the session and its DOXA transcript. Live daemons stop first; an already-absent transcript still removes the saved window entry after its project identity is checked. Successful removal suppresses late history results and daemon frames so the session cannot reappear in the list. Provider-native history remains separate.
+
 ## Fleets and peers
 
 `fleet preflight` checks capacity, spend ceiling, and socket paths before `fleet start`. Use `--worker-task INDEX:TEXT` to give each worker a frozen deliverable and optional `--worker-path INDEX:RELATIVE_PREFIX` to narrow its file scope. `fleet runs|status|attach|stop|resume` operate on owned manifests and verified slots. `fleet debrief RUN` reads a finished run's host journal and reports assignment outcomes, handoff cycles, signed test receipts, and retained review events without peer text or model calls. `/fleet` shows runs in the TUI; starting or resuming there requires reviewing and arming the complete plan. Budgeted resume needs complete persisted accounting. [Fleet guide](../docs/fleet.md).

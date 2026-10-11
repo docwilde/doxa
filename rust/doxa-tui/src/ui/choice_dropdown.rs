@@ -50,7 +50,7 @@ impl App {
                     let values = if *engine == launch::Engine::Router { vec!["native".into()] }
                         else { vec!["native".into(), "docker-open".into(), "docker-offline".into()] };
                     Some(("Isolation".into(), values, form.isolation.key().into()))
-                } else if *field == 0 && !form.models.is_empty() {
+                } else if *field == 0 {
                     Some((if *engine == launch::Engine::Router { "Target" } else { "Model" }.into(), form.models.clone(), form.model.clone()))
                 } else if vendor && *field == 1 && effort_model.as_deref() == Some(form.model.as_str()) {
                     Some(("Effort".into(), form.model_efforts.get(&form.model).cloned().unwrap_or_default(), form.effort.clone().unwrap_or_default()))
@@ -61,7 +61,6 @@ impl App {
 
     fn open_choice_dropdown(&mut self, owner: Owner) -> bool {
         let Some((title, choices, current)) = self.choice_values(&owner) else { return false; };
-        if choices.is_empty() { self.notice = "No verified choices are available".into(); return true; }
         let selected = choices.iter().position(|value| *value == current).unwrap_or(0);
         self.choice_dropdown = Some(Dropdown { owner, title, choices, selected, start: Cell::new(0) });
         true
@@ -77,6 +76,16 @@ impl App {
         let Some(form) = self.new_session.as_ref() else { return false; };
         let effort_model = (!vendor_models(form.engine).is_empty() && form.field == 1).then(|| form.model.clone());
         self.open_choice_dropdown(Owner::NewSession { engine: form.engine, field: form.field, effort_model })
+    }
+
+    pub(super) fn refresh_choice_dropdown(&mut self) {
+        let Some(dropdown) = self.choice_dropdown.as_ref() else { return; };
+        let previous = dropdown.choices.get(dropdown.selected).cloned();
+        let Some((_, choices, current)) = self.choice_values(&dropdown.owner) else { self.choice_dropdown = None; return; };
+        let dropdown = self.choice_dropdown.as_mut().unwrap();
+        dropdown.selected = previous.and_then(|value| choices.iter().position(|choice| *choice == value))
+            .or_else(|| choices.iter().position(|choice| *choice == current)).unwrap_or(0);
+        dropdown.choices = choices;
     }
 
     fn select_dropdown_choice(&mut self) {
@@ -114,6 +123,14 @@ impl App {
     pub(super) fn choice_dropdown_key(&mut self, key: KeyEvent) -> bool {
         let Some(dropdown) = self.choice_dropdown.as_ref() else { return false; };
         if self.choice_values(&dropdown.owner).is_none() { self.choice_dropdown = None; return true; }
+        if matches!(key.code, KeyCode::Char('r' | 'R')) && matches!(dropdown.owner, Owner::NewSession { field: 0, .. }) {
+            self.refresh_new_session_catalog();
+            return true;
+        }
+        if dropdown.choices.is_empty() {
+            if key.code == KeyCode::Esc { self.choice_dropdown = None; }
+            return true;
+        }
         let selected = dropdown.selected;
         let last = dropdown.choices.len() - 1;
         match key.code {
@@ -187,12 +204,19 @@ impl App {
         let dropdown = self.choice_dropdown.as_ref().unwrap();
         let count = usize::from(area.height - 2);
         let start = dropdown.visible_start(count);
-        let lines = dropdown.choices.iter().enumerate().skip(start).take(count).map(|(index, value)|
+        let mut lines = dropdown.choices.iter().enumerate().skip(start).take(count).map(|(index, value)|
             Line::styled(format!(" {} {}", if index == dropdown.selected { '›' } else { ' ' }, choice_label(value)),
                 super::chooser_row_style(index == dropdown.selected))).collect::<Vec<_>>();
+        let model = matches!(dropdown.owner, Owner::NewSession { field: 0, .. });
+        if lines.is_empty() {
+            let loading = self.new_session.as_ref().is_some_and(|form| form.catalog_pending);
+            lines.push(Line::styled(if loading { " Loading models…" } else { " No models · R retries" }, Style::default().fg(theme::MUTED)));
+        }
         frame.render_widget(Clear, area);
         frame.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL)
-            .title(format!(" {} ", safe_label(&dropdown.title))).title_bottom(" Enter select · Esc cancel ").border_style(Style::default().fg(theme::ACCENT)))
+            .title(format!(" {} ", safe_label(&dropdown.title)))
+            .title_bottom(if model { " Enter · Esc · R refresh " } else { " Enter select · Esc cancel " })
+            .border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
         super::render::draw_menu_scrollbar(frame, area, dropdown.choices.len(), count, start);
     }
@@ -477,5 +501,60 @@ mod tests {
         assert_eq!(saved["background"].as_str(), Some("transparent"));
         assert_eq!(saved["unrelated"].as_str(), Some("keep"));
         assert!(app.settings_menu.as_ref().unwrap().edits.is_empty());
+    }
+
+    #[test]
+    fn new_session_cli_model_dropdown_populates_live_while_open_and_uses_reported_default() {
+        for (index, engine) in [(0, launch::Engine::Codex), (1, launch::Engine::Claude)] {
+            let mut app = settings_app();
+            app.settings_menu = None;
+            app.engine_selected = index;
+            app.select_new_engine();
+            let form = app.new_session.as_mut().unwrap();
+            form.model.clear();
+            form.catalog_pending = true;
+            key(&mut app, KeyCode::Enter);
+            assert!(paint(&app).contains("Loading models"));
+            key(&mut app, KeyCode::Enter);
+            assert!(app.choice_dropdown.is_some());
+            assert!(app.pending_launches.is_empty());
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            app.new_session_catalog_pending = Some((engine, rx));
+            tx.send(Ok(serde_json::json!({"models":["fixture-a","fixture-b","fixture-a","bad\nmodel",""],
+                "capabilities":[{"model":"fixture-b","is_default":true}]}))).unwrap();
+            assert!(app.poll_new_session_catalog());
+            assert_eq!(app.new_session.as_ref().unwrap().models, ["fixture-a", "fixture-b"]);
+            assert_eq!(app.new_session.as_ref().unwrap().model, "fixture-b");
+            assert!(paint(&app).contains("fixture-a"));
+            assert_eq!(app.choice_dropdown.as_ref().unwrap().choices, ["fixture-a", "fixture-b"]);
+            key(&mut app, KeyCode::Home);
+            key(&mut app, KeyCode::Enter);
+            assert_eq!(app.new_session.as_ref().unwrap().model, "fixture-a");
+            key(&mut app, KeyCode::Char('x'));
+            assert_eq!(app.new_session.as_ref().unwrap().model, "fixture-a");
+            assert!(app.pending_launches.is_empty());
+        }
+    }
+
+    #[test]
+    fn new_session_catalog_failure_and_engine_switch_never_reuse_old_model_choices() {
+        let mut app = vendor_app();
+        app.engine_selected = 0;
+        app.select_new_engine();
+        key(&mut app, KeyCode::Enter);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        app.new_session_catalog_pending = Some((launch::Engine::Codex, rx));
+        tx.send(Err("Catalog unavailable")).unwrap();
+        assert!(app.poll_new_session_catalog());
+        assert!(app.choice_dropdown.as_ref().unwrap().choices.is_empty());
+        assert!(paint(&app).contains("No models"));
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        app.new_session_catalog_pending = Some((launch::Engine::Codex, rx));
+        app.engine_selected = 1;
+        app.select_new_engine();
+        assert!(tx.send(Ok(serde_json::json!({"models":["stale-codex-model"]}))).is_err());
+        assert!(app.choice_dropdown.is_none());
+        assert!(app.new_session.as_ref().unwrap().models.is_empty());
+        assert!(!app.poll_new_session_catalog());
     }
 }

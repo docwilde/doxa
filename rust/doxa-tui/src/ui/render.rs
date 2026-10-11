@@ -322,7 +322,7 @@ impl App {
         let width = usize::from(area.width.saturating_sub(3));
         let lines = vec![
             Line::from(clipped_title(&format!(" Session {} · daemon stops first if live", safe_label(id)), width).0),
-            Line::styled(" Delete DOXA transcript", chooser_row_style(*selected == 0)),
+            Line::styled(" Delete session and DOXA transcript", chooser_row_style(*selected == 0)),
             Line::styled(" Cancel", chooser_row_style(*selected == 1)),
             Line::from(" Provider-native history remains available separately."),
         ];
@@ -414,17 +414,14 @@ impl App {
                 lines.push(Line::from(if form.engine==launch::Engine::Router {
                     " Click/Enter: Auto routing or configured target."
                 } else if vendor_models(form.engine).is_empty() {
-                    " Blank model uses configured engine default."
+                    " Click/Enter chooses a live model · R refreshes the list."
                 } else {
                     " Click/Enter choose vendor model and effort."
                 }));
                 lines.push(Line::from(if form.engine==launch::Engine::Router {
                     format!(" {}",safe_label(&form.catalog_note))
                 } else if vendor_models(form.engine).is_empty() {
-                    format!(
-                        " Effort preference: {} · new session only",
-                        safe_label(form.effort.as_deref().unwrap_or("provider default"))
-                    )
+                    format!(" {}", safe_label(&form.catalog_note))
                 } else {
                     format!(" {}", safe_label(&form.catalog_note))
                 }));
@@ -434,8 +431,7 @@ impl App {
                     " {} {}: {}",
                     if form.field == 0 { '›' } else { ' ' },
                     if form.engine==launch::Engine::Router {"Target"} else {"Model"},
-                    if form.models.is_empty() { safe_label(&form.model) }
-                    else { format!("[{} ▾]", safe_label(&form.model)) }
+                    format!("[{} ▾]", if form.model.is_empty() { "(default)".into() } else { safe_label(&form.model) })
                 ),
                 chooser_row_style(form.field == 0),
             ));

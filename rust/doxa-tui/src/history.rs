@@ -179,31 +179,54 @@ pub fn saved_session(id: &str, cwd: &Path) -> Option<OfflineSession> {
 /// Remove the exact owned DOXA JSONL transcript after its daemon has stopped.
 /// Provider-native archives are independent records and are not touched here.
 pub fn delete_saved_session(id: &str, cwd: &Path) -> Result<(), &'static str> {
-    let entry = saved_session(id, cwd).ok_or("saved transcript could not be verified")?;
-    if entry.cwd.as_deref().is_some_and(|recorded| recorded != cwd) {
-        return Err("transcript records a different session directory");
-    }
+    if !crate::discovery::valid_id(id) || !cwd.is_absolute() { return Err("invalid session identity"); }
     let root = projects_dir().ok_or("transcript root unavailable")?;
-    delete_exact_in(&root, &entry.project, id)
+    let (project, verified) = if let Some(entry) = saved_session(id, cwd) {
+        if entry.cwd.as_deref().is_some_and(|recorded| recorded != cwd) {
+            return Err("transcript records a different session directory");
+        }
+        (entry.project, true)
+    } else {
+        // Empty sessions and already-removed transcripts still have a saved
+        // window record. Resolve their exact project before treating absence
+        // as success; an unavailable identity service is not proof of absence.
+        let mut lore = LoreClient::open(Duration::from_secs(3)).map_err(|_| "transcript identity unavailable")?;
+        let (canonical_root, project) = lore.transcript_identity(&cwd.to_string_lossy())
+            .map_err(|_| "transcript identity unavailable")?;
+        if canonical_root != root { return Err("transcript root identity changed"); }
+        (project, false)
+    };
+    delete_exact_in(&root, &project, id, verified)
 }
 
-fn delete_exact_in(root: &Path, project: &str, id: &str) -> Result<(), &'static str> {
+fn delete_exact_in(root: &Path, project: &str, id: &str, verified: bool) -> Result<(), &'static str> {
     if !crate::discovery::valid_id(id) || project.is_empty() || project.len() > 255
         || project.contains('/') || project.contains('\\') || project.chars().any(char::is_control) {
         return Err("invalid transcript identity");
     }
     let uid = unsafe { libc::geteuid() };
-    let root = OpenOptions::new().read(true)
+    let root = match OpenOptions::new().read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(root).map_err(|_| "transcript root unavailable")?;
+        .open(root) {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err("transcript root unavailable"),
+        };
     if !owned_dir(&root, uid) { return Err("unsafe transcript root"); }
-    let dir = open_at(&root, OsStr::new(project), libc::O_RDONLY | libc::O_DIRECTORY)
-        .ok_or("project transcript directory unavailable")?;
+    let dir = match open_at(&root, OsStr::new(project), libc::O_RDONLY | libc::O_DIRECTORY) {
+        Some(dir) => dir,
+        None if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        None => return Err("project transcript directory unavailable"),
+    };
     if !owned_dir(&dir, uid) { return Err("unsafe project transcript directory"); }
     let name = format!("{id}.jsonl");
-    let file = open_at(&dir, OsStr::new(&name), libc::O_RDONLY | libc::O_NONBLOCK)
-        .ok_or("transcript unavailable")?;
+    let file = match open_at(&dir, OsStr::new(&name), libc::O_RDONLY | libc::O_NONBLOCK) {
+        Some(file) => file,
+        None if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        None => return Err("transcript unavailable"),
+    };
     let meta = file.metadata().map_err(|_| "cannot inspect transcript")?;
+    if !verified { return Err("saved transcript could not be verified"); }
     if !meta.is_file() || meta.uid() != uid || meta.nlink() != 1 {
         return Err("unsafe transcript file");
     }
@@ -1122,15 +1145,19 @@ for line in sys.stdin:
         let other = project.join("other.jsonl");
         fs::write(&saved, b"saved\n").unwrap();
         fs::write(&other, b"other\n").unwrap();
-        assert!(delete_exact_in(temp.path(), "project", "saved").is_ok());
+        assert!(delete_exact_in(temp.path(), "project", "saved", true).is_ok());
         assert!(!saved.exists());
+        assert!(delete_exact_in(temp.path(), "project", "saved", false).is_ok());
+        assert!(delete_exact_in(temp.path(), "absent-project", "saved", false).is_ok());
+        assert!(delete_exact_in(&temp.path().join("absent-root"), "project", "saved", false).is_ok());
         assert_eq!(fs::read(&other).unwrap(), b"other\n");
+        assert!(delete_exact_in(temp.path(), "project", "other", false).is_err());
         symlink(&other, &saved).unwrap();
-        assert!(delete_exact_in(temp.path(), "project", "saved").is_err());
+        assert!(delete_exact_in(temp.path(), "project", "saved", true).is_err());
         assert_eq!(fs::read(&other).unwrap(), b"other\n");
         fs::remove_file(&saved).unwrap();
         fs::hard_link(&other, &saved).unwrap();
-        assert!(delete_exact_in(temp.path(), "project", "saved").is_err());
-        assert!(delete_exact_in(temp.path(), "../project", "other").is_err());
+        assert!(delete_exact_in(temp.path(), "project", "saved", true).is_err());
+        assert!(delete_exact_in(temp.path(), "../project", "other", true).is_err());
     }
 }

@@ -435,6 +435,7 @@ impl App {
         };
         self.engine_picker = false;
         self.new_session=None;
+        self.new_session_catalog_pending = None;
         if engine==launch::Engine::Router {
             let (path,config)=match launch::router_config(None) {
                 Ok(value)=>value,
@@ -485,7 +486,9 @@ impl App {
             })
             .or_else(|| (!models.is_empty()).then(|| "high".to_owned()));
         self.vendor_catalog_pending = None;
-        let catalog_pending = self.request_vendor_catalog(engine);
+        let catalog_pending = if matches!(engine, launch::Engine::Codex | launch::Engine::Claude) {
+            self.request_new_session_catalog(engine)
+        } else { self.request_vendor_catalog(engine) };
         self.new_session = Some(NewSession {
             router_config:None,
             isolation: doxa_isolation::home().and_then(|home|doxa_isolation::configured_profile(&home)).unwrap_or_default(),
@@ -494,7 +497,9 @@ impl App {
             models: models.iter().map(|name| (*name).to_owned()).collect(),
             model_efforts,
             catalog_note: if catalog_pending {
-                "Checking vendor model catalog…".into()
+                "Loading this engine's live model catalog…".into()
+            } else if models.is_empty() {
+                "Live catalog unavailable · R retries; Start uses the displayed model/default".into()
             } else {
                 "Static fallback; vendor catalog unavailable".into()
             },
@@ -505,6 +510,65 @@ impl App {
             prompt: String::new(),
             field: 0,
         });
+    }
+
+    fn request_new_session_catalog(&mut self, engine: launch::Engine) -> bool {
+        self.new_session_catalog_pending = None;
+        if cfg!(test) { return false; }
+        let Ok(cwd) = std::env::current_dir() else { return false; };
+        let (tx, rx) = mpsc::sync_channel(1);
+        if std::thread::Builder::new().name("new-session-model-catalog".into()).spawn(move || {
+            let _ = tx.send(crate::new_session_catalog::load(engine, &cwd));
+        }).is_err() { return false; }
+        self.new_session_catalog_pending = Some((engine, rx));
+        true
+    }
+
+    pub(super) fn refresh_new_session_catalog(&mut self) {
+        let Some(engine) = self.new_session.as_ref().filter(|form| !form.catalog_pending).map(|form| form.engine) else { return; };
+        let pending = if matches!(engine, launch::Engine::Codex | launch::Engine::Claude) {
+            self.request_new_session_catalog(engine)
+        } else if engine == launch::Engine::Router { return; }
+        else { self.request_vendor_catalog(engine) };
+        if let Some(form) = self.new_session.as_mut() {
+            form.catalog_pending = pending;
+            form.catalog_note = if pending { "Refreshing live model catalog…" } else { "Live model catalog unavailable · R retries" }.into();
+            if matches!(engine, launch::Engine::Codex | launch::Engine::Claude) { form.models.clear(); }
+        }
+        self.refresh_choice_dropdown();
+    }
+
+    pub(super) fn poll_new_session_catalog(&mut self) -> bool {
+        let (engine, result) = match self.new_session_catalog_pending.as_ref() {
+            Some((engine, rx)) => match rx.try_recv() {
+                Ok(result) => (*engine, result),
+                Err(TryRecvError::Disconnected) => (*engine, Err("Live model catalog worker disconnected")),
+                Err(TryRecvError::Empty) => return false,
+            },
+            None => return false,
+        };
+        self.new_session_catalog_pending = None;
+        let Some(form) = self.new_session.as_mut().filter(|form| form.engine == engine) else { return false; };
+        form.catalog_pending = false;
+        match result {
+            Ok(reply) => {
+                form.models = reply["models"].as_array().into_iter().flatten().filter_map(|value| value.as_str())
+                    .filter(|model| !model.is_empty() && model.len() <= 128 && !model.chars().any(char::is_control))
+                    .take(100).map(str::to_owned).collect();
+                let mut seen = HashSet::new();
+                form.models.retain(|model| seen.insert(model.clone()));
+                if !form.models.is_empty() && !form.models.contains(&form.model) {
+                    form.model = reply["capabilities"].as_array().into_iter().flatten()
+                        .find(|row| row["is_default"] == true && row["model"].as_str().is_some_and(|model| form.models.iter().any(|id| id == model)))
+                        .and_then(|row| row["model"].as_str()).map(str::to_owned).unwrap_or_else(|| form.models[0].clone());
+                }
+                form.catalog_note = if form.models.is_empty() { "Live catalog returned no selectable models · R retries".into() }
+                    else { reply["note"].as_str().map(super::safe_label).unwrap_or_else(|| "Live engine model catalog".into()) };
+            }
+            Err(error) => { form.models.clear(); form.catalog_note = format!("{error} · R retries; Start uses displayed model/default"); }
+        }
+        self.refresh_choice_dropdown();
+        true
     }
 
     pub(super) fn request_vendor_catalog(&mut self, engine: launch::Engine) -> bool {
@@ -607,6 +671,7 @@ impl App {
         } else {
             form.catalog_note = "Static fallback; vendor catalog unavailable".into();
         }
+        self.refresh_choice_dropdown();
         true
     }
 
@@ -642,8 +707,6 @@ impl App {
             KeyCode::Backspace => {
                 if form.field == prompt_field {
                     form.prompt.pop();
-                } else if !vendor && !router && form.field == 0 {
-                    form.model.pop();
                 }
             }
             KeyCode::Char(c)
@@ -656,8 +719,6 @@ impl App {
                     if form.prompt.len() + c.len_utf8() <= MAX_INPUT_BYTES {
                         form.prompt.push(c);
                     }
-                } else if !vendor && !router && form.field == 0 && form.model.len() + c.len_utf8() <= 128 {
-                    form.model.push(c);
                 }
             }
             KeyCode::Enter if form.field < prompt_field => form.field += 1,
@@ -666,8 +727,12 @@ impl App {
                     self.notice = "Session launch already in progress".into();
                     return true;
                 }
-                if vendor && form.catalog_pending {
-                    self.notice = "Waiting for vendor model catalog".into();
+                if form.catalog_pending {
+                    self.notice = "Waiting for live model catalog".into();
+                    return true;
+                }
+                if !form.models.is_empty() && !form.models.contains(&form.model) {
+                    self.notice = "Model catalog changed; choose an available model".into();
                     return true;
                 }
                 if vendor && form.models.is_empty() {

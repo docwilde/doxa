@@ -329,6 +329,7 @@ impl App {
     }
 
     pub(crate) fn restore_archive(&mut self, entry: &history::OfflineSession, note: &str) {
+        if self.deleted_this_run.contains(&entry.id) { return; }
         self.history_entries.insert(entry.id.clone(), entry.clone());
         self.offline_ids.insert(entry.id.clone());
         let session = Session {
@@ -372,6 +373,7 @@ impl App {
         }
         let mut changed = false;
         for entry in found {
+            if self.deleted_this_run.contains(&entry.id) { continue; }
             if let Some(query) = &scan_query {
                 self.history_scanned_matches
                     .insert(entry.id.clone(), query.clone());

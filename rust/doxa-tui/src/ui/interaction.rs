@@ -1588,10 +1588,6 @@ impl App {
                     return true;
                 }
                 let Some((id, cwd, _)) = self.delete_confirmation.take() else { return true; };
-                if crate::history::saved_session(&id, &cwd).is_none() {
-                    self.notice = "Saved DOXA transcript could not be verified; nothing deleted".into();
-                    return true;
-                }
                 let live = match crate::discovery::sessions() {
                     Ok(sessions) => sessions.iter().any(|session| session.id == id),
                     Err(_) => {

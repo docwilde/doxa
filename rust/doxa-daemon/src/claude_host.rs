@@ -240,48 +240,7 @@ fn settings(value: &Value) -> Result<(Option<String>, Option<String>), String> {
     Ok((Some(model.into()), effort))
 }
 fn catalog(value: &Value) -> Result<Value, String> {
-    let rows = value["models"]
-        .as_array()
-        .filter(|a| !a.is_empty() && a.len() <= 64)
-        .ok_or("Claude model catalog unavailable")?;
-    let mut ids = Vec::new();
-    let mut capabilities = Vec::new();
-    for row in rows {
-        let name = row["value"]
-            .as_str()
-            .or_else(|| row["model"].as_str())
-            .filter(|s| !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control))
-            .ok_or("invalid Claude model catalog")?;
-        let mut names = vec![name];
-        if let Some(resolved) = row["resolvedModel"]
-            .as_str()
-            .filter(|s| !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control))
-        {
-            if resolved != name {
-                names.push(resolved);
-            }
-        }
-        let efforts = row
-            .get("supportedEfforts")
-            .or_else(|| row.get("supportedEffortLevels"))
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .filter(|s| matches!(*s, "low" | "medium" | "high" | "xhigh" | "max"))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for name in names {
-            if !ids.contains(&name) {
-                ids.push(name);
-                capabilities.push(json!({"model":name,"efforts":efforts}));
-            }
-        }
-    }
-    Ok(
-        json!({"models":ids,"capabilities":capabilities,"note":"Provider catalog refreshed from the connected Claude CLI"}),
-    )
+    doxa_claude::catalog::decode(value).map_err(|_| "Claude model catalog unavailable".into())
 }
 impl ClaudeHost {
     pub fn new(

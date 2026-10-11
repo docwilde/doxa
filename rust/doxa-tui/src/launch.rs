@@ -128,6 +128,13 @@ pub fn claude_executable(options: &LaunchOptions) -> io::Result<PathBuf> {
     executable(options.claude_bin.as_deref().unwrap_or(Path::new("claude")))
 }
 
+pub fn codex_executable(options: &LaunchOptions) -> io::Result<PathBuf> {
+    let installed = env::var_os("XDG_DATA_HOME").map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .and_then(|data| installed_codex(&data));
+    executable(options.codex_bin.as_deref().unwrap_or_else(|| installed.as_deref().unwrap_or(Path::new("codex"))))
+}
+
 pub fn vendor_effort(options: &LaunchOptions) -> io::Result<()> {
     if let Some(effort) = &options.effort {
         if !(matches!(effort.as_str(), "low" | "high" | "max")
@@ -472,11 +479,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             if options.claude_bin.is_some() {
                 return Err(invalid("Claude options require --engine claude"));
             }
-            let installed = env::var_os("XDG_DATA_HOME").map(PathBuf::from)
-                .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-                .and_then(|data| installed_codex(&data));
-            let default = installed.as_deref().unwrap_or(Path::new("codex"));
-            let codex = executable(options.codex_bin.as_deref().unwrap_or(default))?;
+            let codex = codex_executable(options)?;
             command.args(["--engine", "codex", "--codex-bin"]).arg(codex).args(["--sandbox", sandbox]);
             if options.resume.is_some() {
                 command.args(["--resume", "true"]);

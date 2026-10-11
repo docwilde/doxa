@@ -201,16 +201,25 @@ impl App {
         let (id, outcome) = result;
         match outcome {
             Ok(()) => {
+                self.deleted_this_run.insert(id.clone());
+                for group in &mut self.groups {
+                    group.tabs.retain(|item| item != &id);
+                    group.active = group.active.min(group.tabs.len().saturating_sub(1));
+                }
                 self.sessions.retain(|session| session.id != id);
                 self.history_entries.remove(&id);
                 self.history_scanned_matches.remove(&id);
                 self.offline_ids.remove(&id);
                 self.detached_this_run.retain(|item| item != &id);
                 self.session_cwds.remove(&id);
+                self.session_identity.remove(&id);
+                self.session_catalogs.remove(&id);
+                self.custom_names.remove(&id);
+                self.default_names.remove(&id);
                 self.killed_this_run.insert(id.clone());
                 for collection in &mut self.collections { collection.sessions.retain(|item| item != &id); }
                 self.rail_selected = self.rail_selected.min(self.rail_order().len().saturating_sub(1));
-                self.notice = format!("DOXA transcript deleted · {}", safe_label(&id));
+                self.notice = format!("Session and DOXA transcript removed · {}", safe_label(&id));
             }
             Err(reason) => self.notice = format!("Transcript preserved · {reason} · use /resume to reopen"),
         }
