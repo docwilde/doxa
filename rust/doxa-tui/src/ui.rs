@@ -83,7 +83,7 @@ pub(crate) mod transcript_tools;
 use tool_cards::ToolCards;
 
 /// Turn a validated, host-scrubbed peer journal row into the same typed
-/// transcript card used for live peer events. Unknown or legacy rows stay prose.
+/// transcript card used for live peer events. Unknown journal rows are omitted.
 pub(crate) fn restored_peer_message(event_type: &str, data: &serde_json::Value, owner: &str) -> Option<String> {
     let session_id = |key: &str| data[key].as_str().is_some_and(doxa_transcript::valid_session_id);
     let has_message_id = data["message_id"].as_str().is_some_and(|id| {

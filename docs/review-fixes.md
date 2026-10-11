@@ -36,7 +36,7 @@ The workspace build passed. Workspace Rust testing was split after the first
 900-second command limit, with no assertion failures before the limit. The
 remaining engine suites, remaining workspace packages, and excluded library
 doc-test targets then passed. The initial TUI library suite passed **800 tests**. After the UI follow-ups,
-the full TUI library suite passed **818 tests**, with six intentionally ignored
+the final TUI library suite passed **824 tests**, with six intentionally ignored
 tests. The native LORE carrier was built from the
 existing released pin and configured for history/picker fixtures; the
 unreleased upstream patch did not replace that carrier.
@@ -79,11 +79,16 @@ provider acceptance remain release/deployment gates.
 The integration also includes portable context and quota bars, session-bound
 last-context restoration, Codex belief-count forwarding, the Peers chip,
 Settings dismissal/focus handling, desktop-helper clipboard copy, and clearer
-canonical peer-send guidance. Verification of these follow-ups is recorded
-in the detailed interface record. The full 818-test TUI suite covers Settings
+canonical peer-send guidance and persisted peer-card provenance. Verification
+of these follow-ups is recorded in the detailed interface record. The full
+824-test TUI suite covers Settings
 save/dismiss/type, nested-menu admission, pane drafts, context restoration,
-quota validation/scrolling, chips, and private clipboard helpers. Focused Codex
+quota validation/scrolling, chips, private clipboard helpers, and typed peer
+history restoration/deduplication. Focused Codex
 quota, Codex host, and canonical peer-guidance tests also passed.
+Final peer provenance checks passed 97 core tests, 69 daemon unit tests,
+three isolated delivery process fixtures and the 61-test Router host target.
+These counts include overlapping targets and should not be added together.
 
 Mid-turn steering was investigated from the pinned Codex source and installed
 Claude CLI. Codex offers acknowledged `turn/steer`; Claude exposes a queued

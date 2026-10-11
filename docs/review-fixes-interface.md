@@ -182,10 +182,23 @@ path. Warp's OSC52 path remains available. Tests write only to a private fake
 helper, including Unicode/control characters, bounds, failure and timeout;
 no system clipboard or live GNOME/Warp session was accessed.
 
+## Restored peer cards
+
+Peer-started turns restore their typed origin from the host-created user row.
+Sent and received journal entries restore as collapsed cards with a distinct
+stripe and `🤖↑` or `🤖↓` prefix. Recovered journal cards are shown in a separate
+history section because their exact position among provider transcript events
+was not recorded. Session and scope checks reject unrelated journal rows;
+a bounded per-session ID index avoids duplicate cards during live replay.
+Recorded recipient identity and the unreviewed fleet-message label survive
+restoration and replay.
+Legacy history and generic socket prompts without peer provenance keep their
+ordinary user formatting.
+
 
 ## Follow-up verification
 
-The full TUI library suite passed **818 tests**, with six intentionally ignored
+The final TUI library suite passed **824 tests**, with six intentionally ignored
 acceptance/performance cases, using the released native LORE carrier. The
 Settings fixture enters the real command, stages and saves a setting in a
 private `0700` test home, dismisses an inline editor and dropdown, clicks blank
@@ -194,3 +207,8 @@ Clipboard fixtures never read or write the desktop clipboard. The focused
 Codex quota projection and Codex host compilation tests passed as well.
 Initial runs caught nested-menu routing regressions and fixture mismatches;
 the final suite was run after those were corrected.
+
+The final peer-history regressions cover typed origin without a side journal,
+session and scope rejection, exact restore limits, renderable card boundaries,
+collapsed sent/received cards, and merging a restored receipt with replay and
+its admitted turn. Generic socket prompt text cannot supply peer provenance.
