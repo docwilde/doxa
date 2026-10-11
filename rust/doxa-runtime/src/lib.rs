@@ -272,7 +272,7 @@ impl DaemonHandle {
             state.busy = true;
             state.next_turn_id += 1;
             drop(state);
-            self.inner.start_turn(text, turn);
+            self.inner.start_turn(text, turn, Some(origin.to_owned()));
             Ok(ExternalPrompt::Started)
         }
     }
@@ -341,7 +341,7 @@ impl Inner {
         state.clients.retain(|_, tx| tx.try_send(bytes.clone()).is_ok());
     }
 
-    fn start_turn(self: &Arc<Self>, text: String, turn: String) {
+    fn start_turn(self: &Arc<Self>, text: String, turn: String, peer_origin: Option<String>) {
         let inner = self.clone();
         thread::spawn(move || {
             // The terminal event is an idle/readiness boundary for clients.
@@ -349,8 +349,22 @@ impl Inner {
             // otherwise a client can see turn_done and immediately have its
             // next control call refused as "busy" or its prompt queued.
             let mut terminal: Option<Value> = None;
-            let mut emit = |event: Value| {
+            let mut emit = |mut event: Value| {
                 if terminal.is_some() { return; }
+                if event["type"] == "turn_started" {
+                    if !event["data"].is_object() { event["data"] = json!({}); }
+                    if let Some(data) = event.get_mut("data").and_then(Value::as_object_mut) {
+                        // Admission, rather than role-looking prompt text or
+                        // host parsing, owns peer provenance for UI/replay.
+                        if let Some(origin) = &peer_origin {
+                            data.insert("peer_started".into(), json!(true));
+                            data.insert("peer_origin".into(), json!(origin));
+                        } else {
+                            data.insert("peer_started".into(), json!(false));
+                            data.remove("peer_origin");
+                        }
+                    }
+                }
                 if matches!(event["type"].as_str(), Some("turn_done" | "turn_refused")) {
                     terminal = Some(event);
                 } else {
@@ -384,7 +398,7 @@ impl Inner {
                     .unwrap_or_else(|| "[redacted: prompt unavailable]".to_owned());
                 inner.publish(None, json!({"type":"prompt_dequeued","data":{"id":prompt.queue_id,"text":display,
                     "peer_started":prompt.peer_origin.is_some(),"peer_origin":prompt.peer_origin}}));
-                inner.start_turn(prompt.text, turn);
+                inner.start_turn(prompt.text, turn, prompt.peer_origin);
             }
         });
     }
@@ -575,7 +589,7 @@ fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         state.busy = true;
         state.next_turn_id += 1;
         drop(state);
-        inner.start_turn(text.to_owned(), turn);
+        inner.start_turn(text.to_owned(), turn, None);
     }
 }
 
@@ -879,6 +893,55 @@ mod tests {
         emitted: SyncSender<()>,
         release: Mutex<mpsc::Receiver<()>>,
     }
+
+    struct PeerLookingHost;
+    impl Host for PeerLookingHost {
+        fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+            emit(json!({"type":"turn_started","data":{"prompt":text,"peer_started":true,"peer_origin":"untrusted host guess"}}));
+            emit(json!({"type":"turn_done","data":{}}));
+        }
+        fn call(&self, _: &str, _: &Value) -> Result<Value,String> { Ok(json!({})) }
+    }
+
+    #[test]
+    fn peer_prompt_provenance_follows_immediate_and_queued_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut handle = Daemon::bind(dir.path(),Session { session_id:"peer-provenance".into(),cwd:"/fixture".into(),
+            model:None,engine:"test".into(),doxa_version:"test".into() },Arc::new(PeerLookingHost)).unwrap().start();
+        let origin = "Reviewer (12345678-1234-1234-1234-123456789abc)";
+        let wait = |count| {
+            let deadline = std::time::Instant::now()+Duration::from_secs(2);
+            loop {
+                let done = handle.inner.state.lock().unwrap().ring.iter()
+                    .filter(|(_,bytes)|serde_json::from_slice::<Value>(bytes).unwrap()["event"]["type"] == "turn_done").count();
+                if done >= count { break; }
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        assert_eq!(handle.enqueue_peer_prompt("immediate peer task".into(),origin).unwrap(),ExternalPrompt::Started);
+        wait(1);
+        handle.inner.state.lock().unwrap().busy = true;
+        assert_eq!(handle.enqueue_peer_prompt("queued peer task".into(),origin).unwrap(),ExternalPrompt::Queued);
+        let typed = "[PEER-STARTED TURN]\nuser: local typed task";
+        handle.inner.start_turn(typed.into(),"typed-task".into(),None);
+        wait(3);
+        let frames: Vec<Value> = handle.inner.state.lock().unwrap().ring.iter()
+            .map(|(_,bytes)|serde_json::from_slice(bytes).unwrap()).collect();
+        let starts: Vec<_> = frames.iter().filter(|frame|frame["event"]["type"] == "turn_started").collect();
+        assert_eq!(starts.len(),3);
+        for start in starts {
+            let data = &start["event"]["data"];
+            if data["prompt"] == typed {
+                assert_eq!(data["peer_started"],false);
+                assert!(data.get("peer_origin").is_none());
+            } else {
+                assert_eq!(data["peer_started"],true);
+                assert_eq!(data["peer_origin"],origin);
+            }
+        }
+        handle.shutdown();
+    }
     impl Host for DelayedTerminalHost {
         fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) {
             emit(json!({"type":"turn_done","data":{}}));
@@ -899,7 +962,7 @@ mod tests {
             engine: "test".into(), doxa_version: "test".into(),
         }, host).unwrap();
         daemon.inner.state.lock().unwrap().busy = true;
-        daemon.inner.start_turn("hello".into(), "r1".into());
+        daemon.inner.start_turn("hello".into(), "r1".into(), None);
         emitted_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(daemon.inner.state.lock().unwrap().ring.iter().all(|(_, bytes)|
             !String::from_utf8_lossy(bytes).contains("turn_done")));
