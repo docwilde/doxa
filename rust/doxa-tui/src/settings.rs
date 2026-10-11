@@ -3,14 +3,14 @@
 use std::{io, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind { Text, Number, Bool, BoolOn, Choice, Format, Key }
+pub enum Kind { Text, Number, Bool, BoolOn, Choice, Format, Key, Credential }
 #[derive(Debug, Clone, Copy)]
 pub struct Setting {
     pub key: &'static str, pub env: &'static str, pub label: &'static str,
     pub category: &'static str, pub kind: Kind, pub choices: &'static [&'static str],
     pub default: &'static str, pub read_only: bool, pub help: &'static str, pub note: &'static str,
 }
-pub const CATEGORIES: &[&str] = &["Session", "Fleet", "Memory", "Appearance", "Keys", "Notifications", "Remote", "Paths", "About"];
+pub const CATEGORIES: &[&str] = &["Session", "Fleet", "Memory", "Appearance", "Keys", "Notifications", "Remote", "Paths", "About", "MCP"];
 pub fn engine_label(value: &str) -> &str {
     match value {
         "router"=>"Jev Router (on for new sessions)",
@@ -127,6 +127,12 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "notify_needs_input", env: "DOXA_NOTIFY_NEEDS_INPUT", label: "notify: needs input", category: "Notifications", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Notify when a session is waiting on you", note: "OFF by default -- the ONLY notification-worthy turn outcome (a plain finished response is not one; see the module docstring of doxa.notify) is still opt-in, on the owner's own call. Fires on an AskUserQuestion or a permission request the CLI would have prompted on (doxa.engine's can_use_tool callback) -- while it's attached, gated like every other trigger above; a fully detached session (nobody attached at all) always notifies once this is on, since there is no window to blink instead." },
     Setting { key: "", env: "DOXA_HOME", label: "doxa home", category: "Paths", kind: Kind::Text, choices: &[], default: "", read_only: true, help: "Durable DOXA state: this config, the window layout", note: "" },
     Setting { key: "", env: "DOXA_RUNTIME_DIR", label: "runtime dir", category: "Paths", kind: Kind::Text, choices: &[], default: "", read_only: true, help: "Ephemeral endpoints: daemon sockets and the peer registry (doxa.peers.runtime_dir)", note: "Deliberately NOT under ~/.doxa: home directories can be NFS (AF_UNIX misbehaves) and stale sockets must not outlive a reboot." },
+    Setting {key:"mcp_enabled",env:"DOXA_MCP_ENABLED",label:"API worker MCP",category:"MCP",kind:Kind::Bool,choices:&[],default:"off",read_only:false,help:"Opt in to the explicitly configured local MCP servers for DeepSeek, GLM and API router workers.",note:"Off means zero host MCP connections or tool exposure. Native Claude/Codex CLI workers retain their own MCP configuration. Local MCP processes run on the trusted host, outside any worker Docker sandbox."},
+    Setting {key:"mcp_config",env:"DOXA_MCP_CONFIG",label:"MCP server config",category:"MCP",kind:Kind::Text,choices:&[],default:"",read_only:false,help:"Absolute owner-private MCP JSON path. Ctrl+P connects and lists only enabled configured servers; no tools are called.",note:"Each server has an explicit tool allowlist and bounded limits. No discovery, imports or automatic installation. The probe does not enable MCP; credentials and endpoints stay local."},
+    Setting {key:"tavily_api_key",env:"TAVILY_API_KEY",label:"Tavily API key",category:"MCP",kind:Kind::Credential,choices:&[],default:"",read_only:false,help:"Enter opens a masked private credential editor; Enter saves the key, Esc discards. Delete removes a saved key.",note:"Environment-owned keys are read-only. Values are saved only to the private credential store, never config.toml or MCP JSON. The standard environment reference also resolves a saved key when the environment is unset."},
+    Setting {key:"firecrawl_api_key",env:"FIRECRAWL_API_KEY",label:"Firecrawl API key",category:"MCP",kind:Kind::Credential,choices:&[],default:"",read_only:false,help:"Enter opens a masked private credential editor; Enter saves the key, Esc discards. Delete removes a saved key.",note:"Environment-owned keys are read-only. Values are saved only to the private credential store, never config.toml or MCP JSON. The standard environment reference also resolves a saved key when the environment is unset."},
+    Setting {key:"exa_api_key",env:"EXA_API_KEY",label:"Exa API key",category:"MCP",kind:Kind::Credential,choices:&[],default:"",read_only:false,help:"Enter opens a masked private credential editor; Enter saves the key, Esc discards. Delete removes a saved key.",note:"Environment-owned keys are read-only. Values are saved only to the private credential store, never config.toml or MCP JSON. The standard environment reference also resolves a saved key when the environment is unset."},
+    Setting {key:"brave_api_key",env:"BRAVE_API_KEY",label:"Brave Search API key",category:"MCP",kind:Kind::Credential,choices:&[],default:"",read_only:false,help:"Enter opens a masked private credential editor; Enter saves the key, Esc discards. Delete removes a saved key.",note:"Environment-owned keys are read-only. Values are saved only to the private credential store, never config.toml or MCP JSON. The standard environment reference also resolves a saved key when the environment is unset."},
 ];
 
 #[derive(Debug, Clone)]
@@ -136,6 +142,7 @@ pub fn find(key: &str) -> io::Result<&'static Setting> {
 }
 pub fn config_path() -> io::Result<std::path::PathBuf> { Ok(crate::operations::doxa_home()?.join("config.toml")) }
 pub fn raw_from(config: &toml::Table, setting: &Setting, override_value: Option<&str>, engine: &str) -> String {
+    if setting.kind==Kind::Credential {return String::new();}
     if let Some(value) = override_value.filter(|v| !v.trim().is_empty() && !(setting.key == "model" && engine == "router")) { return value.trim().into(); }
     if setting.kind == Kind::Key {
         let mut effective = config.clone();
@@ -164,6 +171,19 @@ pub fn rows(engine: &str, session_model: Option<&str>) -> io::Result<Vec<Row>> {
     let home = crate::operations::doxa_home()?;
     let mut rows = Vec::new();
     for s in SETTINGS {
+        if s.kind==Kind::Credential {
+            use doxa_vendors::credentials::{self,CredentialStatus,SearchProvider};
+            let provider=SearchProvider::from_setting_key(s.key).expect("fixed search setting");
+            let environment=std::env::var_os(s.env).is_some_and(|value|!value.is_empty());
+            let (value,source)=match credentials::search_status(provider) {
+                Ok(CredentialStatus::Environment)=>("set","environment-owned"),
+                Ok(CredentialStatus::Saved)=>("set","private credential store"),
+                Ok(CredentialStatus::Missing)=>("missing","not configured"),
+                Err(_)=>("unavailable","credential status unavailable"),
+            };
+            rows.push(Row {setting:s,value:value.into(),source:source.into(),shadowed:environment,stored:String::new()});
+            continue;
+        }
         let override_value = std::env::var(s.env).ok().filter(|v| !v.trim().is_empty() && !(engine == "router" && matches!(s.key, "model" | "effort")));
         let shadowed = override_value.is_some();
         let stored = raw_from(&config, s, None, engine);
@@ -187,6 +207,7 @@ pub fn rows(engine: &str, session_model: Option<&str>) -> io::Result<Vec<Row>> {
     Ok(rows)
 }
 pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value>> {
+    if s.kind==Kind::Credential {return Err(io::Error::new(io::ErrorKind::PermissionDenied,"Use the masked MCP Settings editor; keys never enter regular settings"));}
     if s.read_only || s.key.is_empty() { return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} is read-only. {}", s.label, s.note))); }
     let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else { return Ok(None); };
     let invalid = |reason: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("{}: {reason}", s.key));
@@ -216,7 +237,11 @@ pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value
         Kind::Choice => { if !s.choices.contains(&value) { return Err(invalid(&format!("accepts {}", s.choices.join(" | ")))); } toml::Value::String(value.into()) },
         Kind::Format => { crate::preferences::validate_clock_format(value).map_err(|_| invalid("invalid strftime format"))?; toml::Value::String(value.into()) },
         Kind::Key => { let chord = crate::keybindings::Chord::parse(value).map_err(|e| invalid(&e.to_string()))?; toml::Value::String(chord.map(|c| c.display()).unwrap_or_else(|| "none".into())) },
-        Kind::Text => {if s.key=="router_config" {
+        Kind::Credential => unreachable!("credential edits never enter config.toml"),
+        Kind::Text => {if s.key=="mcp_config" {
+            if !Path::new(value).is_absolute(){return Err(invalid("requires an absolute path"));}
+            doxa_mcp::Config::load(Path::new(value)).map_err(|_|invalid("requires a valid owner-private MCP JSON file"))?;
+        }if s.key=="router_config" {
             if !Path::new(value).is_absolute(){return Err(invalid("requires an absolute path"));}
             doxa_router::Config::load(Path::new(value)).map_err(|_|invalid("requires a valid owner-private router JSON file; review with Ctrl+P"))?;
         }if matches!(s.key,"fleet_alignment_supervisor"|"fleet_message_judge"){let model=doxa_fleet::judge::Model::parse(value).map_err(|_|invalid("requires a supported provider:model"))?;if s.key=="fleet_alignment_supervisor"&&model.provider=="jev"{return Err(invalid("Jev judges messages; select an LLM supervisor"));}}toml::Value::String(value.into())},
@@ -282,6 +307,17 @@ pub(crate) fn save_with_review(path: &Path, edits: &[(String, Option<String>)], 
                 review.ready() && review.current(Path::new(path)))) {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput,
                     "Jev Router needs a current config/account/catalog review with an available fallback and Jev key; select router config and press Ctrl+P"));
+            }
+        }
+        if edits.iter().any(|(key,_)|matches!(key.as_str(),"mcp_enabled"|"mcp_config")) {
+            let enabled=std::env::var("DOXA_MCP_ENABLED").ok().filter(|value|!value.is_empty())
+                .map(|value|!matches!(value.to_ascii_lowercase().as_str(),"off"|"0"|"false"|"no"))
+                .unwrap_or_else(||config.get("mcp_enabled").and_then(toml::Value::as_bool).unwrap_or(false));
+            if enabled {
+                let selected=std::env::var("DOXA_MCP_CONFIG").ok().filter(|value|!value.is_empty())
+                    .or_else(||config.get("mcp_config").and_then(toml::Value::as_str).map(str::to_owned))
+                    .ok_or_else(||io::Error::new(io::ErrorKind::InvalidInput,"Select an explicit private MCP config before enabling MCP"))?;
+                doxa_mcp::Config::load(Path::new(&selected)).map_err(|_|io::Error::new(io::ErrorKind::InvalidInput,"MCP requires a valid owner-private config"))?;
             }
         }
         if key_edited { config.insert("keybindings_schema".into(), toml::Value::Integer(2)); }

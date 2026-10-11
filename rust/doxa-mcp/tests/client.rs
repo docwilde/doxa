@@ -167,6 +167,11 @@ fn private_config_rejects_public_symlink_duplicate_and_unknown_fields() {
     std::fs::write(&path,config.to_string()).unwrap();std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(Config::load(&path).unwrap().enabled_servers().count(),1);
     let link=directory.path().join("link");std::os::unix::fs::symlink(&path,&link).unwrap();assert!(Config::load(&link).is_err());
+    let parent_link=directory.path().join("parent-link");std::os::unix::fs::symlink(directory.path(),&parent_link).unwrap();
+    assert!(Config::load(&parent_link.join("config.json")).is_err());
+    let hard=directory.path().join("hard");std::fs::hard_link(&path,&hard).unwrap();assert!(Config::load(&path).is_err());std::fs::remove_file(hard).unwrap();
+    std::fs::set_permissions(directory.path(),std::fs::Permissions::from_mode(0o777)).unwrap();assert!(Config::load(&path).is_err());
+    std::fs::set_permissions(directory.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o644)).unwrap();assert!(Config::load(&path).is_err());
     std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();
     for invalid in ["{\"schema_version\":1,\"schema_version\":1,\"servers\":[]}","{\"schema_version\":1,\"servers\":[],\"unexpected\":true}"] {
@@ -289,4 +294,27 @@ async fn standard_search_ref_uses_private_saved_key_then_environment_and_scrubs_
     if let TransportConfig::Stdio{args,..}=&mut config.transport {args.push("inactive-exa-fixture".into());}
     let error=Client::connect(&config,directory.path(),cancel()).await.err().unwrap();
     assert!(matches!(error.kind,ErrorKind::Config(_)));assert!(!error.attempted);assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn changed_or_missing_credentials_refuse_calls_without_refresh_or_send() {
+    let _environment=isolated();
+    use doxa_vendors::credentials::{self,SearchProvider};
+    credentials::search_save(SearchProvider::Tavily,"saved-tavily-fixture").unwrap();
+    let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
+    let mut config=stdio_config("good",&path);
+    if let TransportConfig::Stdio{env,..}=&mut config.transport {
+        env.insert("TEST_SECRET".into(),EnvRef{env:"TAVILY_API_KEY".into(),bearer:false});
+    }
+    let mut client=Client::connect(&config,directory.path(),cancel()).await.unwrap();
+    client.list_tools(cancel()).await.unwrap();assert!(client.credentials_current().unwrap());
+    credentials::search_save(SearchProvider::Tavily,"changed-tavily-fixture").unwrap();
+    assert!(!client.credentials_current().unwrap());
+    let error=client.call_tool("search",&json!({}),cancel()).await.unwrap_err();
+    assert_eq!(error.kind,ErrorKind::Credential);assert!(!error.attempted);
+    credentials::search_remove(SearchProvider::Tavily).unwrap();
+    let error=client.call_tool("search",&json!({}),cancel()).await.unwrap_err();
+    assert_eq!(error.kind,ErrorKind::Credential);assert!(!error.attempted);
+    assert!(!journal(&path).iter().any(|value|value["method"]=="tools/call"));
+    client.close().await;
 }

@@ -17,6 +17,7 @@ mod native_package_viewer;
 mod native_package_run;
 mod operations_controller;
 mod router_settings;
+mod mcp_settings;
 mod operations_menu;
 mod credential_editor;
 pub(crate) mod panes;
@@ -1666,6 +1667,8 @@ pub struct App {
     offline_ids: HashSet<String>,
     queue_picker: Option<QueuePicker>,
     settings_menu: Option<SettingsMenu>,
+    mcp_secret: Option<mcp_settings::SecretEdit>,
+    mcp_probe: Option<mcp_settings::Probe>,
     choice_dropdown: Option<choice_dropdown::Dropdown>,
     mermaid_preflight: Option<MermaidPreflight>,
     pending_queue_commands: Vec<crate::bridge::WorkerCommand>,
@@ -1951,6 +1954,8 @@ impl Default for App {
             offline_ids: HashSet::new(),
             queue_picker: None,
             settings_menu: None,
+            mcp_secret: None,
+            mcp_probe: None,
             choice_dropdown: None,
             mermaid_preflight: None,
             pending_queue_commands: Vec::new(),

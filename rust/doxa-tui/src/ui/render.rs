@@ -629,7 +629,8 @@ impl App {
                 .filter(|(k, _)| k == row.setting.key)
                 .map(|(_, v)| v.as_str());
             let edited = menu.edits.get(row.setting.key);
-            let shown = draft
+            let secret_mask=self.mcp_secret_mask(row.setting.key);
+            let shown = secret_mask.as_deref().or(draft)
                 .or_else(|| edited.and_then(|v| v.as_deref()))
                 .unwrap_or(if edited == Some(&None) {
                     "(default after save)"
@@ -732,7 +733,16 @@ impl App {
         let mermaid_selected = menu.rows.get(menu.selected).is_some_and(|row|
             matches!(row.setting.key, "mermaid_renderer" | "mermaid_renderer_root"));
         let router_selected=menu.rows.get(menu.selected).is_some_and(|row|matches!(row.setting.key,"engine"|"router_config"));
-        let mut preflight_lines = if router_selected {
+        let mut preflight_lines = if crate::settings::CATEGORIES[menu.category]=="MCP" {
+            let path=std::path::PathBuf::from(menu.effective_value("mcp_config"));
+            let width=usize::from(area.width.saturating_sub(3)).max(1);
+            let mut footer=vec![Line::styled(if self.mcp_secret.is_some() {
+                " Key editor · masked · Enter/Ctrl+S save privately · Esc discards"
+            } else {" Ctrl+P: connection/list probe · no tool calls · never enables MCP"},Style::default().fg(theme::ACCENT))];
+            footer.extend(self.mcp_probe_lines(&path).into_iter().flat_map(|line|
+                crate::memory_menu::wrap_review(&format!(" {line}"),width)).take(3).map(Line::from));
+            footer
+        } else if router_selected {
             let path=std::path::PathBuf::from(menu.effective_value("router_config"));
             let mut footer=vec![Line::styled(" Ctrl+P: review Jev Router config/accounts/catalogs · no inference",
                 Style::default().fg(theme::ACCENT))];
@@ -758,7 +768,7 @@ impl App {
         lines.push(Line::from(if menu.draft.is_some() {
             " Enter accept edit · Ctrl+S save · Esc cancel edit"
         } else {
-            " 1–9 category · Enter/click choose/edit · Ctrl+S save · Esc discard/close"
+            " 1–9 / 0 MCP category · Enter/click choose/edit · Ctrl+S save · Esc discard/close"
         }));
         frame.render_widget(
             Paragraph::new(chooser_list_lines(lines, usize::from(area.width.saturating_sub(3))))

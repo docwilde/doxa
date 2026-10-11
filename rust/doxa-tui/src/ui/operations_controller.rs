@@ -568,6 +568,7 @@ impl App {
         }
     }
     pub(super) fn open_settings_menu(&mut self) {
+        self.mcp_secret=None;
         self.choice_dropdown = None;
         let identity = self.groups[self.active_group]
             .active_id()
@@ -714,8 +715,8 @@ impl App {
         if self.choice_dropdown.is_some() { return self.choice_dropdown_key(key); }
         if self.settings_menu.as_ref().is_some_and(|menu| menu.draft.is_none())
             && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
-            if let KeyCode::Char(number @ '1'..='9') = key.code {
-                self.select_settings_category(number as usize - '1' as usize);
+            if let KeyCode::Char(number @ '0'..='9') = key.code {
+                self.select_settings_category(if number=='0' {9} else {number as usize - '1' as usize});
                 return true;
             }
         }
@@ -727,6 +728,9 @@ impl App {
             return true;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+            if crate::settings::CATEGORIES[menu.category]=="MCP" {
+                self.start_mcp_probe();return true;
+            }
             if menu.rows.get(menu.selected).is_some_and(|row|matches!(row.setting.key,"engine"|"router_config")) {
                 menu.finish_draft();
                 let path=std::path::PathBuf::from(menu.effective_value("router_config"));
@@ -803,6 +807,11 @@ impl App {
                 } else if row.setting.read_only || row.setting.key.is_empty() {
                     self.notice =
                         format!("{} is read-only. {}", row.setting.label, row.setting.note);
+                } else if row.setting.kind==crate::settings::Kind::Credential {
+                    let provider=doxa_vendors::credentials::SearchProvider::from_setting_key(row.setting.key).expect("fixed search setting");
+                    if matches!(key.code,KeyCode::Char('u')|KeyCode::Delete) {self.remove_mcp_secret(provider);}
+                    else {self.start_mcp_secret(provider);}
+                    return true;
                 } else if matches!(key.code, KeyCode::Char('u') | KeyCode::Delete) {
                     menu.edits.insert(row.setting.key.into(), None);
                 } else if row.setting.kind == crate::settings::Kind::Choice {

@@ -234,6 +234,7 @@ impl App {
         if index >= settings::CATEGORIES.len() { return; }
         menu.finish_draft();
         menu.category = index;
+        self.mcp_secret=None;
         menu.selected = menu.indices().first().copied().unwrap_or(0);
         self.choice_dropdown = None;
     }
@@ -245,7 +246,7 @@ fn choice_label(value: &str) -> String {
 
 /// Render and hit testing consume the same title-bar tabs, including overflow.
 pub(super) fn settings_tabs(area: Rect, selected: usize) -> Vec<(usize, Rect, String)> {
-    let labels = settings::CATEGORIES.iter().enumerate().map(|(index, label)| format!(" {} {label} ", index + 1)).collect::<Vec<_>>();
+    let labels = settings::CATEGORIES.iter().enumerate().map(|(index, label)| format!(" {} {label} ", if index==9 {0} else {index+1})).collect::<Vec<_>>();
     let capacity = usize::from(area.width.saturating_sub(4));
     let mut start = 0;
     while start < selected && labels[start..=selected].iter().map(|s| s.width()).sum::<usize>() > capacity { start += 1; }

@@ -37,7 +37,8 @@ HTTP rules are in the official
 ## Private configuration
 
 `Config::load(&absolute_path)` accepts an owner-private regular JSON file with
-one link and no final symlink, at most 256 KiB. Duplicate/unknown config fields
+mode 0600, one link, no symlink in any path component, and a protected owner
+directory, at most 256 KiB. File identity is checked around the bounded read. Duplicate/unknown config fields
 fail closed. Config never comes from project discovery. `schema_version` is 1.
 Every server has an explicit ID, enabled flag, exact tool allowlist, transport,
 and bounded limits. The [search templates](examples/mcp-search.json) are disabled.
@@ -48,7 +49,8 @@ are never config literals. URLs cannot contain userinfo, a query, or fragment;
 do not put credentials in their paths. Stdio starts an absolute, already
 installed program with only explicitly referenced environment variables.
 Package launchers which install on connection, such as npm/npx, are rejected.
-Arguments are public configuration and must not contain referenced credentials.
+Arguments are public configuration; known saved/inherited credentials are
+refused in executable paths, arguments and endpoints before connection.
 
 Defaults are a 30-second request/list deadline, 256 KiB frame/request/HTTP-stream
 limit, 1 MiB aggregate catalog, 16 pages, 128 advertised tools, 64 intervening
@@ -57,6 +59,37 @@ bounds on each setting. Progress does not reset a deadline. Cancellation uses
 the provided `Arc<AtomicBool>`; attempted ordinary requests receive a bounded
 cancellation notification, then the connection is closed. Initialization is
 never cancelled by notification.
+
+## MCP Settings
+
+`/settings` has an MCP category using the same title tabs, mouse navigation and
+overflow as the other categories. `0` opens MCP; `1` through `9` keep their
+existing categories. `mcp_enabled` / `DOXA_MCP_ENABLED` defaults off and
+`mcp_config` / `DOXA_MCP_CONFIG` selects the explicit private file. API workers
+consume those settings; native Claude/Codex CLI workers retain their own MCP
+configuration. Stdio servers execute on the trusted host, outside worker Docker
+isolation.
+
+The Tavily, Firecrawl, Exa and Brave Search key rows expose only set/missing
+status and source. Enter opens a masked, bounded transient editor; Enter or
+Ctrl+S saves the key privately, Esc erases the draft, and Delete removes a saved
+key. They never enter ordinary Settings drafts, config.toml, CLI settings list,
+or MCP JSON. Key edits cannot be made through command-line arguments.
+
+Search credentials use the existing protected `credentials.json` store and
+its workspace/LORE exclusions. `TAVILY_API_KEY`, `FIRECRAWL_API_KEY`,
+`EXA_API_KEY` and `BRAVE_API_KEY` take precedence over saved search keys; their
+rows are environment-owned and read-only. An invalid environment value or
+unsafe store fails closed. The corresponding MCP environment references use a
+saved search key when the environment is absent, without changing process-wide
+environment variables. Existing native vendor credential precedence is unchanged.
+
+Ctrl+P in MCP explicitly initializes and lists enabled configured servers with
+a ten-second overall request deadline plus bounded cleanup. It never calls a
+tool or enables MCP. The result shows only a config digest snapshot and counts;
+no server descriptions, endpoints, headers or key values. Session/pane changes
+or a changed config path cancel the probe and withhold stale results. The
+config is reloaded and compared before completing a successful snapshot.
 
 ## Host integration
 
@@ -82,11 +115,20 @@ arbitrary model-supplied name to select a server.
 
 `CallResult` retains bounded `content`, optional `structured_content`, and
 `is_error`. A tool-level error is a result, distinct from a JSON-RPC failure.
-Known connection credential values are scrubbed from returned strings;
+All saved/inherited vendor, Jev and search keys plus connection credentials
+are scrubbed from returned strings;
 reflection in object keys is refused. Media/resource content is returned as
 untrusted data, never automatically opened or fetched. The client checks schema
 and result shapes, not full JSON Schema validation. See the official
 [tools contract](https://modelcontextprotocol.io/specification/2025-11-25/server/tools).
+
+Keep a session runtime alive until `close().await` has completed. A per-turn
+runtime must not own clients intended for later turns. `credentials_current()`
+re-resolves the exact selected references and compares with the frozen
+connection credentials without exposing values or hashes. `call_tool` refuses
+changed/missing credentials before sending; it never refreshes authentication.
+The host must likewise revalidate the selected private configuration digest
+immediately before a reviewed call.
 
 `Error { kind, attempted }` contains safe categories and numeric RPC/HTTP codes,
 not server error text, URL contents, credentials, or stderr. `attempted` records

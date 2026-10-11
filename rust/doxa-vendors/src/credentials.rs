@@ -300,6 +300,28 @@ pub fn redact_json(value: &mut Value) -> io::Result<()> {
     visit(value,&known_keys()?)
 }
 
+/// Read an explicitly selected owner-private configuration using the same
+/// directory binding as the credential store. No symlink component, hardlink,
+/// special file or path replacement is accepted. Errors contain no path/data.
+pub fn read_private_config(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    clean((|| {
+        if !path.is_absolute() || path.components().any(|part|matches!(part,Component::ParentDir)) {
+            return Err(private_error());
+        }
+        let parent=path.parent().ok_or_else(private_error)?;
+        let entry=path.file_name().and_then(|entry|entry.to_str()).filter(|entry|!entry.as_bytes().contains(&0)).ok_or_else(private_error)?;
+        let dir=directory(parent,false)?.ok_or_else(private_error)?;
+        let before=identity(&dir,entry)?.ok_or_else(private_error)?;
+        let mut file=open_at(&dir,entry,libc::O_RDONLY,0)?;
+        let meta=check_file(&file)?;
+        if (meta.dev(),meta.ino())!=before || meta.len()>limit {return Err(private_error());}
+        let mut bytes=Vec::new();
+        (&mut file).take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+        if bytes.len() as u64>limit || identity(&dir,entry)?!=Some(before) {return Err(private_error());}
+        Ok(bytes)
+    })())
+}
+
 /// Deny the reserved path using the opened parent before a read tool opens it.
 /// This remains true when an atomic save/remove retires an already opened inode.
 pub fn is_credential_path(parent: &File, entry: &std::ffi::OsStr) -> io::Result<bool> {

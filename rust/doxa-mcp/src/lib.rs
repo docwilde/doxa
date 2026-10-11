@@ -157,6 +157,17 @@ impl Client {
     pub fn info(&self) -> &ServerInfo { self.info.as_ref().expect("only initialized clients are public") }
     pub fn catalog_changed(&self) -> bool { self.changed }
     pub fn is_closed(&self) -> bool { self.closed }
+    /// Re-resolve only the configured credential references and compare with
+    /// the private connection snapshot. No credential or digest is exposed.
+    /// Authentication stays frozen; a changed source requires a new client.
+    pub fn credentials_current(&self) -> Result<bool> {
+        let references=match &self.config.transport {
+            TransportConfig::Stdio {env,..}=>env.values(),
+            TransportConfig::StreamableHttp {headers,..}=>headers.values(),
+        };
+        let current=references.map(config::resolve).collect::<Result<Vec<_>>>()?;
+        Ok(current==self.secrets)
+    }
     async fn request(&mut self, method: &str, params: Value, cancel: Arc<AtomicBool>) -> Result<Value> {
         self.request_with_timeout(method,params,cancel,self.config.limits.timeout_ms).await
     }
@@ -238,6 +249,7 @@ impl Client {
     pub async fn call_tool(&mut self, name: &str, arguments: &Value, cancel: Arc<AtomicBool>) -> Result<CallResult> {
         if self.changed { return Err(Error::new(ErrorKind::CatalogChanged,false)); }
         if !self.config.allow_tools.iter().any(|v|v == name) || !self.catalog.contains_key(name) { return Err(Error::new(ErrorKind::ToolNotAllowed,false)); }
+        if !self.credentials_current()? {return Err(Error::new(ErrorKind::Credential,false));}
         if !arguments.is_object() { return Err(Error::config("tool arguments must be an object")); }
         let result = self.request("tools/call",json!({"name":name,"arguments":arguments}),cancel).await?;
         CallResult::from_value(result)

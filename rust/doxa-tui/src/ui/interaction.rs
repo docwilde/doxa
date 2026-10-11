@@ -159,6 +159,7 @@ impl App {
         {
             self.transcript_selection.borrow_mut().clear();
         }
+        self.retire_mcp_if_changed();
         self.refresh_vendor_credentials();
         if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential())
             && (self.should_quit || !self.chip_info.as_ref().is_some_and(|info| info.kind == "operations")
@@ -235,6 +236,8 @@ impl App {
             self.retire_operations(); self.chip_info = None;
         }
         if before != after {
+            self.mcp_secret=None;
+            self.retire_mcp_if_changed();
             self.branch_picker = None;
             let moved_active_tab = std::mem::take(&mut self.moved_active_tab)
                 && !before.1.is_empty()
@@ -319,6 +322,9 @@ impl App {
         if let Some(token) = self.clipboard_secret_owner.take() {
             let active = self.active_group == target.pane
                 && self.groups[self.active_group].active_id().unwrap_or("") == target.session;
+            if active && self.mcp_secret.as_ref().is_some_and(|secret|secret.token==token) {
+                return self.mcp_secret_paste(&text);
+            }
             if active && self.chip_info.as_ref().is_some_and(|info| info.kind == "operations") {
                 if let Some(menu) = self.operations_menu.as_mut().filter(|menu| menu.credential_token() == Some(token)) {
                     menu.paste(&text);
@@ -401,6 +407,7 @@ impl App {
     }
 
     pub(super) fn paste(&mut self, text: &str) -> bool {
+        if self.mcp_secret.is_some() {return self.mcp_secret_paste(text);}
         if let Some(menu) = &mut self.operations_menu {
             let handled = menu.paste(text);
             if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
@@ -646,7 +653,8 @@ impl App {
             return true;
         }
         if ctrl && matches!(key.code, KeyCode::Char('v' | 'V')) {
-            if let Some(token) = self.operations_menu.as_ref().and_then(|menu| menu.credential_token()) {
+            if let Some(token) = self.mcp_secret.as_ref().map(|secret|secret.token)
+                .or_else(||self.operations_menu.as_ref().and_then(|menu|menu.credential_token())) {
                 self.clipboard_job = None;
                 self.clipboard_secret_owner = Some(token);
                 let mut target = self.clipboard_target(); target.draft.clear(); target.cursor = 0;
@@ -741,6 +749,7 @@ impl App {
             self.detach_active_tab();
             return true;
         }
+        if self.mcp_secret_key(key) {return true;}
         // A credential owns all typing while its editor exists. Provider input
         // requests must never capture a key intended for this transient field.
         if let Some(menu) = self.operations_menu.as_mut().filter(|menu| menu.editing_credential()) {
@@ -1663,7 +1672,7 @@ impl App {
     pub(super) fn active_request_index(&self) -> Option<usize> {
         // Keep both input and rendering with the secret editor until the user
         // explicitly saves or cancels. Requests remain queued in their store.
-        if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential()) {
+        if self.mcp_secret.is_some() || self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential()) {
             return None;
         }
         let id = self.groups[self.active_group].active_id()?;

@@ -1,6 +1,6 @@
 use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::{BTreeMap, BTreeSet}, fs::OpenOptions, io::Read, os::unix::fs::{MetadataExt, OpenOptionsExt}, path::{Path, PathBuf}};
+use std::{collections::{BTreeMap, BTreeSet}, path::{Path, PathBuf}};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -13,15 +13,8 @@ impl Config {
     /// An explicitly supplied owner-private file. Never discovers project files.
     pub fn load(path: &Path) -> Result<Self> {
         if !path.is_absolute() { return Err(Error::config("config path must be absolute")); }
-        let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path).map_err(|_| Error::config("cannot open private config"))?;
-        let metadata = file.metadata().map_err(|_| Error::config("cannot inspect config"))?;
-        if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-            return Err(Error::config("config must be an owner-private regular file"));
-        }
-        let mut bytes = Vec::new();
-        file.take(262145).read_to_end(&mut bytes).map_err(|_| Error::config("cannot read config"))?;
-        if bytes.len() > 262144 { return Err(Error::config("config exceeds size limit")); }
+        let bytes=doxa_vendors::credentials::read_private_config(path,262144)
+            .map_err(|_|Error::config("config requires a protected owner directory and regular 0600 file"))?;
         let value = crate::wire::parse(&bytes).map_err(|_| Error::config("invalid or duplicate JSON field"))?;
         let config: Self = serde_json::from_value(value).map_err(|_| Error::config("invalid config schema"))?;
         config.validate()?;
