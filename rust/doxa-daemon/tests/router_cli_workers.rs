@@ -1,4 +1,4 @@
-#![cfg(all(unix,feature="local-test-server"))]
+#![cfg(all(target_os="linux",feature="local-test-server"))]
 //! Credential-free native process/catalog/tool/permission/router fixtures.
 use serde_json::{json,Value};
 use std::{fs,io::{BufRead,BufReader,Read,Write},net::TcpListener,os::unix::{fs::PermissionsExt,net::UnixStream},

@@ -25,8 +25,10 @@ doxa doctor --engine router --router-config /home/you/.doxa/router-candidates.js
 
 `DOXA_ROUTER_CONFIG` or the `router_config` setting can explicitly supply the
 path. DOXA does not invent a default config, candidate list, or target. Selecting
-Jev Router in `/settings` or the new-session form requires that setting and a
-read-only review of the private config and current authenticated catalogs. The
+Jev Router in `/settings` → Session or the new-session form requires that
+setting. Ctrl+P on the default-engine/config row reviews the private config and
+current authenticated catalogs; Ctrl+S saves only after a ready review. The
+review checks Jev credential shape/presence without authenticating it over HTTP. The
 form offers Auto and configured target IDs; no candidate list is invented. Global `DOXA_MODEL` and `DOXA_EFFORT` do not
 select router targets. A stored `[models].router` preference applies to new CLI
 launches and must name `auto` or an exact target ID.
@@ -311,7 +313,7 @@ before HTTP and the outcome afterward; an existing journal cannot be reused.
 SIGINT/SIGTERM cancels the bounded call while retaining admitted reservations.
 See [evaluation format and evidence](router-evaluation.md) for reproducible cases.
 
-Credential-free native process fixtures cover routed Claude and protected Codex
+Credential-free Linux native process fixtures cover routed Claude and protected Codex
 authenticated catalog admission, native permission/peer-tool roundtrips, exact
 model/usage accounting, fresh worker identities, API switching and canonical
 resume. They do not prove real-account quota, billing or task quality.

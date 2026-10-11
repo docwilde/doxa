@@ -116,7 +116,7 @@ usage-based cost are estimates, not live invoices.
   launches and Docker migration.
 - [x] Internal authenticated Claude/protected Codex workers with bounded
   canonical history transfer, native permission/tool lifecycle and fail-closed
-  recovery. Credential-free local fixtures; no real-account quality claim.
+  recovery. Credential-free Linux local fixtures; no real-account quality claim.
 - [ ] External CLI handoffs and CLI managed-summary targets; no implicit
   propagation to child/fleet/Docker sessions.
 - [ ] Authenticated platform checks. Local Linux fixtures are not authenticated

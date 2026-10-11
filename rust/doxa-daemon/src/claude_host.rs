@@ -88,7 +88,7 @@ impl Shared {
     }
     fn checkpoint(&self, incomplete: bool) -> Result<(), String> {
         let s = self.selection.lock().unwrap();
-        let fields = json!({"thread_id":self.session,"session_id":self.session,"engine":"claude","transport":"stream-json","cwd":self.cwd,"model":s.0,"effort":s.1,"permission_mode":s.2,"lore_enabled":self.enabled,"lore_tools":self.agent.is_some(),"spawn_depth":self.depth,"parent_session_id":self.parent,"turn_incomplete":incomplete,"recorded":crate::iso_now()});
+        let fields = json!({"thread_id":self.session,"session_id":self.session,"engine":"claude","transport":"stream-json","cwd":self.cwd,"model":s.0,"effort":s.1,"permission_mode":s.2,"lore_enabled":self.enabled,"lore_tools":self.agent.is_some(),"spawn_depth":self.depth,"parent_session_id":self.parent,"turn_incomplete":incomplete,"router_worker":self.routed,"recorded":crate::iso_now()});
         self.store
             .try_write_thread(fields.as_object().unwrap().clone(), |s| {
                 self.scrub(s).map_err(io::Error::other)

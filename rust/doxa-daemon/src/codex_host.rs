@@ -394,6 +394,7 @@ impl CodexHost {
         fields.insert("thread_id".into(), json!(thread_id));
         fields.insert("turn_incomplete".into(), json!(turn_incomplete));
         fields.insert("session_id".into(), json!(self.session_id));
+        if self.routed {fields.insert("router_worker".into(),json!(true));}
         let selection = self.selection.lock().unwrap();
         fields.insert("model".into(), json!(selection.0));
         fields.insert("effort".into(), json!(selection.1));
