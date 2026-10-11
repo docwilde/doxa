@@ -399,7 +399,7 @@ impl Journal {
         let result=(||{file.write_all(&bytes)?;file.sync_all()?;self.current()?;
             let current=fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW).open(parent)?.metadata()?;
             if (current.dev(),current.ino())!=(identity.dev(),identity.ino()){return Err(io::Error::other("MCP receipt directory changed"));}
-            if unsafe{libc::renameat(directory.as_raw_fd(),temporary.as_ptr(),directory.as_raw_fd(),target.as_ptr())}!=0{return Err(io::Error::last_os_error());}directory.sync_all()}) (); 
+            if unsafe{libc::renameat(directory.as_raw_fd(),temporary.as_ptr(),directory.as_raw_fd(),target.as_ptr())}!=0{return Err(io::Error::last_os_error());}directory.sync_all()}) ();
         if result.is_err(){unsafe{libc::unlinkat(directory.as_raw_fd(),temporary.as_ptr(),0)};}
         result?;self.expected=Some(self.receipt.clone());Ok(())
     }
