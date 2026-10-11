@@ -1542,15 +1542,27 @@ for line in sys.stdin:
     #[test]
     fn fleet_admission_notices_and_unreviewed_status_are_visible_in_the_transcript() {
         let mut app=App::default();
+        app.rail_visible=false;
+        app.handle(Event::Resize(120,32));
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","cwd":"/demo"}));
         app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"fleet_guard","data":{"delivered":false,"reason":"outside approved assignment"}}}));
-        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"peer_message","data":{"from_title":"Worker","body":"status only","fleet_admission":{"delivered":true,"unreviewed":true}}}}));
-        let transcript=&app.sessions[0].transcript;
-        assert!(transcript.contains("Fleet message quarantined: outside approved assignment"));
-        let (lines, _) = super::transcript_tools::render(transcript, 100, None, None);
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"peer_message","data":{"from_title":"Worker","from_id":"worker-1","kind":"status","message_id":"receipt-1","body":"status only","fleet_admission":{"delivered":true,"unreviewed":true}}}}));
+        assert!(app.sessions[0].transcript.contains("Fleet message quarantined: outside approved assignment"));
+        let (lines, sections) = super::transcript_tools::render(&app.sessions[0].transcript, 120, None, None);
         let visible = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
-        assert!(visible.contains("Peer Worker [unreviewed fleet message]"));
-        assert!(visible.contains("│ status only"));
+        assert_eq!(sections.len(),1);
+        assert!(visible.contains("Peer Worker (worker-1)"));
+        assert!(visible.contains("[unreviewed fleet message]"));
+        assert!(visible.contains("kind: status") && visible.contains("message_id: receipt-1"));
+        assert!(!visible.contains("status only"), "peer bodies start collapsed");
+        assert!(!painted_at(&app,120,32).contains("status only"));
+        app.focus=Focus::Transcript;
+        assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE))));
+        let expanded=painted_at(&app,120,32);
+        assert!(expanded.contains("│ status only"), "{expanded}");
+        assert!(expanded.contains("[unreviewed fleet message]"));
+        assert!(expanded.contains("Fleet message quarantined"));
+        assert!(app.pending_prompts.is_empty() && app.pending_answers.is_empty());
         let row=super::transcript_events::structured_event("fleet_guard",&json!({"delivered":false,"reason":"hold\nfor human\u{1b}"})).unwrap();
         assert!(!row.contains('\u{1b}'));
     }

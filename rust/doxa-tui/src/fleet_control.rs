@@ -1363,6 +1363,16 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Launch-review fixtures exercise the real AF_UNIX admission bound. Keep
+    // their explicit root short and private under the caller's real-disk TMPDIR
+    // rather than inheriting a potentially long owner DOXA_HOME/fleets path.
+    fn review_fixture_root(args: &mut Vec<String>) -> tempfile::TempDir {
+        let root = tempfile::Builder::new().prefix("fr").rand_bytes(4).tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        args.extend(["--root".into(), root.path().to_string_lossy().into_owned()]);
+        root
+    }
     #[test]
     fn cancellation_and_receipt_publication_have_one_order() {
         let control=AutoTestControl::new();
@@ -1398,6 +1408,7 @@ mod tests {
             "--auto-test".into(),"--dry-run".into()];
         assert!(Spec::parse(&args).is_err(),"automatic tests must not run without an approved recipe");
         args.extend(["--test-recipe".into(),recipe.to_string_lossy().into_owned()]);
+        let _fleet_root = review_fixture_root(&mut args);
         let spec=Spec::parse(&args).unwrap();
         assert_eq!(spec.review().unwrap()["auto_test"],true);
         let isolation=args.iter().position(|arg|arg=="--isolation").unwrap()+1;
@@ -1547,6 +1558,7 @@ mod tests {
             "--run-budget".into(),"1".into(),"--review-budget".into(),"0.1".into(),
             "--alignment-supervisor".into(),"deepseek:reviewer".into(),
             "--isolation".into(),"docker-offline".into(),"--test-recipe".into(),recipe.to_string_lossy().into_owned(),"--dry-run".into()];
+        let _fleet_root = review_fixture_root(&mut args);
         let spec=Spec::parse(&args).unwrap();
         assert_eq!(spec.review().unwrap()["test_recipe"]["argv"][0],"/usr/bin/true");
         fs::write(&recipe,r#"{"argv":["/usr/bin/false"],"cwd_relative":"","timeout_s":5}"#).unwrap();
@@ -1569,12 +1581,13 @@ mod tests {
     }
     #[test]
     fn astra_supervisor_and_message_judge_are_frozen_as_separate_exact_selections(){
-        let args=vec!["--pool","fixture:fixture-v1","--prompt","bounded task","-n","1",
+        let mut args=vec!["--pool","fixture:fixture-v1","--prompt","bounded task","-n","1",
             "--run-budget","10","--review-budget","1",
             "--alignment-supervisor","codex:gpt-6-astra",
             "--message-review","shadow","--message-judge","llm:codex:gpt-6-astra",
             "--review-input-price","165","--review-output-price","495","--dry-run"]
             .into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let _fleet_root = review_fixture_root(&mut args);
         let spec=Spec::parse(&args).unwrap();
         let review=spec.review().unwrap();
         assert_eq!(review["independent_review"]["supervisor"],json!({"provider":"codex","model":"gpt-6-astra"}));
@@ -1635,11 +1648,12 @@ mod tests {
     }
     #[test]
     fn frozen_worker_tasks_and_paths_are_reviewed_before_launch() {
-        let args:Vec<String>=["--pool","fixture","--prompt","Shared goal","-n2","--run-budget","10",
+        let mut args:Vec<String>=["--pool","fixture","--prompt","Shared goal","-n2","--run-budget","10",
             "--alignment-supervisor","deepseek:reviewer","--review-budget","1",
             "--allowed-path","src","--worker-task","1:Implement parser",
             "--worker-task","2:Test parser","--worker-path","1:src/parser",
             "--worker-path","2:src/tests"].into_iter().map(str::to_owned).collect();
+        let _fleet_root = review_fixture_root(&mut args);
         let spec=Spec::parse(&args).unwrap();
         let review=spec.review().unwrap();
         assert_eq!(review["slots"][0]["task_sha256"],format!("{:x}",Sha256::digest(b"Implement parser")));
@@ -1655,10 +1669,11 @@ mod tests {
 
     #[test]
     fn reviewed_dependency_plan_requires_earlier_workers_and_a_coordinator() {
-        let args:Vec<String>=["--pool","claude:worker","--supervisor","claude:boss","--prompt","Shared goal",
+        let mut args:Vec<String>=["--pool","claude:worker","--supervisor","claude:boss","--prompt","Shared goal",
             "-n3","--run-budget","10","--isolation","docker-open","--alignment-supervisor","deepseek:reviewer",
             "--review-budget","1","--worker-after","2:1","--worker-after","3:2"]
             .into_iter().map(str::to_owned).collect();
+        let _fleet_root = review_fixture_root(&mut args);
         let spec=Spec::parse(&args).unwrap();
         assert_eq!(spec.worker_after,vec![vec![],vec![1],vec![2]]);
         let review=spec.review().unwrap();
