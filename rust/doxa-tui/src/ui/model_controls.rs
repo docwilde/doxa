@@ -399,8 +399,9 @@ impl App {
             .and_then(|id| self.session_identity.get(id))
             .and_then(|identity| identity.0.as_deref());
         let configured = engine_name(launch::configured_engine());
-        self.engine_selected = engine
-            .and_then(|engine| ENGINE_CHOICES.iter().position(|name| *name == engine))
+        let explicit_default=crate::settings::raw("engine");
+        self.engine_selected = ENGINE_CHOICES.iter().position(|name| *name==explicit_default)
+            .or_else(||engine.and_then(|engine| ENGINE_CHOICES.iter().position(|name| *name == engine)))
             .or_else(|| ENGINE_CHOICES.iter().position(|name| *name == configured))
             .unwrap_or(1);
         self.engine_picker = true;
