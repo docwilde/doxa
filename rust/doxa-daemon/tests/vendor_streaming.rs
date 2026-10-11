@@ -133,13 +133,20 @@ fn glm_account_startup_and_status_are_cached_and_monitor_is_explicit() {
         let mut command=Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
         command.env_clear().args(["--runtime-dir",root.to_str().unwrap(),"--cwd",root.to_str().unwrap(),"--session-id","glm-report","--engine","glm","--model","glm-5.3-flash","--effort","low","--vendor-endpoint",&endpoint,"--linger","20"])
             .env("PATH","/usr/bin:/bin").env("TMPDIR",root).env("HOME",root.join("home")).env("DOXA_HOME",&doxa)
+            .env("ZAI_API_KEY","local-reporting-fixture-key")
             .env("LORE_ROOT",root.join("lore")).env("LORE_PROJECTS_DIR",root.join("projects"))
             .env("LORE_SKILLS_DIR",root.join("skills")).env("LORE_DISABLE_SYNC","1").env("LORE_DISABLE_REVIEW","1")
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
         if let Some(carrier)=std::env::var_os("DOXA_LORE_RS") {command.env("DOXA_LORE_RS",carrier);}
         let mut daemon=Daemon(command.spawn().unwrap());
         let registry=root.join("registry/glm-report.json");let deadline=Instant::now()+Duration::from_secs(10);
-        while !registry.exists() {assert!(daemon.0.try_wait().unwrap().is_none());assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(10));}
+        while !registry.exists() {
+            if let Some(status)=daemon.0.try_wait().unwrap() {
+                let mut error=String::new();daemon.0.stderr.take().unwrap().read_to_string(&mut error).unwrap();
+                panic!("reporting fixture startup failed ({status}): {error}");
+            }
+            assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(10));
+        }
         let record:Value=serde_json::from_slice(&fs::read(registry).unwrap()).unwrap();
         let mut socket=UnixStream::connect(record["daemon_socket"].as_str().unwrap()).unwrap();socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut reader=BufReader::new(socket.try_clone().unwrap());let hello=frame(&mut reader);
