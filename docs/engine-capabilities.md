@@ -19,7 +19,7 @@ DOXA keeps one engine per session. The model picker shows choices reported by or
 | Model change | Idle session, verified against CLI settings | Next turn on same thread | Idle session, catalog choice | Idle session, catalog choice | Idle `/model auto` or exact configured target ID |
 | Reasoning effort | Reported choices | Reported choices | Model-dependent | Model-dependent | Fixed per configured target; effective effort in route status |
 | Tool permissions | Provider controls plus DOXA peer/LORE review | On-request, auto, or full-access; peer/LORE review stays active | DOXA peer/LORE review | DOXA peer/LORE review | DOXA peer/LORE review; no provider permission-mode control |
-| Compaction | LORE review before provider compaction | Trusted `PreCompact` review in private build | Reviewed summary checkpoint | Reviewed summary checkpoint | Unavailable in first slice |
+| Compaction | LORE review before provider compaction | Trusted `PreCompact` review in private build | Reviewed summary checkpoint | Reviewed summary checkpoint | Reviewed managed summary; no Jev call, originals retained |
 
 Provider tool features depend on the installed CLI, model, and account. `/model`, `/effort`, and `/mode` expose only supported choices. Changes wait for the current turn and queue to finish. The picker can show separately sourced context, thinking, and price facts for an exact model ID; unknown fields stay unknown and facts do not make a model selectable. [Model fact provenance](plans/model-registry.md).
 
@@ -34,6 +34,16 @@ the pin. Router owns aggregate durable routing/worker reservations; an attempted
 Jev call with unknown usage withholds worker execution. Configured descriptions
 are operator policy and token-based price bounds are estimates. See the
 [router operator guide](jev-router.md) for fallback and resume limits.
+
+Bare router `/compact` uses the pin, last ordinary worker or configured fallback
+without changing Auto/pin. Completed canonical-source LORE review precedes the
+bounded summary, with aggregate budget and unknown-usage limits still active.
+The UI keeps summary-worker status separate from ordinary routing. The pinned
+LORE worker currently records derivation provenance under the selected API
+provider; DOXA source proof/storage/replay stay `router` and review receipts bind
+the exact summary target. Compaction fixtures and controlled native review
+carrier checks are local evidence; paid summary and real-task quality checks
+remain open. [Compaction details](jev-router.md#reviewed-managed-compaction).
 
 With beta.43 and the updated private provider, Codex can switch from `on-request` to `auto`
 during an active turn. The waiting provider escalation is declined so the model

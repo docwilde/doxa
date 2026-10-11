@@ -138,6 +138,47 @@ Token-based estimates and conservative reservations are not billed tier or invoi
 An interrupted/incomplete journal pauses further work rather than replaying an
 uncertain turn.
 
+## Reviewed managed compaction
+
+Use bare `/compact` in an idle router session. The summary target is the exact
+pin when pinned; in Auto it is the last ordinary effective worker, or the
+configured fallback if no ordinary worker has run. The target must still pass
+eligibility and aggregate budget checks. Compaction makes no Jev selection call
+and changes neither Auto/the pin nor the last ordinary routing status.
+
+The host requires completed LORE review of the canonical source before sending
+a bounded summary request. Disabled or unavailable review, stale source proof,
+ineligible target and budget refusal stop before a summary HTTP request. A
+verified managed summary becomes separate context for subsequent turns; the
+canonical messages and transcript originals remain intact. This does not add
+automatic compaction or unbounded long-history support.
+
+The UI shows the source review and summary phases, then a separate summary
+target/provider/model/effort record with the original message count. Reattach
+restores that record from billing telemetry. Summary source/content and
+credentials are not included in those status rows. Summary usage is charged
+against the durable aggregate allowance and included in the session estimate,
+even when a known-usage summary is rejected. An attempted summary with missing
+usage retains its reservation and blocks further work; retry or resume does
+not clear accounting uncertainty. Admission saves the exact summary target,
+request hash and canonical source proof before HTTP, so interrupted work retains
+that binding in the durable journal. Recovered summary context must still match
+its canonical source prefix. A canonical source mismatch is sticky for the live
+host and withholds later Jev and worker calls; restoring an old file does not
+make that host retry automatically.
+
+The pinned native LORE worker currently accepts the selected API provider as
+review authority, rather than `router`. LORE derivation `source_engine` therefore
+identifies DeepSeek or GLM. DOXA binds `conversation_engine: "router"` and the
+exact summary worker identity in review metadata/receipts, while canonical
+source proof, storage and replay retain engine `router`. First-class router
+attribution in LORE remains future work.
+
+Compaction verification is local: controlled provider fixtures and a controlled
+native LORE carrier test cover review and source integrity. These checks are
+separate from the six-call synthetic Jev transport smoke below. No authenticated
+paid summary or real-task summary quality result is recorded.
+
 ## Resume and first-slice limits
 
 ```sh
@@ -158,8 +199,8 @@ original `session_budget_usd`/`DOXA_SESSION_BUDGET_USD` setting when resuming.
 The history picker explains that explicit config is required for resume.
 Existing live router sessions can be attached normally. Automatic launch from
 history, `/clear`, `/cd`, child spawning and fleet config inheritance are
-unavailable in this slice. Docker isolation, isolation migration, CLI handoffs,
-and router compaction are also unavailable. Start a separate explicit session
+unavailable in this slice. Docker isolation, isolation migration and CLI handoffs
+are also unavailable. Start a separate explicit session
 when those missing inheritance paths would otherwise be needed.
 
 ## Evaluation and evidence
