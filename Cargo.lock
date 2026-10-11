@@ -724,6 +724,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "doxa-mcp"
+version = "2.0.0-beta.47"
+dependencies = [
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "doxa-peers"
 version = "2.0.0-beta.46"
 dependencies = [
