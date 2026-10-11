@@ -14,6 +14,19 @@ fn event(app: &mut App, id: &str, kind: &str, data: Value) {
     app.apply_daemon_frame(&json!({"type":"event","session_id":id,"event":{"type":kind,"data":data}}));
 }
 
+fn click_visible_text(app: &mut App, text: &str) {
+    let mut terminal = Terminal::new(TestBackend::new(126, 31)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let label = text.chars().map(|c| c.to_string()).collect::<Vec<_>>();
+    let point = (0..31).find_map(|y| (0..=126-label.len() as u16).find_map(|x| {
+        label.iter().enumerate().all(|(offset, symbol)|
+            terminal.backend().buffer()[(x + offset as u16, y)].symbol() == symbol.as_str())
+            .then_some((x, y))
+    })).expect("visible fixture control");
+    app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+        column: point.0, row: point.1, modifiers: KeyModifiers::NONE }));
+}
+
 fn tool_activity(app: &mut App) {
     event(app,"demo-codex-01","tool_call",json!({"id":"tool-1","name":"Read","input":{"path":"src/parser.rs"}}));
     event(app,"demo-codex-01","tool_result",json!({"id":"tool-1","name":"Read","result_summary":"File read successfully","duration_ms":42}));
@@ -239,6 +252,54 @@ fn scene(name: &str) -> App {
             app.input = "/help".into();
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         }
+        "settings" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            app.input = "/settings".into();
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            // The production title-tab hit path, with no preference writes.
+            click_visible_text(&mut app, "Appearance");
+            app.notice = "Fixture · Settings title tabs · changes are not saved".into();
+        }
+        "context" => {
+            app.groups[0].tabs = vec!["demo-claude-02".into()];
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-claude-02",
+                "engine":"claude","model":"claude-sonnet-4","cwd":"/demo/project",
+                "ctx_tokens":42000,"ctx_max_tokens":200000,"ctx_percentage":21}));
+            app.input = "/context".into();
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            app.apply_daemon_frame(&json!({"type":"context_detail","session_id":"demo-claude-02","ok":true,
+                "detail":{"source":"Synthetic provider context fixture","total_tokens":42000,"max_tokens":200000,
+                    "percentage":21,"categories":[{"name":"System","tokens":8000},
+                        {"name":"Tools","tokens":12000},{"name":"Conversation","tokens":22000},
+                        {"name":"Free space","tokens":158000}]}}));
+            app.notice = "Fixture · reported context tokens · LORE character caps stay separate".into();
+        }
+        "queued-prompts" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            app.sessions.iter_mut().for_each(|session| session.transcript.clear());
+            event(&mut app,"demo-codex-01","turn_started",json!({"prompt":"Compare the parser changes."}));
+            event(&mut app,"demo-codex-01","text_delta",json!({"text":
+                "## Parser review\n\nBounds checks passed. I am checking reconnect behavior."}));
+            event(&mut app,"demo-codex-01","prompt_queued",json!({"id":"q-next",
+                "timestamp":"2026-10-11T13:25:00Z",
+                "text":"Review **bounds** and **reconnect** checks next.\n\n- Keep the parser API stable\n- Explain remaining errors"}));
+            app.notice = "Fixture · queued user prompt · same Markdown and stripe as ordinary prompts".into();
+        }
+        "peer-messages" => {
+            app.groups[0].tabs = vec!["demo-claude-02".into()];
+            app.sessions.iter_mut().for_each(|session| session.transcript.clear());
+            event(&mut app,"demo-claude-02","turn_started",json!({"prompt":"Review the parser changes."}));
+            event(&mut app,"demo-claude-02","text_delta",json!({"text":"I will check bounds and reconnect behavior."}));
+            event(&mut app,"demo-claude-02","turn_done",json!({"is_error":false}));
+            let sender = "12345678-1234-1234-1234-123456789abc";
+            event(&mut app,"demo-claude-02","peer_message",json!({"from_id":sender,
+                "from_title":"Parser reviewer","sent_at":"2026-10-11T13:25:00Z",
+                "body":"**Reviewer handoff**\n\nThe boundary checks passed. Please verify reconnect before approving."}));
+            event(&mut app,"demo-claude-02","prompt_queued",json!({"id":"q-peer","peer_started":true,
+                "peer_origin":format!("Parser reviewer ({sender})"),"timestamp":"2026-10-11T13:25:00Z",
+                "text":"Run the **reconnect review** next.\n\nReport unresolved errors before release."}));
+            app.notice = "Fixture · attributed peer receipt and queued peer task · no message delivery".into();
+        }
         "needs-input" => {
             event(&mut app,"demo-codex-01","needs_input",json!({"id":"req-1","kind":"ask_user","title":"Choose migration target","questions":[{"question":"Where should the migration run?","header":"Environment","options":[{"label":"Staging","description":"Validate before release"},{"label":"Production","description":"Apply to live data"}]}]}));
         }
@@ -431,7 +492,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
+        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "context" | "queued-prompts" | "peer-messages" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
@@ -467,5 +528,5 @@ fn main() {
             let cell = &terminal.backend().buffer()[(x,y)];
             json!([cell.symbol(),rgb(cell.fg),rgb(cell.bg),cell.modifier.bits()])
         }).collect();
-    println!("{}",json!({"width":width,"height":height,"cells":cells}));
+    println!("{}",json!({"version":env!("CARGO_PKG_VERSION"),"width":width,"height":height,"cells":cells}));
 }
