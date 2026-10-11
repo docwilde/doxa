@@ -75,7 +75,12 @@ fn cleanup(child: &mut Child) -> io::Result<()> {
     }
 }
 
-fn run_with_timeout(mut command: Command, timeout: Duration) -> io::Result<Vec<u8>> {
+fn run_with_timeout(command: Command, timeout: Duration) -> io::Result<Vec<u8>> {
+    run_with_cleanup(command, timeout, cleanup)
+}
+
+fn run_with_cleanup(mut command: Command, timeout: Duration,
+    cleanup: impl FnOnce(&mut Child) -> io::Result<()>) -> io::Result<Vec<u8>> {
     let deadline = Instant::now() + timeout;
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .process_group(0);
@@ -117,13 +122,17 @@ fn run_with_timeout(mut command: Command, timeout: Duration) -> io::Result<Vec<u
             if !progress { sleep_until(deadline); }
         }
     })();
-    // Close our pipe ends before bounded teardown. No reader threads or joins
-    // survive a return, and no timeout/error automatically retries the command.
+    // Signal while we still own the read ends: closing first can kill a writer
+    // by SIGPIPE before group signaling. A signal refusal remains unconfirmed
+    // even when the direct child is subsequently reaped. Never replay it.
+    let cleanup_result = if reaped { Ok(()) } else { cleanup(&mut child) };
     drop(stdout); drop(stderr);
-    if !reaped {
-        if let Err(err) = cleanup(&mut child) {
-            return Err(error(format!("isolation operation failed; process cleanup unconfirmed: {err}; native fallback refused")));
-        }
+    if let Err(err) = cleanup_result {
+        let cause = match result {
+            Err(cause) => cause,
+            Ok(_) => error("isolation operation failed"),
+        };
+        return Err(error(format!("{cause}; process cleanup unconfirmed: {err}; native fallback refused")));
     }
     result
 }
@@ -215,10 +224,36 @@ mod tests {
 
     #[test]
     fn output_limit_refuses_and_cleans_up_writer() {
-        let command = shell("while :; do printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'; done");
+        let root = FixtureRoot::new();
+        let mut command = shell("printf '%s' $$ > parent.pid; printf 'attempt\\n' >> attempts; while :; do printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'; done");
+        command.current_dir(&root.0);
         let started = Instant::now();
         let err = run_with_timeout(command, Duration::from_secs(3)).unwrap_err();
         assert!(err.to_string().contains("output exceeds limit"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(3));
+        assert_reaped(fs::read_to_string(root.0.join("parent.pid")).unwrap().parse().unwrap());
+        assert_eq!(fs::read_to_string(root.0.join("attempts")).unwrap(), "attempt\n");
+    }
+
+    #[test]
+    fn cleanup_refusal_preserves_operation_cause_and_stays_failed() {
+        let root = FixtureRoot::new();
+        let mut command = shell("printf '%s' $$ > parent.pid; printf 'attempt\\n' >> attempts; while :; do printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'; done");
+        command.current_dir(&root.0);
+        let mut cleanup_called = false;
+        let err = run_with_cleanup(command, Duration::from_secs(3), |child| {
+            cleanup_called = true;
+            // Clean the actual local process, then inject an unconfirmed group
+            // signal result. This must never become a successful operation or
+            // hide the original output-cap error on any Unix platform.
+            cleanup(child)?;
+            Err(io::Error::from_raw_os_error(libc::EPERM))
+        }).unwrap_err();
+        assert!(cleanup_called);
+        assert!(err.to_string().contains("output exceeds limit"), "{err}");
+        assert!(err.to_string().contains("process cleanup unconfirmed"), "{err}");
+        assert!(err.to_string().contains("native fallback refused"), "{err}");
+        assert_reaped(fs::read_to_string(root.0.join("parent.pid")).unwrap().parse().unwrap());
+        assert_eq!(fs::read_to_string(root.0.join("attempts")).unwrap(), "attempt\n");
     }
 }

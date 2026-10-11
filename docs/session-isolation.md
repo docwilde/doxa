@@ -166,9 +166,10 @@ an orphan provider writer when the supervisor crashes.
 Host Git and Docker controller commands have one 45-second elapsed deadline
 covering the direct child and EOF on both output pipes. A descendant retaining
 either pipe cannot extend that limit. Timeout, read failure or excessive stdout
-closes the pipes and kills the command's process group, with at most one extra
-second to confirm direct-child reaping. Unconfirmed cleanup is an explicit
-failure; the helper does not retry the command or select native fallback.
+signals the command's process group before closing the read ends, with at most
+one extra second to confirm direct-child reaping. Unconfirmed cleanup is an
+explicit failure alongside the original operation error; a signal refusal is
+not treated as verified cleanup. The helper does not retry the command or select native fallback.
 This stops local client processes, not an Engine operation already submitted:
 retained manifests and containers still need the normal reconciliation checks.
 
