@@ -171,7 +171,12 @@ mod tests {
         assert_eq!(claims["aud"], TOKEN_URL);
         assert_eq!(claims["iat"], 1_800_000_000u64);
         assert_eq!(claims["exp"], 1_800_003_600u64);
-        assert_eq!(URL_SAFE_NO_PAD.decode(parts[2]).unwrap().len(), key.public().modulus_len());
+        let signature = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+        assert_eq!(signature.len(), key.public().modulus_len());
+        let verifier = ring::signature::UnparsedPublicKey::new(
+            &ring::signature::RSA_PKCS1_2048_8192_SHA256, key.public().as_ref());
+        verifier.verify(assertion.rsplit_once('.').unwrap().0.as_bytes(), &signature).unwrap();
+        assert!(verifier.verify(b"tampered assertion", &signature).is_err());
         assert!(pkcs8_der("-----BEGIN RSA PRIVATE KEY-----\nAA==\n-----END RSA PRIVATE KEY-----").is_err());
     }
 }

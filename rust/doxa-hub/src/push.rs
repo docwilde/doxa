@@ -1,7 +1,7 @@
 //! Owner-scoped Web Push. Notifications contain only a generic event kind;
 //! the browser fetches session state after the owner opens the private hub.
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use p256::{ecdsa::{signature::Signer, Signature, SigningKey}, elliptic_curve::sec1::ToEncodedPoint};
+use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use reqwest::{Client, Url};
 use serde_json::{json, Value};
 use std::{fs::OpenOptions, io::{self, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},

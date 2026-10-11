@@ -539,7 +539,7 @@ impl Hub {
     }
     #[test]fn push_is_owner_scoped_and_duplicate_events_do_not_notify_twice(){
         let mut hub=Hub::new();
-        use p256::{ecdsa::SigningKey, elliptic_curve::{rand_core::OsRng, sec1::ToEncodedPoint}};
+        use p256::{ecdsa::SigningKey, elliptic_curve::rand_core::OsRng};
         let key=SigningKey::random(&mut OsRng);
         let public=web_push_native::p256::PublicKey::from_sec1_bytes(
             key.verifying_key().to_encoded_point(false).as_bytes()).unwrap();
