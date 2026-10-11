@@ -12,6 +12,7 @@ pub(crate) struct HttpTransport {
 }
 impl HttpTransport {
     pub(crate) fn open(url: &str, headers: &BTreeMap<String,EnvRef>, allow_local: bool, limits: &Limits) -> Result<(Self,Vec<String>)> {
+        config::credential_free(url)?;
         let url = config::endpoint(url, allow_local)?;
         let mut resolved = HeaderMap::new();
         let mut secrets = Vec::new();

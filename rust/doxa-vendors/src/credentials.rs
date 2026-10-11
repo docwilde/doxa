@@ -16,6 +16,29 @@ static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialStatus { Saved, Environment, Missing }
 
+/// Search credentials share the protected store and its workspace exclusions.
+/// Their inherited environment values take precedence over saved values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchProvider { Tavily, Firecrawl, Exa, Brave }
+impl SearchProvider {
+    pub const ALL: [Self; 4] = [Self::Tavily, Self::Firecrawl, Self::Exa, Self::Brave];
+    pub fn env_var(self) -> &'static str { match self {
+        Self::Tavily=>"TAVILY_API_KEY", Self::Firecrawl=>"FIRECRAWL_API_KEY",
+        Self::Exa=>"EXA_API_KEY", Self::Brave=>"BRAVE_API_KEY",
+    } }
+    pub fn store_key(self) -> &'static str { match self {
+        Self::Tavily=>"tavily", Self::Firecrawl=>"firecrawl", Self::Exa=>"exa", Self::Brave=>"brave",
+    } }
+    pub fn label(self) -> &'static str { match self {
+        Self::Tavily=>"Tavily", Self::Firecrawl=>"Firecrawl", Self::Exa=>"Exa", Self::Brave=>"Brave Search",
+    } }
+    pub fn from_env_var(name: &str) -> Option<Self> { Self::ALL.into_iter().find(|provider|provider.env_var()==name) }
+    pub fn from_setting_key(name: &str) -> Option<Self> { Self::ALL.into_iter().find(|provider|match provider {
+        Self::Tavily=>name=="tavily_api_key", Self::Firecrawl=>name=="firecrawl_api_key",
+        Self::Exa=>name=="exa_api_key", Self::Brave=>name=="brave_api_key",
+    }) }
+}
+
 fn error(kind: io::ErrorKind) -> io::Error { io::Error::new(kind, "Native vendor credential operation failed") }
 fn private_error() -> io::Error { error(io::ErrorKind::PermissionDenied) }
 fn clean<T>(result: io::Result<T>) -> io::Result<T> { result.map_err(|e| error(e.kind())) }
@@ -126,7 +149,7 @@ impl Store {
             let value: Value = serde_json::from_slice(&bytes).map_err(|_| error(io::ErrorKind::InvalidData))?;
             values = value.as_object().cloned().ok_or_else(|| error(io::ErrorKind::InvalidData))?;
             for (vendor, value) in &values {
-                if !matches!(vendor.as_str(), "deepseek" | "glm") || value.as_str().is_none_or(|k| valid_key(k).is_err() || k.trim() != k) {
+                if !matches!(vendor.as_str(), "deepseek" | "glm" | "tavily" | "firecrawl" | "exa" | "brave") || value.as_str().is_none_or(|k| valid_key(k).is_err() || k.trim() != k) {
                     return Err(error(io::ErrorKind::InvalidData));
                 }
             }
@@ -190,6 +213,50 @@ pub fn remove(vendor: Vendor) -> io::Result<()> {
 /// an inherited key is available. No key is retained by a client struct.
 pub fn resolve(vendor: Vendor) -> io::Result<Option<String>> { clean(saved(vendor).map(|key| key.or_else(|| environment(vendor)))) }
 
+fn search_environment(provider: SearchProvider) -> io::Result<Option<String>> {
+    match std::env::var(provider.env_var()) {
+        Ok(value) if value.is_empty()=>Ok(None),
+        Ok(value)=>valid_key(&value).map(|key|Some(key.to_owned())),
+        Err(std::env::VarError::NotPresent)=>Ok(None),
+        Err(_)=>Err(error(io::ErrorKind::InvalidInput)),
+    }
+}
+pub fn search_status(provider: SearchProvider) -> io::Result<CredentialStatus> {
+    clean((|| {
+        let store=Store::open(&home()?,false)?;
+        Ok(if search_environment(provider)?.is_some() { CredentialStatus::Environment }
+            else if store.as_ref().is_some_and(|store|store.values.contains_key(provider.store_key())) { CredentialStatus::Saved }
+            else { CredentialStatus::Missing })
+    })())
+}
+/// A fresh resolution; an invalid environment or unsafe private store fails
+/// closed. No saved value silently replaces an invalid environment value.
+pub fn search_resolve(provider: SearchProvider) -> io::Result<Option<String>> {
+    clean((|| {
+        let store=Store::open(&home()?,false)?;
+        Ok(search_environment(provider)?.or_else(||store.as_ref().and_then(|store|
+            store.values.get(provider.store_key()).and_then(Value::as_str).map(str::to_owned))))
+    })())
+}
+pub fn search_save(provider: SearchProvider, value: &str) -> io::Result<()> {
+    clean((|| {
+        if search_environment(provider)?.is_some() { return Err(private_error()); }
+        let key=valid_key(value)?;
+        let mut store=Store::open(&home()?,true)?.ok_or_else(private_error)?;
+        store.values.insert(provider.store_key().into(),Value::String(key.into()));
+        store.write()
+    })())
+}
+pub fn search_remove(provider: SearchProvider) -> io::Result<()> {
+    clean((|| {
+        if search_environment(provider)?.is_some() { return Err(private_error()); }
+        if let Some(mut store)=Store::open(&home()?,false)? {
+            if store.values.remove(provider.store_key()).is_some() { store.write()?; }
+        }
+        Ok(())
+    })())
+}
+
 /// Redact keys locally before text crosses a LORE/model/transcript boundary.
 /// Both overrides and inherited values are covered, including inactive vendors.
 pub(crate) fn known_keys() -> io::Result<Vec<String>> {
@@ -199,6 +266,10 @@ pub(crate) fn known_keys() -> io::Result<Vec<String>> {
             let saved = store.as_ref().and_then(|s| s.values.get(vendor.engine_id())).and_then(Value::as_str).map(str::to_owned);
             saved.into_iter().chain(environment(vendor))
         }).collect();
+        for provider in SearchProvider::ALL {
+            if let Some(value)=store.as_ref().and_then(|store|store.values.get(provider.store_key())).and_then(Value::as_str) { keys.push(value.to_owned()); }
+            if let Some(value)=search_environment(provider)? { keys.push(value); }
+        }
         if let Ok(value) = std::env::var("TYPESAFE_API_KEY") {
             if let Ok(key) = valid_key(&value) { keys.push(key.to_owned()); }
         }
@@ -209,6 +280,24 @@ pub(crate) fn known_keys() -> io::Result<Vec<String>> {
 }
 pub fn redact(text: &str) -> io::Result<String> {
     Ok(known_keys()?.iter().fold(text.to_owned(), |text, key| text.replace(key, "***")))
+}
+
+/// Scrub all saved/inherited credentials from untrusted structured responses.
+/// Reflections in object keys are rejected rather than changing key identity.
+pub fn redact_json(value: &mut Value) -> io::Result<()> {
+    fn visit(value: &mut Value, keys: &[String]) -> io::Result<()> {
+        match value {
+            Value::String(text)=>for key in keys { *text=text.replace(key,"***"); },
+            Value::Array(values)=>for value in values { visit(value,keys)?; },
+            Value::Object(values)=>for (key,value) in values {
+                if keys.iter().any(|secret|key.contains(secret)) { return Err(error(io::ErrorKind::InvalidData)); }
+                visit(value,keys)?;
+            },
+            _=>{},
+        }
+        Ok(())
+    }
+    visit(value,&known_keys()?)
 }
 
 /// Deny the reserved path using the opened parent before a read tool opens it.
@@ -247,7 +336,7 @@ pub(crate) mod tests {
     pub(crate) fn fixture() -> (EnvironmentGuard, tempfile::TempDir) {
         let lock = ENV_LOCK.lock().unwrap();
         // Opaque snapshots are restored only, never resolved/asserted/displayed.
-        let previous = ["DOXA_HOME", "DEEPSEEK_API_KEY", "ZAI_API_KEY", "TYPESAFE_API_KEY"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
+        let previous = ["DOXA_HOME", "DEEPSEEK_API_KEY", "ZAI_API_KEY", "TYPESAFE_API_KEY", "TAVILY_API_KEY", "FIRECRAWL_API_KEY", "EXA_API_KEY", "BRAVE_API_KEY"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
         let guard = EnvironmentGuard { _lock: lock, previous };
         let dir = tempfile::tempdir().unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -256,7 +345,49 @@ pub(crate) mod tests {
         std::env::set_var("DEEPSEEK_API_KEY", "inherited-deepseek-fixture");
         std::env::set_var("ZAI_API_KEY", "inherited-zai-fixture");
         std::env::set_var("TYPESAFE_API_KEY", "inherited-typesafe-fixture");
+        for provider in SearchProvider::ALL { std::env::remove_var(provider.env_var()); }
         (guard, dir)
+    }
+    #[test]
+    fn search_namespace_has_environment_precedence_and_global_redaction() {
+        let (_guard,dir)=fixture();
+        save(Vendor::Glm,"saved-zai-fixture").unwrap();
+        for provider in SearchProvider::ALL {
+            assert_eq!(search_status(provider).unwrap(),CredentialStatus::Missing);
+            let saved=format!("saved-{}-fixture",provider.store_key());
+            let inherited=format!("inherited-{}-fixture",provider.store_key());
+            search_save(provider,&saved).unwrap();
+            assert_eq!(search_resolve(provider).unwrap().as_deref(),Some(saved.as_str()));
+            assert_eq!(search_status(provider).unwrap(),CredentialStatus::Saved);
+            std::env::set_var(provider.env_var(),&inherited);
+            assert_eq!(search_resolve(provider).unwrap().as_deref(),Some(inherited.as_str()));
+            assert_eq!(search_status(provider).unwrap(),CredentialStatus::Environment);
+            assert!(search_save(provider,"replacement-fixture").is_err());
+            assert!(search_remove(provider).is_err());
+            assert_eq!(redact(&format!("{saved} {inherited}")).unwrap(),"*** ***");
+            let mut value=serde_json::json!({"text":[saved,inherited]});
+            redact_json(&mut value).unwrap();
+            assert_eq!(value,serde_json::json!({"text":["***","***"]}));
+            let mut value=serde_json::json!({format!("secret-{saved}"):"x"});
+            assert!(redact_json(&mut value).is_err());
+            std::env::set_var(provider.env_var(),"bad\nfixture");
+            assert!(search_resolve(provider).is_err());
+            std::env::remove_var(provider.env_var());
+            search_remove(provider).unwrap();
+            assert_eq!(search_status(provider).unwrap(),CredentialStatus::Missing);
+        }
+        assert_eq!(resolve(Vendor::Glm).unwrap().as_deref(),Some("saved-zai-fixture"));
+        assert_eq!(fs::metadata(dir.path().join(FILE_NAME)).unwrap().mode() & 0o777,0o600);
+    }
+    #[test]
+    fn search_environment_does_not_bypass_an_unsafe_store() {
+        let (_guard,dir)=fixture();
+        std::env::set_var("TAVILY_API_KEY","synthetic-tavily-fixture");
+        fs::write(dir.path().join(FILE_NAME),"{}").unwrap();
+        fs::set_permissions(dir.path().join(FILE_NAME),fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(search_resolve(SearchProvider::Tavily).is_err());
+        assert!(search_status(SearchProvider::Tavily).is_err());
+        assert!(redact("synthetic-tavily-fixture").is_err());
     }
     #[test]
     fn source_precedence_changes_immediately_and_remove_returns_to_environment() {

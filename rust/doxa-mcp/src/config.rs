@@ -158,6 +158,17 @@ pub(crate) fn endpoint(text: &str, allow_local: bool) -> Result<reqwest::Url> {
 }
 
 pub(crate) fn resolve(reference: &EnvRef) -> Result<String> {
+    if let Some(provider)=doxa_vendors::credentials::SearchProvider::from_env_var(&reference.env) {
+        return doxa_vendors::credentials::search_resolve(provider)
+            .map_err(|_|Error::new(ErrorKind::Credential,false))?
+            .ok_or_else(||Error::new(ErrorKind::Credential,false));
+    }
     std::env::var(&reference.env).ok().filter(|v| !v.is_empty() && v.len() <= 8192 && !v.contains('\0'))
         .ok_or_else(|| Error::new(ErrorKind::Credential, false))
+}
+
+pub(crate) fn credential_free(text: &str) -> Result<()> {
+    let scrubbed=doxa_vendors::credentials::redact(text).map_err(|_|Error::new(ErrorKind::Credential,false))?;
+    if scrubbed!=text { return Err(Error::config("credentials must not occur in endpoint or arguments")); }
+    Ok(())
 }

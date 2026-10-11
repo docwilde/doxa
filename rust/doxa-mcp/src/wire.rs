@@ -69,17 +69,21 @@ pub(crate) fn classify(value: Value, expected: u64) -> Result<Message> {
 }
 
 pub(crate) fn redact(value: &mut Value, secrets: &[String]) -> Result<()> {
+    doxa_vendors::credentials::redact_json(value).map_err(|_|Error::new(ErrorKind::Credential,true))?;
+    redact_references(value,secrets)
+}
+fn redact_references(value: &mut Value, secrets: &[String]) -> Result<()> {
     fn scrub(text: &str, secrets: &[String]) -> String {
         secrets.iter().fold(text.to_owned(), |text, secret| text.replace(secret, "[redacted]"))
     }
     match value {
         Value::String(text) => *text = scrub(text, secrets),
-        Value::Array(values) => for value in values { redact(value,secrets)?; },
+        Value::Array(values) => for value in values { redact_references(value,secrets)?; },
         Value::Object(values) => {
             let old = std::mem::take(values);
             for (key, mut value) in old {
                 if secrets.iter().any(|secret|key.contains(secret)) { return Err(Error::protocol("credential reflected in object key")); }
-                redact(&mut value,secrets)?; values.insert(key, value);
+                redact_references(&mut value,secrets)?; values.insert(key, value);
             }
         }
         _ => {},

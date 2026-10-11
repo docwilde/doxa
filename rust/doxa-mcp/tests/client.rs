@@ -4,6 +4,28 @@ use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, path::Path, sync:
 use tokio::{io::{AsyncReadExt,AsyncWriteExt}, net::TcpListener};
 
 static ENV: Mutex<()> = Mutex::new(());
+struct Environment {
+    _lock: std::sync::MutexGuard<'static,()>,
+    _home: tempfile::TempDir,
+    previous: Vec<(&'static str,Option<std::ffi::OsString>)>,
+}
+impl Drop for Environment {
+    fn drop(&mut self) {
+        for (name,value) in self.previous.drain(..) {
+            match value {Some(value)=>std::env::set_var(name,value),None=>std::env::remove_var(name)}
+        }
+    }
+}
+fn isolated() -> Environment {
+    let lock=ENV.lock().unwrap();
+    let names=["DOXA_HOME","DEEPSEEK_API_KEY","ZAI_API_KEY","TYPESAFE_API_KEY","TAVILY_API_KEY","FIRECRAWL_API_KEY","EXA_API_KEY","BRAVE_API_KEY","DOXA_MCP_FIXTURE_SECRET","DOXA_MCP_UNRELATED"];
+    let previous=names.into_iter().map(|name|(name,std::env::var_os(name))).collect();
+    for name in names {std::env::remove_var(name);}
+    let home=tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::env::set_var("DOXA_HOME",home.path());
+    Environment {_lock:lock,_home:home,previous}
+}
 fn cancel() -> Arc<AtomicBool> { Arc::new(AtomicBool::new(false)) }
 fn stdio_config(mode: &str, journal: &Path) -> ServerConfig {
     ServerConfig { id:"fixture".into(), enabled:true, allow_tools:vec!["search".into(),"lookup".into()],
@@ -23,6 +45,7 @@ fn dead(pid: u64) -> bool {
 
 #[tokio::test]
 async fn stdio_negotiates_paginates_filters_and_returns_structured_tool_errors() {
+    let _environment=isolated();
     for mode in ["good","messages","tool_error","rpc_error"] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("journal.jsonl");
@@ -44,7 +67,7 @@ async fn stdio_negotiates_paginates_filters_and_returns_structured_tool_errors()
 
 #[tokio::test]
 async fn stdio_inherits_only_explicit_env_and_redacts_result_credentials() {
-    let _guard=ENV.lock().unwrap();
+    let _environment=isolated();
     std::env::set_var("DOXA_MCP_FIXTURE_SECRET","synthetic-secret-0824");
     std::env::set_var("DOXA_MCP_UNRELATED","must-not-inherit");
     let directory=tempfile::tempdir().unwrap(); let path=directory.path().join("journal.jsonl");
@@ -64,6 +87,7 @@ async fn stdio_inherits_only_explicit_env_and_redacts_result_credentials() {
 
 #[tokio::test]
 async fn initialization_rejects_wrong_protocol_ids_caps_noise_duplicates_and_oversize() {
+    let _environment=isolated();
     for (mode,kind) in [("unsupported",ErrorKind::UnsupportedVersion),("missing_capability",ErrorKind::MissingToolsCapability)] {
         let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
         let result=Client::connect(&stdio_config(mode,&path),directory.path(),cancel()).await;
@@ -81,6 +105,7 @@ async fn initialization_rejects_wrong_protocol_ids_caps_noise_duplicates_and_ove
 
 #[tokio::test]
 async fn catalog_failures_disable_tools_and_bound_pages_and_notifications() {
+    let _environment=isolated();
     for mode in ["cursor_cycle","duplicate_tool","bad_schema","flood","good"] {
         let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
         let mut config=stdio_config(mode,&path);
@@ -96,6 +121,7 @@ async fn catalog_failures_disable_tools_and_bound_pages_and_notifications() {
 
 #[tokio::test]
 async fn cancellation_before_connect_never_starts_a_process() {
+    let _environment=isolated();
     let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
     let stop=cancel();stop.store(true,Ordering::SeqCst);
     let error=Client::connect(&stdio_config("good",&path),directory.path(),stop).await.err().unwrap();
@@ -104,6 +130,7 @@ async fn cancellation_before_connect_never_starts_a_process() {
 
 #[tokio::test]
 async fn timeout_cancels_attempted_call_and_cleans_up_process_group() {
+    let _environment=isolated();
     let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
     let mut config=stdio_config("timeout",&path);config.limits.timeout_ms=150;
     let mut client=Client::connect(&config,directory.path(),cancel()).await.unwrap();
@@ -124,6 +151,7 @@ async fn timeout_cancels_attempted_call_and_cleans_up_process_group() {
 
 #[tokio::test]
 async fn initialization_timeout_sends_no_cancel_notification() {
+    let _environment=isolated();
     let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
     let mut config=stdio_config("init_timeout",&path);config.limits.timeout_ms=100;
     let error=Client::connect(&config,directory.path(),cancel()).await.err().unwrap();
@@ -133,6 +161,7 @@ async fn initialization_timeout_sends_no_cancel_notification() {
 
 #[test]
 fn private_config_rejects_public_symlink_duplicate_and_unknown_fields() {
+    let _environment=isolated();
     let directory=tempfile::tempdir().unwrap();let path=directory.path().join("config.json");
     let config=json!({"schema_version":1,"servers":[serde_json::to_value(stdio_config("good",&directory.path().join("journal"))).unwrap()]});
     std::fs::write(&path,config.to_string()).unwrap();std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -147,6 +176,7 @@ fn private_config_rejects_public_symlink_duplicate_and_unknown_fields() {
 
 #[test]
 fn disabled_search_templates_are_valid_without_credentials_or_installs() {
+    let _environment=isolated();
     let value:Config=serde_json::from_str(include_str!("../../../docs/examples/mcp-search.json")).unwrap();
     value.validate().unwrap();assert_eq!(value.servers.len(),4);assert_eq!(value.enabled_servers().count(),0);
     for url in ["http://remote.example/mcp","https://user:key@example.com/mcp","https://example.com/mcp?api_key=x","https://example.com/mcp#x"] {
@@ -214,6 +244,7 @@ async fn http_fixture(mode: &'static str) -> (String,Arc<Mutex<Vec<Value>>>,toki
 
 #[tokio::test]
 async fn http_json_and_sse_preserve_session_headers_and_close_without_tool_replay() {
+    let _environment=isolated();
     for mode in ["json","sse","expired","redirect"] {
         let (url,records,task)=http_fixture(mode).await;
         let directory=tempfile::tempdir().unwrap();
@@ -231,4 +262,31 @@ async fn http_json_and_sse_preserve_session_headers_and_close_without_tool_repla
         tokio::time::timeout(Duration::from_secs(2),task).await.unwrap().unwrap();
         assert_eq!(records.lock().unwrap().iter().filter(|v|v["method"]=="tools/call").count(),usize::from(mode!="redirect"));
     }
+}
+
+#[tokio::test]
+async fn standard_search_ref_uses_private_saved_key_then_environment_and_scrubs_inactive_keys() {
+    let _environment=isolated();
+    use doxa_vendors::credentials::{self,SearchProvider};
+    credentials::search_save(SearchProvider::Tavily,"saved-tavily-fixture").unwrap();
+    credentials::search_save(SearchProvider::Exa,"inactive-exa-fixture").unwrap();
+    for expected in ["saved-tavily-fixture","inherited-tavily-fixture"] {
+        if expected.starts_with("inherited") {std::env::set_var("TAVILY_API_KEY",expected);}
+        let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
+        let mut config=stdio_config("good",&path);
+        if let TransportConfig::Stdio{env,..}=&mut config.transport {
+            env.insert("TEST_SECRET".into(),EnvRef{env:"TAVILY_API_KEY".into(),bearer:false});
+        }
+        let mut client=Client::connect(&config,directory.path(),cancel()).await.unwrap();
+        client.list_tools(cancel()).await.unwrap();
+        let result=client.call_tool("search",&json!({}),cancel()).await.unwrap();
+        let serialized=serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains(expected));assert!(serialized.contains("***"));
+        client.close().await;
+    }
+    let directory=tempfile::tempdir().unwrap();let path=directory.path().join("never-started");
+    let mut config=stdio_config("good",&path);
+    if let TransportConfig::Stdio{args,..}=&mut config.transport {args.push("inactive-exa-fixture".into());}
+    let error=Client::connect(&config,directory.path(),cancel()).await.err().unwrap();
+    assert!(matches!(error.kind,ErrorKind::Config(_)));assert!(!error.attempted);assert!(!path.exists());
 }

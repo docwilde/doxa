@@ -12,6 +12,7 @@ pub(crate) struct StdioTransport {
 }
 impl StdioTransport {
     pub(crate) fn open(program: &Path, args: &[String], env: &BTreeMap<String, EnvRef>, cwd: &Path) -> Result<(Self, Vec<String>)> {
+        config::credential_free(&format!("{}\n{}",program.display(),args.join("\n")))?;
         let mut command = Command::new(program);
         command.args(args).current_dir(cwd).env_clear().stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
         command.as_std_mut().process_group(0);
