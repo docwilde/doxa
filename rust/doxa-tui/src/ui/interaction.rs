@@ -858,12 +858,25 @@ impl App {
                 }
             }
             let codegraph_area = self.active_chooser_rect();
+            let context_rows = self.chip_info.as_ref().filter(|info| info.kind == "context")
+                .map(|_| self.context_info_lines(codegraph_area.map_or(1, |area| usize::from(area.width.saturating_sub(3)).max(1))).len());
             if let Some(info) = self.chip_info.as_mut().filter(|info| {
                 matches!(
                     info.kind,
                     "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "routing" | "compaction" | "native_plugin" | "native_status" | "codegraph"
                 )
             }) {
+                if let Some(count) = context_rows {
+                    let page = codegraph_area.map_or(1, |area| usize::from(area.height.saturating_sub(2)).max(1));
+                    match key.code {
+                        KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
+                        KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(count.saturating_sub(page)),
+                        KeyCode::PageUp => info.scroll = info.scroll.saturating_sub(page),
+                        KeyCode::PageDown => info.scroll = info.scroll.saturating_add(page).min(count.saturating_sub(page)),
+                        _ => return false,
+                    }
+                    return true;
+                }
                 if info.kind == "codegraph" {
                     let width = codegraph_area.map_or(1, |area| usize::from(area.width.saturating_sub(3)).max(1));
                     let count = super::codegraph_viewer::wrapped_lines(&info.lines, width).len();
@@ -2680,6 +2693,14 @@ impl App {
             let inside_menu = self.active_chooser_rect().is_some_and(|area| {
                 area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
             });
+            if inside_menu && self.chip_info.as_ref().is_some_and(|info| info.kind == "context") {
+                let key = match mouse.kind {
+                    MouseEventKind::ScrollUp => Some(KeyCode::Up),
+                    MouseEventKind::ScrollDown => Some(KeyCode::Down),
+                    _ => None,
+                };
+                if let Some(key) = key { return self.key(KeyEvent::new(key, KeyModifiers::NONE)); }
+            }
             let memory_rows = self.memory_list.as_ref().map(|list| list.indices().len());
             if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
                 if inside_menu {

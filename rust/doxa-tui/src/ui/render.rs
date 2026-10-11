@@ -867,6 +867,17 @@ impl App {
             draw_menu_scrollbar(frame, area, info.lines.len(), visible, start);
             return;
         }
+        if info.kind == "context" {
+            let lines = self.context_info_lines(usize::from(area.width.saturating_sub(3)).max(1));
+            let visible = usize::from(area.height.saturating_sub(2)).max(1);
+            let start = info.scroll.min(lines.len().saturating_sub(visible));
+            frame.render_widget(Paragraph::new(lines.iter().skip(start).take(visible).cloned().collect::<Vec<_>>())
+                .block(Block::default().title(" Context · ↑↓/PgUp/PgDn scroll · Esc close ").borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::ACCENT)))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
+            draw_menu_scrollbar(frame, area, lines.len(), visible, start);
+            return;
+        }
         if info.kind == "codegraph" {
             let lines = super::codegraph_viewer::wrapped_lines(&info.lines, usize::from(area.width.saturating_sub(3)).max(1));
             let visible = usize::from(area.height.saturating_sub(2)).max(1);

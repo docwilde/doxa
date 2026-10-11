@@ -3,6 +3,7 @@ mod actions;
 mod commands;
 mod choice_dropdown;
 mod codegraph_viewer;
+mod context_usage;
 mod diff_controller;
 mod fleet_dependency_review;
 pub(crate) mod fleet_menu;

@@ -557,6 +557,9 @@ impl App {
             (self.memory_list.as_ref().unwrap().indices().len() + 3).clamp(7, 19) as u16
         } else if self.chip_info.is_some() {
             self.chip_info.as_ref().map_or(5, |info| {
+                if info.kind == "context" {
+                    return (self.context_info_lines(usize::from(pane.width.saturating_sub(3)).max(1)).len() + 2).clamp(7, 19) as u16;
+                }
                 if matches!(
                     info.kind,
                     "memory"

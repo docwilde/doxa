@@ -1179,13 +1179,10 @@ impl App {
                         .push("Detailed context metadata not reported by this engine".into());
                     return true;
                 }
+                self.session_telemetry.entry(id.to_owned()).or_default()
+                    .update_context_detail(&frame["detail"]);
                 info.lines.extend(context_detail_lines(&frame["detail"]));
-                if self.size.width >= 65 {
-                    info.lines.extend(crate::preferences::context_grid(
-                        &frame["detail"],
-                        self.preferences.value("context_grid") == "ascii",
-                    ));
-                }
+                info.scroll = 0;
                 true
             }
             "models_reply" => {

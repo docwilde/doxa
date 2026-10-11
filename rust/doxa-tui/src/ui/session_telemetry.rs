@@ -106,6 +106,7 @@ pub(super) struct SessionTelemetry {
     pub(super) isolation: Option<serde_json::Value>,
     pub(super) account: Option<serde_json::Value>,
     pub(super) context: Option<String>,
+    pub(super) context_usage: super::context_usage::ContextUsage,
     pub(super) context_percent: Option<f64>,
     pub(super) context_tokens: Option<u64>,
     pub(super) context_limit: Option<u64>,
@@ -124,6 +125,24 @@ pub(super) struct SessionTelemetry {
 }
 
 impl SessionTelemetry {
+    fn store_context(&mut self, context: super::context_usage::ContextUsage) {
+        self.context = context.chip_label();
+        self.context_percent = context.percentage;
+        self.context_tokens = context.used;
+        self.context_limit = context.capacity;
+        self.context_usage = context;
+    }
+
+    fn update_context(&mut self, report: &serde_json::Value) {
+        if ["ctx_percentage", "ctx_tokens", "ctx_max_tokens"].iter().any(|key| report.get(key).is_some()) {
+            self.store_context(super::context_usage::ContextUsage::reported(report, "ctx_tokens", "ctx_max_tokens", "ctx_percentage"));
+        }
+    }
+
+    pub(super) fn update_context_detail(&mut self, detail: &serde_json::Value) {
+        self.store_context(self.context_usage.detail(detail));
+    }
+
     /// The most consumed reported window determines the subscription warning.
     /// Unknown quotas and API billing retain the ordinary chip style.
     pub(super) fn quota_color(&self) -> Option<ratatui::style::Color> {
@@ -161,23 +180,7 @@ impl SessionTelemetry {
     pub(super) fn update_turn(&mut self, data: &serde_json::Value) {
         if let Some(compaction) = data.get("compaction") { self.compaction = CompactionStatus::from_value(compaction); }
         if let Some(routing) = data.get("routing") { self.routing = RoutingStatus::from_value(routing); }
-        let context = data["ctx_percentage"]
-            .as_f64()
-            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
-            .map(|value| format!("{value:.0}%"));
-        let absolute = data["ctx_tokens"]
-            .as_u64()
-            .zip(data["ctx_max_tokens"].as_u64())
-            .filter(|(used, limit)| *limit > 0 && used <= limit)
-            .map(|(used, limit)| format!("{used}/{limit}"));
-        if data.get("ctx_percentage").is_some() || data.get("ctx_tokens").is_some() {
-            self.context = context.or(absolute);
-            self.context_percent = data["ctx_percentage"]
-                .as_f64()
-                .filter(|value| value.is_finite() && (0.0..=100.0).contains(value));
-            self.context_tokens = data["ctx_tokens"].as_u64();
-            self.context_limit = data["ctx_max_tokens"].as_u64().filter(|limit| *limit > 0);
-        }
+        self.update_context(data);
         if data["usage_scope"] == "session" {
             self.turns = data["num_turns"].as_u64().or(self.turns);
             self.input_tokens = data["input_tokens"].as_u64().or(self.input_tokens);
@@ -263,23 +266,7 @@ impl SessionTelemetry {
         if let Some(billing) = status.get("billing") {
             self.update_billing(billing);
         }
-        let context = status["ctx_percentage"]
-            .as_f64()
-            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
-            .map(|value| format!("{value:.0}%"));
-        let absolute = status["ctx_tokens"]
-            .as_u64()
-            .zip(status["ctx_max_tokens"].as_u64())
-            .filter(|(used, limit)| *limit > 0 && used <= limit)
-            .map(|(used, limit)| format!("{used}/{limit}"));
-        if status.get("ctx_percentage").is_some() || status.get("ctx_tokens").is_some() {
-            self.context = context.or(absolute);
-            self.context_percent = status["ctx_percentage"]
-                .as_f64()
-                .filter(|value| value.is_finite() && (0.0..=100.0).contains(value));
-            self.context_tokens = status["ctx_tokens"].as_u64();
-            self.context_limit = status["ctx_max_tokens"].as_u64().filter(|limit| *limit > 0);
-        }
+        self.update_context(status);
         if let Some(usage) = status.get("usage") {
             self.turns = usage["num_turns"].as_u64();
             self.input_tokens = usage["input_tokens"].as_u64();
