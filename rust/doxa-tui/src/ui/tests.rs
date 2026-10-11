@@ -6299,7 +6299,8 @@ for line in sys.stdin:
         }
         for body in ["RECEIVED_BODY", "SENT_BODY", "WRONG_SESSION", "NOT_DELIVERED", "body is untrusted prose"] { assert!(!visible.contains(body)); }
         let closed = painted_at(&app, 110, 44);
-        assert!(closed.contains("🤖↓") && closed.contains("🤖↑"));
+        // painted_at retains TestBackend's blank continuation cell for 🤖.
+        assert!(closed.contains("🤖 ↓") && closed.contains("🤖 ↑"), "{closed}");
         assert!(!closed.contains("RECEIVED_BODY") && !closed.contains("SENT_BODY"));
         let received = app.visible_tool_sections.borrow().iter().find(|(_, _, _, key)| *key == FoldKey::Section(0)).unwrap().0;
         assert!(received.height > 1, "metadata header wraps at the active pane width");
@@ -6371,7 +6372,7 @@ for line in sys.stdin:
         app.apply_daemon_frame(&event("tool_call", json!({"id":"read-1","name":"Read","input":"HIDDEN_INPUT"})));
         app.apply_daemon_frame(&event("peer_message", json!({"from_id":"other-peer","from_title":"Reviewer","body":"HIDDEN_PEER"})));
         let glyphs = painted_at(&app, 90, 36);
-        for icon in ["🧠", "🛠", "🤖↓"] { assert!(glyphs.contains(icon), "missing {icon}"); }
+        for icon in ["🧠", "🛠", "🤖 ↓"] { assert!(glyphs.contains(icon), "missing {icon}: {glyphs}"); }
         for body in ["HIDDEN_THINKING", "HIDDEN_INPUT", "HIDDEN_PEER"] { assert!(!glyphs.contains(body)); }
         app.preferences.set_for_test("nerd_font", "0");
         let plain = painted_at(&app, 90, 36);
