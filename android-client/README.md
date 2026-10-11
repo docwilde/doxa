@@ -175,3 +175,8 @@ and [FCM server authorization requirements](https://firebase.google.com/docs/clo
 Pure protocol tests exercise a two-second lease, foreground expiry, invalid expiry
 and failed-renewal state without Firebase or a provisioned device. Actual FCM
 delivery remains a separate device acceptance gate.
+
+Approval cards show the complete selectable request JSON in their scrollable
+review area before Allow/Deny. A title cannot hide tool arguments. The submitted
+answer remains bound to that captured request and incarnation. Pure display tests
+retain long argument tails; this does not replace provisioned-device UI acceptance.

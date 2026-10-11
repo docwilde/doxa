@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -788,6 +789,7 @@ private fun PendingInput(state: RemoteController, item: JSONObject) {
         Column(Modifier.padding(12.dp).heightIn(max = 220.dp).verticalScroll(rememberScrollState())) {
             Text(item.optString("title", item.optString("input_summary", "Input needed")),
                 style = MaterialTheme.typography.titleMedium)
+            SelectionContainer { Text(AndroidReview.displayRequest(item)) }
             if (item.optString("kind") == "ask_user") {
                 val questions = item.optJSONArray("questions") ?: JSONArray()
                 if (state.questionIndex < questions.length()) {
