@@ -266,6 +266,23 @@ fn scene(name: &str) -> App {
             click_visible_text(&mut app, "Appearance");
             app.notice = "Fixture · Settings title tabs · changes are not saved".into();
         }
+        "settings-router" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            app.input = "/settings".into();
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            // Stage the Session's first two rows through the real editor. No
+            // Ctrl+S save or Ctrl+P account/catalog review is performed.
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            key(&mut app, KeyCode::End, KeyModifiers::NONE);
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            for ch in "/private/reviewed-router.json".chars() {
+                key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+            }
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            app.notice = "Fixture · staged Jev Router defaults · not reviewed or saved".into();
+        }
         "context" => {
             app.groups[0].tabs = vec!["demo-claude-02".into()];
             app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-claude-02",
@@ -517,7 +534,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "context" | "routing-status" | "queued-prompts" | "peer-messages" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
+        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "settings-router" | "context" | "routing-status" | "queued-prompts" | "peer-messages" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
