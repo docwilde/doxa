@@ -3329,7 +3329,7 @@ for line in sys.stdin:
             assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
         }
         assert!(info.lines.iter().any(|line| line.contains("unavailable in Rust")));
-        assert!(info.lines.iter().any(|line| line.contains("Claude only")));
+        assert!(info.lines.iter().any(|line| line.starts_with("/compact") && line.contains("Claude and router")));
         let menu = app.active_chooser_rect().unwrap();
         assert!(menu.bottom() < app.layout(app.size).body.bottom());
         app.handle(Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
