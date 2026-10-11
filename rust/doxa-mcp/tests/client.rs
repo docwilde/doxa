@@ -324,13 +324,21 @@ async fn changed_or_missing_credentials_refuse_calls_without_refresh_or_send() {
 async fn bounded_handshake_preserves_the_configured_call_deadline() {
     let _environment=isolated();
     let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
-    let mut config=stdio_config("slow_call",&path);config.limits.timeout_ms=1500;
-    let mut client=Client::connect_bounded(&config,directory.path(),cancel(),200).await.unwrap();
+    // Cold Python startup on macOS can exceed 200 ms. Use the normal 2 s
+    // handshake margin, then a 3 s fixture call which still exceeds that
+    // handshake bound but has ample room inside the configured 6 s call limit.
+    let mut config=stdio_config("slow_call",&path);config.limits.timeout_ms=6000;
+    let mut client=Client::connect_bounded(&config,directory.path(),cancel(),2000).await.unwrap();
     client.list_tools(cancel()).await.unwrap();
     assert!(client.call_tool("search",&json!({}),cancel()).await.is_ok());client.close().await;
     let path=directory.path().join("initialization-timeout");
-    let error=Client::connect_bounded(&stdio_config("init_timeout",&path),directory.path(),cancel(),200).await.err().unwrap();
+    let mut initialization=stdio_config("init_timeout",&path);initialization.limits.timeout_ms=6000;
+    let started=std::time::Instant::now();
+    let error=Client::connect_bounded(&initialization,directory.path(),cancel(),200).await.err().unwrap();
     assert_eq!(error.kind,ErrorKind::Timeout);assert!(error.attempted);
+    // A generous margin still proves initialize used its short override rather
+    // than waiting for the configured 6 s list/call timeout.
+    assert!(started.elapsed()<Duration::from_secs(4), "initialization ignored its handshake deadline");
 }
 
 #[tokio::test]

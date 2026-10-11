@@ -96,7 +96,9 @@ while True:
                 "code": -32042, "message": os.environ.get("TEST_SECRET", "synthetic")}}), flush=True)
         else:
             if mode == "slow_call":
-                time.sleep(0.3)
+                # This mode has one caller: a 2 s handshake / 6 s call regression.
+                # Exceed the former with room for scheduling inside the latter.
+                time.sleep(3.0)
             secret = os.environ.get("TEST_SECRET", "synthetic")
             reply(request, {"content": [{"type": "text", "text": "Local result " + secret}],
                             "structuredContent": {"source": secret}, "isError": mode == "tool_error"})
