@@ -534,6 +534,7 @@ const MAX_RESTORED_DETAIL_BYTES: usize = 256 * 1024;
 #[derive(Default)]
 struct Turn {
     prompt: String,
+    peer_card: Option<String>,
     answer: String,
     tools: Vec<String>,
     tool_names: std::collections::HashMap<String, String>,
@@ -680,15 +681,6 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
             continue;
         }
         if kind == "user" {
-            if record.get("doxa_peer_origin").and_then(crate::ui::peer_origin_message_id)
-                .is_some_and(|message_id| peer_ids.contains(&(message_id, false))) {
-                // The private receipt journal supplies the same admitted
-                // message as a typed card. Keep a turn slot for its assistant
-                // response, but do not render the provider wrapper as a second
-                // ordinary user prompt.
-                turns.push(Turn::default());
-                continue;
-            }
             let mut prompt = String::new();
             if let Some(text) = content.as_str() {
                 append_text(&mut prompt, text);
@@ -697,6 +689,28 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
                     if block["type"] == "text" {
                         append_text(&mut prompt, block["text"].as_str().unwrap_or(""));
                     }
+                }
+            }
+            let origin = record.get("doxa_peer_origin");
+            // Bind persisted origin to both the attached snapshot and the
+            // exact transcript row before using it to style or suppress the
+            // provider-facing prompt. A copied/cross-session field stays prose.
+            let row_matches_snapshot = snapshot.session_id.as_deref().is_some_and(|session_id|
+                doxa_transcript::valid_session_id(session_id)
+                    && record["sessionId"].as_str() == Some(session_id));
+            if row_matches_snapshot {
+                if origin.and_then(crate::ui::peer_origin_message_id)
+                    .is_some_and(|message_id| peer_ids.contains(&(message_id, false))) {
+                    // The private receipt journal supplies the same admitted
+                    // message as a typed card. Keep a turn slot for its assistant
+                    // response, but do not render the provider wrapper twice.
+                    turns.push(Turn::default());
+                    continue;
+                }
+                if let Some(marker) = origin.and_then(|origin|
+                    crate::ui::restored_peer_turn(origin, &prompt)) {
+                    turns.push(Turn { peer_card: Some(marker), ..Turn::default() });
+                    continue;
                 }
             }
             if !prompt.is_empty() { turns.push(Turn { prompt, ..Turn::default() }); }
@@ -746,7 +760,10 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
                 turn.tools[*index].push_str(&restored_detail_marker("result", &Value::String(detail.clone())));
             }
         }
-        if !turn.prompt.is_empty() {
+        if let Some(peer_card) = turn.peer_card {
+            out.push_str(&peer_card);
+            out.push_str("\n\n");
+        } else if !turn.prompt.is_empty() {
             out.push_str("**You:**\n\n");
             out.push_str(&turn.prompt);
             out.push_str("\n\n");
@@ -872,6 +889,39 @@ for line in sys.stdin:
         let stale = render(&TranscriptSnapshot { session_id:Some("another-session".into()),
             peer_scope:Some(scope.into()), peer_bytes, ..Default::default() });
         assert!(!stale.contains("\u{001e}DOXA_MESSAGE:"));
+    }
+
+    #[test]
+    fn restores_typed_peer_turn_in_place_without_journal_and_rejects_cross_session_origin() {
+        let owner = "owner-session";
+        let origin = serde_json::json!({"sender_session_id":"sender-session","sender_title":"Reviewer",
+            "message_id":"msg-restored","sent_at":"2026-10-11T13:25:00Z","from_repo":null,
+            "remote_origin":null,"source":"peer_message"});
+        let records = [
+            serde_json::json!({"type":"user","sessionId":owner,"doxa_peer_origin":origin,
+                "message":{"role":"user","content":"typed inbound peer prompt"}}),
+            serde_json::json!({"type":"assistant","sessionId":owner,
+                "message":{"role":"assistant","content":[{"type":"text","text":"peer answer"}]}}),
+            serde_json::json!({"type":"user","sessionId":"other-session","doxa_peer_origin":origin,
+                "message":{"role":"user","content":"cross session ordinary prompt"}}),
+            serde_json::json!({"type":"assistant","sessionId":"other-session",
+                "message":{"role":"assistant","content":[{"type":"text","text":"ordinary answer"}]}}),
+        ];
+        let bytes = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n").into_bytes();
+        let rendered = render(&TranscriptSnapshot { session_id:Some(owner.into()), bytes, ..Default::default() });
+
+        assert_eq!(rendered.matches("\u{001e}DOXA_MESSAGE:").count(), 1);
+        assert_eq!(rendered.matches("**You:**").count(), 1);
+        assert!(rendered.contains("cross session ordinary prompt"));
+        let marker = "\u{001e}DOXA_MESSAGE:";
+        let card_start = rendered.find(marker).unwrap();
+        let answer_start = rendered.find("peer answer").unwrap();
+        assert!(card_start < answer_start, "the restored peer card stays at its transcript turn position");
+        let paragraph = rendered[card_start..].split("\n\n").next().unwrap();
+        let card: Value = serde_json::from_str(paragraph.strip_prefix(marker).unwrap()).unwrap();
+        assert_eq!(card["starts_turn"], true);
+        assert_eq!(card["message_id"], "msg-restored");
+        assert!(card["text"].as_str().unwrap().contains("typed inbound peer prompt"));
     }
 
     #[test]

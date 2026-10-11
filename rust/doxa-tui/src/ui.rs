@@ -111,6 +111,16 @@ pub(crate) fn peer_origin_message_id(value: &serde_json::Value) -> Option<String
     parse_peer_origin_for_restore(value).and_then(|(_, message_id)| message_id)
 }
 
+/// Rebuild a transcript-position peer turn only from the typed provenance
+/// persisted on its user row. Callers must first bind that row to the attached
+/// session; the prompt text itself is never used to infer peer origin.
+pub(crate) fn restored_peer_turn(origin: &serde_json::Value, prompt: &str) -> Option<String> {
+    let (label, _) = parse_peer_origin_for_restore(origin)?;
+    let data = serde_json::json!({"peer_started":true,"peer_origin":label,
+        "peer_origin_data":origin,"prompt":prompt});
+    transcript_messages::Message::peer_turn(&data, true).map(|message| message.encoded())
+}
+
 fn parse_peer_origin_for_restore(value: &serde_json::Value) -> Option<(String, Option<String>)> {
     transcript_messages::parse_peer_origin(value)
 }
