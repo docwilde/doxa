@@ -6838,7 +6838,7 @@ for line in sys.stdin:
         let receipt = json!({"version":1,"session_id":owner,"scope":scope,"event_type":"peer_message",
             "data":{"from_id":sender,"from_title":"Reviewer","body":"RECEIVED_BODY","from_repo":null,
                 "sent_at":"2026-10-11T13:25:00Z","kind":"direct","origin":null,
-                "message_id":"msg-received","in_reply_to":null,"unreviewed":false}});
+                "message_id":"msg-received","in_reply_to":null,"unreviewed":true}});
         let sent = json!({"version":1,"session_id":owner,"scope":scope,"event_type":"peer_sent",
             "data":{"to":[sender],"failed":[],"body":"SENT_BODY","sent_at":"2026-10-11T13:26:00Z",
                 "kind":"direct","in_reply_to":null,"message_id":"msg-sent"}});
@@ -6879,6 +6879,8 @@ for line in sys.stdin:
             transcript_messages::Message::parse(paragraph.trim_matches('\n')))
             .find(|message|message.message_id.as_deref()==Some("msg-received")).unwrap();
         assert!(received.starts_turn);
+        assert!(received.unreviewed, "restoration and replay must preserve the recorded review state");
+        assert_eq!(received.recipients, [owner]);
         assert_eq!(received.text, "RECEIVED_BODY");
         let (_, sections) = transcript_tools::render(&session.transcript, 100, None, None);
         assert_eq!(sections.len(), 2);

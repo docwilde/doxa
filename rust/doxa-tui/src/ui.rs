@@ -91,7 +91,12 @@ pub(crate) fn restored_peer_message(event_type: &str, data: &serde_json::Value, 
     });
     if !has_message_id { return None; }
     let message = match event_type {
-        "peer_message" if session_id("from_id") => transcript_messages::Message::peer(data, true)?,
+        "peer_message" if session_id("from_id") => {
+            let mut message = transcript_messages::Message::peer(data, true)?;
+            message.unreviewed = data["unreviewed"].as_bool()?;
+            message.recipients.push(owner.to_owned());
+            message
+        }
         "peer_sent" => {
             if !data["to"].as_array().is_some_and(|rows| !rows.is_empty() && rows.len() <= 256
                 && rows.iter().all(|row| row.as_str().is_some_and(doxa_transcript::valid_session_id)))
