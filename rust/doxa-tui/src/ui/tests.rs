@@ -875,8 +875,8 @@ use super::*;
         app.settings_menu.as_mut().unwrap().selected = background;
         app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.choice_dropdown.is_some());
-        let transparent = app.choice_dropdown.as_ref().unwrap().choices.iter()
-            .position(|choice| choice == "transparent").unwrap();
+        let transparent = app.settings_menu.as_ref().unwrap().rows[background].setting.choices.iter()
+            .position(|choice| *choice == "transparent").unwrap();
         app.settings_menu_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         for _ in 0..transparent {
             app.settings_menu_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));

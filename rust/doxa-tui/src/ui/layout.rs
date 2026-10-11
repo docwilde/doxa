@@ -634,7 +634,7 @@ impl App {
         self.chooser_rect(pane)
     }
 
-    pub(super) fn chips(&self, index: usize) -> Vec<(&'static str, String)> {
+    pub(crate) fn chips(&self, index: usize) -> Vec<(&'static str, String)> {
         let id = self.groups[index].active_id();
         let identity = id.and_then(|id| self.session_identity.get(id));
         if self.pane_remote(index) {
