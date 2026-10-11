@@ -42,6 +42,7 @@ struct Fixture { root:tempfile::TempDir, model:Model, server:Option<Child>, conf
 impl Fixture {
     fn new(transport:&str,call_count:usize)->Self {
         let root=tempfile::tempdir().unwrap();let home=root.path().join("home");fs::create_dir(root.path().join("workspace")).unwrap();fs::create_dir(&home).unwrap();fs::set_permissions(&home,fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();
         let secret=format!("synthetic-search-{}",root.path().file_name().unwrap().to_string_lossy());let credentials=home.join("credentials.json");
         private(&credentials,json!({"deepseek":"synthetic-api-fixture-key","glm":"synthetic-api-fixture-key","tavily":secret}));
         let log=root.path().join("mcp-log.jsonl");let control=root.path().join("control.json");private(&control,json!({"secret":secret}));
@@ -51,7 +52,7 @@ impl Fixture {
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();wait(||address.exists());
             (Some(child),json!({"transport":"streamable_http","url":fs::read_to_string(&address).unwrap(),"headers":{"Authorization":{"env":"TAVILY_API_KEY","bearer":true}},"allow_loopback_http":true}))};
         let mut entry=json!({"id":"search-local","enabled":true,"allow_tools":["search","workspace_read","msg"],"limits":{"timeout_ms":2000,"shutdown_ms":100}});
-        for (key,value) in fields.as_object().unwrap(){entry[key]=value.clone();}
+        entry["transport"]=fields;
         let config=root.path().join("mcp.json");private(&config,json!({"schema_version":1,"servers":[entry]}));
         Self{root,model:Model::new(call_count),server,config,log,control,credentials,secret}
     }

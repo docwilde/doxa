@@ -142,6 +142,7 @@ mod tests {
     fn mcp_probe_lists_local_fixture_and_never_calls_tools_or_enables_settings() {
         if !isolated("ui::mcp_settings::tests::mcp_probe_lists_local_fixture_and_never_calls_tools_or_enables_settings") {return;}
         let directory=tempfile::tempdir().unwrap();let path=directory.path().join("mcp.json");
+        std::fs::set_permissions(directory.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
         let journal=directory.path().join("journal.jsonl");
         let config=json!({"schema_version":1,"servers":[{"id":"fixture","enabled":true,"allow_tools":["search"],
             "transport":{"transport":"stdio","program":"/usr/bin/python3","args":["-u",format!("{}/../doxa-mcp/tests/fake_stdio.py",env!("CARGO_MANIFEST_DIR")),"good",journal]},
