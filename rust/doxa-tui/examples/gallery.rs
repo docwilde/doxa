@@ -15,10 +15,16 @@ fn event(app: &mut App, id: &str, kind: &str, data: Value) {
 }
 
 fn click_visible_text(app: &mut App, text: &str) {
+    click_visible_text_order(app, text, false);
+}
+
+fn click_visible_text_order(app: &mut App, text: &str, from_bottom: bool) {
     let mut terminal = Terminal::new(TestBackend::new(126, 31)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     let label = text.chars().map(|c| c.to_string()).collect::<Vec<_>>();
-    let point = (0..31).find_map(|y| (0..=126-label.len() as u16).find_map(|x| {
+    // Chips sit below the transcript, which may contain the same target ID.
+    let rows = if from_bottom { (0..31).rev().collect::<Vec<_>>() } else { (0..31).collect() };
+    let point = rows.into_iter().find_map(|y| (0..=126-label.len() as u16).find_map(|x| {
         label.iter().enumerate().all(|(offset, symbol)|
             terminal.backend().buffer()[(x + offset as u16, y)].symbol() == symbol.as_str())
             .then_some((x, y))
@@ -274,6 +280,25 @@ fn scene(name: &str) -> App {
                         {"name":"Free space","tokens":158000}]}}));
             app.notice = "Fixture · reported context tokens · LORE character caps stay separate".into();
         }
+        "routing-status" => {
+            let id = "demo-router-04";
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":id,"engine":"router",
+                "model":"auto","can_set_model":true,"cwd":"/demo/project","lore_scrub":"ready"}));
+            app.groups[0].tabs = vec![id.into()];
+            app.set_lore_memory_usage(id, 3471, 8800, 2824, 4500);
+            app.sessions.iter_mut().find(|session| session.id == id).unwrap().title = "Routed parser review".into();
+            let routing = json!({"target_id":"ds-fast","engine":"deepseek","model":"deepseek-flash",
+                "effort":"none","route_mode":"auto","fallback_reason":null,
+                "latency_ms":24,"cost_usd":0.000004,"cost_is_estimate":true});
+            event(&mut app,id,"turn_started",json!({"prompt":"Review the parser boundary checks."}));
+            event(&mut app,id,"routing_selected",routing.clone());
+            event(&mut app,id,"text_delta",json!({"text":
+                "## Routed review\n\nThe effective worker checked the boundary cases.\n\n- Auto remains the session's selection\n- The target supplies its model and effort\n- Session cost includes routing and worker calls"}));
+            event(&mut app,id,"turn_done",json!({"is_error":false,"routing":routing,
+                "session_cost_usd":0.001204,"cost_is_estimate":true}));
+            click_visible_text_order(&mut app, "ds-fast", true);
+            app.notice = "Fixture · synthetic routing decision and cost · no model calls".into();
+        }
         "queued-prompts" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];
             app.sessions.iter_mut().for_each(|session| session.transcript.clear());
@@ -492,7 +517,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "context" | "queued-prompts" | "peer-messages" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
+        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "context" | "routing-status" | "queued-prompts" | "peer-messages" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
