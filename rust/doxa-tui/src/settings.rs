@@ -170,12 +170,15 @@ pub fn rows(engine: &str, session_model: Option<&str>) -> io::Result<Vec<Row>> {
     let config = doxa_state::load_config_checked(&path)?;
     let home = crate::operations::doxa_home()?;
     let mut rows = Vec::new();
+    let search_statuses=doxa_vendors::credentials::search_status_all();
     for s in SETTINGS {
         if s.kind==Kind::Credential {
-            use doxa_vendors::credentials::{self,CredentialStatus,SearchProvider};
+            use doxa_vendors::credentials::{CredentialStatus,SearchProvider};
             let provider=SearchProvider::from_setting_key(s.key).expect("fixed search setting");
             let environment=std::env::var_os(s.env).is_some_and(|value|!value.is_empty());
-            let (value,source)=match credentials::search_status(provider) {
+            let status=search_statuses.as_ref().map_err(|_|()).and_then(|statuses|
+                statuses.iter().find(|(candidate,_)|*candidate==provider).map(|(_,status)|*status).ok_or(()));
+            let (value,source)=match status {
                 Ok(CredentialStatus::Environment)=>("set","environment-owned"),
                 Ok(CredentialStatus::Saved)=>("set","private credential store"),
                 Ok(CredentialStatus::Missing)=>("missing","not configured"),

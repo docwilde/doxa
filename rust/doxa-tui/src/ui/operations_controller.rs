@@ -713,6 +713,7 @@ impl App {
     }
     pub(super) fn settings_menu_key(&mut self, key: KeyEvent) -> bool {
         if self.choice_dropdown.is_some() { return self.choice_dropdown_key(key); }
+        if self.mcp_page_key(key) {return true;}
         if self.settings_menu.as_ref().is_some_and(|menu| menu.draft.is_none())
             && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             if let KeyCode::Char(number @ '0'..='9') = key.code {

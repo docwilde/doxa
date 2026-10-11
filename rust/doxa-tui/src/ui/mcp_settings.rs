@@ -109,11 +109,34 @@ mod tests {
         app.start_mcp_probe();assert!(app.notice.contains("still running"));
         app.settings_menu.as_mut().unwrap().edits.insert("mcp_config".into(),Some("/private/changed.json".into()));
         app.retire_mcp_if_changed();assert!(stop.load(Ordering::SeqCst));
-        sender.send(Ok(Report {digest:vec![0;32],servers:999,tools:333})).unwrap();
+        sender.send(Ok(Report {digest:vec![0;32],servers:999,tools:333,checks:Vec::new()})).unwrap();
         assert!(app.poll_mcp_probe());assert!(!app.mcp_probe_lines(Path::new("/private/changed.json")).join(" ").contains("999"));
         let before=app.prompt_owner();app.groups[0].tabs.push("two".into());app.groups[0].active=app.groups[0].tabs.len()-1;
         app.finish_prompt_owner_transition(before);
         assert!(!app.mcp_probe_lines(&path).join(" ").contains("999"));
+    }
+    #[test]
+    fn mcp_server_pages_show_safe_ids_allowlists_and_individual_probe_status() {
+        if !isolated("ui::mcp_settings::tests::mcp_server_pages_show_safe_ids_allowlists_and_individual_probe_status") {return;}
+        let mut app=app();let path=PathBuf::from("/private/fixture.json");
+        app.settings_menu.as_mut().unwrap().edits.insert("mcp_config".into(),Some(path.display().to_string()));
+        let checks=vec![
+            ServerCheck {id:"brave".into(),enabled:false,allow_tools:vec!["brave_web_search".into()],status:"disabled · no connection".into()},
+            ServerCheck {id:"exa".into(),enabled:true,allow_tools:vec!["web_search_exa".into()],status:"error · initialization failed".into()},
+        ];
+        app.mcp_config_view=Some(ConfigView {owner:app.prompt_owner(),path:path.clone(),state:ConfigViewState::Complete(Ok(checks.clone()))});
+        let lines=app.mcp_probe_lines(&path).join(" ");
+        assert!(lines.contains("brave") && lines.contains("disabled") && lines.contains("brave_web_search"));
+        key(&mut app,KeyCode::PageDown);assert_eq!(app.mcp_server_page,1);
+        let lines=app.mcp_probe_lines(&path).join(" ");assert!(lines.contains("exa") && lines.contains("web_search_exa") && lines.contains("error"));
+        key(&mut app,KeyCode::PageUp);assert_eq!(app.mcp_server_page,0);
+        app.mcp_probe=Some(Probe {owner:app.prompt_owner(),path:path.clone(),cancel:Arc::new(AtomicBool::new(false)),
+            state:ProbeState::Complete(Ok(Report {digest:vec![0;32],servers:0,tools:0,checks}))});
+        assert!(app.mcp_probe_lines(&path).join(" ").contains("Snapshot"));
+        let config:doxa_mcp::Config=serde_json::from_str(include_str!("../../../../docs/examples/mcp-search.json")).unwrap();
+        assert_eq!(server_checks(&config).unwrap().len(),4);
+        std::env::set_var("EXA_API_KEY","brave_web_search");
+        assert!(server_checks(&config).is_err());
     }
     #[test]
     fn mcp_probe_lists_local_fixture_and_never_calls_tools_or_enables_settings() {
@@ -144,11 +167,18 @@ pub(super) struct Probe {
     cancel: Arc<AtomicBool>,
     state: ProbeState,
 }
+#[derive(Clone,Debug)]
+pub(super) struct ServerCheck {id:String,enabled:bool,allow_tools:Vec<String>,status:String}
+pub(super) struct ConfigView {owner:(usize,String),path:PathBuf,state:ConfigViewState}
+enum ConfigViewState {Running(Receiver<Result<Vec<ServerCheck>,&'static str>>),Complete(Result<Vec<ServerCheck>,&'static str>)}
+impl std::fmt::Debug for ConfigView {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("McpConfigView { private_metadata: withheld }")}
+}
 pub(super) enum ProbeState {
     Running(Receiver<Result<Report, &'static str>>),
     Complete(Result<Report, &'static str>),
 }
-pub(super) struct Report { digest: Vec<u8>, servers: usize, tools: usize }
+pub(super) struct Report { digest: Vec<u8>, servers: usize, tools: usize,checks:Vec<ServerCheck> }
 impl std::fmt::Debug for SecretEdit {
     fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("SearchCredentialEditor { masked: true }")}
 }
@@ -160,12 +190,22 @@ impl Drop for Probe { fn drop(&mut self) { self.cancel.store(true, Ordering::Seq
 fn digest(config: &doxa_mcp::Config) -> Vec<u8> {
     Sha256::digest(serde_json::to_vec(config).expect("validated serializable config")).to_vec()
 }
+fn server_checks(config:&doxa_mcp::Config)->Result<Vec<ServerCheck>,&'static str> {
+    let public=serde_json::Value::Array(config.servers.iter().map(|server|serde_json::json!({
+        "id":server.id,"allow_tools":server.allow_tools})).collect());
+    let mut scrubbed=public.clone();
+    credentials::redact_json(&mut scrubbed).map_err(|_|"Public MCP metadata unavailable")?;
+    if scrubbed!=public {return Err("Credential reflected in MCP public metadata; details withheld");}
+    Ok(config.servers.iter().map(|server|ServerCheck {id:server.id.clone(),enabled:server.enabled,
+        allow_tools:server.allow_tools.clone(),status:if server.enabled {"not probed"} else {"disabled · no connection"}.into()}).collect())
+}
 
 // A ten-second total probe deadline includes all enabled servers. Each client
 // owns its runtime until explicit close; no tools/call or automatic retry.
 async fn inspect(path: &Path, cwd: &Path, cancel: Arc<AtomicBool>) -> Result<Report, &'static str> {
     let config=doxa_mcp::Config::load(path).map_err(|_|"Private MCP config unavailable or invalid")?;
     let original=digest(&config);
+    let mut checks=server_checks(&config)?;
     let stop=cancel.clone();
     let timer=tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -174,28 +214,69 @@ async fn inspect(path: &Path, cwd: &Path, cancel: Arc<AtomicBool>) -> Result<Rep
     let result=async {
         let mut servers=0;
         let mut tools=0;
-        for server in config.enabled_servers() {
-            if cancel.load(Ordering::SeqCst) {return Err("MCP probe stopped or reached its deadline");}
+        for (server,check) in config.servers.iter().zip(checks.iter_mut()) {
+            if !server.enabled {continue;}
+            if cancel.load(Ordering::SeqCst) {check.status="stopped/deadline · no connection".into();continue;}
             let mut bounded=server.clone();
             bounded.limits.timeout_ms=bounded.limits.timeout_ms.min(5000);
             bounded.limits.shutdown_ms=bounded.limits.shutdown_ms.min(100);
-            let mut client=doxa_mcp::Client::connect(&bounded,cwd,cancel.clone()).await
-                .map_err(|_|"MCP connection/initialization failed; inspect local configuration")?;
+            let mut client=match doxa_mcp::Client::connect(&bounded,cwd,cancel.clone()).await {
+                Ok(client)=>client,
+                Err(_)=>{check.status="error · connection/initialization failed".into();continue;},
+            };
             let listed=client.list_tools(cancel.clone()).await;
             client.close().await;
-            tools+=listed.map_err(|_|"MCP tool catalog unavailable or invalid")?.len();
+            let listed=match listed {Ok(listed)=>listed,Err(_)=>{check.status="error · catalog unavailable/invalid".into();continue;}};
+            check.status=format!("connected · catalog {} allowlisted",listed.len());
+            tools+=listed.len();
             servers+=1;
         }
-        if cancel.load(Ordering::SeqCst) {return Err("MCP probe stopped or reached its deadline");}
         let current=doxa_mcp::Config::load(path).map_err(|_|"MCP config changed during probe")?;
         if digest(&current)!=original {return Err("MCP config changed during probe");}
-        Ok(Report {digest:original,servers,tools})
+        Ok(Report {digest:original,servers,tools,checks})
     }.await;
     timer.abort();let _=timer.await;
     result
 }
 
 impl App {
+    pub(super) fn poll_mcp_config_view(&mut self)->bool {
+        let selected=self.settings_menu.as_ref().filter(|menu|crate::settings::CATEGORIES[menu.category]=="MCP" && menu.draft.is_none())
+            .map(|menu|(self.prompt_owner(),PathBuf::from(menu.effective_value("mcp_config"))));
+        if let Some(view)=self.mcp_config_view.as_mut() {
+            if let ConfigViewState::Running(receiver)=&view.state {
+                match receiver.try_recv() {
+                    Ok(result)=>{view.state=ConfigViewState::Complete(result);return true;},
+                    Err(TryRecvError::Empty)=>return false,
+                    Err(TryRecvError::Disconnected)=>{view.state=ConfigViewState::Complete(Err("Config reader stopped"));return true;},
+                }
+            }
+        }
+        let Some((owner,path))=selected.filter(|(_,path)|path.is_absolute()) else {return false;};
+        if self.mcp_config_view.as_ref().is_some_and(|view|view.owner==owner && view.path==path) {return false;}
+        let (sender,receiver)=mpsc::sync_channel(1);let worker_path=path.clone();
+        std::thread::spawn(move || {
+            let result=doxa_mcp::Config::load(&worker_path).map_err(|_|"Private MCP config unavailable or invalid")
+                .and_then(|config|server_checks(&config));
+            let _=sender.send(result);
+        });
+        self.mcp_server_page=0;
+        self.mcp_config_view=Some(ConfigView {owner,path,state:ConfigViewState::Running(receiver)});true
+    }
+    pub(super) fn mcp_page_key(&mut self,key:KeyEvent)->bool {
+        if !self.settings_menu.as_ref().is_some_and(|menu|crate::settings::CATEGORIES[menu.category]=="MCP" && menu.draft.is_none()) {return false;}
+        match key.code {
+            KeyCode::PageUp=>self.mcp_server_page=self.mcp_server_page.saturating_sub(1),
+            KeyCode::PageDown=>self.mcp_server_page=(self.mcp_server_page+1).min(15),
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL)=>{
+                if !self.mcp_config_view.as_ref().is_some_and(|view|matches!(view.state,ConfigViewState::Running(_))) {
+                    self.mcp_config_view=None;self.poll_mcp_config_view();
+                }
+            },
+            _=>return false,
+        }
+        true
+    }
     fn mcp_secret_current(&self) -> bool {
         self.mcp_secret.as_ref().is_some_and(|secret|secret.owner==self.prompt_owner()
             && !std::env::var_os(secret.provider.env_var()).is_some_and(|value|!value.is_empty())
@@ -303,17 +384,33 @@ impl App {
         probe.state=ProbeState::Complete(result);true
     }
     pub(super) fn mcp_probe_lines(&self,path:&Path)->Vec<String> {
-        let Some(probe)=self.mcp_probe.as_ref().filter(|probe|probe.path==path && probe.owner==self.prompt_owner()) else {
-            return vec!["Not checked · Ctrl+P connects and lists enabled servers; no tool calls".into()];
-        };
-        match &probe.state {
-            ProbeState::Running(_)=>vec!["Connecting/listing · bounded 10-second probe · no tools called".into()],
-            ProbeState::Complete(Err(reason))=>vec![(*reason).into()],
-            ProbeState::Complete(Ok(report))=>{
+        let probe=self.mcp_probe.as_ref().filter(|probe|probe.path==path && probe.owner==self.prompt_owner());
+        let view=self.mcp_config_view.as_ref().filter(|view|view.path==path && view.owner==self.prompt_owner());
+        let (status,checks)=match probe.map(|probe|&probe.state) {
+            Some(ProbeState::Complete(Ok(report)))=>{
                 let hash=report.digest.iter().take(6).map(|byte|format!("{byte:02x}")).collect::<String>();
-                vec![format!("Snapshot {} enabled servers · {} allowlisted tools · config {hash}",report.servers,report.tools),
-                    "Connection/catalog snapshot only · no tools called · Ctrl+P refreshes".into()]
+                (format!("Snapshot {} connected · {} tools · config {hash}",report.servers,report.tools),Some(&report.checks))
             },
+            Some(ProbeState::Complete(Err(reason)))=>((*reason).into(),None),
+            state=>{
+                let status=if matches!(state,Some(ProbeState::Running(_))) {"Connecting/listing · no tool calls"} else {"Not probed · Ctrl+P connects/lists · no tool calls"};
+                match view.map(|view|&view.state) {
+                    Some(ConfigViewState::Complete(Ok(checks)))=>(status.into(),Some(checks)),
+                    Some(ConfigViewState::Complete(Err(reason)))=>((*reason).into(),None),
+                    Some(ConfigViewState::Running(_))=>("Reading private config · no connections".into(),None),
+                    None=>(status.into(),None),
+                }
+            },
+        };
+        let mut lines=vec![status];
+        if let Some(checks)=checks {
+            if let Some(check)=checks.get(self.mcp_server_page.min(checks.len().saturating_sub(1))) {
+                let page=self.mcp_server_page.min(checks.len()-1)+1;
+                lines.push(format!("Server {page}/{} · PgUp/PgDn · {} · {} · {}",checks.len(),super::safe_label(&check.id),if check.enabled {"enabled"} else {"disabled"},check.status));
+                let names=check.allow_tools.iter().take(3).map(|name|super::safe_label(name)).collect::<Vec<_>>().join(", ");
+                lines.push(format!("Allowlist ({}): {}{}",check.allow_tools.len(),if names.is_empty() {"none"} else {&names},if check.allow_tools.len()>3 {" … (remaining names in private config)"} else {""}));
+            } else {lines.push("No configured servers".into());}
         }
+        lines
     }
 }

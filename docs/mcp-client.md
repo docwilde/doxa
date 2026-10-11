@@ -86,8 +86,11 @@ environment variables. Existing native vendor credential precedence is unchanged
 
 Ctrl+P in MCP explicitly initializes and lists enabled configured servers with
 a ten-second overall request deadline plus bounded cleanup. It never calls a
-tool or enables MCP. The result shows only a config digest snapshot and counts;
-no server descriptions, endpoints, headers or key values. Session/pane changes
+tool or enables MCP. The footer shows each configured server ID, enabled/disabled state, allowlist
+count and up to three exact names. PgUp/PgDn pages through servers; Ctrl+R
+reloads this local configuration view without connecting. Probe results add
+per-server connected/catalog/error status and a config digest snapshot.
+No server descriptions, endpoints, headers or key values are shown. Session/pane changes
 or a changed config path cancel the probe and withhold stale results. The
 config is reloaded and compared before completing a successful snapshot.
 
@@ -123,7 +126,9 @@ and result shapes, not full JSON Schema validation. See the official
 [tools contract](https://modelcontextprotocol.io/specification/2025-11-25/server/tools).
 
 Keep a session runtime alive until `close().await` has completed. A per-turn
-runtime must not own clients intended for later turns. `credentials_current()`
+runtime must not own clients intended for later turns. `connect_bounded` caps
+each initialize/initialized phase while preserving configured list/call limits;
+the host owns its aggregate preparation deadline. `credentials_current()`
 re-resolves the exact selected references and compares with the frozen
 connection credentials without exposing values or hashes. `call_tool` refuses
 changed/missing credentials before sending; it never refreshes authentication.

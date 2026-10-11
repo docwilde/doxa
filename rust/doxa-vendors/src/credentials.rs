@@ -229,6 +229,18 @@ pub fn search_status(provider: SearchProvider) -> io::Result<CredentialStatus> {
             else { CredentialStatus::Missing })
     })())
 }
+/// One protected store read for the Settings catalog; only source enums leave.
+pub fn search_status_all() -> io::Result<Vec<(SearchProvider,CredentialStatus)>> {
+    clean((|| {
+        let store=Store::open(&home()?,false)?;
+        SearchProvider::ALL.into_iter().map(|provider| {
+            let status=if search_environment(provider)?.is_some() {CredentialStatus::Environment}
+                else if store.as_ref().is_some_and(|store|store.values.contains_key(provider.store_key())) {CredentialStatus::Saved}
+                else {CredentialStatus::Missing};
+            Ok((provider,status))
+        }).collect()
+    })())
+}
 /// A fresh resolution; an invalid environment or unsafe private store fails
 /// closed. No saved value silently replaces an invalid environment value.
 pub fn search_resolve(provider: SearchProvider) -> io::Result<Option<String>> {

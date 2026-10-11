@@ -738,9 +738,9 @@ impl App {
             let width=usize::from(area.width.saturating_sub(3)).max(1);
             let mut footer=vec![Line::styled(if self.mcp_secret.is_some() {
                 " Key editor · masked · Enter/Ctrl+S save privately · Esc discards"
-            } else {" Ctrl+P: connection/list probe · no tool calls · never enables MCP"},Style::default().fg(theme::ACCENT))];
+            } else {" Ctrl+P probe · Ctrl+R reload config · PgUp/PgDn servers · no tools"},Style::default().fg(theme::ACCENT))];
             footer.extend(self.mcp_probe_lines(&path).into_iter().flat_map(|line|
-                crate::memory_menu::wrap_review(&format!(" {line}"),width)).take(3).map(Line::from));
+                crate::memory_menu::wrap_review(&format!(" {line}"),width)).take(4).map(Line::from));
             footer
         } else if router_selected {
             let path=std::path::PathBuf::from(menu.effective_value("router_config"));
