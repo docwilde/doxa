@@ -83,7 +83,9 @@ fn provider_catalog(provider: &str, cwd: &Path) -> Result<Value, Availability> {
     match provider {
         "claude" | "codex" => new_session_catalog::load_authenticated(
             if provider == "claude" { Engine::Claude } else { Engine::Codex }, cwd)
-            .map_err(|_| Availability::Unknown("account/catalog unverified · /login or retry")),
+            .map_err(|reason| if matches!(reason,"Claude executable unavailable"|"Codex executable unavailable") {
+                Availability::Unavailable("CLI executable unavailable")
+            } else {Availability::Unknown("account/catalog unverified · /login or retry")}),
         "deepseek" | "glm" => {
             let vendor = if provider == "deepseek" { doxa_vendors::Vendor::DeepSeek } else { doxa_vendors::Vendor::Glm };
             match doxa_vendors::credentials::status(vendor) {
@@ -187,5 +189,17 @@ pub(crate) mod tests {
             Availability::Unavailable("exact model not in live catalog"));
         let mut wrong=candidate.clone();wrong["billing"]=json!("api");
         assert_eq!(candidate_availability(&wrong,&catalog),Availability::Unavailable("CLI account billing must be explicit"));
+    }
+
+    #[test]
+    fn api_review_requires_registry_price_bounds_and_verified_context_caps() {
+        let mut candidate=serde_json::to_value(&config().candidates[0]).unwrap();
+        let catalog=json!({"capabilities":[{"model":"deepseek-flash","efforts":["none"]}]});
+        candidate["input_usd_micros_per_million"]=json!(1);
+        assert_eq!(candidate_availability(&candidate,&catalog),Availability::Unavailable("configured rates below source-dated bound"));
+        candidate["input_usd_micros_per_million"]=json!(1000000);
+        candidate["context_tokens"]=json!(2000000);
+        assert_eq!(candidate_availability(&candidate,&catalog),Availability::Unavailable("context cap exceeds verified window"));
+        assert_eq!(candidate_availability(&candidate,&json!({"models":["deepseek-flash"]})),Availability::Unknown("catalog capabilities unverified"));
     }
 }

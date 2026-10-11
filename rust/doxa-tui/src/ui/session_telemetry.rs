@@ -92,7 +92,8 @@ impl RoutingStatus {
     pub(super) fn summary(&self) -> String {
         let reason = self.fallback_reason.as_deref().unwrap_or("selected");
         let cost = self.cost_usd.map(|v| format!("${v:.6} est")).unwrap_or_else(|| "unknown cost".into());
-        format!("Route {} · {} · {reason} · {} ms · {cost}", self.route_mode, self.label(), self.latency_ms)
+        format!("Route {} · {} · {reason} · {} ms · {}{cost}{}", self.route_mode, self.label(), self.latency_ms,
+            if self.tracked_cost_only {"Jev "} else {""},if self.tracked_cost_only {" · CLI charges unknown"} else {""})
     }
 
     pub(super) fn lines(&self) -> Vec<String> {
