@@ -6314,10 +6314,16 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(!painted_at(&app, 110, 44).contains("RECEIVED_BODY"));
         let sent = app.visible_tool_sections.borrow().iter().find(|(_, _, _, key)| *key == FoldKey::Section(1)).unwrap().0;
-        // Robot occupies two display cells. Both belong to this row's click target.
-        for offset in [4, 5] {
+        let mut terminal = Terminal::new(TestBackend::new(110, 44)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let robot = (sent.x..sent.right()).find(|x| terminal.backend().buffer()[(*x, sent.y)].symbol().contains('🤖')).unwrap();
+        assert!(robot + 1 < sent.right());
+        // Locate the actual two-cell robot glyph in the production paint, then
+        // hit both cells. The second cell is a continuation in TestBackend.
+        assert_eq!(terminal.backend().buffer()[(robot + 1, sent.y)].symbol(), " ");
+        for column in [robot, robot + 1] {
             app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
-                column: sent.x + offset, row: sent.y, modifiers: KeyModifiers::NONE }));
+                column, row: sent.y, modifiers: KeyModifiers::NONE }));
             assert!(painted_at(&app, 110, 44).contains("SENT_BODY"));
             app.focus = Focus::Transcript;
             app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
