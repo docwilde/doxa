@@ -29,6 +29,7 @@ impl App {
     }
 
     pub(super) fn close_settings_menu(&mut self) {
+        self.title_tab_hover = None;
         self.settings_menu = None;
         self.choice_dropdown = None;
         if self.docker_settings_open {

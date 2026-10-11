@@ -774,7 +774,7 @@ impl App {
             Paragraph::new(chooser_list_lines(lines, usize::from(area.width.saturating_sub(3))))
                 .block(
                     Block::default()
-                        .title(super::choice_dropdown::settings_tab_line(area, menu.category))
+                        .title(self.settings_tab_line(area, menu.category))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(theme::ACCENT)),
                 )
@@ -1467,7 +1467,7 @@ impl App {
                 lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(3)));
             }
             frame.render_widget(Paragraph::new(lines)
-                .block(Block::default().title(lore_view_title(picker))
+                .block(Block::default().title(self.lore_tab_line(area, picker))
                     .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), area);
             draw_menu_scrollbar(frame, area, scrollbar.0, scrollbar.1, scrollbar.2);
@@ -1651,7 +1651,7 @@ impl App {
             Paragraph::new(lines)
                 .block(
                     Block::default()
-                        .title(lore_view_title(picker))
+                        .title(self.lore_tab_line(area, picker))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(theme::ACCENT)),
                 )
@@ -2939,11 +2939,6 @@ pub(super) fn transcript_window(
         }
     }
     (window, top)
-}
-
-fn lore_view_title(picker: &super::LorePicker) -> Line<'static> {
-    Line::from([("1 Active", !picker.proposal_mode), ("2 Pending", picker.proposal_mode && !picker.cluster_mode), ("3 Clustered", picker.cluster_mode)]
-        .into_iter().map(|(label, selected)| Span::styled(format!(" {label} "), chooser_row_style(selected))).collect::<Vec<_>>())
 }
 
 pub(super) fn draw_menu_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize, start: usize) {

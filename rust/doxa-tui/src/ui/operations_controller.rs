@@ -568,6 +568,7 @@ impl App {
         }
     }
     pub(super) fn open_settings_menu(&mut self) {
+        self.title_tab_hover = None;
         self.mcp_secret=None;
         self.choice_dropdown = None;
         let identity = self.groups[self.active_group]
