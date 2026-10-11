@@ -43,6 +43,7 @@ fn load_with_auth(engine: Engine, cwd: &Path, authenticated: bool) -> Result<Val
     }
 }
 
+#[cfg(test)]
 fn codex_at(executable: &Path, cwd: &Path) -> Result<Value, &'static str> {
     codex_catalog_at(executable, cwd, false)
 }

@@ -64,12 +64,13 @@ for line in sys.stdin:
 "#).unwrap();
     fs::set_permissions(&executable,fs::Permissions::from_mode(0o700)).unwrap();
     let path=root.path().join("router.json");
+    let candidates=["fast","slow"].iter().map(|id|
+        serde_json::json!({"id":id,"provider":"codex","billing":"cli_account",
+            "model":format!("fixture-{id}"),"effort":"high","description":"Reviewed fixture target",
+            "context_tokens":131072,"max_output_tokens":1024,"supports_tools":true})).collect::<Vec<_>>();
     let router=serde_json::json!({"version":1,"jev_model":"jev-1.13.0","criteria_version":"settings-cli-v1",
         "fallback_id":"fast","confidence_threshold":0.5,"max_calls":2,"max_spend_usd_micros":1000,
-        "max_input_bytes":2048,"deadline_ms":1000,"candidates":["fast","slow"].iter().map(|id|
-            serde_json::json!({"id":id,"provider":"codex","billing":"cli_account",
-                "model":format!("fixture-{id}"),"effort":"high","description":"Reviewed fixture target",
-                "context_tokens":131072,"max_output_tokens":1024,"supports_tools":true})).collect::<Vec<_>>()});
+        "max_input_bytes":2048,"deadline_ms":1000,"candidates":candidates});
     let bytes=serde_json::to_vec(&router).unwrap();fs::write(&path,&bytes).unwrap();
     fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
     let run=|args:&[&str],engine_override:Option<&str>| {
