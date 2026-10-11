@@ -841,12 +841,12 @@ mod checkpoint_tests {
         assert_eq!(store.read_records().unwrap().len(), 1, "rejected metadata must append no partial row");
         let mut cross_session = record();
         cross_session["sessionId"] = json!("other-session");
-        assert!(store.try_append_with_peer_origin(cross_session, "claude", &origin, str::to_owned).is_err());
+        assert!(store.try_append_with_peer_origin(cross_session, "claude", &origin, |text| Ok(text.to_owned())).is_err());
         let mut non_user = record();
         non_user["type"] = json!("assistant");
-        assert!(store.try_append_with_peer_origin(non_user, "claude", &origin, str::to_owned).is_err());
+        assert!(store.try_append_with_peer_origin(non_user, "claude", &origin, |text| Ok(text.to_owned())).is_err());
         assert_eq!(store.read_records().unwrap().len(), 1, "cross-session and non-user rows are not admitted");
-        store.try_append(record(), "claude", str::to_owned).unwrap();
+        store.try_append(record(), "claude", |text| Ok(text.to_owned())).unwrap();
         let records = store.read_records().unwrap();
         assert_eq!(records.len(), 2);
         assert!(records[1].get("doxa_peer_origin").is_none(),
