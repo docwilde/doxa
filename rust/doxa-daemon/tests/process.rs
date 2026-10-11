@@ -2884,6 +2884,140 @@ mod vendor_process {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn deepseek_reviewed_peer_send_wakes_idle_and_queues_busy_codex_and_claude() {
+        for engine in ["codex", "claude"] { for busy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let receiver_id = if engine == "claude" { CLAUDE_SESSION }
+                else { "862fb5a9-9f1a-43e4-80cb-65bb767993e2" };
+            let sender_id = "0f390f46-5d6c-4a2c-b086-5d65d3e6b911";
+            let captured = root.join("receiver-prompts"); let release = root.join("release-receiver");
+            doxa_state::save_config(&root.join("home/config.toml"), &"peer_inbound_turns = true".parse().unwrap()).unwrap();
+            if !busy { fs::write(&release,b"ready").unwrap(); }
+            let cli = root.join("receiver-cli");
+            let cli = if engine == "codex" {
+                executable(&cli,&format!(r#"#!/bin/sh
+cat >> '{}'
+while [ ! -f '{}' ]; do sleep 0.01; done
+echo '{{"type":"thread.started","thread_id":"cross-peer-thread"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"receiver done"}}}}'
+"#,captured.display(),release.display()));
+                codex_appserver_fixture(&cli)
+            } else {
+                claude_fixture(&cli,"",&format!(r#"elif frame['type']=='user':
+  with root.joinpath('receiver-prompts').open('a') as output: output.write(frame['message']['content']+'\n')
+  deadline=time.monotonic()+40
+  while not root.joinpath('release-receiver').exists():
+   assert time.monotonic()<deadline
+   time.sleep(.01)
+  delta('receiver done'); result(False,.01)
+"#)); cli
+            };
+            let private_command = || {
+                let mut command = daemon_command();
+                command.0.env_clear();
+                command.env("PATH","/usr/bin:/bin").env("TMPDIR",root)
+                    .env("DOXA_HOME",root.join("home")).env("DOXA_WORKTREE","0")
+                    .env("LORE_SKIP","1");
+                if let Some(carrier)=std::env::var_os("DOXA_LORE_RS") { command.env("DOXA_LORE_RS",carrier); }
+                command
+            };
+            let mut command = private_command();
+            command.args(["--runtime-dir",root.to_str().unwrap(),"--cwd",root.to_str().unwrap(),
+                "--session-id",receiver_id,"--engine",engine,if engine=="codex" {"--codex-bin"} else {"--claude-bin"},
+                cli.to_str().unwrap(),"--linger","20"])
+                .env_remove("DOXA_PEER_INBOUND_TURNS").env_remove("DOXA_SESSION_BUDGET_USD")
+                .env("DOXA_LORE","0").env("DOXA_AGENT_PEER_SEND","1")
+                .stdout(Stdio::null()).stderr(Stdio::piped());
+            let mut child=command.spawn().unwrap();
+            let registry=root.join("registry").join(format!("{receiver_id}.json"));
+            wait_for_registry(&mut child,&registry);
+            let entry:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+            let mut receiver=Process{child,registry,socket:PathBuf::from(entry["daemon_socket"].as_str().unwrap())};
+            let (mut received,mut receiver_socket)=receiver.connect();
+            received.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+            receive(&mut received);send(&mut receiver_socket,json!({"type":"attach","cursor":null}));
+            if busy {
+                send(&mut receiver_socket,json!({"type":"prompt","id":1,"text":"Existing user turn."}));
+                claude_receive_until(&mut received,|row|row["event"]["type"]=="turn_started");
+                wait_until_with_timeout(CODEX_PREPARATION_TIMEOUT,||captured.exists());
+            }
+            let arguments=json!({"session_id":receiver_id,"message":"Synthetic cross-engine peer handoff."}).to_string();
+            let first=format!("data: {}\n\ndata: [DONE]\n\n",json!({"model":"deepseek-flash",
+                "choices":[{"finish_reason":"tool_calls","delta":{"tool_calls":[{"index":0,"id":"peer-delivery",
+                    "function":{"name":doxa_engines::peer_tools::SEND,"arguments":arguments}}]}}],
+                "usage":{"prompt_tokens":20,"completion_tokens":8}}));
+            let last=format!("data: {}\n\ndata: [DONE]\n\n",json!({"model":"deepseek-flash",
+                "choices":[{"finish_reason":"stop","delta":{"content":"sender done"}}],
+                "usage":{"prompt_tokens":30,"completion_tokens":4}}));
+            let (endpoint,server)=fake_vendor_frames(vec![first,last]);
+            let mut child=private_command().args(["--runtime-dir",root.to_str().unwrap(),"--cwd",root.to_str().unwrap(),
+                "--session-id",sender_id,"--engine","deepseek","--model","deepseek-flash","--effort","none",
+                "--vendor-endpoint",&endpoint,"--linger","20"])
+                .env("DEEPSEEK_API_KEY","test-key-1234").env_remove("ZAI_API_KEY").env_remove("DOXA_SESSION_BUDGET_USD")
+                .env("DOXA_AGENT_PEER_SEND","1").env("DOXA_PEER_INBOUND_TURNS","off").env("DOXA_LORE","0")
+                .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+            let registry=root.join("registry").join(format!("{sender_id}.json"));
+            wait_for_registry(&mut child,&registry);
+            let entry:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+            let mut sender=Process{child,registry,socket:PathBuf::from(entry["daemon_socket"].as_str().unwrap())};
+            let (mut sent,mut sender_socket)=sender.connect();
+            receive(&mut sent);send(&mut sender_socket,json!({"type":"attach","cursor":null}));
+            send(&mut sender_socket,json!({"type":"prompt","id":1,"text":"Deliver the synthetic peer handoff."}));
+            let mut evidence=Vec::new();let approval=glm_approval(&mut sent,&mut evidence);
+            assert_eq!(approval["tool_name"],doxa_engines::peer_tools::SEND);
+            assert!(approval["input_summary"].as_str().unwrap().contains(receiver_id));
+            send(&mut receiver_socket,json!({"type":"call","id":2,"method":"get_state","params":{}}));
+            let before=receive(&mut received);assert_eq!(before["running"],busy);assert_eq!(before["queued"],0);
+            assert!(!fs::read_to_string(&captured).unwrap_or_default().contains("Synthetic cross-engine peer handoff."));
+            glm_reviewed_answer(&mut sender_socket,2,&approval,"allow");
+            for _ in 0..48 {
+                let frame=receive(&mut sent);if frame["type"]=="event" {evidence.push(frame["event"].clone());}
+                if frame["event"]["type"]=="turn_done" {assert_ne!(frame["event"]["data"]["is_error"],true);break;}
+            }
+            let resolved=evidence.iter().position(|row|row["type"]=="needs_input_resolved").unwrap();
+            let result=evidence.iter().position(|row|row["type"]=="tool_result").unwrap();
+            let terminal=evidence.iter().position(|row|row["type"]=="turn_done").unwrap();
+            assert!(result<terminal&&resolved<terminal);
+            let message=receive(&mut received);
+            assert_eq!(message["event"]["type"],"peer_message");
+            assert_eq!(message["event"]["data"]["from_id"],sender_id);
+            assert_eq!(message["event"]["data"]["wake_policy"],"enabled");
+            if busy {
+                let queued=receive(&mut received);assert_eq!(queued["event"]["type"],"prompt_queued");
+                assert_eq!(queued["event"]["data"]["peer_started"],true);
+                assert!(queued["event"]["data"]["peer_origin"].as_str().unwrap().contains(sender_id));
+                fs::write(&release,b"ready").unwrap();
+            }
+            let mut peer_started=false;let mut terminals=0;
+            while terminals<if busy {2} else {1} {
+                let frame=receive(&mut received);
+                if frame["event"]["type"]=="turn_started" {
+                    peer_started=true;assert!(frame["turn"].as_str().unwrap().starts_with("peer-"));
+                    assert_eq!(frame["event"]["data"]["peer_started"],true);
+                    let prompt=frame["event"]["data"]["prompt"].as_str().unwrap();
+                    assert!(prompt.contains(sender_id)&&prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
+                }
+                if frame["event"]["type"]=="turn_done" {
+                    terminals+=1;assert_ne!(frame["event"]["data"]["is_error"],true);
+                }
+            }
+            assert!(peer_started,"{engine} busy={busy} did not admit peer turn");
+            assert!(fs::read_to_string(&captured).unwrap().contains("Synthetic cross-engine peer handoff."));
+            let requests=server.join().unwrap();assert_eq!(requests.len(),2);
+            let tool=requests[1]["messages"].as_array().unwrap().iter().find(|row|row["role"]=="tool").unwrap();
+            let delivered:Value=serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();
+            assert_eq!(delivered["delivered_to"],json!([receiver_id]));assert_eq!(delivered["failed"],json!([]));
+            for (reader,socket,process) in [(&mut sent,&mut sender_socket,&mut sender),(&mut received,&mut receiver_socket,&mut receiver)] {
+                send(socket,json!({"type":"call","id":3,"method":"stop","params":{}}));
+                assert_eq!(claude_receive_until(reader,|row|row["type"]=="reply"&&row["id"]==3)["ok"],true);
+                wait_until(||process.exited());
+            }
+        }}
+    }
+
+    #[test]
     fn vendor_missing_credential_rejects_session_before_socket() {
         let dir = tempfile::tempdir().unwrap();
         let output = daemon_command()
