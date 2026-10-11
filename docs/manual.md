@@ -1447,6 +1447,14 @@ the model message other sessions** (`agent_peer_send` /
   agent can see that a peer has asked it the same thing four times and
   stop answering on its own judgement.
 
+Agents send peer messages only through the canonical `peer_send` tool,
+using the full `session_id` returned by a fresh `peer_list`. A generic
+`prompt` request to another daemon's control socket is a normal user-origin
+turn; it carries no peer envelope, is not shown as a received peer card,
+and must not be used as a substitute. If `peer_send` is unavailable in a
+session, the agent should tell the operator; the operator can use
+`/msg <full-session-id> <text>` in the DOXA interface.
+
 `peer_list` and `peer_history` are read-only and available either way;
 only sending is gated. What the switch actually grants is worth stating
 plainly: a model that can send can reach another live session's context
