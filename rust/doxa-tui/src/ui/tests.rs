@@ -220,9 +220,11 @@ use super::*;
         app.open_settings_menu();
         app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         app.settings_menu_key(KeyEvent::new(KeyCode::Home,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
         app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         app.settings_menu_key(KeyEvent::new(KeyCode::Char('s'),KeyModifiers::CONTROL));
         assert_eq!(launch::configured_engine(),launch::Engine::Claude);
+        assert_eq!(crate::settings::raw("engine"),"claude");
         assert_eq!(doxa_state::load_config_checked(&crate::settings::config_path().unwrap()).unwrap()["router_config"].as_str(),path.to_str());
     }
 

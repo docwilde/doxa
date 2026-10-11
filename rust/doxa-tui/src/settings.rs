@@ -14,7 +14,7 @@ pub const CATEGORIES: &[&str] = &["Session", "Fleet", "Memory", "Appearance", "K
 pub fn engine_label(value: &str) -> &str {
     match value {
         "router"=>"Jev Router (on for new sessions)",
-        ""=>"Claude default (routing off)",
+        ""=>"(default)",
         _=>value,
     }
 }
