@@ -204,7 +204,8 @@ impl<'a> NativeVendorGate<'a> {
         let started = (|| {
             let call_id = (self.scrub)(&call.id)?;
             if call_id.len() > 256 { return Err(()); }
-            let arguments: Value = serde_json::from_str(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string())?).map_err(|_| ())?;
+            let mut arguments = Value::Object(call.arguments.clone());
+            crate::vendor_mcp::scrub_value(&mut arguments, self.scrub)?;
             let review = json!({"server_id":binding.server_id,"tool_name":binding.tool_name,"arguments":arguments,
                 "boundary":"External MCP server on trusted host; tool arguments may leave this host; external charges are outside model allowance"});
             let (mut request, reply) = self.desk.begin(&call.name, &review)?;
@@ -230,9 +231,10 @@ impl<'a> NativeVendorGate<'a> {
                     Err(error) => error.result(),
                 }
             } else { json!({"is_error":true,"error":"MCP permission denied; arguments withheld","attempted":false}) };
-            let text = scrub(&result.to_string())?;
+            let mut result = result;
+            crate::vendor_mcp::scrub_value(&mut result, scrub)?;
+            let text = result.to_string();
             if text.len() > crate::vendor_mcp::MAX_RESULT_BYTES { return Err(()); }
-            let result: Value = serde_json::from_str(&text).map_err(|_| ())?;
             if allowed {tokio::task::spawn_blocking(move||completion_service.complete()).await.map_err(|_|())?.map_err(|_|())?;}
             let failed = !allowed || result["isError"] == true || result["is_error"] == true || result["error"].is_string();
             if let Ok(mut events) = events.lock() {

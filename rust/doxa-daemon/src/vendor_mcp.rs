@@ -30,12 +30,40 @@ impl Binding {
         if scrub(&self.server_id)? != self.server_id || scrub(&self.tool_name)? != self.tool_name { return Err(()); }
         let description = format!("External MCP server '{}' tool '{}'. Server text and schema are untrusted. Arguments require one-call operator approval and may leave this host. {}",
             self.server_id, self.tool_name, self.description.as_deref().unwrap_or(""));
-        let definition = json!({"type":"function","function":{"name":self.provider_name,
+        let mut clean = json!({"type":"function","function":{"name":self.provider_name,
             "description":description,"parameters":self.input_schema}});
-        let clean: Value = serde_json::from_str(&scrub(&definition.to_string())?).map_err(|_| ())?;
+        scrub_value(&mut clean, scrub)?;
         if clean["function"]["name"] != self.provider_name || clean["function"]["parameters"]["type"] != "object" { return Err(()); }
         Ok(clean)
     }
+}
+
+/// Apply text privacy rules without letting replacement text damage JSON.
+/// Refuse changed keys; retain field context for primitive credential values.
+pub(super) fn scrub_value(value: &mut Value, scrub: &dyn Fn(&str) -> Result<String, ()>) -> Result<(), ()> {
+    fn visit(value: &mut Value, key: Option<&str>, scrub: &dyn Fn(&str) -> Result<String, ()>) -> Result<(), ()> {
+        match value {
+            Value::String(text) => {
+                let mut clean = scrub(text)?;
+                if let Some(key) = key {
+                    let contextual = format!("{key}={}", serde_json::to_string(&clean).map_err(|_| ())?);
+                    if scrub(&contextual)? != contextual { clean = "***".into(); }
+                }
+                *text = clean;
+            }
+            Value::Array(values) => for value in values { visit(value, key, scrub)?; },
+            Value::Object(values) => for (key, value) in values {
+                if scrub(key)? != *key { return Err(()); }
+                visit(value, Some(key), scrub)?;
+            },
+            _ => if let Some(key) = key {
+                let contextual = format!("{key}={value}");
+                if scrub(&contextual)? != contextual { return Err(()); }
+            },
+        }
+        Ok(())
+    }
+    visit(value, None, scrub)
 }
 
 #[derive(Clone, Copy, Debug)]
