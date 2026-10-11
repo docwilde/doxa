@@ -1878,7 +1878,7 @@ commands this session carries, and is omitted entirely when there are none
 | `/login [provider]` | Sign in through a provider's own auth CLI (default: `claude`) |
 | `/logout [provider]` | Sign out through a provider's own auth CLI |
 | `/settings` | Open the settings modal (`ctrl+,`) |
-| `/setup` | Check state, fix findings one at a time |
+| `/setup [docker]` | Check state and optional Docker prerequisites; `docker` opens pinned image/rootless socket setup directly |
 | `/doctor` | Read-only health checks: pass/fail and the fix command for each |
 | `/plugins` | Your Claude Code plugins/skills: discovered, adopted or refused, and why (see [docs/plans/plugins.md](plans/plugins.md)) |
 | `/reload-plugins` | Re-scan Claude Code plugins/skills now (new sessions/tabs only) |

@@ -43,9 +43,9 @@ The focused integration results below belong to the beta.47 candidate.
 | Medium: remote HTTP | JSON collection from a configured hub had no byte cap. | Count streamed bytes before parsing, bound total time and preserve eight-command envelope; local oversized/streamed/stalled-body fixtures passed. |
 | Medium: Android alerts | The 24-hour registration expired without foreground renewal. | Monotonic lease proof, foreground/timer renewal, stale-callback rejection; pure protocol fixtures passed. No live push delivery claim. |
 | Medium: installation | Protected Codex publication survived a later failed frontend install. | Exact-publication rollback receipt joins the outer transaction; two actual-shell failure injections and 17 installer checks passed. Power-loss/concurrent frontend atomicity remains unproved. |
-| Medium: routed API accounting | Limited worker turns accepted zero input/output usage for nonempty responses and tool calls, reopening the allowance. | Validate required positive counts before tool execution or continuation; fixed direct-provider behavior retained. Focused host/vendor verification pending. |
+| Medium: routed API accounting | Limited worker turns accepted zero input/output usage for nonempty responses and tool calls, reopening the allowance. | Validate required positive counts before tool execution or continuation; three bounded vendor fixtures and actual RouterHost content/tool matrix passed, retaining unknown holds and refusing replay. Fixed direct-provider behavior retained. |
 | Low: stored Python graph | Public LORE snapshot lookup rejected Python despite parser/viewer support. | **Open:** pinned LORE also rejects Python at storage admission. A DOXA-only relaxation failed the native roundtrip gate and was reverted; requires an upstream LORE change and verified immutable pin. |
-| Medium: isolation command runner | The helper's 45-second child deadline did not bound joins when a descendant retained output pipes. | Confirmed with exact frozen helper code and a private local child; correction and focused verification pending. A live Docker trigger was not tested. |
+| Medium: isolation command runner | The helper's 45-second child deadline did not bound joins when a descendant retained output pipes. | One deadline through child exit and both pipe EOFs, with bounded process-group teardown; four Cargo fixtures passed, including either/both inherited streams, live/closed-pipe children, normal/error and overflow. A live Docker trigger was not tested. |
 | Low: Settings draw | Completed Router review reopens private config/key storage during paint. | **Open:** move freshness checks to a bounded controller worker while preserving save/start admission checks. No measured latency or security-bypass claim. |
 
 The native key and FIFO reproductions used controlled fake provider processes.
@@ -93,7 +93,7 @@ freshness require measurement before making performance claims.
   browser clients, wire/hub, CI, containers and systemd units. Python/shell/JS/C
   syntax checks and local Node/Kotlin/installer fixtures were run. This is not
   a claim that every selected line received a semantic audit.
-- Backend slice: daemon/engines/vendors/Claude/router/runtime/peers/protocol/
+- Backend slice: 76 inventoried Rust source files; daemon/engines/vendors/Claude/router/runtime/peers/protocol/
   LORE/hub and isolation ownership/admission/accounting paths. Supplementary
   inspection covers egress/quota/runner/migration and broker boundaries.
   No live container/kernel enforcement or provider entitlement was verified.

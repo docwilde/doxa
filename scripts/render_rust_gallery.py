@@ -69,7 +69,7 @@ def capture(binary: Path, scene: str, destination: Path, version: str, env: dict
         "peer-messages": ("🤖 ↓", "🤖 ↑", "Peer Parser reviewer", "q-peer", "12345678-1234-1234-1234-123456789abc"),
         "peer-expanded": ("🤖 ↓", "🤖 ↑", "Reviewer handoff", "Please verify reconnect", "Received the handoff"),
         "reasoning": ("🧠", "Thinking", "128"),
-        "tool-entries": ("🛠", "src/parser.rs", "File read successfully"),
+        "tool-entries": ("🛠", "src/parser.rs", "check_bounds(input)?;"),
     }
     for label in required.get(scene, ()):
         if label not in "\n".join(rows):
