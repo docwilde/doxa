@@ -195,6 +195,7 @@ impl App {
         if self.memory_preview.owner().is_some_and(|owner| self.valid_memory_preview_owner(owner)) {
             self.memory_preview.render_memory(frame,area);
         }
+        self.draw_choice_dropdown(frame);
         self.transcript_selection
             .borrow_mut()
             .finish_paint(frame.buffer_mut());
@@ -321,7 +322,7 @@ impl App {
         let width = usize::from(area.width.saturating_sub(3));
         let lines = vec![
             Line::from(clipped_title(&format!(" Session {} · daemon stops first if live", safe_label(id)), width).0),
-            Line::styled(" Delete DOXA transcript", chooser_row_style(*selected == 0)),
+            Line::styled(" Delete session and DOXA transcript", chooser_row_style(*selected == 0)),
             Line::styled(" Cancel", chooser_row_style(*selected == 1)),
             Line::from(" Provider-native history remains available separately."),
         ];
@@ -374,7 +375,7 @@ impl App {
                 ));
             }
         } else if let Some(form) = &self.new_session {
-            title = " New session · Tab field · Enter continue/start · Esc close ";
+            title = " New session · Tab field · Enter choose/start · Esc close ";
             let name = match form.engine {
                 launch::Engine::Codex => "codex",
                 launch::Engine::Claude => "claude",
@@ -411,19 +412,16 @@ impl App {
                 }));
             } else if height >= 8 {
                 lines.push(Line::from(if form.engine==launch::Engine::Router {
-                    " Left/Right: Auto routing or configured target."
+                    " Click/Enter: Auto routing or configured target."
                 } else if vendor_models(form.engine).is_empty() {
-                    " Blank model uses configured engine default."
+                    " Click/Enter chooses a live model · R refreshes the list."
                 } else {
-                    " Left/Right choose vendor model and effort."
+                    " Click/Enter choose vendor model and effort."
                 }));
                 lines.push(Line::from(if form.engine==launch::Engine::Router {
                     format!(" {}",safe_label(&form.catalog_note))
                 } else if vendor_models(form.engine).is_empty() {
-                    format!(
-                        " Effort preference: {} · new session only",
-                        safe_label(form.effort.as_deref().unwrap_or("provider default"))
-                    )
+                    format!(" {}", safe_label(&form.catalog_note))
                 } else {
                     format!(" {}", safe_label(&form.catalog_note))
                 }));
@@ -433,7 +431,7 @@ impl App {
                     " {} {}: {}",
                     if form.field == 0 { '›' } else { ' ' },
                     if form.engine==launch::Engine::Router {"Target"} else {"Model"},
-                    safe_label(&form.model)
+                    format!("[{} ▾]", if form.model.is_empty() { "(default)".into() } else { safe_label(&form.model) })
                 ),
                 chooser_row_style(form.field == 0),
             ));
@@ -447,14 +445,14 @@ impl App {
                     format!(
                         " {} Effort: {}",
                         if form.field == 1 { '›' } else { ' ' },
-                        form.effort.as_deref().unwrap_or("unknown")
+                        format!("[{} ▾]", form.effort.as_deref().unwrap_or("unknown"))
                     ),
                     chooser_row_style(form.field == 1),
                 ));
             }
             lines.push(Line::styled(
-                format!(" {} Isolation: {}{}",if form.field==prompt_field-1{'›'}else{' '},form.isolation.label(),
-                    if form.engine==launch::Engine::Router {" · API chat; no shell or workspace writes"} else {" · Left/Right select"}),
+                format!(" {} Isolation: [{} ▾]{}",if form.field==prompt_field-1{'›'}else{' '},form.isolation.label(),
+                    if form.engine==launch::Engine::Router {" · API chat; no shell or workspace writes"} else {" · Click/Enter choose"}),
                 chooser_row_style(form.field==prompt_field-1),
             ));
             lines.push(Line::styled(
@@ -607,15 +605,8 @@ impl App {
             return;
         };
         let mut lines = vec![
-            Line::from(" env > config.toml > default"),
-            Line::styled(
-                format!(
-                    " {} · shift+←/→ categories · {} unsaved",
-                    crate::settings::CATEGORIES[menu.category],
-                    menu.edits.len() + usize::from(menu.draft.is_some())
-                ),
-                Style::default().fg(theme::ACCENT),
-            ),
+            Line::from(format!(" env > config.toml > default · {} unsaved", menu.edits.len() + usize::from(menu.draft.is_some()))),
+            super::choice_dropdown::settings_tab_line(area, menu.category),
         ];
         let (indices, start, visible) = menu.visible_window(area.height);
         for &index in indices.iter().skip(start).take(visible) {
@@ -640,7 +631,9 @@ impl App {
                     " {} {}: {} ({}){}",
                     if menu.selected == index { '›' } else { ' ' },
                     row.setting.label,
-                    safe_label(shown),
+                    if row.setting.kind == crate::settings::Kind::Choice && !row.shadowed && !row.setting.read_only {
+                        format!("[{} ▾]", if shown.is_empty() { "(default)".into() } else { safe_label(shown) })
+                    } else { safe_label(shown) },
                     row.source,
                     if row.shadowed {
                         " · set by env"
@@ -740,9 +733,9 @@ impl App {
         lines.truncate(usize::from(area.height.saturating_sub(3)).saturating_sub(preflight_lines.len()));
         lines.extend(preflight_lines);
         lines.push(Line::from(if menu.draft.is_some() {
-            " Enter/Ctrl+S save · Ctrl+P preflight · Esc cancel edit"
+            " Enter accept edit · Ctrl+S save · Esc cancel edit"
         } else {
-            " Enter edit/toggle · U unset · Ctrl+S save · Esc discard/close"
+            " 1–9 category · Enter/click choose/edit · Ctrl+S save · Esc discard/close"
         }));
         frame.render_widget(
             Paragraph::new(chooser_list_lines(lines, usize::from(area.width.saturating_sub(3))))
@@ -2909,7 +2902,7 @@ fn lore_view_title(picker: &super::LorePicker) -> Line<'static> {
         .into_iter().map(|(label, selected)| Span::styled(format!(" {label} "), chooser_row_style(selected))).collect::<Vec<_>>())
 }
 
-fn draw_menu_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize, start: usize) {
+pub(super) fn draw_menu_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize, start: usize) {
     if visible == 0 || total <= visible || area.width < 5 || area.height < 5 { return; }
     let rect = Rect::new(area.right() - 2, area.y + 1, 1, area.height - 2);
     // Ratatui expects the last position to be content_length - 1. Here the

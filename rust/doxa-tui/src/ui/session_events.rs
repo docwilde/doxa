@@ -54,6 +54,7 @@ impl App {
     pub fn apply_update(&mut self, update: DaemonUpdate) {
         match update {
             DaemonUpdate::Upsert(mut session) => {
+                if self.deleted_this_run.contains(&session.id) { return; }
                 session.transcript = transcript_tail(&session.transcript).to_owned();
                 if self.sessions.iter().find(|old| old.id == session.id)
                     .is_some_and(|old| old.transcript != session.transcript) {
@@ -138,6 +139,7 @@ impl App {
     /// Apply one versioned daemon frame after transport decoding. Returns whether
     /// visible state changed. Unknown frames are ignored for forward compatibility.
     pub fn apply_daemon_frame(&mut self, frame: &serde_json::Value) -> bool {
+        if frame["session_id"].as_str().is_some_and(|id| self.deleted_this_run.contains(id)) { return false; }
         let before = self.prompt_owner();
         let changed = self.apply_daemon_frame_inner(frame);
         let owner_changed = before != self.prompt_owner();

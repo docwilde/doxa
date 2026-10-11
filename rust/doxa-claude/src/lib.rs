@@ -1,5 +1,6 @@
 //! Native Claude Code transport and isolated authentication/artifact snapshots.
 pub mod cli;
+pub mod catalog;
 pub mod isolation;
 pub use cli::{Cli, CliOptions};
 use std::io;

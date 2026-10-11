@@ -133,7 +133,7 @@ use super::*;
     }
 
     #[test]
-    fn router_target_form_rotates_only_configured_ids_and_refuses_docker() {
+    fn router_target_dropdown_selects_only_configured_ids_and_refuses_docker() {
         let mut app=App::default();
         app.new_session=Some(NewSession{engine:launch::Engine::Router,router_config:Some(PathBuf::from("/private/router.json")),
             isolation:doxa_isolation::Profile::Native,model:"auto".into(),models:vec!["auto".into(),"ds-fixture".into()],
@@ -141,10 +141,15 @@ use super::*;
             prompt:String::new(),field:0,launch_error:None,retry_allowed:true});
         app.new_session_key(KeyEvent::new(KeyCode::Char('x'),KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().model,"auto");
-        app.new_session_key(KeyEvent::new(KeyCode::Right,KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert_eq!(app.new_session.as_ref().unwrap().model,"auto");
+        app.new_session_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().model,"ds-fixture");
         app.new_session.as_mut().unwrap().field=1;
-        app.new_session_key(KeyEvent::new(KeyCode::Right,KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().isolation,doxa_isolation::Profile::Native);
         app.new_session.as_mut().unwrap().field=2;
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
@@ -701,6 +706,110 @@ for line in sys.stdin:
         assert!(app.delete_after_stop.is_none());
         assert!(app.session_delete_pending.is_none());
         assert!(app.notice.contains("Transcript preserved"));
+    }
+
+    #[test]
+    fn confirmed_session_deletion_survives_late_history_hello_and_layout_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = crate::ui_state::UiStateStore::new(dir.path(), "/repo", "fixture-machine").unwrap();
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"gone","cwd":"/repo"}));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"keep","cwd":"/repo"}));
+        app.groups[0].tabs = vec!["gone".into(), "keep".into()];
+        app.groups[0].active = 1;
+        store.save(&app).unwrap();
+        let stale = crate::history::OfflineSession { id: "gone".into(), project: "project".into(),
+            markdown: "old transcript".into(), search_snippets: Vec::new(), cwd: Some(PathBuf::from("/repo")) };
+        app.history_entries.insert("gone".into(), stale.clone());
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.session_delete_pending = Some(rx);
+        tx.send(("gone".into(), Ok(()))).unwrap();
+        assert!(app.poll_session_delete());
+        assert!(app.sessions.iter().all(|session| session.id != "gone"));
+        assert_eq!(app.groups[0].tabs, ["keep"]);
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        tx.send(vec![stale.clone()]).unwrap();
+        app.poll_history();
+        app.restore_archive(&stale, "late restore");
+        assert!(!app.apply_daemon_frame(&json!({"type":"hello","session_id":"gone","cwd":"/repo"})));
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "gone".into(), title: "gone".into(),
+            collection: "project".into(), transcript: String::new(), status: "Ready".into() }));
+        assert!(app.sessions.iter().all(|session| session.id != "gone"));
+        assert!(!app.history_entries.contains_key("gone"));
+        store.forget_sessions(&app.killed_this_run).unwrap();
+        store.save(&app).unwrap();
+        let reloaded = crate::ui_state::UiStateStore::new(dir.path(), "/repo", "fixture-machine").unwrap();
+        assert_eq!(reloaded.saved_tabs().unwrap().iter().map(|tab| tab.session_id.as_str()).collect::<Vec<_>>(), ["keep"]);
+    }
+
+    #[test]
+    fn failed_session_deletion_keeps_history_visible_and_allows_late_updates() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"keep","cwd":"/repo"}));
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.session_delete_pending = Some(rx);
+        tx.send(("keep".into(), Err("unsafe transcript file"))).unwrap();
+        assert!(app.poll_session_delete());
+        assert!(app.deleted_this_run.is_empty());
+        assert!(app.sessions.iter().any(|session| session.id == "keep"));
+        assert!(app.notice.contains("Transcript preserved"));
+        assert!(app.apply_daemon_frame(&json!({"type":"hello","session_id":"keep","cwd":"/repo"})));
+    }
+
+    #[test]
+    fn ctrl_delete_forgets_an_empty_session_and_its_last_restore_record_in_private_home() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("DOXA_EMPTY_DELETE_FIXTURE").is_none() {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let lore = root.path().join("lore-fixture");
+            std::fs::write(&lore, r#"#!/usr/bin/env python3
+import json, os, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','transcript_identity']}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({'type':'reply','id':request['id'],'ok':True,
+        'value':{'projects_dir':os.environ['LORE_PROJECTS_DIR'],'slug':'fixture-project'}}), flush=True)
+"#).unwrap();
+            std::fs::set_permissions(&lore, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "ui::tests::ctrl_delete_forgets_an_empty_session_and_its_last_restore_record_in_private_home", "--nocapture"])
+                .env("DOXA_EMPTY_DELETE_FIXTURE", "1").env("DOXA_HOME", root.path())
+                .env("DOXA_RUNTIME_DIR", root.path().join("runtime"))
+                .env("LORE_PROJECTS_DIR", root.path().join("projects"))
+                .env("DOXA_LORE_RS", &lore).output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let home = PathBuf::from(std::env::var_os("DOXA_HOME").unwrap());
+        let runtime = home.join("runtime");
+        std::fs::create_dir_all(runtime.join("registry")).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(runtime.join("registry"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cwd = home.join("repo");
+        std::fs::create_dir(&cwd).unwrap();
+        let mut app = App { size: Rect::new(0, 0, 100, 28), ..Default::default() };
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"empty-session","cwd":cwd}));
+        let mut store = crate::ui_state::UiStateStore::new(&home, "/repo", "fixture-machine").unwrap();
+        store.save(&app).unwrap();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL)));
+        assert!(app.delete_confirmation.is_some());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.session_delete_pending.is_some(), "{}", app.notice);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.session_delete_pending.is_some() && Instant::now() < deadline {
+            app.poll_session_delete();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(app.session_delete_pending.is_none(), "delete worker did not finish");
+        assert!(app.sessions.is_empty(), "{}", app.notice);
+        assert!(app.groups.iter().all(|group| group.tabs.is_empty()));
+        store.forget_sessions(&app.killed_this_run).unwrap();
+        store.save(&app).unwrap();
+        let reloaded = crate::ui_state::UiStateStore::new(&home, "/repo", "fixture-machine").unwrap();
+        assert!(reloaded.saved_tabs().unwrap().is_empty());
     }
 
     #[test]
@@ -1386,21 +1495,23 @@ for line in sys.stdin:
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: engines.x + 2, row: engines.y + 3, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.new_session_catalog_pending = Some((launch::Engine::Claude, rx));
+        tx.send(Ok(json!({"models":["sonnet","opus"]}))).unwrap();
+        assert!(app.poll_new_session_catalog());
         let form = app.active_chooser_rect().unwrap();
         let first = form.y + if form.height >= 8 { 4 } else { 2 };
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: form.x + 2, row: first + 1, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.new_session.as_ref().unwrap().field, 1);
+        assert!(app.choice_dropdown.is_some());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: form.x + 2, row: first, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.new_session.as_ref().unwrap().field, 0);
-        // Replace the displayed configured default deliberately.
-        while !app.new_session.as_ref().unwrap().model.is_empty() {
-            app.handle(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
-        }
-        for c in "sonnet".chars() {
-            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
-        }
+        assert!(app.choice_dropdown.is_some());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         let rendered = painted(&app);
         assert!(rendered.contains("Start session"));
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
@@ -1421,10 +1532,10 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-flash");
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
         assert_eq!(app.new_session.as_ref().unwrap().effort.as_deref(), Some("high"));
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
         for c in "Explain this".chars() {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
         }
@@ -1601,7 +1712,9 @@ for line in sys.stdin:
         assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-flash");
         assert_eq!(app.new_session.as_ref().unwrap().effort.as_deref(), Some("high"));
         app.new_session.as_mut().unwrap().field = 0;
-        app.new_session_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-v4-pro");
         app.engine_selected = 3;
         app.select_new_engine();

@@ -1,6 +1,7 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 mod actions;
 mod commands;
+mod choice_dropdown;
 mod codegraph_viewer;
 mod diff_controller;
 mod fleet_dependency_review;
@@ -1554,6 +1555,7 @@ pub struct App {
     stale_detached_check_at: Instant,
     session_stop_pending: Option<Receiver<crate::sessions::Report>>,
     pub(crate) killed_this_run: HashSet<String>,
+    deleted_this_run: HashSet<String>,
     pending_clear_finalizes: Vec<String>,
     pub(crate) clear_stop_after_save: Vec<String>,
     clear_pending: Option<ClearPending>,
@@ -1574,6 +1576,7 @@ pub struct App {
     engine_picker: bool,
     engine_selected: usize,
     new_session: Option<NewSession>,
+    new_session_catalog_pending: Option<(launch::Engine, Receiver<Result<serde_json::Value, &'static str>>)>,
     vendor_catalog_pending: Option<(
         launch::Engine,
         Receiver<Option<Vec<doxa_vendors::ModelCapability>>>,
@@ -1639,6 +1642,7 @@ pub struct App {
     offline_ids: HashSet<String>,
     queue_picker: Option<QueuePicker>,
     settings_menu: Option<SettingsMenu>,
+    choice_dropdown: Option<choice_dropdown::Dropdown>,
     mermaid_preflight: Option<MermaidPreflight>,
     pending_queue_commands: Vec<crate::bridge::WorkerCommand>,
     diff_modal: bool,
@@ -1840,6 +1844,7 @@ impl Default for App {
             stale_detached_check_at: Instant::now(),
             session_stop_pending: None,
             killed_this_run: HashSet::new(),
+            deleted_this_run: HashSet::new(),
             pending_clear_finalizes: Vec::new(),
             clear_stop_after_save: Vec::new(),
             clear_pending: None,
@@ -1860,6 +1865,7 @@ impl Default for App {
             engine_picker: false,
             engine_selected: 0,
             new_session: None,
+            new_session_catalog_pending: None,
             vendor_catalog_pending: None,
             pending_launches: Vec::new(),
             pending_attaches: Vec::new(),
@@ -1918,6 +1924,7 @@ impl Default for App {
             offline_ids: HashSet::new(),
             queue_picker: None,
             settings_menu: None,
+            choice_dropdown: None,
             mermaid_preflight: None,
             pending_queue_commands: Vec::new(),
             diff_modal: false,

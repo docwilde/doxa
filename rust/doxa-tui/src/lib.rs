@@ -12,6 +12,7 @@ pub mod memory_menu;
 pub mod native_plugins;
 pub mod model_fact_review;
 pub mod model_catalog;
+mod new_session_catalog;
 pub mod codegraph_snapshot;
 pub mod diff_view;
 pub mod discovery;
