@@ -379,33 +379,25 @@ CLI's internals name the mechanism outright —
 `messageQueue.consume(..., {reason: "absorbed_mid_turn"})`,
 `isMidTurnFoldSuspended()`. Absorption, not a second turn.
 
-That machinery is **not reachable through the stdin protocol the Agent SDK
-speaks**, and this is measured rather than inferred. Spawn the CLI in
-stream-json mode, start a turn that makes three sequential `Bash` calls,
-and write a second user frame to its stdin six seconds in, while the first
-turn is inside a tool call. The frame never appears in the output stream at
-all. The turn completes all three steps unaffected, emits its result, and
-no second turn ever starts — the frame is neither absorbed into the running
-turn nor deferred into a following one. It is **dropped, silently**. Two
-runs, identical: the first under `-p`, the second without it, because the
-SDK does not pass `--print` — it spawns with `--output-format stream-json
---verbose --input-format stream-json`. The same outcome on the SDK's own
-spawn shape is what makes this a fact about DOXA's conditions rather than a
-print-mode artefact. Measured on `claude-agent-sdk` 0.2.144 and Claude Code
-2.1.273.
+One historical test on `claude-agent-sdk` 0.2.144 and Claude Code 2.1.273
+started a turn with three sequential `Bash` calls, then wrote a second user
+frame to stdin six seconds in, during a tool call. That run observed no user
+frame in the output and no second turn; it records the result for that exact
+version and test shape. It does not establish that the current CLI's
+stream-json input has no queue. The locally installed Claude Code 2.1.296
+contains a user-frame-to-queue path and a same-turn fold path at eligible
+model-loop boundaries. See [the mid-turn steering investigation](mid-turn-steering.md)
+for the versioned source evidence and the distinction between this queue/fold
+behavior and a turn-scoped steering API.
 
-So a bounded FIFO on DOXA's side is not a second-best reading of the SDK —
-it is the only thing that does not lose the prompt. `interrupt()` is the
-one mid-turn primitive the SDK exposes and it aborts rather than steers,
-and a second `query()` is no way round it either: `receive_response()` ends
-at the first `ResultMessage` on one shared stream, with no per-query
-correlation id on a `result` frame, so two turns in flight risk one
-iterator eating the other's result.
-
-> **Note:** `SessionEngine.send`'s docstring argues the same conclusion
-> from the SDK's read side alone. The conclusion holds; the reason recorded
-> there is not the operative one, which is that the write never arrives.
-> The docstring has not been corrected.
+DOXA's Claude host does not yet expose a mid-turn control. Keep the bounded
+DOXA prompt FIFO as the behavior it can promise, and do not describe an
+ordinary stream-json frame write as acknowledged steering. The Agent SDK's
+`interrupt()` aborts rather than steering, and a second `query()` is not a
+safe substitute: `receive_response()` ends at the first `ResultMessage` on a
+shared stream with no per-query correlation ID. The previously recorded
+`SessionEngine.send` explanation applies to that SDK read path, not to the
+current CLI's stdin queue.
 
 ## Tabs
 
