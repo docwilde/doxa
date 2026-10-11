@@ -3143,7 +3143,7 @@ fn native_peers_full_backlog_is_bounded_and_exact_healthy_delivery_recovers() {
     send(&mut socket,json!({"type":"call","id":2,"method":"peers","params":{}}));
     let roster=receive(&mut reader); assert_eq!(roster["ok"],true);
     assert!(started.elapsed()<Duration::from_secs(2),"full backlog stalled native discovery");
-    assert_eq!(roster["peers"],json!([{"session_id":LIVE,"title":"healthy fixture"}]));
+    assert_eq!(roster["peers"],json!([{"session_id":LIVE,"title":"healthy fixture","origin":null}]));
     assert_eq!(fs::read(&blocked_record).unwrap(),before,"failed probe must not reap a live record");
     send(&mut socket,json!({"type":"call","id":4,"method":"msg","params":{"target":FOREIGN,"text":"unapproved fixture"}}));
     assert_eq!(receive(&mut reader)["ok"],false);
