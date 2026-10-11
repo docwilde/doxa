@@ -27,7 +27,7 @@
 
 ## Install and start
 
-Install the [latest Rust prerelease](https://github.com/docwilde/doxa/releases):
+Install the [latest Rust beta release](https://github.com/docwilde/doxa/releases/latest):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
@@ -60,8 +60,10 @@ The [Rust guide](rust/README.md) covers keys, session recovery, worktrees, setti
 | Codex | Protected private app server | Linux build and Codex sign-in. |
 | DeepSeek | Rust API client | Supply an API key. |
 | GLM | Rust API client | Supply a z.ai API key. |
+| Router (opt-in) | Jev selects a configured DeepSeek/GLM API target | Private candidate config and worker credentials; Jev API key for automatic selection. |
 
 [Engine capability matrix](docs/engine-capabilities.md) lists model, permission, cost, compaction, and platform support. The picker distinguishes sourced model facts from unknown context or thinking support. Budget admission uses a conservative documented price bound and refuses an unknown priced bound. DOXA does not silently switch engines during a session.
+The [Jev router](docs/jev-router.md) keeps a router session while selecting a configured API target at each turn. `/model auto` enables routing; a target ID pins it. This first native API slice supports chat and existing reviewed tools; Bash, workspace writes and Claude/Codex handoffs remain open.
 `doxa model-facts ENGINE MODEL [--review-before YYYY-MM-DD]` prints exact sourced facts and flags operator-selected review candidates. Add `--check-catalog` for an explicit read-only OpenAI API listing check with `OPENAI_API_KEY`; it reports listed, unlisted, or unknown without changing model or budget admission.
 
 Fleets can run an acting coordinator and workers under a reviewed charter, typed host gates, and spending limits. A separately selected alignment supervisor and fast LLM or Jev message judge can inspect work and messages. Dependent Docker-isolated workers wait for a host checkpoint, receiver read-back, sender agreement, and explicit human release; later turns and handoffs invalidate the review. `/fleet dependency-review` shows the evidence in the TUI. An owner-reviewed offline recipe can produce snapshot-bound test receipts; opt-in `--auto-test` runs it after host-observed turns. Receipts do not release dependencies. `doxa fleet debrief RUN --root PATH` summarizes bounded host evidence after a run without opening peer bodies or making model calls. A private scorer can evaluate consented, labeled real-message verdicts; no such corpus ships and evaluation does not change enforcement. [Fleet supervision](docs/fleet-supervision.md).
@@ -94,6 +96,8 @@ DOXA loads selected provider plugins with scoped adoption rules. Remote access n
 
 - [Rust guide](rust/README.md) — install, sessions, review, fleets, and remote use.
 - [Engine capabilities](docs/engine-capabilities.md) — what each provider supports.
+- [Jev router](docs/jev-router.md) — candidate configuration, automatic routing, pins, budgets and evaluation limits.
+- [Release publication](docs/releasing.md) — advertise the current recommended beta as GitHub Latest.
 - [Session isolation](docs/session-isolation.md) — Docker profiles and their limits; guarded egress checks kernel writers and connector scope through each upload chunk, but the checks are sequential and exact Engine/container identity and provider flows remain unproved. The [quota helper](docs/hard-quota-preflight.md) is inactive; hardened admission stays closed.
 - [Fleet supervision](docs/fleet-supervision.md) — independent review and message judging.
 - [Code graph queries](docs/plans/code-graph.md) — bounded Rust and Python syntax queries with source-read deadlines; a blocked reader can linger until process exit. The [disabled semantic probe](docs/plans/codegraph-semantic-verification.md) repeats a bounded whole-worktree observation around one inspect/attach/LSP exchange, but the mutable reads are non-atomic and `binding=unknown`; [scan benchmark](docs/codegraph-scan-benchmark-2026-10-09.md).

@@ -160,7 +160,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
     CommandHelp { kind: LocalCommand::Pending, name: "/lore:pending", form: "/lore:pending [--cluster]", summary: "LORE pending alias", support: "local · same browser for every engine" },
     CommandHelp { kind: LocalCommand::Search, name: "/search", form: "/search [terms]", summary: "Search saved sessions", support: "local · LORE index then bounded transcript scan" },
     CommandHelp { kind: LocalCommand::Resume, name: "/resume", form: "/resume [session-id]", summary: "Resume conversation", support: "local · new tab" },
-    CommandHelp { kind: LocalCommand::Compact, name: "/compact", form: "/compact", summary: "Compact transcript", support: "Claude only · completed LORE review required" },
+    CommandHelp { kind: LocalCommand::Compact, name: "/compact", form: "/compact", summary: "Review and compact context", support: "Claude and router · completed LORE review required" },
     CommandHelp { kind: LocalCommand::Update, name: "/update", form: "/update [--restart]", summary: "Update DOXA", support: "local · reviewed install" },
     CommandHelp { kind: LocalCommand::Help, name: "/help", form: "/help", summary: "Command registry", support: "local" },
     CommandHelp { kind: LocalCommand::About, name: "/about", form: "/about", summary: "Version and active session identity", support: "local · measured installation and selected session details" },
@@ -706,7 +706,7 @@ impl App {
                         self.input_cursor = 0;
                     } else {
                         self.notice =
-                            "Unknown engine · choose claude, codex, deepseek or glm".into();
+                            "Unknown engine · choose claude, codex, deepseek, glm or router".into();
                     }
                     return true;
                 }
@@ -889,13 +889,13 @@ impl App {
                     .active_id()
                     .and_then(|id| self.session_identity.get(id))
                     .and_then(|identity| identity.0.as_deref());
-                if args.trim().is_empty() && engine == Some("claude") {
-                    return false; // The Claude sidecar reviews synchronously before forwarding.
+                if args.trim().is_empty() && matches!(engine,Some("claude"|"router")) {
+                    return false; // The host must complete review before changing context.
                 }
                 self.notice = if !args.trim().is_empty() {
                     "Usage: /compact".into()
                 } else {
-                    "Reviewed compaction is available only for Claude sessions".into()
+                    "Reviewed compaction is available only for Claude and router sessions".into()
                 };
                 true
             }
@@ -1322,8 +1322,8 @@ mod tests {
     }
 
     #[test]
-    fn compaction_passthrough_requires_exact_claude_identity_and_bare_form() {
-        for engine in [None, Some("codex"), Some("Claude"), Some("claude")] {
+    fn compaction_passthrough_requires_exact_supported_identity_and_bare_form() {
+        for engine in [None, Some("codex"), Some("deepseek"), Some("glm"), Some("Claude"), Some("Router"), Some("claude"), Some("router")] {
             let mut app = App::default();
             app.groups[0].tabs.push("session".into());
             if let Some(engine) = engine {
@@ -1331,7 +1331,7 @@ mod tests {
                     .insert("session".into(), (Some(engine.into()), None));
             }
             enter(&mut app, "/compact");
-            if engine == Some("claude") {
+            if matches!(engine,Some("claude"|"router")) {
                 assert_eq!(app.pending_prompts, [("session".into(), "/compact".into())]);
             } else {
                 assert!(app.pending_prompts.is_empty());

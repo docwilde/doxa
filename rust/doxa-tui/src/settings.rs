@@ -62,9 +62,10 @@ pub const SETTINGS: &[Setting] = &[
     key_setting!("key_lore", "LORE beliefs", "Alt+L"),
     key_setting!("key_stop", "stop session", "Ctrl+X"),
     key_setting!("key_delete_transcript", "delete session transcript", "Ctrl+Delete"),
-    Setting { key: "engine", env: "DOXA_ENGINE", label: "engine", category: "Session", kind: Kind::Choice, choices: &["", "claude", "codex", "deepseek", "glm"], default: "claude", read_only: false, help: "Which engine drives NEW sessions (doxa.engines -- `doxa --engine <id>` is the flag layer, `/engine` the in-app one)", note: "Not every session surface exists on every engine, and the ones that do not are HIDDEN rather than shown inert -- no permission-mode chip where there are no modes, no ctx chip where no window size is reported, no cost chip where no dollar figure is. `/engine` prints what each one can and cannot do, read off doxa.engines.EngineCapabilities itself rather than described here, where it would go stale. An engine is chosen at CONNECT, so a change here reaches NEW sessions and tabs and never the running one." },
-    Setting { key: "model", env: "DOXA_MODEL", label: "model", category: "Session", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Model preference for the active session's engine, used by new sessions of that engine (/model switches the live session). DOXA_MODEL overrides every engine.", note: "" },
-    Setting { key: "effort", env: "DOXA_EFFORT", label: "effort", category: "Session", kind: Kind::Choice, choices: &["", "low", "medium", "high", "xhigh", "max"], default: "", read_only: false, help: "Default reasoning effort for new sessions; use the effort chip or /effort for the current session", note: "Supported current-session changes require an idle provider and verified capability. Claude resumes its existing provider conversation with the selected effort; Codex applies it to the next turn." },
+    Setting { key: "engine", env: "DOXA_ENGINE", label: "engine", category: "Session", kind: Kind::Choice, choices: &["", "claude", "codex", "deepseek", "glm", "router"], default: "claude", read_only: false, help: "Which engine drives NEW sessions (doxa.engines -- `doxa --engine <id>` is the flag layer, `/engine` the in-app one)", note: "Not every session surface exists on every engine, and the ones that do not are HIDDEN rather than shown inert -- no permission-mode chip where there are no modes, no ctx chip where no window size is reported, no cost chip where no dollar figure is. `/engine` prints what each one can and cannot do, read off doxa.engines.EngineCapabilities itself rather than described here, where it would go stale. An engine is chosen at CONNECT, so a change here reaches NEW sessions and tabs and never the running one." },
+    Setting { key: "router_config", env: "DOXA_ROUTER_CONFIG", label: "router candidate config", category: "Session", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Absolute path to an owner-private router JSON config. Required only for explicit router sessions.", note: "API chat targets only; native isolation. Candidate descriptions and prices are operator policy. Read docs/jev-router.md before enabling paid routing." },
+    Setting { key: "model", env: "DOXA_MODEL", label: "model", category: "Session", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Model preference for new sessions of this engine; /model switches the live session. Router uses auto or an exact configured target ID and ignores DOXA_MODEL.", note: "Router target choice is separate from the effective provider/model for each turn and from permission mode." },
+    Setting { key: "effort", env: "DOXA_EFFORT", label: "effort", category: "Session", kind: Kind::Choice, choices: &["", "low", "medium", "high", "xhigh", "max"], default: "", read_only: false, help: "Default reasoning effort for new sessions; router effort is fixed per target in its candidate config. Use the effort chip or /effort on supported engines", note: "Supported current-session changes require an idle provider and verified capability. Claude resumes its existing provider conversation with the selected effort; Codex applies it to the next turn." },
     Setting { key: "allow_bypass", env: "DOXA_ALLOW_BYPASS", label: "allow bypass", category: "Session", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Let NEW sessions reach bypassPermissions at all (spawns their CLI with --allow-dangerously-skip-permissions)", note: "OFF by default, and the default is the point. The claude CLI arms this capability at LAUNCH, not at runtime: a session started without the flag cannot enter bypassPermissions, and no setting can retrofit one that is already running. While this is off, the mode is absent from the permission picker, the chip's picker and /mode's list rather than being offered and refused. Turning it on puts every session spawned afterwards one keystroke away from running tools unapproved, in every repository you open." },
     Setting { key: "adopt_plugins", env: "DOXA_ADOPT_PLUGINS", label: "adopt claude plugins", category: "Session", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Load the commands, skills and agents from your OWN installed Claude Code plugins into NEW sessions (doxa.claude_plugins.adopt) -- never their hooks or MCP servers, and never the LORE plugin", note: "OFF by default: isolation (doxa.cli_isolation, item AA) stays the resting posture, and adopting your plugins is a choice you make, not something a fresh install does for you. Turning this on does not undo the isolation fix -- hooks and MCP servers stay refused unconditionally (see docs/plans/plugins.md), only commands/skills/agents from plugins your own ~/.claude/settings.json already has enabled are staged into a sanitized copy and loaded via --plugin-dir, one session-scoped flag per adopted plugin. /plugins previews what this would adopt before you turn it on; /reload-plugins re-scans for NEW sessions without restarting doxa." },
     Setting { key: "auto_diff", env: "DOXA_AUTO_DIFF", label: "auto-open the live diff", category: "Session", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Open the live diff beside a session the FIRST time it edits the worktree, once per session (doxa.diff.auto_open_enabled / PaneRuntimeMixin._maybe_auto_open_diff)", note: "OFF by default, and the default is the argument: opening the diff splits the group the session is in, halving the width of the transcript you are reading, and a surface that rearranges the screen mid-turn without being asked is worse than one you have to know about. ONCE per session, so closing it is final -- it never re-opens behind you. It never takes the keyboard (the prompt keeps focus), and on a window too narrow to split it REFUSES and says so rather than making an unusable sliver. The `diff N files +A −R` status chip is on either way and is how you see there are changes at all; F2 and /diff open the pane by hand at any time." },
@@ -128,7 +129,7 @@ pub fn find(key: &str) -> io::Result<&'static Setting> {
 }
 pub fn config_path() -> io::Result<std::path::PathBuf> { Ok(crate::operations::doxa_home()?.join("config.toml")) }
 pub fn raw_from(config: &toml::Table, setting: &Setting, override_value: Option<&str>, engine: &str) -> String {
-    if let Some(value) = override_value.filter(|v| !v.trim().is_empty()) { return value.trim().into(); }
+    if let Some(value) = override_value.filter(|v| !v.trim().is_empty() && !(setting.key == "model" && engine == "router")) { return value.trim().into(); }
     if setting.kind == Kind::Key {
         let mut effective = config.clone();
         crate::keybindings::migrate_legacy_defaults(&mut effective);
@@ -156,7 +157,7 @@ pub fn rows(engine: &str, session_model: Option<&str>) -> io::Result<Vec<Row>> {
     let home = crate::operations::doxa_home()?;
     let mut rows = Vec::new();
     for s in SETTINGS {
-        let override_value = std::env::var(s.env).ok().filter(|v| !v.trim().is_empty());
+        let override_value = std::env::var(s.env).ok().filter(|v| !v.trim().is_empty() && !(engine == "router" && matches!(s.key, "model" | "effort")));
         let shadowed = override_value.is_some();
         let stored = raw_from(&config, s, None, engine);
         let mut value = raw_from(&config, s, override_value.as_deref(), engine);
@@ -208,7 +209,7 @@ pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value
         Kind::Choice => { if !s.choices.contains(&value) { return Err(invalid(&format!("accepts {}", s.choices.join(" | ")))); } toml::Value::String(value.into()) },
         Kind::Format => { crate::preferences::validate_clock_format(value).map_err(|_| invalid("invalid strftime format"))?; toml::Value::String(value.into()) },
         Kind::Key => { let chord = crate::keybindings::Chord::parse(value).map_err(|e| invalid(&e.to_string()))?; toml::Value::String(chord.map(|c| c.display()).unwrap_or_else(|| "none".into())) },
-        Kind::Text => {if matches!(s.key,"fleet_alignment_supervisor"|"fleet_message_judge"){let model=doxa_fleet::judge::Model::parse(value).map_err(|_|invalid("requires a supported provider:model"))?;if s.key=="fleet_alignment_supervisor"&&model.provider=="jev"{return Err(invalid("Jev judges messages; select an LLM supervisor"));}}toml::Value::String(value.into())},
+        Kind::Text => {if s.key=="router_config" && !Path::new(value).is_absolute(){return Err(invalid("requires an absolute path"));}if matches!(s.key,"fleet_alignment_supervisor"|"fleet_message_judge"){let model=doxa_fleet::judge::Model::parse(value).map_err(|_|invalid("requires a supported provider:model"))?;if s.key=="fleet_alignment_supervisor"&&model.provider=="jev"{return Err(invalid("Jev judges messages; select an LLM supervisor"));}}toml::Value::String(value.into())},
     }))
 }
 pub fn save(path: &Path, edits: &[(String, Option<String>)], engine: &str) -> io::Result<()> {
@@ -239,10 +240,18 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     #[test]
+    fn router_settings_keep_target_selection_and_private_config_explicit() {
+        let config: toml::Table = "[models]\nrouter='reviewed-target'\n".parse().unwrap();
+        assert_eq!(raw_from(&config, find("model").unwrap(), Some("gpt-global"), "router"), "reviewed-target");
+        assert!(coerce(find("router_config").unwrap(), Some("relative.json")).is_err());
+        assert_eq!(coerce(find("router_config").unwrap(), Some("/private/router.json")).unwrap().unwrap().as_str(), Some("/private/router.json"));
+        assert!(find("engine").unwrap().choices.contains(&"router"));
+    }
+    #[test]
     fn catalog_covers_python119_categories_and_conservative_defaults() {
         for key in ["engine","effort","allow_bypass","spawn_sessions","agent_peer_send","peer_inbound_turns","session_budget_usd","permission_mode","restore_tabs","resume_restored","lore","derive_secs","consult_floor","graph_context","graph_view","ctx_absolute","context_grid","boot_banner","show_reasoning","background","sidebar","rail_entries","collection_sort","sidebar_width","clock_show","clock_date","clock_hour","clock_seconds","clock_tz","clock_format","notify","notify_update","notify_lore","notify_staged","notify_needs_input"] {assert!(find(key).is_ok(),"missing {key}");}
         assert_eq!(find("lore").unwrap().default,"1");assert_eq!(find("sidebar").unwrap().default,"");assert_eq!(find("collection_sort").unwrap().default,"manual");assert_eq!(find("rail_entries").unwrap().default,"sessions");assert_eq!(find("notify").unwrap().default,"auto");assert_eq!(find("notify_needs_input").unwrap().default,"");
-        assert_eq!(find("engine").unwrap().choices,&["","claude","codex","deepseek","glm"]);
+        assert_eq!(find("engine").unwrap().choices,&["","claude","codex","deepseek","glm","router"]);
         assert!(!find("image_mode").unwrap().read_only);assert!(find("lore_root").unwrap().read_only);
     }
     #[test]

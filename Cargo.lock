@@ -627,6 +627,7 @@ dependencies = [
  "doxa-isolation",
  "doxa-lore",
  "doxa-peers",
+ "doxa-router",
  "doxa-runtime",
  "doxa-state",
  "doxa-transcript",
@@ -635,6 +636,7 @@ dependencies = [
  "doxa-worktrees",
  "futures-util",
  "libc",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -784,6 +786,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "doxa-router"
+version = "2.0.0-beta.43"
+dependencies = [
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "doxa-runtime"
 version = "2.0.0-beta.43"
 dependencies = [
@@ -829,6 +844,7 @@ dependencies = [
  "doxa-peers",
  "doxa-protocol",
  "doxa-remote-wire",
+ "doxa-router",
  "doxa-state",
  "doxa-vendors",
  "doxa-worktrees",

@@ -95,7 +95,8 @@ window is open; /remote-disconnect stops sharing. /remote-control URL adds
 remote tabs beside local tabs; /local selects an open local tab. Ctrl+R opens
 remote history, and PageUp at its top fetches older turns.
 
-New-session options: --engine codex|claude|deepseek|glm, --model NAME,
+New-session options: --engine codex|claude|deepseek|glm|router, --model NAME,
+  --router-config ABSOLUTE_PATH (router targets; native isolation only),
   --isolation native|docker-open|docker-offline,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.
 Codex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH.
@@ -342,7 +343,7 @@ fn run(args: &[String]) -> io::Result<()> {
                 command = Some(arg)
             }
             "--session" | "--socket" | "--engine" | "--model" | "--effort" | "--linger"
-            | "--sandbox" | "--codex-bin" | "--claude-bin"
+            | "--sandbox" | "--codex-bin" | "--claude-bin" | "--router-config"
              | "--resume" | "--branch" | "--isolation" => {
                 index += 1;
                 let value = args
@@ -368,8 +369,9 @@ fn run(args: &[String]) -> io::Result<()> {
                             "fixture" => options.engine = launch::Engine::Fixture,
                             "deepseek" => options.engine = launch::Engine::DeepSeek,
                             "glm" => options.engine = launch::Engine::Glm,
+                            "router" => options.engine = launch::Engine::Router,
                             _ => return Err(invalid(
-                                "native engine must be codex, claude, deepseek, glm, or fixture",
+                                "native engine must be codex, claude, deepseek, glm, router, or fixture",
                             )),
                         }
                     }
@@ -384,6 +386,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     "--sandbox" => options.sandbox = Some(value.clone()),
                     "--codex-bin" => options.codex_bin = Some(PathBuf::from(value)),
                     "--claude-bin" => options.claude_bin = Some(PathBuf::from(value)),
+                    "--router-config" => {explicit_launch=true;options.router_config=Some(PathBuf::from(value));},
                     "--resume" => options.resume = Some(value.clone()),
                     "--branch" => options.branch = Some(value.clone()),
                     _ => unreachable!(),
@@ -413,11 +416,14 @@ fn run(args: &[String]) -> io::Result<()> {
     }
     if options.resume.is_some() && command != Some("new") {
         return Err(invalid(
-            "--resume requires new --engine codex|claude|deepseek|glm",
+            "--resume requires new --engine codex|claude|deepseek|glm|router",
         ));
     }
     if options.branch.is_some() && command != Some("new") {
         return Err(invalid("--branch requires new"));
+    }
+    if options.router_config.is_some() && options.engine!=launch::Engine::Router {
+        return Err(invalid("--router-config requires --engine router"));
     }
     match command {
         Some("--version") => {
@@ -518,6 +524,16 @@ fn run(args: &[String]) -> io::Result<()> {
                         Ok(CredentialStatus::Missing) => { println!("missing {key}: unset"); missing = true; }
                         Err(_) => { println!("missing {key}: credential store unavailable"); missing = true; }
                     }
+                }
+                launch::Engine::Router => {
+                    match launch::router_config(options.router_config.as_deref()) {
+                        Ok((_,config)) => println!("ok router config: {} configured targets (account availability unverified)",config.candidates.len()),
+                        Err(_) => {println!("missing router config: explicit owner-private config required");missing=true;}
+                    }
+                    if !std::env::var("TYPESAFE_API_KEY").is_ok_and(|value|!value.trim().is_empty()) {
+                        println!("missing TYPESAFE_API_KEY: unset");missing=true;
+                    } else {println!("ok TYPESAFE_API_KEY: set (environment)");}
+                    println!("router doctor is read-only; no Jev or worker request was sent");
                 }
             }
             for (name, result) in checks {

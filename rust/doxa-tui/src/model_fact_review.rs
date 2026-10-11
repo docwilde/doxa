@@ -100,10 +100,10 @@ mod tests {
         assert!(marked.contains("API model context window: 1048576 tokens · checked 2026-10-08 · REVIEW"));
         assert!(marked.contains("does not establish this session's effective context allocation"));
         assert!(marked.contains("source: https://api-docs.deepseek.com/api/list-models/"));
-        assert!(marked.contains("Standard API input: $0.3/million tokens · checked 2026-09-30 · REVIEW"));
-        assert!(marked.contains("6 review candidates · 0 unknown fields"));
+        assert!(marked.contains("Standard API input: $0.3/million tokens · checked 2026-10-10\n"));
+        assert!(marked.contains("2 review candidates · 0 unknown fields"));
 
-        let same_day = report("deepseek", "deepseek-flash", Some("2026-09-30")).unwrap();
+        let same_day = report("deepseek", "deepseek-flash", Some("2026-10-08")).unwrap();
         assert!(same_day.contains("0 review candidates · 0 unknown fields"));
         assert!(!same_day.contains(" · REVIEW"));
         let no_cutoff = report("deepseek", "deepseek-flash", None).unwrap();

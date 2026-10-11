@@ -264,6 +264,22 @@ impl TranscriptStore {
         timestamp: &str,
         mut scrub: impl FnMut(&str) -> io::Result<String>,
     ) -> io::Result<()> {
+        self.append_vendor_turn_metadata(engine, cwd, prompt, answer, timestamp, None, &mut scrub)
+    }
+
+    /// One canonical router conversation with an exact public worker selection
+    /// on both records. Private reasoning is never a public transcript field.
+    pub fn try_append_router_turn(&self, cwd: &str, prompt: &str, answer: &str,
+        timestamp: &str, selection: &Value,
+        mut scrub: impl FnMut(&str) -> io::Result<String>) -> io::Result<()> {
+        self.append_vendor_turn_metadata("router", cwd, prompt, answer, timestamp,
+            Some(selection), &mut scrub)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_vendor_turn_metadata(&self, engine: &str, cwd: &str, prompt: &str,
+        answer: &str, timestamp: &str, selection: Option<&Value>,
+        scrub: &mut impl FnMut(&str) -> io::Result<String>) -> io::Result<()> {
         owned_dir(&self.dir)?;
         let user = serde_json::json!({"type":"user", "message":{"role":"user","content":prompt},
             "cwd":cwd,"sessionId":self.session_id,"timestamp":timestamp});
@@ -273,10 +289,12 @@ impl TranscriptStore {
         let mut bytes = Vec::new();
         for mut record in [user, assistant] {
             record["engine"] = Value::String(engine.to_owned());
-            try_scrub_value(&mut record, &mut scrub)?;
+            if let Some(selection) = selection { record["routing"] = selection.clone(); }
+            try_scrub_value(&mut record, scrub)?;
             if record["engine"] != engine || record["sessionId"] != self.session_id {
                 return Err(bad_data());
             }
+            if selection.is_some_and(|selection| record["routing"] != *selection) { return Err(bad_data()); }
             let line = serde_json::to_vec(&record)?;
             if line.len() > MAX_TRANSCRIPT_BYTES {
                 return Err(bad_data());
@@ -514,6 +532,8 @@ impl TranscriptStore {
         temp.as_file().sync_all()?;
         temp.persist(self.vendor_messages_path())
             .map_err(|error| error.error)?;
+        fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&self.dir)?.sync_all()?;
         Ok(clean)
     }
 

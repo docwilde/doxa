@@ -21,6 +21,7 @@ pub enum Engine {
     Fixture,
     DeepSeek,
     Glm,
+    Router,
 }
 
 impl Engine {
@@ -48,6 +49,7 @@ impl Engine {
             Self::Claude => "claude",
             Self::DeepSeek => "deepseek",
             Self::Glm => "glm",
+            Self::Router => "router",
             Self::Fixture => "fixture",
         }
     }
@@ -67,6 +69,7 @@ pub struct LaunchOptions {
     pub codex_bin: Option<PathBuf>,
     pub claude_bin: Option<PathBuf>,
     pub resume: Option<String>,
+    pub router_config: Option<PathBuf>,
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -189,10 +192,30 @@ fn configured_string(key: &str, env_key: &str, config: Option<&toml::Value>) -> 
 }
 
 pub fn configured_engine() -> Engine {
-    match configured_string("engine", "DOXA_ENGINE", config().as_ref()).map(|s| s.to_ascii_lowercase()).as_deref() {
+    configured_engine_id(configured_string("engine", "DOXA_ENGINE", config().as_ref()).as_deref())
+}
+fn configured_engine_id(value:Option<&str>) -> Engine {
+    match value.map(str::to_ascii_lowercase).as_deref() {
         Some("codex") => Engine::Codex, Some("deepseek") => Engine::DeepSeek, Some("glm") => Engine::Glm,
+        Some("router") => Engine::Router,
         _ => Engine::Claude,
     }
+}
+
+/// Routing is enabled only by a named, owner-private config. No default file
+/// or model shortlist is invented when a router session is requested.
+pub fn router_config_path(explicit: Option<&Path>) -> io::Result<PathBuf> {
+    let path=explicit.map(Path::to_path_buf).or_else(||
+        configured_string("router_config","DOXA_ROUTER_CONFIG",config().as_ref()).map(PathBuf::from))
+        .ok_or_else(||invalid("router needs --router-config PATH or an explicit router_config setting"))?;
+    if !path.is_absolute() {return Err(invalid("router config path must be absolute"));}
+    Ok(path)
+}
+
+pub fn router_config(explicit: Option<&Path>) -> io::Result<(PathBuf,doxa_router::Config)> {
+    let path=router_config_path(explicit)?;
+    let config=doxa_router::Config::load(&path).map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
+    Ok((path,config))
 }
 
 fn configured_scalar(key: &str, env_key: &str, config: Option<&toml::Value>) -> Option<String> {
@@ -254,6 +277,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
 
 /// Fleet-scoped child environment without changing the frontend process.
 pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>, inbound: bool, lore: bool) -> io::Result<Session> {
+    if options.engine==Engine::Router {return Err(invalid("router fleet config inheritance is unavailable; start an explicit router session"));}
     let mut environment = vec![("DOXA_RUNTIME_DIR", runtime.to_string_lossy().into_owned()),
         ("DOXA_AGENT_PEER_SEND", "1".into()),
         ("DOXA_PEER_INBOUND_TURNS", if inbound { "1" } else { "0" }.into())];
@@ -274,6 +298,7 @@ pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>,
 
 /// Reattach the same stopped conversation with its original admission policy.
 pub(crate) fn spawn_migrated(options:&LaunchOptions,record:&serde_json::Value)->io::Result<Session>{
+    if options.engine==Engine::Router {return Err(invalid("router isolation migration is unavailable"));}
     let runtime=Path::new(record["runtime"].as_str().ok_or_else(||invalid("migration runtime missing"))?);
     let mut environment=vec![("DOXA_PEER_INBOUND_TURNS",if record["inbound"]==true{"1"}else{"0"}.into()),
         ("DOXA_LORE",if record["lore"]==true{"1"}else{"0"}.into()),
@@ -291,10 +316,11 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
     } else { 10 };
     let cfg = config();
     let mut effective = options.clone();
-    if effective.resume.is_none() && effective.engine != Engine::Fixture && effective.effort.is_none() {
+    if effective.resume.is_none() && !matches!(effective.engine,Engine::Fixture|Engine::Router) && effective.effort.is_none() {
         effective.effort = configured_string("effort", "DOXA_EFFORT", cfg.as_ref());
     }
     let options = &effective;
+    if options.router_config.is_some() && options.engine!=Engine::Router {return Err(invalid("--router-config requires --engine router"));}
     let requested_cwd = options.cwd.clone().unwrap_or(env::current_dir()?);
     let cwd = match fs::canonicalize(&requested_cwd) {
         Ok(cwd) if cwd.is_dir() => cwd,
@@ -333,7 +359,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
         .model
         .clone()
         .or_else(|| {
-            if options.resume.is_some() || options.engine == Engine::Fixture { return None; }
+            if options.resume.is_some() || matches!(options.engine,Engine::Fixture|Engine::Router) { return None; }
             configured_string("model", "DOXA_MODEL", None)
         })
         .or_else(|| {
@@ -372,7 +398,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
     let id = if let Some(id) = &options.resume {
         if !matches!(
             options.engine,
-            Engine::Codex | Engine::Claude | Engine::DeepSeek | Engine::Glm
+            Engine::Codex | Engine::Claude | Engine::DeepSeek | Engine::Glm | Engine::Router
         ) || !discovery::valid_id(id)
         {
             return Err(invalid(
@@ -401,7 +427,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
     }
     if let Some(value) = crate::preferences::lore_notify_override() { command.env("LORE_NOTIFY", value); }
     for (key, value) in environment { command.env(key, value); }
-    if environment.is_empty() && options.resume.is_some() {
+    if environment.is_empty() && options.resume.is_some() && options.engine!=Engine::Router {
         if let Some(ceiling) = saved_budget(&id)? {
             // Restore the original allowance, never a fresh allowance. The
             // daemon verifies engine/model/cwd and the durable spent total.
@@ -498,6 +524,20 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
                 command.args(["--resume", "true"]);
             }
         }
+        Engine::Router => {
+            if options.codex_bin.is_some() || options.claude_bin.is_some() || options.sandbox.is_some() || options.effort.is_some() {
+                return Err(invalid("router targets define their effort; CLI executables and sandbox overrides are unsupported"));
+            }
+            let profile=options.isolation.unwrap_or(doxa_isolation::configured_profile(&doxa_isolation::home()?)?);
+            if profile!=doxa_isolation::Profile::Native {return Err(invalid("router currently requires native isolation"));}
+            let (path,config)=router_config(options.router_config.as_deref())?;
+            if model.as_deref().is_some_and(|id| id!="auto" && config.candidate(id).is_none()) {
+                return Err(invalid("router model must be auto or an exact configured target ID"));
+            }
+            command.args(["--engine","router","--router-config"]).arg(path);
+            if let Some(model)=&model {command.arg("--model").arg(model);}
+            if options.resume.is_some() {command.args(["--resume","true"]);}
+        }
     }
     // Keep a private startup diagnostic so a failed daemon can tell the TUI
     // why it refused to launch (including worktree safety failures).
@@ -577,6 +617,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
                     Engine::Codex => "Codex authentication and LORE",
                     Engine::Fixture => "fixture",
                     Engine::DeepSeek | Engine::Glm => "vendor API key and LORE",
+                    Engine::Router => "router config, Typesafe and candidate API credentials",
                 }
             )));
         }
@@ -614,6 +655,38 @@ pub fn stop(session: &Session) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn router_fixture() -> serde_json::Value {
+        serde_json::json!({"version":1,"jev_model":"jev-1.13.0","criteria_version":"fixture-v1",
+            "fallback_id":"ds-fixture","confidence_threshold":0.5,"max_calls":2,
+            "max_spend_usd_micros":1000,"max_input_bytes":2048,"deadline_ms":1000,
+            "candidates":[
+                {"id":"ds-fixture","provider":"deepseek","model":"deepseek-flash","effort":"high","description":"fixture only","context_tokens":65536,"max_output_tokens":1024,"supports_tools":true,"input_usd_micros_per_million":1000000,"output_usd_micros_per_million":2000000},
+                {"id":"glm-fixture","provider":"glm","model":"glm-5.3-flash","effort":"high","description":"fixture only","context_tokens":65536,"max_output_tokens":1024,"supports_tools":true,"input_usd_micros_per_million":1000000,"output_usd_micros_per_million":2000000}
+            ]})
+    }
+    #[test]
+    fn router_is_explicit_and_config_errors_do_not_disclose_private_input() {
+        assert_eq!(configured_engine_id(Some("router")), Engine::Router);
+        assert_eq!(configured_engine_id(None), Engine::Claude);
+        assert!(router_config_path(Some(Path::new("relative.json"))).is_err());
+        let dir=tempfile::tempdir().unwrap();
+        let path=dir.path().join("private-router.json");
+        fs::write(&path,serde_json::to_vec(&router_fixture()).unwrap()).unwrap();
+        fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
+        let (loaded_path,config)=router_config(Some(&path)).unwrap();
+        assert_eq!(loaded_path,path);
+        assert!(config.candidate("ds-fixture").is_some());
+        fs::write(&path,b"private malformed input").unwrap();
+        let error=router_config(Some(&path)).unwrap_err().to_string();
+        assert_eq!(error,"router config is missing, unsafe, or invalid");
+        assert!(!error.contains("private-router"));
+    }
+    #[test]
+    fn router_refuses_unpropagated_fleet_and_migration_before_host_actions() {
+        let options=LaunchOptions{engine:Engine::Router,..Default::default()};
+        assert!(spawn_fleet(&options,Path::new("/missing"),Some(1.0),false,false).unwrap_err().to_string().contains("config inheritance"));
+        assert!(spawn_migrated(&options,&serde_json::json!({})).unwrap_err().to_string().contains("migration is unavailable"));
+    }
     #[test]
     fn launcher_config_rejects_fifo_and_oversized_files() {
         use std::ffi::CString;

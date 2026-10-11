@@ -380,6 +380,7 @@ impl App {
                 launch::Engine::Claude => "claude",
                 launch::Engine::DeepSeek => "deepseek",
                 launch::Engine::Glm => "glm",
+                launch::Engine::Router => "router",
                 launch::Engine::Fixture => "fixture",
             };
             if height < 8 && form.launch_error.is_some() {
@@ -409,12 +410,16 @@ impl App {
                     " Session exists; use doxa-rs attach · Esc close"
                 }));
             } else if height >= 8 {
-                lines.push(Line::from(if vendor_models(form.engine).is_empty() {
+                lines.push(Line::from(if form.engine==launch::Engine::Router {
+                    " Left/Right: Auto routing or configured target."
+                } else if vendor_models(form.engine).is_empty() {
                     " Blank model uses configured engine default."
                 } else {
                     " Left/Right choose vendor model and effort."
                 }));
-                lines.push(Line::from(if vendor_models(form.engine).is_empty() {
+                lines.push(Line::from(if form.engine==launch::Engine::Router {
+                    format!(" {}",safe_label(&form.catalog_note))
+                } else if vendor_models(form.engine).is_empty() {
                     format!(
                         " Effort preference: {} · new session only",
                         safe_label(form.effort.as_deref().unwrap_or("provider default"))
@@ -425,8 +430,9 @@ impl App {
             }
             lines.push(Line::styled(
                 format!(
-                    " {} Model: {}",
+                    " {} {}: {}",
                     if form.field == 0 { '›' } else { ' ' },
+                    if form.engine==launch::Engine::Router {"Target"} else {"Model"},
                     safe_label(&form.model)
                 ),
                 chooser_row_style(form.field == 0),
@@ -447,7 +453,8 @@ impl App {
                 ));
             }
             lines.push(Line::styled(
-                format!(" {} Isolation: {} · Left/Right select",if form.field==prompt_field-1{'›'}else{' '},form.isolation.label()),
+                format!(" {} Isolation: {}{}",if form.field==prompt_field-1{'›'}else{' '},form.isolation.label(),
+                    if form.engine==launch::Engine::Router {" · API chat; no shell or workspace writes"} else {" · Left/Right select"}),
                 chooser_row_style(form.field==prompt_field-1),
             ));
             lines.push(Line::styled(
@@ -947,7 +954,7 @@ impl App {
         }
         if matches!(
             info.kind,
-            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "isolation" | "native_plugin" | "native_status"
+            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "isolation" | "routing" | "compaction" | "native_plugin" | "native_status"
         ) {
             let current = self.groups[self.active_group].active_id().and_then(|id| {
                 self.session_cwds
