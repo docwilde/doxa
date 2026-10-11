@@ -88,7 +88,7 @@ impl App {
                     self.notice = "Enlarge active pane to inspect queued prompts".into();
                 }
                 if self.settings_menu.is_some() && self.active_chooser_rect().is_none() {
-                    self.settings_menu = None;
+                    self.close_settings_menu();
                     self.choice_dropdown = None;
                     self.notice = "Enlarge active pane to edit settings".into();
                 }
@@ -858,12 +858,25 @@ impl App {
                 }
             }
             let codegraph_area = self.active_chooser_rect();
+            let context_rows = self.chip_info.as_ref().filter(|info| info.kind == "context")
+                .map(|_| self.context_info_lines(codegraph_area.map_or(1, |area| usize::from(area.width.saturating_sub(3)).max(1))).len());
             if let Some(info) = self.chip_info.as_mut().filter(|info| {
                 matches!(
                     info.kind,
                     "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "routing" | "compaction" | "native_plugin" | "native_status" | "codegraph"
                 )
             }) {
+                if let Some(count) = context_rows {
+                    let page = codegraph_area.map_or(1, |area| usize::from(area.height.saturating_sub(2)).max(1));
+                    match key.code {
+                        KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
+                        KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(count.saturating_sub(page)),
+                        KeyCode::PageUp => info.scroll = info.scroll.saturating_sub(page),
+                        KeyCode::PageDown => info.scroll = info.scroll.saturating_add(page).min(count.saturating_sub(page)),
+                        _ => return false,
+                    }
+                    return true;
+                }
                 if info.kind == "codegraph" {
                     let width = codegraph_area.map_or(1, |area| usize::from(area.width.saturating_sub(3)).max(1));
                     let count = super::codegraph_viewer::wrapped_lines(&info.lines, width).len();
@@ -2443,6 +2456,20 @@ impl App {
             self.link_hover = link;
             return changed || moved || tool_hover_changed || rail_hover_changed;
         }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.active_request_index().is_none()
+        {
+            if let (Some(menu), Some(area)) = (&self.settings_menu, self.active_chooser_rect()) {
+                let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+                if let Some(category) = super::choice_dropdown::settings_tabs(area, menu.category)
+                    .into_iter().find(|(_, rect, _)| rect.contains(point))
+                    .map(|(index, _, _)| index)
+                {
+                    self.select_settings_category(category);
+                    return true;
+                }
+            }
+        }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.lore_picker.is_some() {
             if let Some(area) = self.active_chooser_rect() {
                 if mouse.row == area.y && mouse.column > area.x {
@@ -2546,12 +2573,6 @@ impl App {
                 if let Some(area) = menu.filter(|area| {
                     area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
                 }) {
-                    if let Some(category) = super::choice_dropdown::settings_tabs(area, self.settings_menu.as_ref().unwrap().category)
-                        .into_iter().find(|(_, rect, _)| rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)))
-                        .map(|(index, _, _)| index) {
-                        self.select_settings_category(category);
-                        return true;
-                    }
                     let offset = usize::from(mouse.row.saturating_sub(area.y.saturating_add(3)));
                     let index = self
                         .settings_menu
@@ -2566,7 +2587,7 @@ impl App {
                         return self.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                     }
                 } else {
-                    self.settings_menu = None;
+                    self.close_settings_menu();
                 }
                 return true;
             }
@@ -2672,6 +2693,14 @@ impl App {
             let inside_menu = self.active_chooser_rect().is_some_and(|area| {
                 area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
             });
+            if inside_menu && self.chip_info.as_ref().is_some_and(|info| info.kind == "context") {
+                let key = match mouse.kind {
+                    MouseEventKind::ScrollUp => Some(KeyCode::Up),
+                    MouseEventKind::ScrollDown => Some(KeyCode::Down),
+                    _ => None,
+                };
+                if let Some(key) = key { return self.key(KeyEvent::new(key, KeyModifiers::NONE)); }
+            }
             let memory_rows = self.memory_list.as_ref().map(|list| list.indices().len());
             if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
                 if inside_menu {
@@ -3114,6 +3143,11 @@ impl App {
                     self.select_new_engine();
                 }
                 return true;
+            }
+            if self.new_session.as_ref().is_some_and(|form| form.isolation.docker()) {
+                let fields = if vendor_models(self.new_session.as_ref().unwrap().engine).is_empty() { 3 } else { 4 };
+                let first = y + if height >= 8 { 4 } else { 2 };
+                if mouse.row == first + fields + 2 { return self.open_docker_settings(); }
             }
             if let Some(form) = self.new_session.as_mut() {
                 let first = y + if height >= 8 { 4 } else { 2 };

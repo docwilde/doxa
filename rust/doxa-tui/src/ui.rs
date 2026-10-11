@@ -3,6 +3,7 @@ mod actions;
 mod commands;
 mod choice_dropdown;
 mod codegraph_viewer;
+mod context_usage;
 mod diff_controller;
 mod fleet_dependency_review;
 pub(crate) mod fleet_menu;
@@ -15,12 +16,14 @@ mod model_controls;
 mod native_package_viewer;
 mod native_package_run;
 mod operations_controller;
+mod router_settings;
 mod operations_menu;
 mod credential_editor;
 pub(crate) mod panes;
 mod render;
 mod session_controls;
 mod isolation_controls;
+mod docker_setup;
 mod session_navigation;
 mod triage;
 mod terminal_loop;
@@ -71,6 +74,7 @@ mod transcript_images;
 pub mod transcript_mermaid;
 mod tool_cards;
 mod transcript_roles;
+mod transcript_messages;
 pub(crate) mod transcript_tools;
 use tool_cards::ToolCards;
 
@@ -198,9 +202,15 @@ const CODEX_PERMISSION_CHOICES: [(&str, &str); 3] = [
     ("full-access", "No prompts; no sandbox"),
 ];
 
+const ROUTER_PERMISSION_CHOICES: [(&str,&str);2] = [
+    ("default","Manual · native worker asks before protected calls"),
+    ("auto","Native worker Auto · separate from automatic model routing"),
+];
+
 fn permission_choices(engine: Option<&str>) -> &'static [(&'static str, &'static str)] {
     match engine {
         Some("codex") => &CODEX_PERMISSION_CHOICES,
+        Some("router") => &ROUTER_PERMISSION_CHOICES,
         _ => &CLAUDE_PERMISSION_CHOICES,
     }
 }
@@ -213,7 +223,7 @@ fn permission_index(mode: &str, engine: Option<&str>) -> Option<usize> {
 
 fn permission_display_mode(mode: &str, engine: Option<&str>) -> bool {
     match engine {
-        Some("claude") => permission_index(mode, engine).is_some(),
+        Some("claude" | "router") => permission_index(mode, engine).is_some(),
         Some("codex") => matches!(mode, "on-request" | "auto" | "full-access" | "never"),
         _ => false,
     }
@@ -437,9 +447,19 @@ impl SettingsMenu {
         let (indices, start, count) = self.visible_window(height);
         indices.into_iter().skip(start).take(count).collect()
     }
+    fn has_preflight(&self) -> bool {
+        self.rows.get(self.selected).is_some_and(|row| matches!(row.setting.key,
+            "engine" | "router_config" | "mermaid_renderer" | "mermaid_renderer_root"))
+    }
+    fn preflight_rows(&self, height: u16) -> usize {
+        // Reserve the header, selected row, action hint and borders first.
+        if self.has_preflight() { usize::from(height.saturating_sub(6)).min(5) } else { 0 }
+    }
     fn visible_window(&self, height: u16) -> (Vec<usize>, usize, usize) {
         let indices = self.indices();
-        let count = usize::from(height.saturating_sub(if height < 12 { 5 } else { 9 })).max(1);
+        let count = usize::from(height.saturating_sub(if height < 12 { 5 } else { 9 }))
+            .min(usize::from(height.saturating_sub(5)).saturating_sub(self.preflight_rows(height)))
+            .max(1);
         let position = indices
             .iter()
             .position(|i| *i == self.selected)
@@ -1188,7 +1208,8 @@ fn streamed_turn_start(source: &str) -> Option<usize> {
     let mut start = 0;
     let mut found = None;
     for paragraph in source.split("\n\n") {
-        if fence.is_none() && paragraph.trim_matches('\n') == "**You:**"
+        if fence.is_none() && (paragraph.trim_matches('\n') == "**You:**"
+            || transcript_messages::Message::parse(paragraph.trim_matches('\n')).is_some_and(|message| message.starts_turn))
         {
             found = Some(start);
         } else {
@@ -1576,7 +1597,10 @@ pub struct App {
     engine_picker: bool,
     engine_selected: usize,
     new_session: Option<NewSession>,
+    docker_setup: Option<docker_setup::Prerequisites>,
+    docker_settings_open: bool,
     new_session_catalog_pending: Option<(launch::Engine, Receiver<Result<serde_json::Value, &'static str>>)>,
+    router_review: Option<router_settings::RouterReview>,
     vendor_catalog_pending: Option<(
         launch::Engine,
         Receiver<Option<Vec<doxa_vendors::ModelCapability>>>,
@@ -1865,7 +1889,10 @@ impl Default for App {
             engine_picker: false,
             engine_selected: 0,
             new_session: None,
+            docker_setup: None,
+            docker_settings_open: false,
             new_session_catalog_pending: None,
+            router_review: None,
             vendor_catalog_pending: None,
             pending_launches: Vec::new(),
             pending_attaches: Vec::new(),

@@ -5,6 +5,45 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.46 — 2026-10-11
+
+**Interface**
+
+- Place numbered **Settings** tabs on the submenu title bar, preserving clickable overflow, staged edits and the selected row above review footers.
+- Add responsive **`ContextUsage`** bars with validated token totals, component colors and ASCII support. Unknown or inconsistent usage stays explicit.
+- Render queued prompts with ordinary user Markdown and stripe formatting; remove pending previews when dequeued or canceled.
+
+**Peer messages**
+
+- Fix **`PeerHost`** and spawned-session prompts truncating sender IDs. Preserve full addresses and tell Claude to refresh **`peer_list`** after an exact-target refusal.
+- Give peer messages a separate stripe and Nerd Font robot marker. Preserve peer attribution through immediate and queued turns using host admission metadata.
+- Verify Claude SDK-MCP list/send/reply delivery with scoped full IDs; refuse prefixes, titles and peers outside the project scope.
+
+**Vendor approvals**
+
+- Fix **`NativeVendorGate`** delaying resolved approvals until model text arrives. Flush each reviewed tool result before the next call so consecutive GLM and DeepSeek approvals stay actionable.
+
+**Code graph and CLI**
+
+- Reduce Linux source-open and bounded Git-wait overhead. Five paired runs measure warmed p95 **117.0 → 91.9 ms**; one optimized pair reaches 101.1 ms. Broader latency validation remains open.
+- Retain all source hash passes, symlink refusal and read limits, including descriptor-walk fallback for 4096-byte relative paths. Document explicit TUI/CLI access and maintenance.
+- Add Greek **ΔΟΞΑ** block art to help and version output, build metadata and **docwilde <docwilde@proton.me>** author credit. Support **`-V`** as a version alias.
+
+**Jev Router**
+
+- Extend **`RouterHost`** to authenticated Claude and protected Codex targets with native permission/tool reviews, fresh internal worker IDs and source-bound canonical history.
+- Enable **Jev Router** in the Settings engine dropdown after private config and account/catalog review. New Session lists eligible configured targets; fixed-engine defaults disable routing.
+- Add explicit **`CliAccount`** billing: track Jev/API allowance separately from unknown CLI and total charges. Incomplete usage or interrupted worker identity blocks replay; managed summaries require an API target.
+
+**Docker setup**
+
+- Show Docker prerequisites before Start, preserve the New Session draft through image Settings, and accept only the current protected Codex image receipt.
+
+**Gallery**
+
+- Regenerate 22 terminal scenes at **3068 × 1734**, including Settings, context, queued prompts, peers and routing. Add a horizontally scrollable README gallery with full-size image links.
+- Move browser and Android screenshots into **`docs/remote-gallery.md`** with their fixture and historical capture records.
+
 ## 2.0.0-beta.45 — 2026-10-11
 
 **Menus**

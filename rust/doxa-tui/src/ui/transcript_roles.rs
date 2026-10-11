@@ -13,6 +13,7 @@ use ratatui::text::Line;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Speaker {
     User,
+    Peer,
     Assistant,
 }
 
@@ -36,18 +37,19 @@ pub(super) fn render(source: &str, width: u16, speaker: Option<Speaker>) -> Vec<
 
 pub(super) fn render_with_links(source: &str, width: u16, speaker: Option<Speaker>) -> markdown::RenderedMarkdown {
     let user = speaker == Some(Speaker::User);
-    let rule = user && width > 2;
+    let peer = speaker == Some(Speaker::Peer);
+    let rule = (user || peer) && width > 2;
     let body_width = if rule { width - 2 } else { width };
     let mut rendered = markdown::render_with_links(source, body_width);
     if rule {
         for link in &mut rendered.links { link.start += 2; link.end += 2; }
     }
     for line in &mut rendered.lines {
-        if user {
+        if user || peer {
             if rule {
-                line.spans.insert(0, Span::styled("│ ", Style::default().fg(theme::ACCENT)));
+                line.spans.insert(0, Span::styled("│ ", Style::default().fg(if peer { theme::PEER } else { theme::ACCENT })));
             }
-            line.style = line.style.patch(Style::default().bg(theme::HIGHLIGHT));
+            line.style = line.style.patch(Style::default().bg(if peer { theme::RAISED } else { theme::HIGHLIGHT }));
         }
     }
     rendered

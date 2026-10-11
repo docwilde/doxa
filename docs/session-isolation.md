@@ -18,7 +18,20 @@ container:
     doxa new --engine claude --isolation docker-open
     doxa new --engine codex --isolation docker-open
 
-Select the profile in the new-session form with Left/Right. The owner default is
+In New Session, click the Isolation field or press Enter to open its dropdown;
+Up/Down chooses a profile and Enter confirms it. Docker choices show local image
+policy and owned canonical socket prerequisites before Start. Missing setup
+keeps the selected model, profile and first prompt in place.
+
+Click **Docker image Settings** or press **Ctrl+O** to open **Settings → Session →
+Docker worker image digest**. Ctrl+S saves staged settings; Esc returns to the
+same New Session draft and refreshes the prerequisites. Configure the local
+socket under **Settings → Paths → local rootless Docker socket** if it differs
+from `unix:///run/user/UID/docker.sock`. The check reads local configuration and
+socket metadata only: Start still requires the Engine to prove rootless mode,
+effective cgroup limits and the pinned image's local availability.
+
+The owner default is
 configured with doxa settings set session_isolation PROFILE, selecting native,
 docker-open or docker-offline. Open egress permits worker Internet access.
 Docker offline has no worker network: ordinary online Claude and Codex turns
@@ -31,7 +44,11 @@ claims an outbound allowlist.
 
 Configure a reviewed worker image with docker_image = "sha256:CONTENT_ID" or
 "NAME@sha256:DIGEST" in the private DOXA config. An image must contain the
-image-owned doxa-isolation-worker, Claude CLI and protected Codex launcher.
+image-owned doxa-isolation-worker and the native CLI selected for that session
+(Claude CLI or the current protected Codex launcher). Follow the explicit
+[rootless Engine and reviewed worker image setup guide](../containers/session/README.md)
+before selecting Docker. The builder accepts the current installer/patch receipt
+and refuses the legacy protected Codex package; rebuild after upgrading it.
 DOXA does not pull images or build a repository's Dockerfile at session start.
 Rebuild the reviewed image with the current `doxa-isolation-worker` after upgrading
 DOXA; older workers cannot perform the required cgroup probe and are refused.

@@ -43,7 +43,7 @@ impl CompactionStatus {
     pub(super) fn lines(&self) -> Vec<String> {
         vec![self.summary(), "A verified managed summary is separate context; canonical originals are retained.".into(),
             "Auto/pin and the last ordinary routed worker remain unchanged; no Jev selection call.".into(),
-            "Summary call cost is included in the aggregate session estimate.".into()]
+            "Summary call cost is included in the tracked Jev/direct API estimate for Router sessions.".into()]
     }
 }
 
@@ -58,11 +58,12 @@ pub(super) struct RoutingStatus {
     fallback_reason: Option<String>,
     latency_ms: u64,
     cost_usd: Option<f64>,
+    tracked_cost_only: bool,
 }
 
 impl RoutingStatus {
     pub(super) fn from_value(data: &serde_json::Value) -> Option<Self> {
-        let engine = data["engine"].as_str().filter(|v| matches!(*v, "deepseek" | "glm"))?;
+        let engine = data["engine"].as_str().filter(|v| matches!(*v, "deepseek" | "glm" | "claude" | "codex"))?;
         let effort = data["effort"].as_str().filter(|v| matches!(*v, "none" | "low" | "medium" | "high" | "xhigh" | "max"))?;
         let mode = data["route_mode"].as_str().filter(|v| matches!(*v, "auto" | "pinned"))?;
         let reason = match data.get("fallback_reason") {
@@ -80,6 +81,7 @@ impl RoutingStatus {
             engine: engine.into(), model: identifier(data, "model", 128)?, effort: effort.into(),
             route_mode: mode.into(), fallback_reason: reason,
             latency_ms: data["latency_ms"].as_u64()?, cost_usd: cost,
+            tracked_cost_only: data["cost_scope"] == "jev_and_direct_api_only" || matches!(engine,"claude"|"codex"),
         })
     }
 
@@ -90,11 +92,14 @@ impl RoutingStatus {
     pub(super) fn summary(&self) -> String {
         let reason = self.fallback_reason.as_deref().unwrap_or("selected");
         let cost = self.cost_usd.map(|v| format!("${v:.6} est")).unwrap_or_else(|| "unknown cost".into());
-        format!("Route {} · {} · {reason} · {} ms · {cost}", self.route_mode, self.label(), self.latency_ms)
+        format!("Route {} · {} · {reason} · {} ms · {}{cost}{}", self.route_mode, self.label(), self.latency_ms,
+            if self.tracked_cost_only {"Jev "} else {""},if self.tracked_cost_only {" · CLI charges unknown"} else {""})
     }
 
     pub(super) fn lines(&self) -> Vec<String> {
-        vec![self.summary(), "Cost covers this routing decision; session cost includes worker calls.".into(),
+        vec![self.summary(), if self.tracked_cost_only {
+            "Decision cost is Jev only. Tracked session cost covers Jev/direct API; CLI account charges and total spend are unknown."
+        } else {"Cost covers this routing decision; session cost includes worker calls."}.into(),
             "Auto/target selection is controlled by /model; effort is configured per target.".into()]
     }
 }
@@ -106,6 +111,7 @@ pub(super) struct SessionTelemetry {
     pub(super) isolation: Option<serde_json::Value>,
     pub(super) account: Option<serde_json::Value>,
     pub(super) context: Option<String>,
+    pub(super) context_usage: super::context_usage::ContextUsage,
     pub(super) context_percent: Option<f64>,
     pub(super) context_tokens: Option<u64>,
     pub(super) context_limit: Option<u64>,
@@ -116,6 +122,7 @@ pub(super) struct SessionTelemetry {
     pub(super) cache_write_tokens: Option<u64>,
     pub(super) session_cost: Option<String>,
     pub(super) cost: Option<String>,
+    pub(super) tracked_cost_only: bool,
     pub(super) billing_mode: Option<String>,
     pub(super) subscription_type: Option<String>,
     pub(super) quota: Option<String>,
@@ -124,6 +131,33 @@ pub(super) struct SessionTelemetry {
 }
 
 impl SessionTelemetry {
+    pub(super) fn update_cost_scope(&mut self, data: &serde_json::Value) {
+        // Once a session can use CLI account workers, later API-only turns or
+        // incomplete status replies cannot turn the partial amount into a total.
+        self.tracked_cost_only |= data["cost_scope"] == "jev_and_direct_api_only"
+            || self.routing.as_ref().is_some_and(|routing|routing.tracked_cost_only);
+        if self.tracked_cost_only {
+            if let Some(routing)=self.routing.as_mut() {routing.tracked_cost_only=true;}
+        }
+    }
+    fn store_context(&mut self, context: super::context_usage::ContextUsage) {
+        self.context = context.chip_label();
+        self.context_percent = context.percentage;
+        self.context_tokens = context.used;
+        self.context_limit = context.capacity;
+        self.context_usage = context;
+    }
+
+    fn update_context(&mut self, report: &serde_json::Value) {
+        if ["ctx_percentage", "ctx_tokens", "ctx_max_tokens"].iter().any(|key| report.get(key).is_some()) {
+            self.store_context(super::context_usage::ContextUsage::reported(report, "ctx_tokens", "ctx_max_tokens", "ctx_percentage"));
+        }
+    }
+
+    pub(super) fn update_context_detail(&mut self, detail: &serde_json::Value) {
+        self.store_context(self.context_usage.detail(detail));
+    }
+
     /// The most consumed reported window determines the subscription warning.
     /// Unknown quotas and API billing retain the ordinary chip style.
     pub(super) fn quota_color(&self) -> Option<ratatui::style::Color> {
@@ -161,23 +195,8 @@ impl SessionTelemetry {
     pub(super) fn update_turn(&mut self, data: &serde_json::Value) {
         if let Some(compaction) = data.get("compaction") { self.compaction = CompactionStatus::from_value(compaction); }
         if let Some(routing) = data.get("routing") { self.routing = RoutingStatus::from_value(routing); }
-        let context = data["ctx_percentage"]
-            .as_f64()
-            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
-            .map(|value| format!("{value:.0}%"));
-        let absolute = data["ctx_tokens"]
-            .as_u64()
-            .zip(data["ctx_max_tokens"].as_u64())
-            .filter(|(used, limit)| *limit > 0 && used <= limit)
-            .map(|(used, limit)| format!("{used}/{limit}"));
-        if data.get("ctx_percentage").is_some() || data.get("ctx_tokens").is_some() {
-            self.context = context.or(absolute);
-            self.context_percent = data["ctx_percentage"]
-                .as_f64()
-                .filter(|value| value.is_finite() && (0.0..=100.0).contains(value));
-            self.context_tokens = data["ctx_tokens"].as_u64();
-            self.context_limit = data["ctx_max_tokens"].as_u64().filter(|limit| *limit > 0);
-        }
+        self.update_cost_scope(data);
+        self.update_context(data);
         if data["usage_scope"] == "session" {
             self.turns = data["num_turns"].as_u64().or(self.turns);
             self.input_tokens = data["input_tokens"].as_u64().or(self.input_tokens);
@@ -210,6 +229,7 @@ impl SessionTelemetry {
     pub(super) fn update_billing(&mut self, billing: &serde_json::Value) {
         if let Some(compaction) = billing.get("compaction") { self.compaction = CompactionStatus::from_value(compaction); }
         if let Some(routing) = billing.get("routing") { self.routing = RoutingStatus::from_value(routing); }
+        self.update_cost_scope(billing);
         if billing.get("session_cost_usd").is_some() || billing.get("cost_usd").is_some() {
             self.update_turn(billing);
         }
@@ -241,6 +261,7 @@ impl SessionTelemetry {
     pub(super) fn update_status(&mut self, status: &serde_json::Value) {
         if let Some(compaction) = status.get("compaction") { self.compaction = CompactionStatus::from_value(compaction); }
         if let Some(routing) = status.get("routing") { self.routing = RoutingStatus::from_value(routing); }
+        self.update_cost_scope(status);
         if let Some(value)=status.get("isolation") {
             self.isolation=super::isolation_controls::verified_status(value);
         }
@@ -263,23 +284,7 @@ impl SessionTelemetry {
         if let Some(billing) = status.get("billing") {
             self.update_billing(billing);
         }
-        let context = status["ctx_percentage"]
-            .as_f64()
-            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
-            .map(|value| format!("{value:.0}%"));
-        let absolute = status["ctx_tokens"]
-            .as_u64()
-            .zip(status["ctx_max_tokens"].as_u64())
-            .filter(|(used, limit)| *limit > 0 && used <= limit)
-            .map(|(used, limit)| format!("{used}/{limit}"));
-        if status.get("ctx_percentage").is_some() || status.get("ctx_tokens").is_some() {
-            self.context = context.or(absolute);
-            self.context_percent = status["ctx_percentage"]
-                .as_f64()
-                .filter(|value| value.is_finite() && (0.0..=100.0).contains(value));
-            self.context_tokens = status["ctx_tokens"].as_u64();
-            self.context_limit = status["ctx_max_tokens"].as_u64().filter(|limit| *limit > 0);
-        }
+        self.update_context(status);
         if let Some(usage) = status.get("usage") {
             self.turns = usage["num_turns"].as_u64();
             self.input_tokens = usage["input_tokens"].as_u64();
@@ -287,7 +292,7 @@ impl SessionTelemetry {
             self.cache_read_tokens = usage["cache_read_input_tokens"].as_u64();
             self.cache_write_tokens = usage["cache_creation_input_tokens"].as_u64();
         }
-        if let Some(cost) = status["total_cost_usd"]
+        if !self.tracked_cost_only { if let Some(cost) = status["total_cost_usd"]
             .as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0)
         {
@@ -308,7 +313,7 @@ impl SessionTelemetry {
         } else if status.get("total_cost_usd").is_some() {
             self.cost = None;
             self.session_cost = None;
-        }
+        } }
         if let Some(count) = status["belief_count"].as_u64() {
             self.lore = Some(format!("{count} beliefs"));
         } else if status.get("lore_scrub").is_some() {
@@ -322,6 +327,7 @@ impl SessionTelemetry {
 
     pub(super) fn billing_label(&self, engine: Option<&str>) -> Option<String> {
         match engine {
+            Some("router") if self.tracked_cost_only=>Some(format!("{} Jev/API · CLI ?",self.cost.clone().unwrap_or_else(||"$?".into()))),
             Some("deepseek" | "glm" | "router") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
             Some("codex" | "claude") => match self.billing_mode.as_deref() {
                 Some("api") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
@@ -353,6 +359,32 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn mixed_router_cost_scope_survives_api_turns_and_reattach_without_becoming_total() {
+        let routing=json!({"target_id":"cli-target","engine":"codex","model":"gpt-test","effort":"high",
+            "route_mode":"auto","fallback_reason":null,"latency_ms":10,"cost_usd":0.000001,
+            "cost_scope":"jev_and_direct_api_only","total_cost_usd":null,"cli_provider_charge_usd":null});
+        let mut telemetry=SessionTelemetry::default();
+        telemetry.update_turn(&json!({"routing":routing,"cost_usd":0.01,"session_cost_usd":0.01,"cost_is_estimate":true,
+            "cost_scope":"jev_and_direct_api_only","total_cost_usd":null}));
+        assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$0.0100 est Jev/API · CLI ?"));
+        assert!(telemetry.routing.as_ref().unwrap().lines().join("\n").contains("total spend are unknown"));
+        // Sticky scope also protects an incomplete older API-only frame.
+        telemetry.update_turn(&json!({"routing":{"target_id":"api-target","engine":"glm","model":"glm-5.3-flash",
+            "effort":"high","route_mode":"pinned","latency_ms":0,"cost_usd":0},
+            "cost_usd":0.02,"session_cost_usd":0.03,"cost_is_estimate":true}));
+        assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$0.0300 est Jev/API · CLI ?"));
+        assert!(telemetry.routing.as_ref().unwrap().lines().join("\n").contains("total spend are unknown"));
+        let mut restored=SessionTelemetry::default();
+        restored.update_status(&json!({"routing":routing,"total_cost_usd":null,"billing":{
+            "mode":"api","cost_usd":0.03,"session_cost_usd":0.03,"cost_is_estimate":true,
+            "cost_scope":"jev_and_direct_api_only","total_cost_usd":null,"cli_provider_charge_usd":null}}));
+        assert_eq!(restored.billing_label(Some("router")),telemetry.billing_label(Some("router")));
+        restored.update_turn(&json!({"cost_usd":null,"session_cost_usd":null,"cost_is_estimate":true}));
+        assert_eq!(restored.billing_label(Some("router")).as_deref(),Some("$? Jev/API · CLI ?"));
+        assert!(restored.session_cost.is_none());
+    }
+
+    #[test]
     fn router_restore_uses_bounded_identity_and_unknown_cost_stays_unknown() {
         let mut telemetry=SessionTelemetry::default();
         let value=json!({"target_id":"ds-fixture","engine":"deepseek","model":"deepseek-flash","effort":"high",
@@ -362,7 +394,7 @@ mod tests {
         assert!(status.summary().contains("unknown cost"));
         assert!(status.summary().contains("pinned"));
         assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$?"));
-        for (key,bad) in [("fallback_reason",json!("provider secret error")),("engine",json!("claude")),("target_id",json!("bad\u{1b}target")),("cost_usd",json!(-1.0)),("route_mode",json!("autoPermissions"))] {
+        for (key,bad) in [("fallback_reason",json!("provider secret error")),("engine",json!("unsupported")),("target_id",json!("bad\u{1b}target")),("cost_usd",json!(-1.0)),("route_mode",json!("autoPermissions"))] {
             let mut malformed=value.clone();malformed[key]=bad;
             assert!(RoutingStatus::from_value(&malformed).is_none(),"{key}");
         }

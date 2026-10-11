@@ -11,7 +11,7 @@
 > [!WARNING]
 > Rust 2.0 is in beta. Agents can edit files and run commands with your privileges. Choose a [session isolation profile](docs/session-isolation.md) and review the [platform limits](#platform-and-scope) before using DOXA on important work.
 
-![DOXA Rust beta.41 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.41-hero.png)
+![DOXA Rust beta.46 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.46-hero.png)
 
 [How the gallery was captured](docs/rust-gallery.md)
 
@@ -60,10 +60,12 @@ The [Rust guide](rust/README.md) covers keys, session recovery, worktrees, setti
 | Codex | Protected private app server | Linux build and Codex sign-in. |
 | DeepSeek | Rust API client | Supply an API key. |
 | GLM | Rust API client | Supply a z.ai API key. |
-| Router (opt-in) | Jev selects a configured DeepSeek/GLM API target | Private candidate config and worker credentials; Jev API key for automatic selection. |
+| Jev Router (opt-in) | Jev selects configured DeepSeek/GLM API or authenticated Claude/Codex CLI targets | Private candidate config, worker credentials and `TYPESAFE_API_KEY`. |
 
-[Engine capability matrix](docs/engine-capabilities.md) lists model, permission, cost, compaction, and platform support. The picker distinguishes sourced model facts from unknown context or thinking support. Budget admission uses a conservative documented price bound and refuses an unknown priced bound. DOXA does not silently switch engines during a session.
-The [Jev router](docs/jev-router.md) keeps a router session while selecting a configured API target at each turn. `/model auto` enables routing; a target ID pins it. This first native API slice supports chat and existing reviewed tools; Bash, workspace writes and Claude/Codex handoffs remain open.
+[Engine capability matrix](docs/engine-capabilities.md) lists model, permission, cost, compaction, and platform support. The picker distinguishes sourced model facts from unknown context or thinking support. API budget admission uses a conservative documented price bound and refuses an unknown priced bound.
+The [Jev Router](docs/jev-router.md) keeps one canonical conversation while selecting an eligible configured worker at each turn. `/model auto` enables routing; a target ID pins it. Native Claude and protected Codex workers retain their tool and permission reviews. Their account charges remain unknown and are excluded from the tracked Jev/API allowance.
+
+Enable it in **`/settings` → Session → default engine → Jev Router**. Set the private candidate-config path, press **Ctrl+P** to review current authentication and catalogs, then **Ctrl+S** to save the default for new sessions. Selecting a fixed engine disables that default. New Session also offers the reviewed Router targets in its clickable model dropdown. [Settings walkthrough](docs/router-settings.md).
 `doxa model-facts ENGINE MODEL [--review-before YYYY-MM-DD]` prints exact sourced facts and flags operator-selected review candidates. Add `--check-catalog` for an explicit read-only OpenAI API listing check with `OPENAI_API_KEY`; it reports listed, unlisted, or unknown without changing model or budget admission.
 
 Fleets can run an acting coordinator and workers under a reviewed charter, typed host gates, and spending limits. A separately selected alignment supervisor and fast LLM or Jev message judge can inspect work and messages. Dependent Docker-isolated workers wait for a host checkpoint, receiver read-back, sender agreement, and explicit human release; later turns and handoffs invalidate the review. `/fleet dependency-review` shows the evidence in the TUI. An owner-reviewed offline recipe can produce snapshot-bound test receipts; opt-in `--auto-test` runs it after host-observed turns. Receipts do not release dependencies. `doxa fleet debrief RUN --root PATH` summarizes bounded host evidence after a run without opening peer bodies or making model calls. A private scorer can evaluate consented, labeled real-message verdicts; no such corpus ships and evaluation does not change enforcement. [Fleet supervision](docs/fleet-supervision.md).
@@ -72,19 +74,40 @@ Fleets can run an acting coordinator and workers under a reviewed charter, typed
 
 Remote control is opt in. `doxa remote serve` exposes a private Rust browser view through Tailscale Serve. A private `doxa-hub` lets another DOXA installation use browser, CLI, or native TUI control across machines. Native clients can encrypt transcript and control content end to end with a shared key; the hub still sees connection metadata. `doxa remote tui HUB_URL --save-layout` saves remote-only tabs; `/remote-control HUB_URL --save-layout` opts in to mixed local/remote pane restore after fresh roster checks. The [remote guide](rust/README.md#remote-access) covers setup and limits. The [Chrome extension](browser-extension/README.md) supports encrypted hub sessions. The [Android client](android-client/README.md) has local and opt-in FCM background alert paths. Its debug APK builds and opens in an offline emulator; provisioned FCM, device and tailnet checks remain open.
 
-![Remote browser with a conversation and prompt](assets/shots/rust-remote-browser-conversation.png)
-
-<img src="assets/shots/android-remote-beta30-home-offline.png" alt="Android Remote connection screen in a clean offline emulator" width="260">
+See the [browser and Android gallery](docs/remote-gallery.md) for client screenshots and capture details.
 
 ## Gallery
 
-These beta.41 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
+**← Scroll left/right →** with the gallery scrollbar or a horizontal trackpad gesture. Click a screenshot to open it at full size.
 
-The gallery also shows the [read-only code graph modal](assets/shots/rust-2.0.0-beta.41-codegraph.png), [explicit project label](assets/shots/rust-2.0.0-beta.41-project-label.png), and [pane-row rail](assets/shots/rust-2.0.0-beta.41-pane-triage.png).
+These beta.46 frames render the production Ratatui app with deterministic example events. The [capture record](docs/rust-gallery.md) explains each scene and how to reproduce it. Browser and Android screenshots have their [own gallery](docs/remote-gallery.md).
 
-| Image preview | Isolation details | Fleet release review |
-| --- | --- | --- |
-| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.41-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.41-isolation.png) | ![Synthetic checkpoint and handoff evidence in the fleet release modal](assets/shots/rust-2.0.0-beta.41-fleet-release-review.png) |
+<table>
+<tr>
+<td><strong>Workspace</strong><br><a href="assets/shots/rust-2.0.0-beta.46-hero.png"><img src="assets/shots/rust-2.0.0-beta.46-hero.png" width="960" alt="Workspace with three engine tabs and a Markdown turn"></a></td>
+<td><strong>Settings</strong><br><a href="assets/shots/rust-2.0.0-beta.46-settings.png"><img src="assets/shots/rust-2.0.0-beta.46-settings.png" width="960" alt="Settings categories on the submenu title bar"></a></td>
+<td><strong>Jev Router settings</strong><br><a href="assets/shots/rust-2.0.0-beta.46-settings-router.png"><img src="assets/shots/rust-2.0.0-beta.46-settings-router.png" width="960" alt="Staged Jev Router default and private config path awaiting review"></a></td>
+<td><strong>Routing status</strong><br><a href="assets/shots/rust-2.0.0-beta.46-routing-status.png"><img src="assets/shots/rust-2.0.0-beta.46-routing-status.png" width="960" alt="Auto selection with separate effective worker and routing cost"></a></td>
+<td><strong>Context usage</strong><br><a href="assets/shots/rust-2.0.0-beta.46-context.png"><img src="assets/shots/rust-2.0.0-beta.46-context.png" width="960" alt="Context bar with reported token totals and components"></a></td>
+<td><strong>Queued prompts</strong><br><a href="assets/shots/rust-2.0.0-beta.46-queued-prompts.png"><img src="assets/shots/rust-2.0.0-beta.46-queued-prompts.png" width="960" alt="Queued prompts with user Markdown and stripe formatting"></a></td>
+<td><strong>Peer messages</strong><br><a href="assets/shots/rust-2.0.0-beta.46-peer-messages.png"><img src="assets/shots/rust-2.0.0-beta.46-peer-messages.png" width="960" alt="Attributed peer messages with a blue stripe and robot marker"></a></td>
+<td><strong>Code graph</strong><br><a href="assets/shots/rust-2.0.0-beta.46-codegraph.png"><img src="assets/shots/rust-2.0.0-beta.46-codegraph.png" width="960" alt="Read-only code graph query with source freshness evidence"></a></td>
+<td><strong>Project triage</strong><br><a href="assets/shots/rust-2.0.0-beta.46-triage.png"><img src="assets/shots/rust-2.0.0-beta.46-triage.png" width="960" alt="Project rail showing a hidden tab that needs input"></a></td>
+<td><strong>Pane rail</strong><br><a href="assets/shots/rust-2.0.0-beta.46-pane-triage.png"><img src="assets/shots/rust-2.0.0-beta.46-pane-triage.png" width="960" alt="Grouped pane rail with hidden-tab urgency"></a></td>
+<td><strong>Project label</strong><br><a href="assets/shots/rust-2.0.0-beta.46-project-label.png"><img src="assets/shots/rust-2.0.0-beta.46-project-label.png" width="960" alt="Explicit label on a verified project heading"></a></td>
+<td><strong>Image preview</strong><br><a href="assets/shots/rust-2.0.0-beta.46-image-preview.png"><img src="assets/shots/rust-2.0.0-beta.46-image-preview.png" width="960" alt="Local Markdown image preview in the transcript"></a></td>
+<td><strong>Isolation</strong><br><a href="assets/shots/rust-2.0.0-beta.46-isolation.png"><img src="assets/shots/rust-2.0.0-beta.46-isolation.png" width="960" alt="Docker isolation details from a synthetic worker report"></a></td>
+<td><strong>Fleet review</strong><br><a href="assets/shots/rust-2.0.0-beta.46-fleet-review.png"><img src="assets/shots/rust-2.0.0-beta.46-fleet-review.png" width="960" alt="Fleet plan with reviewer and message judge"></a></td>
+<td><strong>Dependency plan</strong><br><a href="assets/shots/rust-2.0.0-beta.46-fleet-dependency.png"><img src="assets/shots/rust-2.0.0-beta.46-fleet-dependency.png" width="960" alt="Fleet dependency plan with explicit human release"></a></td>
+<td><strong>Dependency release</strong><br><a href="assets/shots/rust-2.0.0-beta.46-fleet-release-review.png"><img src="assets/shots/rust-2.0.0-beta.46-fleet-release-review.png" width="960" alt="Synthetic checkpoint and handoff evidence in the release modal"></a></td>
+<td><strong>Fleet status</strong><br><a href="assets/shots/rust-2.0.0-beta.46-fleet-view.png"><img src="assets/shots/rust-2.0.0-beta.46-fleet-view.png" width="960" alt="Worker waiting for a reviewed predecessor"></a></td>
+<td><strong>Beliefs</strong><br><a href="assets/shots/rust-2.0.0-beta.46-beliefs.png"><img src="assets/shots/rust-2.0.0-beta.46-beliefs.png" width="960" alt="Belief selection and review controls"></a></td>
+<td><strong>Tool details</strong><br><a href="assets/shots/rust-2.0.0-beta.46-tool-entries.png"><img src="assets/shots/rust-2.0.0-beta.46-tool-entries.png" width="960" alt="Expanded tool input and output"></a></td>
+<td><strong>Memory</strong><br><a href="assets/shots/rust-2.0.0-beta.46-memory-management.png"><img src="assets/shots/rust-2.0.0-beta.46-memory-management.png" width="960" alt="Curated project memory controls"></a></td>
+<td><strong>Commands</strong><br><a href="assets/shots/rust-2.0.0-beta.46-commands.png"><img src="assets/shots/rust-2.0.0-beta.46-commands.png" width="960" alt="Slash-command completion"></a></td>
+<td><strong>Help</strong><br><a href="assets/shots/rust-2.0.0-beta.46-help.png"><img src="assets/shots/rust-2.0.0-beta.46-help.png" width="960" alt="Built-in command help"></a></td>
+</tr>
+</table>
 
 ## Platform and scope
 

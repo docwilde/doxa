@@ -32,6 +32,13 @@ impl Dropdown {
 }
 
 impl App {
+    fn dropdown_choice_label(&self,owner:&Owner,value:&str)->String {
+        match owner {
+            Owner::Setting(key) if key=="engine"=>safe_label(settings::engine_label(value)),
+            Owner::NewSession{engine:launch::Engine::Router,field:0,..}=>safe_label(&self.router_target_label(value)),
+            _=>choice_label(value),
+        }
+    }
     fn choice_values(&self, owner: &Owner) -> Option<(String, Vec<String>, String)> {
         match owner {
             Owner::Setting(key) => {
@@ -116,6 +123,7 @@ impl App {
                         }
                     }
                 } else { form.effort = Some(value.clone()); }
+                self.refresh_docker_setup();
             }
         }
     }
@@ -166,7 +174,7 @@ impl App {
             Owner::NewSession { field, .. } => parent.y + if parent.height >= 8 { 4 } else { 2 } + *field as u16,
         };
         let height = (dropdown.choices.len() as u16 + 2).min(parent.height.saturating_sub(2)).max(3);
-        let width = dropdown.choices.iter().map(|value| choice_label(value).width() as u16 + 4).max().unwrap_or(10)
+        let width = dropdown.choices.iter().map(|value| self.dropdown_choice_label(&dropdown.owner,value).width() as u16 + 4).max().unwrap_or(10)
             .max(safe_label(&dropdown.title).width() as u16 + 4).max(26).min(parent.width.saturating_sub(2));
         let max_y = parent.bottom().saturating_sub(height + 1);
         let y = if row + 1 + height < parent.bottom() { row + 1 }
@@ -205,7 +213,7 @@ impl App {
         let count = usize::from(area.height - 2);
         let start = dropdown.visible_start(count);
         let mut lines = dropdown.choices.iter().enumerate().skip(start).take(count).map(|(index, value)|
-            Line::styled(format!(" {} {}", if index == dropdown.selected { '›' } else { ' ' }, choice_label(value)),
+            Line::styled(format!(" {} {}", if index == dropdown.selected { '›' } else { ' ' }, self.dropdown_choice_label(&dropdown.owner,value)),
                 super::chooser_row_style(index == dropdown.selected))).collect::<Vec<_>>();
         let model = matches!(dropdown.owner, Owner::NewSession { field: 0, .. });
         if lines.is_empty() {
@@ -235,7 +243,7 @@ fn choice_label(value: &str) -> String {
     if value.is_empty() { "(default)".into() } else { safe_label(value) }
 }
 
-/// Render and hit testing consume the same visible numbered tabs, including overflow.
+/// Render and hit testing consume the same title-bar tabs, including overflow.
 pub(super) fn settings_tabs(area: Rect, selected: usize) -> Vec<(usize, Rect, String)> {
     let labels = settings::CATEGORIES.iter().enumerate().map(|(index, label)| format!(" {} {label} ", index + 1)).collect::<Vec<_>>();
     let capacity = usize::from(area.width.saturating_sub(4));
@@ -243,7 +251,7 @@ pub(super) fn settings_tabs(area: Rect, selected: usize) -> Vec<(usize, Rect, St
     while start < selected && labels[start..=selected].iter().map(|s| s.width()).sum::<usize>() > capacity { start += 1; }
     let mut x = area.x + 1;
     let mut result = Vec::new();
-    if start > 0 { result.push((start - 1, Rect::new(x, area.y + 2, 1, 1), "‹".into())); }
+    if start > 0 { result.push((start - 1, Rect::new(x, area.y, 1, 1), "‹".into())); }
     x += 1;
     let right = area.right().saturating_sub(2);
     for (index, label) in labels.iter().enumerate().skip(start) {
@@ -251,12 +259,12 @@ pub(super) fn settings_tabs(area: Rect, selected: usize) -> Vec<(usize, Rect, St
         if x + width > right {
             if index == start {
                 let shown = label.chars().take(usize::from(right.saturating_sub(x))).collect::<String>();
-                result.push((index, Rect::new(x, area.y + 2, shown.width() as u16, 1), shown));
+                result.push((index, Rect::new(x, area.y, shown.width() as u16, 1), shown));
             }
-            if index > selected || index == start { result.push(((if index == start { index + 1 } else { index }).min(labels.len()-1), Rect::new(right, area.y + 2, 1, 1), "›".into())); }
+            if index > selected || index == start { result.push(((if index == start { index + 1 } else { index }).min(labels.len()-1), Rect::new(right, area.y, 1, 1), "›".into())); }
             break;
         }
-        result.push((index, Rect::new(x, area.y + 2, width, 1), label.clone()));
+        result.push((index, Rect::new(x, area.y, width, 1), label.clone()));
         x += width;
     }
     result
@@ -349,9 +357,16 @@ mod tests {
             assert_eq!(app.settings_menu.as_ref().unwrap().category, category);
             let area = app.active_chooser_rect().unwrap();
             let tab = settings_tabs(area, category).into_iter().find(|(index, _, label)| *index == category && label.contains(settings::CATEGORIES[category])).unwrap();
-            assert!(paint(&app).contains(settings::CATEGORIES[category]));
+            let mut terminal = Terminal::new(TestBackend::new(app.size.width, app.size.height)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let row = |y| (area.x..area.right()).map(|x|
+                terminal.backend().buffer()[(x, y)].symbol()).collect::<String>();
+            assert_eq!(tab.1.y, area.y);
+            assert!(row(area.y).contains(settings::CATEGORIES[category]));
+            assert!(!row(area.y + 2).contains(settings::CATEGORIES[category]));
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), tab.1.x + 1, tab.1.y);
             assert_eq!(app.settings_menu.as_ref().unwrap().category, category);
+            assert_eq!(app.drag, None, "title tab click must not resize the menu");
         }
         key(&mut app, KeyCode::Char('1'));
         let menu = app.settings_menu.as_mut().unwrap();
@@ -378,9 +393,9 @@ mod tests {
         assert!(app.choice_dropdown.is_some());
         let dropdown = app.choice_dropdown_rect().unwrap();
         assert!(menu.contains(Position::new(dropdown.x, dropdown.y)));
-        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), dropdown.x + 2, dropdown.y + 2);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), dropdown.x + 2, dropdown.y + 3);
         assert!(app.choice_dropdown.is_none());
-        assert_eq!(app.settings_menu.as_ref().unwrap().edits["session_isolation"].as_deref(), Some("docker-open"));
+        assert_eq!(app.settings_menu.as_ref().unwrap().edits["engine"].as_deref(), Some("codex"));
         assert!(app.settings_menu.as_ref().unwrap().draft.is_none());
         assert!(app.pending_launches.is_empty());
     }

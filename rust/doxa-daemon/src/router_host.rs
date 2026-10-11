@@ -1,20 +1,23 @@
 //! Opt-in turn-boundary routing over one canonical VendorHost conversation.
 use crate::vendor_host::VendorHost;
-use doxa_router::{Candidate, Config, Ledger, Provider, Reason, RoutingInput};
+use doxa_router::{Billing, Candidate, Config, Ledger, Provider, Reason, RoutingInput};
+use crate::router_cli::{CliOptions,Worker};
 use doxa_runtime::Host;
 use doxa_vendors::{TurnLimits, Vendor};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{fs, io::{self, Read, Write}, path::{Path, PathBuf},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-    sync::{atomic::{AtomicBool, Ordering}, Mutex}};
+    sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}};
 
 const JOURNAL_MAX: u64 = 256 * 1024;
 
 fn vendor(provider: Provider) -> Vendor {
-    match provider { Provider::Deepseek => Vendor::DeepSeek, Provider::Glm => Vendor::Glm }
+    match provider { Provider::Deepseek => Vendor::DeepSeek, Provider::Glm => Vendor::Glm,
+        Provider::Claude | Provider::Codex => unreachable!("CLI targets do not use API transport") }
 }
 fn priced(input: u64, output: u64, candidate: &Candidate) -> Option<u64> {
+    if candidate.billing != Billing::Api { return None; }
     let cost = (input as u128).checked_mul(candidate.input_usd_micros_per_million as u128)?
         .checked_add((output as u128).checked_mul(candidate.output_usd_micros_per_million as u128)?)?
         .div_ceil(1_000_000);
@@ -40,6 +43,8 @@ struct WorkerLedger {
     estimated_actual_usd_micros: u64,
     retained_reservation_usd_micros: u64,
     accounting_unknown: bool,
+    #[serde(default)]
+    cli_turns: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,8 +61,13 @@ struct State {
     compaction: Option<Value>,
     #[serde(default)]
     pending_compaction: Option<Value>,
+    #[serde(default)]
+    pending_cli: Option<Value>,
+    #[serde(default = "manual_permission")]
+    permission: String,
     receipts: Vec<Value>,
 }
+fn manual_permission() -> String { "default".into() }
 impl State {
     fn held(&self) -> Option<u64> {
         self.router.reserved_usd_micros.max(self.router.actual_usd_micros)
@@ -65,7 +75,7 @@ impl State {
             .checked_add(self.worker.retained_reservation_usd_micros)
     }
     fn unknown(&self) -> bool {
-        self.incomplete || self.pending_compaction.is_some() || self.router.accounting_unknown || self.worker.accounting_unknown
+        self.incomplete || self.pending_compaction.is_some() || self.pending_cli.is_some() || self.router.accounting_unknown || self.worker.accounting_unknown
     }
     fn estimated_spent(&self) -> Option<u64> {
         if self.unknown() { return None; }
@@ -127,6 +137,11 @@ impl Journal {
 
 pub struct RouterHost {
     inner: VendorHost,
+    cli: CliOptions,
+    cwd: PathBuf,
+    active_worker: Mutex<Option<Arc<Worker>>>,
+    peer_handler: Mutex<Option<doxa_runtime::PeerToolHandler>>,
+    session_handler: Mutex<Option<doxa_runtime::PeerToolHandler>>,
     config: Config,
     ceiling_micros: Option<u64>,
     journal: Journal,
@@ -140,8 +155,14 @@ pub struct RouterHost {
 }
 
 impl RouterHost {
+    #[cfg(test)]
     pub fn new(config: Config, cwd: &Path, id: &str, resume: bool, ceiling: Option<f64>,
         #[cfg(feature = "local-test-server")] endpoint: Option<String>) -> Result<Self, String> {
+        Self::new_with_cli(config,cwd,id,resume,ceiling,CliOptions::default(),
+            #[cfg(feature = "local-test-server")] endpoint)
+    }
+    pub fn new_with_cli(config: Config, cwd: &Path, id: &str, resume: bool, ceiling: Option<f64>, cli: CliOptions,
+        #[cfg(feature = "local-test-server")] endpoint: Option<String>) -> Result<Self,String> {
         config.validate().map_err(|_| "Invalid router configuration")?;
         if config.candidates.iter().any(|candidate| candidate.id == "auto") {
             return Err("Router target ID auto is reserved for automatic selection".into());
@@ -160,17 +181,20 @@ impl RouterHost {
         let state = if resume {
             let state = journal.read().map_err(|_| "Router resume requires a safe durable journal")?;
             if state.version != 1 || state.identity != identity || state.held().is_none()
-                || state.receipts.len() > 1024 || state.pinned.as_ref().is_some_and(|id| config.candidate(id).is_none()) {
+                || !matches!(state.permission.as_str(),"default"|"auto") || state.receipts.len() > 1024 || state.pinned.as_ref().is_some_and(|id| config.candidate(id).is_none()) {
                 return Err("Router resume identity or accounting changed".into());
             }
             state
         } else {
             if fs::symlink_metadata(&journal.path).is_ok() { return Err("Router journal already exists; use explicit resume".into()); }
             State { version: 1, identity, router: Ledger::default(), worker: WorkerLedger::default(),
-                pinned: None, turn: 0, incomplete: false, selection: None, compaction: None, pending_compaction: None, receipts: Vec::new() }
+                pinned: None, turn: 0, incomplete: false, selection: None, compaction: None, pending_compaction: None, pending_cli: None, permission: manual_permission(), receipts: Vec::new() }
         };
         let initial = config.candidate(&config.fallback_id).ok_or("Router fallback is missing")?;
-        let inner = VendorHost::new_router(vendor(initial.provider), initial.model.clone(), initial.effort.clone(), cwd, id, resume,
+        let (initial_vendor,initial_model,initial_effort) = if initial.provider.is_cli() {
+            (Vendor::DeepSeek,"router-unselected".to_owned(),"none".to_owned())
+        } else {(vendor(initial.provider),initial.model.clone(),initial.effort.clone())};
+        let inner = VendorHost::new_router(initial_vendor,initial_model,initial_effort,cwd,id,resume,
             #[cfg(feature = "local-test-server")] endpoint.clone())?;
         // Configuration labels/descriptions cannot smuggle a known credential
         // into Jev payloads, public controls or exact persisted target IDs.
@@ -184,13 +208,14 @@ impl RouterHost {
         }
         if !resume { inner.initialize_router_conversation()?; }
         journal.write(&state).map_err(|_| "Router initial accounting could not be persisted")?;
-        Ok(Self { inner, config, ceiling_micros, journal, state: Mutex::new(state),
+        Ok(Self { inner, cli, cwd:cwd.to_owned(), active_worker:Mutex::new(None),peer_handler:Mutex::new(None),session_handler:Mutex::new(None),config, ceiling_micros, journal, state: Mutex::new(state),
             turn_lock: Mutex::new(()), active: AtomicBool::new(false), cancel: AtomicBool::new(false), closing: AtomicBool::new(false),
             #[cfg(feature = "local-test-server")] jev_endpoint: endpoint })
     }
 
     pub fn shutdown(&self) {
         self.closing.store(true, Ordering::Release); self.cancel.store(true, Ordering::Release);
+        if let Some(worker)=self.active_worker.lock().unwrap().clone() { let _=worker.host().call("interrupt",&json!({})); }
         self.inner.shutdown();
     }
     fn save(&self, state: &mut State) -> Result<(), String> {
@@ -226,8 +251,21 @@ impl RouterHost {
                 }));
             if let Some(rows) = advertised.filter(|rows| !rows.is_empty()) { catalogs.push((provider, rows)); }
         }
+        let mut cli_catalogs=Vec::new();
+        if !summary { for provider in [Provider::Claude,Provider::Codex] {
+            if !self.config.candidates.iter().any(|candidate|candidate.provider == provider
+                && pinned.is_none_or(|id|candidate.id == id)) { continue; }
+            if self.cancel.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) { break; }
+            if let Ok(rows)=self.cli.catalog(provider,&self.cwd) { cli_catalogs.push((provider,rows)); }
+        } }
         self.config.candidates.iter().filter(|candidate| {
             if pinned.is_some_and(|id| candidate.id != id) { return false; }
+            if candidate.provider.is_cli() {
+                if summary || candidate.billing != Billing::CliAccount || tools && !candidate.supports_tools
+                    || candidate.context_tokens.checked_sub(candidate.max_output_tokens).is_none_or(|cap|cap < input) { return false; }
+                return cli_catalogs.iter().find(|(provider,_)|*provider == candidate.provider)
+                    .is_some_and(|(_,rows)|rows.iter().any(|row|crate::router_cli::advertised(candidate,row)));
+            }
             let Some((_, catalog)) = catalogs.iter().find(|(provider, _)| *provider == candidate.provider) else { return false; };
             let selected = vendor(candidate.provider);
             let capability = catalog.iter().find(|row| row.id == candidate.model);
@@ -259,6 +297,7 @@ impl RouterHost {
                 state.pinned.as_deref().or(last).unwrap_or(&self.config.fallback_id).to_owned())
         };
         let candidate = self.config.candidate(&target_id).ok_or("Configured compaction target is missing")?;
+        if candidate.provider.is_cli() { return Err("Router managed summary requires an eligible reviewed API target; pin an API target before /compact".into()); }
         let reserve = summary_hold(candidate).ok_or("Summary reservation overflow")?;
         if self.ceiling_micros.is_some_and(|ceiling| held.checked_add(reserve).is_none_or(|sum|sum > ceiling)) {
             return Err("Aggregate summary reservation exceeds the session ceiling".into());
@@ -356,6 +395,11 @@ impl RouterHost {
                 event["data"]["session_cost_usd"] = json!(state.estimated_spent().map(|sum|sum as f64/1_000_000.0));
                 event["data"]["cost_is_estimate"] = json!(true);
                 event["data"]["cost_basis"] = json!("aggregate_upper_rates");
+                event["data"]["cost_scope"] = json!("jev_and_direct_api_only");
+                if self.config.candidates.iter().any(|row|row.provider.is_cli()) {
+                    event["data"]["total_cost_usd"] = Value::Null;
+                    event["data"]["cli_provider_charge_usd"] = Value::Null;
+                }
                 event["data"]["aggregate_held_usd"] = json!(state.held().map(|sum|sum as f64/1_000_000.0));
                 event["data"]["accounting_unknown"] = json!(state.unknown());
                 completed = true;
@@ -367,6 +411,135 @@ impl RouterHost {
             self.save(&mut state)?;
         }
         Ok(())
+    }
+
+    fn run_cli(&self,text:&str,candidate:&Candidate,selection:&Value,outcome:&doxa_router::Outcome,
+        emit:&mut dyn FnMut(Value)) -> Result<(),String> {
+        let cap=candidate.context_tokens.checked_sub(candidate.max_output_tokens).ok_or("CLI context cap invalid")?;
+        let prepared=self.inner.cli_context(text,cap);
+        let (packet,source_hash)=match prepared {
+            Ok(prepared)=>prepared,
+            Err(error)=>{let mut state=self.state.lock().unwrap();state.incomplete=false;self.save(&mut state)?;return Err(error);}
+        };
+        let worker_id=crate::router_cli::worker_id().map_err(|_|"Router worker identity unavailable")?;
+        let permission={
+            let mut state=self.state.lock().unwrap();
+            state.pending_cli=Some(json!({"operation":"cli_turn","worker_id":worker_id,
+                "source_sha256":source_hash,"request_sha256":doxa_router::hash(&packet).map_err(|_|"CLI request identity unavailable")?,
+                "target_id":candidate.id,"provider":candidate.provider,"model":candidate.model,"effort":candidate.effort,
+                "billing":"cli_account","cost_scope":"jev_and_direct_api_only","provider_charge_usd":null,
+                "input_cap_bytes":cap,"output_cap_tokens":candidate.max_output_tokens,"permission":state.permission}));
+            self.save(&mut state)?;state.permission.clone()
+        };
+        let worker=match self.cli.start(candidate,&self.cwd,&worker_id,&permission,self.inner.router_agent()) {
+            Ok(worker)=>worker,
+            Err(_)=>{let mut state=self.state.lock().unwrap();state.pending_cli=None;state.incomplete=false;self.save(&mut state)?;
+                return Err("Selected CLI worker authentication, catalog or protected startup unavailable; no user prompt submitted".into());}
+        };
+        if let Some(handler)=self.peer_handler.lock().unwrap().clone() { worker.host().set_peer_tool_handler(handler); }
+        if let Some(handler)=self.session_handler.lock().unwrap().clone() { worker.host().set_session_tool_handler(handler); }
+        // Revalidate canonical source after catalog/native initialization and
+        // before submitting the only current user request. No old tool replay.
+        if self.cancel.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire)
+            || self.inner.cli_context(text,cap).map(|(_,current)|current != source_hash).unwrap_or(true) {
+            worker.shutdown();
+            let mut state=self.state.lock().unwrap();state.pending_cli=None;state.incomplete=false;self.save(&mut state)?;
+            return Err("Router CLI source changed or admission cancelled before submission".into());
+        }
+        *self.active_worker.lock().unwrap()=Some(worker.clone());
+        struct WorkerAdmission<'a> { slot:&'a Mutex<Option<Arc<Worker>>>, worker:Arc<Worker> }
+        impl Drop for WorkerAdmission<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut slot)=self.slot.lock() {slot.take();}
+                self.worker.shutdown();
+            }
+        }
+        // Clear the outer control handle and stop the native worker even when
+        // a provider callback panics. Shutdown itself is guarded once-only.
+        let _admission=WorkerAdmission{slot:&self.active_worker,worker:worker.clone()};
+        emit(json!({"type":"routing_selected","data":selection}));
+        let mut output=String::new();let mut overflow=false;let mut terminal=None;
+        worker.host().prompt(&packet,&mut |mut event| {
+            match event["type"].as_str() {
+                // Provider controls never replace the router Auto/pin picker.
+                Some("model_changed"|"effort_changed"|"effort_verified")=>return,
+                Some("turn_started")=>{
+                    event["data"]["prompt"]=json!(text);
+                    event["data"]["engine"]=json!(candidate.provider.engine_id());
+                    event["data"]["routing"]=selection.clone();
+                    if self.cancel.load(Ordering::Acquire) {let _=worker.host().call("interrupt",&json!({}));}
+                }
+                Some("text_delta") if event["data"]["parent_id"].is_null()=>{
+                    if let Some(text)=event["data"]["text"].as_str() {
+                        if output.len().saturating_add(text.len()) > candidate.max_output_tokens.saturating_mul(16).min(8*1024*1024) as usize {
+                            overflow=true;let _=worker.host().call("interrupt",&json!({}));return;
+                        }
+                        output.push_str(text);
+                    }
+                }
+                Some("billing")=>{
+                    let native=event["data"].clone();
+                    event["data"]=self.billing_snapshot().unwrap_or(Value::Null);
+                    event["data"]["worker_billing"]=native;
+                }
+                Some("turn_done"|"turn_refused")=>{terminal=Some(event);return;}
+                _=>{}
+            }
+            emit(event);
+        });
+        *self.active_worker.lock().unwrap()=None;
+        worker.shutdown();
+        let mut event=terminal.unwrap_or_else(||json!({"type":"turn_done","data":{"is_error":true}}));
+        event["type"]=json!("turn_done");
+        let data=&event["data"];
+        let tokens=if candidate.provider == Provider::Claude {
+            data["input_tokens"].as_u64().zip(data["cache_read_input_tokens"].as_u64())
+                .zip(data["cache_creation_input_tokens"].as_u64())
+                .and_then(|((fresh,read),create)|fresh.checked_add(read)?.checked_add(create))
+                .zip(data["output_tokens"].as_u64())
+        } else { data["input_tokens"].as_u64().zip(data["output_tokens"].as_u64()) };
+        let usage=tokens.filter(|(input,output)|*input>0 && *output<=candidate.max_output_tokens
+            && input.checked_add(candidate.max_output_tokens).is_some_and(|total|total<=candidate.context_tokens)
+            && data["is_error"] == false && data["usage_complete"] == true
+            && data["model_consistent"] == true && data["model"] == candidate.model && !overflow
+            && !self.cancel.load(Ordering::Acquire) && !self.closing.load(Ordering::Acquire));
+        let committed=usage.is_some() && self.inner.commit_cli_turn(text,&output,&source_hash,selection).is_ok();
+        let mut state=self.state.lock().unwrap();
+        let pending=state.pending_cli.clone();
+        if committed {
+            let (input,output)=usage.unwrap();
+            if let Some((inputs,outputs,turns))=state.worker.input_tokens.checked_add(input)
+                .zip(state.worker.output_tokens.checked_add(output)).zip(state.worker.cli_turns.checked_add(1)).map(|((i,o),t)|(i,o,t)) {
+                state.worker.input_tokens=inputs;state.worker.output_tokens=outputs;state.worker.cli_turns=turns;
+                state.pending_cli=None;state.incomplete=false;
+            } else {state.worker.accounting_unknown=true;}
+        } else {state.worker.accounting_unknown=true;}
+        let complete=!state.unknown();
+        let receipt=json!({"turn":state.turn,"selection":selection,"router":outcome,"worker":pending,
+            "worker_usage":usage.map(|(input,output)|json!({"input_tokens":input,"output_tokens":output})),
+            "worker_charge_usd":null,"complete":complete});
+        state.receipts.push(receipt);
+        let saved=self.save(&mut state).is_ok();
+        if !complete || !saved { event["data"]["is_error"]=json!(true);
+            event["data"]["error"]=json!("CLI worker usage, model, source or durable completion is unverified; further work withheld without replay"); }
+        event["data"]["engine"]=json!(candidate.provider.engine_id());
+        event["data"]["routing"]=selection.clone();
+        event["data"]["prompt_tokens"]=json!(usage.map(|(input,_)|input));
+        event["data"]["completion_tokens"]=json!(usage.map(|(_,output)|output));
+        event["data"]["usage_complete"]=json!(usage.is_some());
+        // Each private CLI identity executes one turn; provider session usage
+        // is therefore the observed turn usage in the canonical conversation.
+        event["data"]["usage_scope"]=json!("turn");
+        event["data"]["worker_charge_usd"]=Value::Null;
+        event["data"]["total_cost_usd"]=Value::Null;
+        event["data"]["cost_usd"]=json!(if state.unknown(){None}else{outcome.router_cost_usd_micros.map(|sum|sum as f64/1_000_000.0)});
+        event["data"]["session_cost_usd"]=json!(state.estimated_spent().map(|sum|sum as f64/1_000_000.0));
+        event["data"]["cost_scope"]=json!("jev_and_direct_api_only");
+        event["data"]["cost_basis"]=json!("aggregate_upper_rates");
+        event["data"]["cost_is_estimate"]=json!(true);
+        event["data"]["accounting_unknown"]=json!(state.unknown());
+        event["data"]["aggregate_held_usd"]=json!(state.held().map(|sum|sum as f64/1_000_000.0));
+        emit(event);Ok(())
     }
 
     fn route(&self, text: &str, emit: &mut dyn FnMut(Value)) -> Result<(), String> {
@@ -430,22 +603,23 @@ impl RouterHost {
         }
         let candidate = turn_config.candidate(&outcome.candidate_id)
             .filter(|candidate| prepared.eligible_ids.contains(&candidate.id)).ok_or("Router selected an ineligible target")?;
-        let reserve = worker_hold(candidate).ok_or("Worker reservation overflow")?;
+        let reserve = if candidate.provider.is_cli() {0} else {worker_hold(candidate).ok_or("Worker reservation overflow")?};
         let selection = {
             let mut state = self.state.lock().unwrap();
             if self.ceiling_micros.is_some_and(|ceiling| state.held().and_then(|sum| sum.checked_add(reserve)).is_none_or(|sum| sum > ceiling)) {
                 state.incomplete = false; self.save(&mut state)?;
                 return Err("Aggregate router and worker reservation exceeds the session ceiling".into());
             }
-            let facts = doxa_engines::model_registry::lookup(vendor(candidate.provider).engine_id(), &candidate.model);
+            let facts = doxa_engines::model_registry::lookup(candidate.provider.engine_id(), &candidate.model);
             let provider_window = match facts.context_window.provenance {
                 doxa_engines::model_registry::Provenance::Static { source, as_of } =>
                     json!({"value":facts.context_window.value,"source":source,"read_on":as_of}),
                 doxa_engines::model_registry::Provenance::Unknown =>
                     json!({"value":null,"source":null,"read_on":null}),
             };
-            let selection = json!({"turn":state.turn,"target_id":candidate.id,"engine":vendor(candidate.provider).engine_id(),
-                "model":candidate.model,"effort":candidate.effort,"route_mode":if pinned.is_some(){"pinned"}else{"auto"},
+            let selection = json!({"turn":state.turn,"target_id":candidate.id,"engine":candidate.provider.engine_id(),
+                "model":candidate.model,"effort":candidate.effort,"billing":candidate.billing,
+                "cost_scope":"jev_and_direct_api_only","cli_provider_charge_usd":null,"route_mode":if pinned.is_some(){"pinned"}else{"auto"},
                 "fallback_reason":if outcome.reason == Reason::Selected { Value::Null } else { serde_json::to_value(&outcome.reason).unwrap() },
                 "latency_ms":outcome.latency_ms,"cost_usd":outcome.router_cost_usd_micros.map(|cost|cost as f64 / 1_000_000.0),
                 "cost_is_estimate":true,"context_basis":"operator_request_byte_cap","provider_window":provider_window,
@@ -455,6 +629,9 @@ impl RouterHost {
             self.save(&mut state)?;
             selection
         };
+        if candidate.provider.is_cli() {
+            return self.run_cli(text,candidate,&selection,&outcome,emit);
+        }
         if let Err(error) = self.inner.select_route(vendor(candidate.provider), &candidate.model, &candidate.effort, selection.clone(),
             TurnLimits { input_bytes: usize::try_from(candidate.context_tokens-candidate.max_output_tokens).map_err(|_| "Worker context cap overflow")?,
                 output_tokens: candidate.max_output_tokens }) {
@@ -498,6 +675,11 @@ impl RouterHost {
                 event["data"]["session_cost_usd"] = json!(state.estimated_spent().map(|sum|sum as f64/1_000_000.0));
                 event["data"]["cost_is_estimate"] = json!(true);
                 event["data"]["cost_basis"] = json!("aggregate_upper_rates");
+                event["data"]["cost_scope"] = json!("jev_and_direct_api_only");
+                if self.config.candidates.iter().any(|row|row.provider.is_cli()) {
+                    event["data"]["total_cost_usd"] = Value::Null;
+                    event["data"]["cli_provider_charge_usd"] = Value::Null;
+                }
                 event["data"]["aggregate_held_usd"] = json!(state.held().map(|sum|sum as f64/1_000_000.0));
                 event["data"]["accounting_unknown"] = json!(state.unknown());
                 completed = Some(());
@@ -527,7 +709,20 @@ impl Host for RouterHost {
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
-            "interrupt" => { self.cancel.store(true, Ordering::Release); self.inner.call(method, params) }
+            "interrupt" => { self.cancel.store(true, Ordering::Release);
+                if let Some(worker)=self.active_worker.lock().unwrap().clone() {let _=worker.host().call(method,params);}
+                self.inner.call(method, params) }
+            "answer_needs_input" => {
+                if let Some(worker)=self.active_worker.lock().unwrap().clone() {worker.host().call(method,params)}
+                else {self.inner.call(method,params)}
+            }
+            "set_permission_mode" => {
+                let Ok(_turn)=self.turn_lock.try_lock() else {return Err("Router permission changes require idle workers".into());};
+                if !self.config.candidates.iter().any(|row|row.provider.is_cli()) {return Err("No configured CLI permission surface".into());}
+                let mode=params["mode"].as_str().filter(|mode|matches!(*mode,"default"|"auto")).ok_or("Router permission mode must be default or auto")?;
+                let mut state=self.state.lock().unwrap();if state.unknown(){return Err("Router accounting incomplete; permission withheld".into());}
+                state.permission=mode.into();self.save(&mut state)?;Ok(json!({"mode":mode,"verified":true}))
+            }
             "stop" => { self.shutdown(); Ok(json!({})) }
             "list_models" => Ok(json!({"models":std::iter::once("auto").chain(self.config.candidates.iter().map(|row|row.id.as_str())).collect::<Vec<_>>(),
                 "note":"Configured routing targets; eligibility checked at each turn"})),
@@ -542,7 +737,7 @@ impl Host for RouterHost {
                 Ok(json!({"model":model,"effort":null}))
             }
             "set_effort" => Err("Router effort is configured per target; changing it requires a reviewed router config".into()),
-            "get_settings" => { let state = self.state.lock().unwrap(); Ok(json!({"model":state.pinned.as_deref().unwrap_or("auto"),"effort":null,"routing":state.selection})) }
+            "get_settings" => { let state = self.state.lock().unwrap(); Ok(json!({"model":state.pinned.as_deref().unwrap_or("auto"),"effort":null,"routing":state.selection,"permission_mode":state.permission,"cost_scope":"jev_and_direct_api_only"})) }
             "checkpoint_for_migration" => Err("Router handoffs are unavailable in the first slice".into()),
             _ => self.inner.call(method, params),
         }
@@ -550,13 +745,18 @@ impl Host for RouterHost {
     fn has_active_work(&self) -> bool { self.active.load(Ordering::Acquire) || self.inner.has_active_work() }
     fn initial_model(&self) -> Option<String> { Some(self.state.lock().unwrap().pinned.clone().unwrap_or_else(||"auto".into())) }
     fn initial_effort(&self) -> Option<String> { None }
+    fn initial_permission_mode(&self)->String {self.state.lock().unwrap().permission.clone()}
+    fn can_set_permission_mode(&self)->bool {self.config.candidates.iter().any(|row|row.provider.is_cli())}
+    fn permission_change_requires_idle(&self)->bool {true}
     fn can_set_model(&self) -> bool { true }
     fn model_change_requires_idle(&self) -> bool { true }
     fn set_session_tool_handler(&self, handler:doxa_runtime::PeerToolHandler)->bool {
-        !self.active.load(Ordering::Acquire) && self.inner.set_session_tool_handler(handler)
+        if self.active.load(Ordering::Acquire) {return false;}
+        *self.session_handler.lock().unwrap()=Some(handler.clone());self.inner.set_session_tool_handler(handler)
     }
     fn set_peer_tool_handler(&self, handler:doxa_runtime::PeerToolHandler)->bool {
-        !self.active.load(Ordering::Acquire) && self.inner.set_peer_tool_handler(handler)
+        if self.active.load(Ordering::Acquire) {return false;}
+        *self.peer_handler.lock().unwrap()=Some(handler.clone());self.inner.set_peer_tool_handler(handler)
     }
     fn peer_tools_ready(&self)->bool { self.inner.peer_tools_ready() }
     fn lore_enabled(&self)->Option<bool> { self.inner.lore_enabled() }
@@ -566,12 +766,15 @@ impl Host for RouterHost {
     fn transcript_snapshot(&self)->io::Result<Option<(PathBuf,u64)>> { self.inner.transcript_snapshot() }
     fn billing_snapshot(&self)->Option<Value> {
         let state = self.state.lock().ok()?;
-        Some(json!({"mode":"api","routing":state.selection,"compaction":state.compaction,"router_usage":state.router,"worker_usage":state.worker,
+        Some(json!({"mode":if self.config.candidates.iter().any(|row|row.provider.is_cli()){"mixed"}else{"api"},
+            "cost_scope":"jev_and_direct_api_only","cli_provider_charge_usd":null,
+            "total_cost_usd":if self.config.candidates.iter().any(|row|row.provider.is_cli()) {Value::Null}else{json!(state.estimated_spent().map(|sum|sum as f64/1_000_000.0))},
+            "routing":state.selection,"compaction":state.compaction,"router_usage":state.router,"worker_usage":state.worker,
             "cost_usd":state.estimated_spent().map(|sum|sum as f64/1_000_000.0),
             "session_cost_usd":state.estimated_spent().map(|sum|sum as f64/1_000_000.0),
             "cost_is_estimate":true,"cost_basis":"aggregate_upper_rates",
             "budget":{"ceiling_usd":self.ceiling_micros.map(|sum|sum as f64/1_000_000.0),
                 "aggregate_held_usd":state.held().map(|sum|sum as f64/1_000_000.0),
-                "accounting_unknown":state.unknown(),"durable":true,"cost_basis":"aggregate_upper_rates"}}))
+                "accounting_unknown":state.unknown(),"durable":true,"cost_scope":"jev_and_direct_api_only","cost_basis":"aggregate_upper_rates"}}))
     }
 }

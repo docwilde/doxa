@@ -687,7 +687,12 @@ fn structured_events_render_in_target_pane_and_track_status() {
     assert!(rendered.contains("Reasoning/Thinking"));
     assert!(!rendered.contains("Checking the repository"));
     assert!(rendered.contains("1 tool call"));
-    assert!(rendered.contains("Peer Worker:"));
+    assert!(rendered.contains("Peer Worker"));
+    assert!(rendered.contains("Ready for review"));
+    let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert!(terminal.backend().buffer().content.iter()
+        .any(|cell| cell.symbol() == "│" && cell.fg == theme::PEER));
     assert!(app.sessions[1].transcript.contains("Turn failed: failed"));
 }
 

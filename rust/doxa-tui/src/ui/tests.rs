@@ -134,18 +134,67 @@ use super::*;
 
     #[test]
     fn router_target_dropdown_selects_only_configured_ids_and_refuses_docker() {
+        // Keep credentials/config environment scoped to this child test process.
+        if std::env::var_os("DOXA_ROUTER_SETTINGS_TEST").is_none() {
+            let home=tempfile::tempdir().unwrap();
+            std::fs::set_permissions(home.path(),std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","ui::tests::router_target_dropdown_selects_only_configured_ids_and_refuses_docker"])
+                .env("DOXA_HOME",home.path()).env("DOXA_ROUTER_SETTINGS_TEST","1")
+                .env("TYPESAFE_API_KEY","router-settings-test-key")
+                .env_remove("DOXA_ENGINE").env_remove("DOXA_ROUTER_CONFIG")
+                .env_remove("DOXA_MODEL").env_remove("DOXA_EFFORT").output().unwrap();
+            assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
+            return;
+        }
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("router.json");
+        let config=crate::router_setup::tests::config();
+        std::fs::write(&path,serde_json::to_vec(&config).unwrap()).unwrap();
+        std::fs::set_permissions(&path,std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         let mut app=App::default();
-        app.new_session=Some(NewSession{engine:launch::Engine::Router,router_config:Some(PathBuf::from("/private/router.json")),
-            isolation:doxa_isolation::Profile::Native,model:"auto".into(),models:vec!["auto".into(),"ds-fixture".into()],
-            model_efforts:HashMap::new(),catalog_note:"Configured targets".into(),catalog_pending:false,effort:None,
-            prompt:String::new(),field:0,launch_error:None,retry_allowed:true});
+        app.handle(Event::Resize(140,36));
+        app.open_settings_menu();
+        assert_eq!(app.settings_menu.as_ref().unwrap().rows[0].setting.key,"engine");
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::End,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert_eq!(app.settings_menu.as_ref().unwrap().edits["engine"].as_deref(),Some("router"));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        for character in path.to_str().unwrap().chars() {
+            app.settings_menu_key(KeyEvent::new(KeyCode::Char(character),KeyModifiers::NONE));
+        }
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('s'),KeyModifiers::CONTROL));
+        assert!(!crate::settings::config_path().unwrap().exists(),"unreviewed routing must not be saved");
+        let review=crate::router_setup::review_with(&path,&config,true,|provider|Ok(json!({"capabilities":[
+            {"model":if provider=="deepseek" {"deepseek-flash"} else {"glm-5.3-flash"},
+             "efforts":if provider=="deepseek" {vec!["none"]} else {vec!["high"]}}]}))).unwrap();
+        let (tx,rx)=mpsc::sync_channel(1);
+        app.router_review=Some(router_settings::RouterReview{path:path.clone(),state:router_settings::ReviewState::Running(rx)});
+        tx.send(Ok(review)).unwrap();assert!(app.poll_router_review());
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('s'),KeyModifiers::CONTROL));
+        let stored=doxa_state::load_config_checked(&crate::settings::config_path().unwrap()).unwrap();
+        assert_eq!(stored["engine"].as_str(),Some("router"));
+        assert_eq!(stored["router_config"].as_str(),path.to_str());
+        assert!(app.settings_menu.as_ref().unwrap().edits.is_empty());
+        app.settings_menu_key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE));
+        app.groups[0].tabs.push("fixed-session".into());
+        app.session_identity.insert("fixed-session".into(),(Some("claude".into()),Some("fixed-model".into())));
+        app.open_engine_picker();
+        assert_eq!(ENGINE_CHOICES[app.engine_selected],"router");
+        assert_eq!(app.session_identity["fixed-session"].0.as_deref(),Some("claude"));
+        app.select_new_engine();
+        assert_eq!(app.new_session.as_ref().unwrap().engine,launch::Engine::Router);
+        assert_eq!(app.new_session.as_ref().unwrap().models,["auto","ds","glm"]);
+        assert_eq!(app.new_session.as_ref().unwrap().model,"auto");
         app.new_session_key(KeyEvent::new(KeyCode::Char('x'),KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().model,"auto");
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().model,"auto");
         app.new_session_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
-        assert_eq!(app.new_session.as_ref().unwrap().model,"ds-fixture");
+        assert_eq!(app.new_session.as_ref().unwrap().model,"ds");
         app.new_session.as_mut().unwrap().field=1;
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         app.new_session_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
@@ -155,9 +204,55 @@ use super::*;
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         let (options,_,_)=app.pending_launches.pop().unwrap();
         assert_eq!(options.engine,launch::Engine::Router);
-        assert_eq!(options.model.as_deref(),Some("ds-fixture"));
-        assert_eq!(options.router_config.as_deref(),Some(Path::new("/private/router.json")));
+        assert_eq!(options.model.as_deref(),Some("ds"));
+        assert_eq!(options.router_config.as_deref(),Some(path.as_path()));
         assert!(options.effort.is_none());
+        // A file changed after review cannot start using stale account evidence.
+        let mut changed=config.clone();changed.max_calls+=1;
+        std::fs::write(&path,serde_json::to_vec(&changed).unwrap()).unwrap();
+        app.launching=false;
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert!(app.pending_launches.is_empty());
+        assert!(app.notice.contains("unverified or expired"));
+        // Selecting a fixed default engine turns routing off without erasing its
+        // reviewed target file or requiring it to be available.
+        app.new_session=None;
+        app.open_settings_menu();
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Home,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('s'),KeyModifiers::CONTROL));
+        assert_eq!(launch::configured_engine(),launch::Engine::Claude);
+        assert_eq!(crate::settings::raw("engine"),"claude");
+        assert_eq!(doxa_state::load_config_checked(&crate::settings::config_path().unwrap()).unwrap()["router_config"].as_str(),path.to_str());
+    }
+
+    #[test]
+    fn router_review_results_populate_exact_available_targets_and_retain_unavailable_pin() {
+        let mut app=App::default();
+        let path=PathBuf::from("/private/fixture-router.json");
+        app.new_session=Some(NewSession{engine:launch::Engine::Router,router_config:Some(path.clone()),
+            isolation:doxa_isolation::Profile::Native,model:"glm".into(),models:vec!["auto".into()],
+            model_efforts:HashMap::new(),catalog_note:"Loading".into(),catalog_pending:true,effort:None,
+            prompt:String::new(),field:2,launch_error:None,retry_allowed:true});
+        let config=crate::router_setup::tests::config();
+        let review=crate::router_setup::review_with(&path,&config,true,|provider| {
+            if provider=="glm" {Err(crate::router_setup::Availability::Unknown("catalog unavailable"))}
+            else {Ok(json!({"capabilities":[{"model":"deepseek-flash","efforts":["none"]}]}))}
+        }).unwrap();
+        let (tx,rx)=mpsc::sync_channel(1);
+        app.router_review=Some(router_settings::RouterReview{path,state:router_settings::ReviewState::Running(rx)});
+        tx.send(Ok(review)).unwrap();
+        assert!(app.poll_router_review());
+        let form=app.new_session.as_ref().unwrap();
+        assert_eq!(form.models,["auto","ds"]);
+        assert_eq!(form.model,"glm");
+        assert!(form.catalog_note.contains("1 unknown"));
+        assert!(!form.catalog_pending);
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert!(app.pending_launches.is_empty());
+        assert!(app.notice.contains("catalog changed"));
     }
 
     #[test]
@@ -177,6 +272,21 @@ use super::*;
         assert_eq!(app.groups[0].active_id(),Some("route-1"));
         let config:toml::Table="[models]\nrouter='configured-target'\n".parse().unwrap();
         assert_eq!(new_session_preferences(launch::Engine::Router,&config,Some("global-model"),Some("max")),("configured-target".into(),None));
+    }
+
+    #[test]
+    fn router_native_permission_picker_keeps_manual_and_auto_distinct_from_target_auto() {
+        let mut app=App::default();app.size=Rect::new(0,0,100,30);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"router-cli","engine":"router",
+            "model":"auto","permission_mode":"default","can_set_permission_mode":true,"running":false,"queued":0}));
+        app.groups[0].tabs=vec!["router-cli".into()];app.open_permission_picker();
+        assert_eq!(app.permission_picker.as_ref().unwrap().1,0);
+        assert_eq!(permission_choices(Some("router")).iter().map(|row|row.0).collect::<Vec<_>>(),["default","auto"]);
+        app.permission_picker_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));app.select_permission_mode();
+        assert_eq!(app.pending_permission_changes,[("router-cli".into(),"auto".into())]);
+        assert_eq!(app.session_identity["router-cli"].1.as_deref(),Some("auto"));
+        assert!(!permission_display_mode("full-access",Some("router")));
+        assert!(!permission_display_mode("dontAsk",Some("router")));
     }
 
     #[test]
@@ -374,6 +484,33 @@ use super::*;
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)));
         assert!(app.operations_menu.is_some());assert!(app.pending_prompts.is_empty());
         assert!(app.pending_launches.is_empty());assert!(!app.launching);
+    }
+
+    #[test]
+    fn settings_preflight_preserves_selected_row_in_short_menus() {
+        let mut app = App::default();
+        let rows = crate::settings::SETTINGS.iter().map(|setting| crate::settings::Row {
+            setting, value: setting.default.into(), stored: setting.default.into(),
+            source: "default".into(), shadowed: false,
+        }).collect::<Vec<_>>();
+        app.settings_menu = Some(SettingsMenu { rows, selected: 0, category: 0,
+            draft: None, edits: HashMap::new(), engine: "claude".into() });
+        for key in ["engine", "router_config", "mermaid_renderer", "mermaid_renderer_root"] {
+            let menu = app.settings_menu.as_mut().unwrap();
+            menu.selected = menu.rows.iter().position(|row| row.setting.key == key).unwrap();
+            let setting = menu.rows[menu.selected].setting;
+            menu.category = crate::settings::CATEGORIES.iter().position(|category| *category == setting.category).unwrap();
+            for height in [7, 8, 10, 12] {
+                let mut terminal = Terminal::new(TestBackend::new(120, height)).unwrap();
+                terminal.draw(|frame| app.draw_settings_menu(frame, frame.area())).unwrap();
+                let buffer = terminal.backend().buffer();
+                let text = (0..height).map(|y| (0..120).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                    .collect::<Vec<_>>().join("\n");
+                assert!(text.contains(&format!("› {}:", setting.label)), "{key}, height={height}: {text}");
+                let menu = app.settings_menu.as_ref().unwrap();
+                assert!(menu.visible_indices(height).contains(&menu.selected));
+            }
+        }
     }
 
     #[test]
@@ -1216,6 +1353,36 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn glm_peer_resolution_makes_next_review_visible_and_actionable() {
+        let mut app = App::default(); app.rail_visible = false;
+        app.handle(Event::Resize(100, 30));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"glm-peer","engine":"glm","model":"glm-5.3-flash"}));
+        let event = |kind: &str, data| json!({"type":"event","session_id":"glm-peer","event":{"type":kind,"data":data}});
+        let request = |id: &str| json!({"id":id,"kind":"permission","title":"Approve this peer tool once?",
+            "tool_name":doxa_engines::peer_tools::LIST,"input_summary":"{}","require_full_review":true});
+        app.apply_daemon_frame(&event("needs_input", request("first")));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert!(app.pending_answers.is_empty(), "review remains mandatory");
+        assert!(painted_at(&app, 100, 30).contains(doxa_engines::peer_tools::LIST));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert_eq!(app.pending_answers[0].2, json!({"decision":"allow"}));
+        assert!(app.input_requests[0].sending);
+        app.apply_daemon_frame(&json!({"type":"answer_reply","session_id":"glm-peer","request_id":"first","ok":true}));
+        app.apply_daemon_frame(&event("tool_result", json!({"id":"list-first","name":doxa_engines::peer_tools::LIST,"result_summary":"[]"})));
+        app.apply_daemon_frame(&event("needs_input_resolved", json!({"id":"first"})));
+        app.apply_daemon_frame(&event("needs_input", request("second")));
+        assert_eq!(app.input_requests.len(), 1);
+        assert_eq!(app.input_requests[app.active_request_index().unwrap()].id, "second");
+        assert!(!app.input_requests[0].sending);
+        painted_at(&app, 100, 30);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert_eq!(app.pending_answers, vec![("glm-peer".into(), "second".into(), json!({"decision":"allow"}))]);
+        app.apply_daemon_frame(&event("needs_input_resolved", json!({"id":"second"})));
+        app.apply_daemon_frame(&event("turn_done", json!({"is_error":true,"error":"Vendor turn cancelled"})));
+        assert!(app.input_requests.is_empty() && app.pending_answers.is_empty());
+    }
+
+    #[test]
     fn codex_provider_approvals_never_offer_or_reuse_a_session_grant() {
         for tool in ["command_execution", "file_change", "request_permissions"] {
             let mut app = App::default();
@@ -1253,7 +1420,10 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"peer_message","data":{"from_title":"Worker","body":"status only","fleet_admission":{"delivered":true,"unreviewed":true}}}}));
         let transcript=&app.sessions[0].transcript;
         assert!(transcript.contains("Fleet message quarantined: outside approved assignment"));
-        assert!(transcript.contains("Worker [unreviewed fleet message]: status only"));
+        let (lines, _) = super::transcript_tools::render(transcript, 100, None, None);
+        let visible = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(visible.contains("Peer Worker [unreviewed fleet message]"));
+        assert!(visible.contains("│ status only"));
         let row=super::transcript_events::structured_event("fleet_guard",&json!({"delivered":false,"reason":"hold\nfor human\u{1b}"})).unwrap();
         assert!(!row.contains('\u{1b}'));
     }
@@ -1522,6 +1692,86 @@ for line in sys.stdin:
         assert_eq!(options.model.as_deref(), Some("sonnet"));
         assert!(options.codex_bin.is_none() && options.sandbox.is_none() && options.effort.is_none());
         assert!(prompt.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_setup_before_launch_settings_return_retains_draft() {
+        // All settings writes and environment changes belong to a private child.
+        if std::env::var_os("DOXA_DOCKER_SETUP_TEST").is_none() {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(home.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "ui::tests::docker_setup_before_launch_settings_return_retains_draft"])
+                .env("DOXA_HOME", home.path()).env("DOXA_DOCKER_SETUP_TEST", "1");
+            for name in ["DOXA_SESSION_ISOLATION", "DOXA_DOCKER_IMAGE", "DOXA_DOCKER_HOST", "DOCKER_HOST",
+                "DOXA_DOCKER_MEMORY_BYTES", "DOXA_DOCKER_CPUS", "DOXA_DOCKER_PIDS",
+                "DOXA_DOCKER_DISK_SOFT_LIMIT_BYTES", "DOXA_DOCKER_DISK_FREE_FLOOR_BYTES"] { child.env_remove(name); }
+            let output = child.output().unwrap();
+            assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(160, 36));
+        app.new_session = Some(NewSession { engine:launch::Engine::Codex, isolation:doxa_isolation::Profile::Native,
+            router_config:None, model:"fixture-exact-model".into(), models:vec!["fixture-exact-model".into()],
+            model_efforts:HashMap::new(), catalog_note:"Controlled catalog".into(), catalog_pending:false,
+            launch_error:None, retry_allowed:true, effort:None, prompt:"Keep my multiline\nfirst prompt".into(), field:1 });
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.new_session.as_ref().unwrap().isolation, doxa_isolation::Profile::DockerOpen);
+        assert!(app.docker_setup.as_ref().unwrap().label().contains("Image digest missing"));
+        let paint = painted_at(&app, 160, 36);
+        assert!(paint.contains("Image digest missing") && paint.contains("Ctrl+O") && paint.contains("containers/session/README.md"));
+        app.new_session.as_mut().unwrap().field = 2;
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.launching && app.pending_launches.is_empty());
+        assert!(app.new_session.as_ref().unwrap().launch_error.as_ref().unwrap().starts_with("Docker setup:"));
+        assert!(!painted_at(&app, 160, 36).contains("Esc close · /setup checks authentication · Enter retry"));
+        // Click the actual action row, then return by Escape without losing input.
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind:MouseEventKind::Down(MouseButton::Left),
+            column:menu.x+3, row:menu.y+9, modifiers:KeyModifiers::NONE }));
+        assert!(app.docker_settings_open);
+        assert_eq!(app.settings_menu.as_ref().unwrap().rows[app.settings_menu.as_ref().unwrap().selected].setting.key, "docker_image");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.settings_menu.is_none());
+        assert_eq!(app.new_session.as_ref().unwrap().prompt, "Keep my multiline\nfirst prompt");
+        assert_eq!(app.new_session.as_ref().unwrap().model, "fixture-exact-model");
+        assert_eq!(app.new_session.as_ref().unwrap().isolation, doxa_isolation::Profile::DockerOpen);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+        assert!(app.settings_menu.is_some());
+        // Stage/save only this fixture's private owner config. An owned listening
+        // socket is sufficient for the UI check, never proof of a rootless Engine.
+        let path = doxa_isolation::home().unwrap().join("docker.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let menu = app.settings_menu.as_mut().unwrap();
+        menu.edits.insert("docker_image".into(), Some(format!("sha256:{}", "a".repeat(64))));
+        menu.edits.insert("docker_host".into(), Some(format!("unix://{}", path.display())));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
+        assert!(app.notice.starts_with("Settings saved"), "{}", app.notice);
+        app.handle(Event::Mouse(MouseEvent { kind:MouseEventKind::Down(MouseButton::Left), column:0, row:0, modifiers:KeyModifiers::NONE }));
+        assert!(app.settings_menu.is_none() && app.docker_setup.as_ref().unwrap().ready(),
+            "settings_open={} setup={} notice={}", app.settings_menu.is_some(), app.docker_setup.as_ref().unwrap().label(), app.notice);
+        assert!(app.new_session.as_ref().unwrap().launch_error.is_none());
+        // Cached success is not launch authority: a changed unpinned image is
+        // reread and refused before any launch request is queued.
+        let config_path = crate::settings::config_path().unwrap();
+        let mut config = doxa_state::load_config_checked(&config_path).unwrap();
+        config.insert("docker_image".into(), toml::Value::String("unreviewed:latest".into()));
+        doxa_state::save_config(&config_path, &config).unwrap();
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.launching && app.pending_launches.is_empty());
+        config.insert("docker_image".into(), toml::Value::String(format!("sha256:{}", "a".repeat(64))));
+        doxa_state::save_config(&config_path, &config).unwrap();
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let (options, prompt, _) = app.pending_launches.pop().unwrap();
+        assert_eq!(options.isolation, Some(doxa_isolation::Profile::DockerOpen));
+        assert_eq!(options.model.as_deref(), Some("fixture-exact-model"));
+        assert_eq!(prompt.as_deref(), Some("Keep my multiline\nfirst prompt"));
+        assert!(app.launching); // Backend still owns all actual Engine/image proof.
     }
 
     #[test]
@@ -5841,6 +6091,120 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
             "event":{"type":"prompt_dequeued", "data":{"id":"q"}}}));
         assert_eq!(app.session_activity["a"].1, 0);
+    }
+
+    #[test]
+    fn queued_prompt_format_matches_user_markdown_and_promotes_without_duplication() {
+        let prompt = "Check **bold** and [the result](https://example.com/result) while this long line wraps.\n\n- first detail\n- second detail\n\n```rust\nlet answer = 42;\n```\n\nvisible queued ending";
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event","session_id":"s","event":{"type":kind,"data":data}});
+        let setup = || {
+            let mut app = App::default();
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+            app.apply_daemon_frame(&event("turn_started",json!({"prompt":"Initial user prompt"})));
+            app.apply_daemon_frame(&event("text_delta",json!({"text":"Current response"})));
+            app
+        };
+        let mut ordinary = setup();
+        ordinary.apply_daemon_frame(&event("turn_done",json!({})));
+        ordinary.apply_daemon_frame(&event("turn_started",json!({"prompt":prompt})));
+        let mut queued = setup();
+        let admission = event("prompt_queued",json!({"id":"q1","text":prompt,"timestamp":"2026-10-11T13:25:00Z"}));
+        queued.apply_daemon_frame(&admission);
+        queued.apply_daemon_frame(&admission);
+        queued.apply_daemon_frame(&json!({"type":"reply","session_id":"s","ok":true,"queued":true}));
+        assert_eq!(queued.session_activity["s"].1,1);
+        let normal = super::transcript_tools::render_with_links(&ordinary.sessions[0].transcript,28,None,None,&[]);
+        let pending = super::transcript_tools::render_with_links(&queued.sessions[0].transcript,28,None,None,&[]);
+        let user_lines = |lines: Vec<ratatui::text::Line<'static>>| lines.into_iter()
+            .filter(|line|line.style.bg == Some(theme::HIGHLIGHT)).collect::<Vec<_>>();
+        assert_eq!(user_lines(pending.0), user_lines(normal.0));
+        assert_eq!(pending.2.iter().map(|link|(link.start,link.end,link.url.clone())).collect::<Vec<_>>(),
+            normal.2.iter().map(|link|(link.start,link.end,link.url.clone())).collect::<Vec<_>>());
+        queued.apply_daemon_frame(&event("text_delta",json!({"text":"Continued assistant work"})));
+        let (continued,_) = super::transcript_tools::render(&queued.sessions[0].transcript,40,None,None);
+        assert!(continued.iter().any(|line|line.to_string().contains("Continued assistant work") && line.style.bg.is_none()));
+        queued.apply_daemon_frame(&event("turn_done",json!({})));
+        let started = event("prompt_dequeued",json!({"id":"q1"}));
+        queued.apply_daemon_frame(&started);
+        queued.apply_daemon_frame(&started);
+        queued.apply_daemon_frame(&event("turn_started",json!({"prompt":prompt})));
+        assert_eq!(queued.session_activity["s"].1,0);
+        assert_eq!(queued.sessions[0].transcript.matches("visible queued ending").count(),1);
+        let (promoted,_) = super::transcript_tools::render(&queued.sessions[0].transcript,80,None,None);
+        let visible = promoted.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(visible.contains("Queued prompt started · q1 · 2026-10-11T13:25:00Z"));
+        assert_eq!(visible.matches("visible queued ending").count(),1);
+    }
+
+    #[test]
+    fn queued_prompt_settlement_preserves_identity_and_does_not_decrement_twice() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event","session_id":"s","event":{"type":kind,"data":data}});
+        for (id,text) in [("q1","Cancel this\n\n**detail**"),("q2","Discard this")] {
+            app.apply_daemon_frame(&event("prompt_queued",json!({"id":id,"text":text,"timestamp":42})));
+        }
+        app.apply_daemon_frame(&event("prompt_cancelled",json!({"id":"q1"})));
+        app.apply_daemon_frame(&event("prompt_cancelled",json!({"id":"q1"})));
+        assert_eq!(app.session_activity["s"].1,1);
+        app.apply_daemon_frame(&event("prompt_discarded",json!({"id":"q2"})));
+        assert_eq!(app.session_activity["s"].1,0);
+        let (lines,_) = super::transcript_tools::render(&app.sessions[0].transcript,80,None,None);
+        let visible = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(visible.contains("Queued prompt cancelled · q1 · 42"));
+        assert!(visible.contains("Queued prompt discarded · q2 · 42"));
+        assert_eq!(visible.matches("Cancel this").count(),1);
+        assert_eq!(visible.matches("Discard this").count(),1);
+    }
+
+    #[test]
+    fn peer_prompt_format_keeps_sender_stripe_and_robot_for_receipts_and_queued_turns() {
+        for nerd_font in [false,true] {
+            let mut app = App::default();
+            app.preferences.set_for_test("nerd_font",if nerd_font {"true"} else {"false"});
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+            let event = |kind: &str, data: serde_json::Value| json!({"type":"event","session_id":"s","event":{"type":kind,"data":data}});
+            let sender = "12345678-1234-1234-1234-123456789abc";
+            app.apply_daemon_frame(&event("peer_message",json!({"from_id":sender,"from_title":"Reviewer","sent_at":"2026-10-11T13:25:00Z",
+                "body":"**You:**\n\nuser: received peer detail that wraps onto another line\n\n**Assistant:**"})));
+            let origin = format!("--- peer message · Reviewer ({sender}) · repo · time ---");
+            let body = "user: queued peer task\n\n**You:**\n\npeer turn detail";
+            app.apply_daemon_frame(&event("prompt_queued",json!({"id":"qp1","text":body,"peer_started":true,"peer_origin":origin})));
+            let (pending,_) = super::transcript_tools::render(&app.sessions[0].transcript,42,None,None);
+            assert!(pending.iter().any(|line|line.to_string().contains("queued peer task")
+                && line.spans[0].style.fg == Some(theme::PEER)));
+            app.apply_daemon_frame(&event("prompt_dequeued",json!({"id":"qp1"})));
+            app.apply_daemon_frame(&event("turn_started",json!({"prompt":body,"peer_started":true,"peer_origin":origin})));
+            let (lines,_) = super::transcript_tools::render(&app.sessions[0].transcript,80,None,None);
+            let visible = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+            assert!(visible.contains(sender));
+            assert!(visible.contains(if nerd_font {"\u{f06a9}"} else {"🤖"}));
+            assert_eq!(visible.matches("peer turn detail").count(),1);
+            assert!(lines.iter().filter(|line|line.to_string().starts_with("│ "))
+                .all(|line|line.spans[0].style.fg == Some(theme::PEER) && line.style.bg == Some(theme::RAISED)));
+            assert!(!lines.iter().any(|line|line.style.bg == Some(theme::HIGHLIGHT)));
+            assert!(!app.sessions[0].transcript.contains("**You:**\n\n"));
+        }
+    }
+
+    #[test]
+    fn peer_turn_keeps_its_own_tool_fold_and_streaming_cache() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        app.sessions[0].transcript = "**You:**\n\nInspect\n\n**Assistant:**\n\nTool: Read started · earlier\n\nTool: Read finished · ok\n\n".into();
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"turn_started","data":{
+            "prompt":"**You:**\n\nPeer task", "peer_started":true,"peer_origin":"Reviewer (12345678-1234-1234-1234-123456789abc)"}}}));
+        let source = &mut app.sessions[0].transcript;
+        assert_eq!(streamed_turn_start(source),source.find(super::transcript_messages::PREFIX));
+        let mut cached = RenderedTranscript::render(0,"s",source,38,None,None,0,&[]);
+        for chunk in ["**Assistant:**\n\nPeer response", "\n\nTool: Bash started · peer task", "\n\nTool: Bash finished · ok", "\n\nMore response"] {
+            source.push_str(chunk);
+            cached.update(source,38,None,None,0,&[]);
+            let (lines,sections) = super::transcript_tools::render(source,38,None,None);
+            assert_eq!(cached.lines,lines);
+            assert_eq!(cached.sections,sections);
+        }
+        assert_eq!(cached.sections.len(),2);
     }
 
     #[test]

@@ -2752,6 +2752,133 @@ mod vendor_process {
         wait_until(|| process.exited());
     }
 
+    // Deliberately emit no content/reasoning deltas between tool approvals.
+    // GLM may return several calls together, then another tool-only response.
+    fn glm_peer_step(calls: &[(&str, &str)]) -> String {
+        let mut stream = String::new();
+        for (index, (id, arguments)) in calls.iter().enumerate() {
+            for fragment in [json!({"index":index,"id":id,"function":{"name":doxa_engines::peer_tools::LIST,"arguments":""}}),
+                json!({"index":index,"function":{"arguments":arguments}})] {
+                stream.push_str(&format!("data: {}\n\n", json!({"model":"glm-5.3-flash","choices":[{"delta":{"tool_calls":[fragment]}}]})));
+            }
+        }
+        stream.push_str(&format!("data: {}\n\ndata: [DONE]\n\n", json!({"model":"glm-5.3-flash",
+            "choices":[{"finish_reason":"tool_calls","delta":{}}],"usage":{"prompt_tokens":20,"completion_tokens":8}})));
+        stream
+    }
+
+    fn glm_approval(reader: &mut BufReader<UnixStream>, events: &mut Vec<Value>) -> Value {
+        for _ in 0..24 {
+            let frame = receive(reader);
+            if frame["type"] == "event" {
+                assert_ne!(frame["event"]["type"], "turn_done", "tool turn ended before its mandatory review");
+                events.push(frame["event"].clone());
+                if frame["event"]["type"] == "needs_input" { return frame["event"]["data"].clone(); }
+            }
+        }
+        panic!("GLM approval exceeded fixture event bound");
+    }
+
+    fn glm_reviewed_answer(socket: &mut UnixStream, id: u64, request: &Value, decision: &str) {
+        send(socket, json!({"type":"call","id":id,"method":"answer_needs_input","params":{
+            "id":request["id"],"answer":{"decision":decision},"reviewed_request":request}}));
+    }
+
+    #[test]
+    fn glm_peer_approvals_resolve_before_next_call_and_tool_only_continuation() {
+        let dir = tempfile::tempdir().unwrap();
+        let peer_id = "952d818a-47e6-4c52-9d9e-37e1c8538c90";
+        let (_peer, peer_path) = registry_peer(dir.path(), peer_id, dir.path().to_str().unwrap(), "fixture teammate");
+        let (_outsider, _) = registry_peer(dir.path(), "outside-full-session-id", "/other-project", "fixture outsider");
+        let before = fs::read(&peer_path).unwrap();
+        let answer = format!("data: {}\n\ndata: [DONE]\n\n", json!({"model":"glm-5.3-flash",
+            "choices":[{"finish_reason":"stop","delta":{"content":"Peer reviews completed."}}],
+            "usage":{"prompt_tokens":30,"completion_tokens":8}}));
+        let (endpoint, server) = fake_vendor_frames(vec![glm_peer_step(&[("list-first", "{}"), ("list-denied", "{\"limit\":1}")]),
+            glm_peer_step(&[("list-next-step", "{}")]), answer]);
+        let mut process = start_vendor(dir.path(), "glm", &endpoint, Path::new("python3"));
+        let (mut reader, mut socket) = process.connect();
+        assert_eq!(receive(&mut reader)["engine"], "glm");
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        send(&mut socket, json!({"type":"prompt","id":1,"text":"List current peers with reviewed tools."}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        let mut events = Vec::new();
+        let first = glm_approval(&mut reader, &mut events);
+        assert_eq!(first["tool_name"], doxa_engines::peer_tools::LIST);
+        assert_eq!(first["require_full_review"], true);
+        assert!(!events.iter().any(|event| event["type"] == "tool_result"));
+
+        // Reject an answer bound to different content; the original ask stays live.
+        let mut changed = first.clone(); changed["input_summary"] = json!("{\"limit\":100}");
+        glm_reviewed_answer(&mut socket, 2, &changed, "allow");
+        assert_eq!(receive(&mut reader)["ok"], false);
+        send(&mut socket, json!({"type":"call","id":3,"method":"get_state","params":{}}));
+        let state = receive(&mut reader); assert_eq!(state["pending_inputs"], json!([first]));
+        glm_reviewed_answer(&mut socket, 4, &first, "allow");
+        let second = glm_approval(&mut reader, &mut events);
+        let first_resolved = events.iter().position(|event| event["type"] == "needs_input_resolved" && event["data"]["id"] == first["id"]).expect("first approval must resolve before the second opens");
+        let first_result = events.iter().position(|event| event["type"] == "tool_result" && event["data"]["id"] == "list-first").unwrap();
+        assert!(first_result < first_resolved && first_resolved < events.len() - 1);
+        assert_eq!(second["require_full_review"], true);
+        glm_reviewed_answer(&mut socket, 5, &second, "deny");
+        let third = glm_approval(&mut reader, &mut events);
+        assert!(events.iter().any(|event| event["type"] == "needs_input_resolved" && event["data"]["id"] == second["id"]));
+        assert!(events.iter().any(|event| event["type"] == "tool_result" && event["data"]["id"] == "list-denied" && event["data"]["is_error"] == true));
+        assert!(!events.iter().any(|event| matches!(event["type"].as_str(), Some("text_delta" | "reasoning_delta"))));
+        glm_reviewed_answer(&mut socket, 6, &third, "allow");
+        let mut terminal = None;
+        for _ in 0..24 {
+            let frame = receive(&mut reader);
+            if frame["type"] == "event" { events.push(frame["event"].clone()); }
+            if frame["event"]["type"] == "turn_done" { terminal = Some(frame["event"]["data"].clone()); break; }
+        }
+        assert_eq!(terminal.unwrap()["is_error"], false);
+        assert_eq!(events.iter().filter(|event| event["type"] == "needs_input_resolved").count(), 3);
+        send(&mut socket, json!({"type":"call","id":7,"method":"get_state","params":{}}));
+        assert_eq!(receive(&mut reader)["pending_inputs"], json!([]));
+        send(&mut socket, json!({"type":"call","id":8,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true); wait_until(|| process.exited());
+        let requests = server.join().unwrap(); assert_eq!(requests.len(), 3);
+        let tool_results: Vec<Value> = requests[1]["messages"].as_array().unwrap().iter()
+            .filter(|message| message["role"] == "tool")
+            .map(|message| serde_json::from_str(message["content"].as_str().unwrap()).unwrap()).collect();
+        assert_eq!(tool_results[0]["peers"][0]["session_id"], peer_id);
+        assert!(!tool_results[0].to_string().contains("outside-full-session-id"));
+        assert!(tool_results[1]["error"].as_str().unwrap().contains("denied"));
+        assert_eq!(fs::read(peer_path).unwrap(), before, "discovery must remain read-only");
+    }
+
+    #[test]
+    fn glm_peer_approval_interrupt_resolves_without_tool_or_continuation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (endpoint, server) = fake_vendor_frames(vec![glm_peer_step(&[("list-cancelled", "{}")])]);
+        let mut process = start_vendor(dir.path(), "glm", &endpoint, Path::new("python3"));
+        let (mut reader, mut socket) = process.connect(); receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        send(&mut socket, json!({"type":"prompt","id":1,"text":"List peers."}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        let mut events = Vec::new(); let ask = glm_approval(&mut reader, &mut events);
+        send(&mut socket, json!({"type":"call","id":2,"method":"interrupt","params":{}}));
+        let mut terminal = false; let mut replied = false;
+        for _ in 0..12 {
+            let frame = receive(&mut reader);
+            if frame["id"] == 2 { assert_eq!(frame["ok"], true); replied = true; }
+            if frame["type"] == "event" { events.push(frame["event"].clone()); }
+            if frame["event"]["type"] == "turn_done" { assert_eq!(frame["event"]["data"]["is_error"], true); terminal = true; }
+            if replied && terminal { break; }
+        }
+        assert!(terminal && replied);
+        assert!(events.iter().any(|event| event["type"] == "needs_input_resolved" && event["data"]["id"] == ask["id"]));
+        assert!(!events.iter().any(|event| event["type"] == "tool_result"));
+        glm_reviewed_answer(&mut socket, 3, &ask, "allow"); assert_eq!(receive(&mut reader)["ok"], false);
+        send(&mut socket, json!({"type":"call","id":4,"method":"get_state","params":{}}));
+        let state = receive(&mut reader); assert_eq!(state["pending_inputs"], json!([])); assert_eq!(state["running"], false);
+        assert!(!native_transcript(dir.path(), "vendor-session.messages.json").exists());
+        send(&mut socket, json!({"type":"call","id":5,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true); wait_until(|| process.exited());
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
     #[test]
     fn vendor_missing_credential_rejects_session_before_socket() {
         let dir = tempfile::tempdir().unwrap();
@@ -3789,6 +3916,137 @@ fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
     }
     send(&mut socket,json!({"type":"call","id":6,"method":"stop","params":{}}));
     let mut stop=receive(&mut reader);while stop["id"]!=6 { stop=receive(&mut reader); }assert_eq!(stop["ok"],true);wait_until(||process.exited());
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "issue #197: macOS fixture peer socket read returned EINVAL; delivery still needs isolation")]
+fn claude_sdk_mcp_peer_send_uses_full_scoped_ids_and_can_reply_to_received_context() {
+    const PEER: &str = "a1234567-89ab-4cde-8123-0123456789ab";
+    const SAME_PREFIX: &str = "a1234567-fedc-4ba9-8321-abcdef012345";
+    const FOREIGN: &str = "b1234567-89ab-4cde-8123-0123456789ab";
+    let dir = tempfile::tempdir().unwrap();
+    let (recipient, peer_path) = registry_peer(dir.path(), PEER, dir.path().to_str().unwrap(),
+        "sk-ownedCanonicalFixtureSecret1234567890 teammate");
+    let (other, other_path) = registry_peer(dir.path(), SAME_PREFIX, dir.path().to_str().unwrap(), "second teammate");
+    let (foreign, foreign_path) = registry_peer(dir.path(), FOREIGN, "/other-project", "outsider");
+    let originals = [(&peer_path, fs::read(&peer_path).unwrap()), (&other_path, fs::read(&other_path).unwrap()),
+        (&foreign_path, fs::read(&foreign_path).unwrap())];
+    let delivered = thread::spawn(move || {
+        recipient.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut frames = Vec::new();
+        while frames.len() < 2 {
+            assert!(Instant::now() < deadline, "Claude SDK peer delivery deadline");
+            match recipient.accept() {
+                Ok((mut socket, _)) => {
+                    socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                    let mut body = String::new(); socket.read_to_string(&mut body).unwrap();
+                    if !body.is_empty() { frames.push(serde_json::from_str::<Value>(&body).unwrap()); }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(5)),
+                Err(error) => panic!("{error}"),
+            }
+        }
+        frames
+    });
+    let script = dir.path().join("claude-peer-mcp.py");
+    claude_fixture(&script, &format!(r#"peer={PEER:?}
+other={SAME_PREFIX:?}
+foreign={FOREIGN:?}
+turn=0
+step=0
+responses=[]
+def next_peer_call():
+ global step
+ method,params=calls[step]
+ emit({{'type':'control_request','request_id':'peer-'+str(turn)+'-'+str(step),'request':{{'subtype':'mcp_message','server_name':'doxa','message':{{'jsonrpc':'2.0','id':37+step,'method':method,'params':params}}}}}})
+"#), r#"if frame['type']=='user':
+  turn+=1;step=0;responses=[]
+  prompt=frame['message']['content']
+  if turn==2:
+   assert prompt.startswith('[PEER-STARTED TURN]')
+   assert '('+peer+')' in prompt and '('+peer[:8]+')' not in prompt
+   assert 'full exact sender session ID' in prompt
+   root.joinpath('received-peer-prompt').write_text(prompt)
+  calls=[('tools/list',{}),('tools/call',{'name':'peer_list','arguments':{'limit':100}})]
+  for target in [peer[:8],'teammate',foreign]: calls.append(('tools/call',{'name':'peer_send','arguments':{'target':target,'text':'must refuse'}}))
+  calls.extend([('tools/call',{'name':'peer_send','arguments':{'session_id':peer,'message':'sk-ownedCanonicalFixtureSecret1234567890 hello'}}),('tools/call',{'name':'peer_history','arguments':{'direction':'sent','limit':100}})])
+  next_peer_call()
+ elif frame['type']=='control_response':
+  envelope=frame['response'];assert envelope['subtype']=='success' and envelope['request_id']=='peer-'+str(turn)+'-'+str(step)
+  reply=envelope['response']['mcp_response'];assert reply['jsonrpc']=='2.0' and reply['id']==37+step
+  value=reply['result'];responses.append(value)
+  if step==0:
+   tools={row['name']:row for row in value['tools']}
+   assert set(tools)=={'peer_list','peer_send','peer_history'}
+   assert 'full exact' in tools['peer_list']['description'] and 'full session_id' in tools['peer_send']['description']
+  elif step==1:
+   assert not value.get('isError',False)
+   roster=json.loads(value['content'][0]['text'])
+   assert {row['session_id'] for row in roster['peers']}=={peer,other}
+   assert all(len(row['session_id'])==36 for row in roster['peers']) and foreign not in str(roster)
+   assert 'sk-ownedCanonicalFixtureSecret1234567890' not in str(roster)
+  elif step in (2,3,4):
+   assert value['isError']==True and 'full exact session_id' in value['content'][0]['text']
+  elif step==5:
+   assert not value.get('isError',False)
+   result_value=json.loads(value['content'][0]['text'])
+   assert result_value['delivered_to']==[peer] and result_value['failed']==[] and result_value['peer']['session_id']==peer
+  else:
+   history=json.loads(value['content'][0]['text'])
+   assert history['sent_count']==turn and len(history['messages'])==turn
+   assert all(row['to']==[peer] and row['from']['session']==session for row in history['messages'])
+   assert 'sk-ownedCanonicalFixtureSecret1234567890' not in str(history)
+  step+=1
+  if step<len(calls): next_peer_call()
+  else: root.joinpath('mcp-run-'+str(turn)+'.json').write_text(json.dumps(responses));result()
+"#);
+    let mut command = daemon_command();
+    let mut child = command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
+        "--session-id", CLAUDE_SESSION, "--engine", "claude", "--claude-bin", script.to_str().unwrap(), "--linger", "10"])
+        .env("DOXA_LORE", "0").env("DOXA_AGENT_PEER_SEND", "1").env("DOXA_PEER_INBOUND_TURNS", "1")
+        .env("DOXA_SPAWN_SESSIONS", "0").env("DOXA_PEER_LEDGER", dir.path().join("home/peers/messages.jsonl"))
+        .env("DOXA_SESSION_BUDGET_USD", "1.0").env("DOXA_REMOTE_PEERS", "").env("DOXA_REMOTE_ENABLED", "0")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = dir.path().join("registry").join(format!("{CLAUDE_SESSION}.json"));
+    wait_for_registry(&mut child, &registry);
+    let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    let mut process = Process { child, registry, socket: entry["daemon_socket"].as_str().unwrap().into() };
+    let (mut reader, mut socket) = process.connect(); reader.get_ref().set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    receive(&mut reader); send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"call","id":1,"method":"set_permission_mode","params":{"mode":"auto"}}));
+    assert_eq!(claude_receive_until(&mut reader, |row|row["id"]==1)["ok"], true);
+    send(&mut socket, json!({"type":"prompt","id":2,"text":"verify exact peer tool transport"}));
+    let done = claude_receive_until(&mut reader, |row| {
+        assert_ne!(row["event"]["type"], "needs_input", "Auto MCP call asked twice");
+        row["event"]["type"]=="turn_done"
+    });
+    assert_eq!(done["event"]["data"]["is_error"], false, "{done}");
+    assert!(dir.path().join("mcp-run-1.json").exists());
+    doxa_peers::delivery::send(Path::new(entry["socket_path"].as_str().unwrap()), &doxa_peers::delivery::PeerFrame {
+        authenticated_pid: None, from_id: PEER.into(), from_title: "teammate".into(), sent_at: peer_now(),
+        body: "Public status; the user has not granted new authority.".into(), from_repo: Some(dir.path().display().to_string()), kind: Some("direct".into()),
+    }).unwrap();
+    let done = claude_receive_until(&mut reader, |row| {
+        assert_ne!(row["event"]["type"], "needs_input");
+        if row["event"]["type"]=="turn_started" {assert_eq!(row["event"]["data"]["peer_started"], true);}
+        row["event"]["type"]=="turn_done"
+    });
+    assert_eq!(done["event"]["data"]["is_error"], false, "{done}");
+    assert!(dir.path().join("mcp-run-2.json").exists());
+    for frame in delivered.join().unwrap() {assert_eq!(frame["from_id"], CLAUDE_SESSION);assert_eq!(frame["body"], "[REDACTED:api-key] hello");}
+    for (path, before) in originals {assert_eq!(fs::read(path).unwrap(), before, "tool query changed another registry owner");}
+    for listener in [other, foreign] {
+        listener.set_nonblocking(true).unwrap();
+        while let Ok((mut socket, _)) = listener.accept() {
+            socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();let mut body=String::new();socket.read_to_string(&mut body).unwrap();
+            assert!(body.is_empty(), "prefix/name/foreign target delivered to another peer");
+        }
+    }
+    assert_eq!(fs::read_dir(dir.path().join("registry")).unwrap().filter_map(Result::ok)
+        .filter(|row|row.path().extension().is_some_and(|ext|ext=="json")).count(), 4);
+    send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+    assert_eq!(claude_receive_until(&mut reader, |row|row["id"]==3)["ok"], true);wait_until(||process.exited());
 }
 
 #[test]

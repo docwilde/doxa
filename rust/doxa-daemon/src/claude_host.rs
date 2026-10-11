@@ -46,6 +46,7 @@ struct Shared {
     peer_allowed: bool,
     depth: u32,
     parent: Option<String>,
+    routed: bool,
 }
 impl Shared {
     fn scrub(&self, text: &str) -> Result<String, String> {
@@ -74,7 +75,8 @@ impl Shared {
             v => Ok(v.clone()),
         }
     }
-    fn persist(&self, record: Value) -> Result<(), String> {
+    fn persist(&self, mut record: Value) -> Result<(), String> {
+        if self.routed {record["router_worker"]=json!(true);}
         self.store
             .try_append(record, "claude", |s| {
                 self.scrub(s).map_err(io::Error::other)
@@ -86,7 +88,7 @@ impl Shared {
     }
     fn checkpoint(&self, incomplete: bool) -> Result<(), String> {
         let s = self.selection.lock().unwrap();
-        let fields = json!({"thread_id":self.session,"session_id":self.session,"engine":"claude","transport":"stream-json","cwd":self.cwd,"model":s.0,"effort":s.1,"permission_mode":s.2,"lore_enabled":self.enabled,"lore_tools":self.agent.is_some(),"spawn_depth":self.depth,"parent_session_id":self.parent,"turn_incomplete":incomplete,"recorded":crate::iso_now()});
+        let fields = json!({"thread_id":self.session,"session_id":self.session,"engine":"claude","transport":"stream-json","cwd":self.cwd,"model":s.0,"effort":s.1,"permission_mode":s.2,"lore_enabled":self.enabled,"lore_tools":self.agent.is_some(),"spawn_depth":self.depth,"parent_session_id":self.parent,"turn_incomplete":incomplete,"router_worker":self.routed,"recorded":crate::iso_now()});
         self.store
             .try_write_thread(fields.as_object().unwrap().clone(), |s| {
                 self.scrub(s).map_err(io::Error::other)
@@ -254,6 +256,18 @@ impl ClaudeHost {
         depth: u32,
         parent: Option<&str>,
     ) -> Result<Self, String> {
+        Self::new_identity(executable, cwd, session_id, resume, model, effort, depth, parent, None, false)
+    }
+
+    pub(super) fn new_routed(executable: &Path, cwd: &Path, worker_id: &str,
+        model: &str, effort: &str, agent: Option<Arc<crate::agent_tools::AgentTools>>) -> Result<Self,String> {
+        Self::new_identity(executable,cwd,worker_id,false,Some(model),Some(effort),0,None,Some(agent),true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_identity(executable: &Path, cwd: &Path, session_id: &str, resume: bool,
+        model: Option<&str>, effort: Option<&str>, depth: u32, parent: Option<&str>,
+        routed_agent: Option<Option<Arc<crate::agent_tools::AgentTools>>>, require_auth: bool) -> Result<Self,String> {
         if !doxa_claude::cli::canonical_session_id(session_id) {
             return Err("Claude sessions require a canonical hyphenated UUID".into());
         }
@@ -369,12 +383,12 @@ impl ClaudeHost {
             billing: Mutex::new(None),
             quota_limits: Mutex::new(json!({})),
             catalog: Mutex::new(Value::Null),
-            agent: crate::agent_tools::AgentTools::new(&cwd, session_id, "claude", enabled),
+            agent: routed_agent.unwrap_or_else(|| crate::agent_tools::AgentTools::new(&cwd, session_id, "claude", enabled)),
             peer: Mutex::new(None),
             session_tools: Mutex::new(None),
             peer_allowed,
             depth,
-            parent: parent.map(str::to_owned),
+            parent: parent.map(str::to_owned), routed: require_auth,
         });
         let mut cli = Cli::spawn(CliOptions {
             executable,
@@ -400,10 +414,16 @@ impl ClaudeHost {
             return Err("Claude did not apply requested startup effort".into());
         }
         let _ = catalog(&initial)?;
+        if require_auth && !doxa_claude::catalog::authenticated(&initial) { return Err("Current Claude account authentication unavailable".into()); }
         *shared.catalog.lock().unwrap() = initial.clone();
         if let Some(requested) = requested_model.as_deref() {
             if !model_applied(&initial, requested, effective.0.as_deref()) {
                 return Err("Claude did not apply requested startup model".into());
+            }
+            if require_auth && (effective.0.as_deref()!=Some(requested)
+                || initial["models"].as_array().into_iter().flatten().any(|row|row["value"] == requested
+                    && row["resolvedModel"].as_str().is_some_and(|resolved|resolved!=requested))) {
+                return Err("Router Claude requires the exact resolved startup model".into());
             }
         }
         *shared.selection.lock().unwrap() = (effective.0, effective.1, mode);
@@ -411,6 +431,9 @@ impl ClaudeHost {
         if let Some(account) = shared.account.lock().unwrap().as_ref() {
             set_billing_account(&shared, account);
         }
+        // Keep the private worker marker in a small first record. A bounded
+        // history scan must not need to parse a large canonical context packet.
+        if shared.routed {shared.persist(json!({"type":"router_worker","session_id":session_id}))?;}
         let (tx, rx) = mpsc::channel();
         let owned = shared.clone();
         let worker = thread::spawn(move || broker(cli, rx, owned));
@@ -436,9 +459,7 @@ impl ClaudeHost {
         if let Some(worker) = self.worker.lock().unwrap().take() {
             let _ = worker.join();
         }
-        if let Some(agent) = &self.shared.agent {
-            agent.close();
-        }
+        if !self.shared.routed { if let Some(agent) = &self.shared.agent { agent.close(); } }
         let _reviewed = self.shared.review(false);
         let indexed = !self.shared.enabled
             || self
@@ -674,6 +695,10 @@ fn dispatch_mcp(
                 Ok(text) => json!({"content":[{"type":"text","text":text}]}),
                 Err(_) => json!({"isError":true,"content":[{"type":"text","text":"Canonical tool scrub failed"}]}),
             },
+            // This exact static host error is safe and tells the model how to
+            // recover without exposing provider errors or peer message prose.
+            Err(error) if error == doxa_engines::peer_tools::EXACT_TARGET_REQUIRED =>
+                json!({"isError":true,"content":[{"type":"text","text":doxa_engines::peer_tools::EXACT_TARGET_REQUIRED}]}),
             Err(_) => json!({"isError":true,"content":[{"type":"text","text":"Tool request refused or failed; no success was verified"}]}),
         };
         let _ = tx.send((id, json!({"mcp_response":{"jsonrpc":"2.0","id":request["message"]["id"],"result":response}})));
@@ -1101,6 +1126,8 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
     let mut events = None;
     let mut overflow = false;
     let mut provider_failure: Option<String> = None;
+    let mut observed_model: Option<String> = None;
+    let mut model_consistent = true;
     let mut stopping = false;
     let mut turn_deadline = None;
     let mut compact_permit = false;
@@ -1124,6 +1151,8 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                     events = Some(sink);
                     overflow = false;
                     provider_failure = None;
+                    observed_model = None;
+                    model_consistent = true;
                     compact_permit = text.trim() == "/compact";
                     let ready = !shared.cancelled.load(Ordering::Acquire);
                     let admitted = (|| {
@@ -1657,6 +1686,13 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                     turn_deadline = Some(Instant::now() + Duration::from_secs(5));
                 }
                 let kind = frame["type"].as_str().unwrap();
+                if kind == "assistant" && frame["parent_tool_use_id"].is_null() {
+                    if let Some(model) = frame["message"]["model"].as_str()
+                        .filter(|model| !model.is_empty() && model.len() <= 128 && !model.chars().any(char::is_control)) {
+                        model_consistent &= observed_model.as_deref().is_none_or(|previous| previous == model);
+                        observed_model = Some(model.to_owned());
+                    } else { model_consistent = false; }
+                }
                 if frame["message"].is_object() {
                     let mut message = frame["message"].clone();
                     if let Some(blocks) = message["content"].as_array_mut() {
@@ -1719,6 +1755,12 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                     None
                 };
                 let data = json!({"ctx_percentage":null,"ctx_tokens":null,"ctx_max_tokens":null,"input_tokens":usage["input_tokens"],"output_tokens":usage["output_tokens"],"cache_read_input_tokens":usage["cache_read_input_tokens"],"cache_creation_input_tokens":usage["cache_creation_input_tokens"],"cost_usd":frame["total_cost_usd"],"is_error":error||shared.failed.load(Ordering::Acquire),"num_turns":frame["num_turns"],"error":reason});
+                let mut data = data;
+                data["model"] = json!(observed_model.as_ref().filter(|_|model_consistent));
+                data["model_consistent"] = json!(model_consistent && observed_model.is_some());
+                data["usage_complete"] = json!(usage["input_tokens"].as_u64().is_some() && usage["output_tokens"].as_u64().is_some()
+                    && usage["cache_read_input_tokens"].as_u64().is_some() && usage["cache_creation_input_tokens"].as_u64().is_some());
+                data["usage_scope"] = json!("turn");
                 match cli.control(json!({"subtype":"get_context_usage","detail":"summary"})) {
                     Ok(id) => {
                         terminal_context =
@@ -1981,7 +2023,7 @@ for line in sys.stdin:
             session_tools: Mutex::new(None),
             peer_allowed: false,
             depth: 0,
-            parent: None,
+            parent: None, routed: false,
         });
         let mut cli = Cli::spawn(CliOptions {
             executable: &path,

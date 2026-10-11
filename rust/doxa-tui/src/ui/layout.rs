@@ -506,12 +506,14 @@ impl App {
                 .clamp(6, 18) as u16
         } else if self.delete_confirmation.is_some() {
             6
-        } else if self.settings_menu.is_some() {
-            8
+        } else if let Some(menu) = &self.settings_menu {
+            if menu.has_preflight() { 12 } else { 8 }
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
-            if !vendor_models(form.engine).is_empty() {
+            if form.isolation.docker() {
+                if vendor_models(form.engine).is_empty() { 12 } else { 13 }
+            } else if !vendor_models(form.engine).is_empty() {
                 10
             } else if form.engine == launch::Engine::Claude {
                 9
@@ -557,6 +559,9 @@ impl App {
             (self.memory_list.as_ref().unwrap().indices().len() + 3).clamp(7, 19) as u16
         } else if self.chip_info.is_some() {
             self.chip_info.as_ref().map_or(5, |info| {
+                if info.kind == "context" {
+                    return (self.context_info_lines(usize::from(pane.width.saturating_sub(3)).max(1)).len() + 2).clamp(7, 19) as u16;
+                }
                 if matches!(
                     info.kind,
                     "memory"

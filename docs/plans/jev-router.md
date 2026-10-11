@@ -9,13 +9,14 @@ and locally verified on 2026-10-11; beta.44 ships this scope through PR #249.
 
 - Explicit `router` engine with absolute `--router-config`, or an explicitly
   named private `DOXA_ROUTER_CONFIG`/Settings path. No invented candidate list.
-- Configured DeepSeek/GLM target IDs, fixed per-target effort and cap/rate policy.
+- Configured DeepSeek/GLM API and authenticated Claude/protected Codex CLI target
+  IDs, fixed per-target effort and cap/account-billing policy.
   Eligibility is checked against credentials, catalog, history, tools and budget
   before execution. Descriptions are operator assumptions, not quality evidence.
 - Turn-boundary Jev Choice routing, bounded requests/deadlines and exact target
   validation. `/model auto` versus a configured target pin remains distinct from
   permission mode and effective per-turn worker identity.
-- Canonical durable API conversation and route metadata; hash-bound resume;
+- Canonical durable router conversation and route metadata; hash-bound resume;
   durable routing/worker reservations and accounting uncertainty refusal.
 - Bounded target/provider/model/effort status, fallback reason, latency and cost
   estimates. No credentials or full routing input in UI routing rows.
@@ -23,8 +24,16 @@ and locally verified on 2026-10-11; beta.44 ships this scope through PR #249.
   with no Jev call or selection change. Mandatory canonical-source LORE review
   precedes a bounded summary; originals remain canonical and a verified summary
   is separate context. Aggregate cost/reservation and unknown-usage refusal
-  apply to summary calls. UI summary identity and reattach state remain separate
+  apply to API summary calls; CLI pin/last target is explicitly refused. UI summary identity and reattach state remain separate
   from the ordinary routed worker.
+- Internal CLI workers use fresh private UUIDs, exact current authenticated
+  catalogs, existing native tool/permission controls and one outer Rust
+  peer/LORE registry. Durable worker/request/canonical-source bindings and
+  complete observed token usage guard settlement/resume. Private worker proof
+  is excluded from public history/restore. Explicit `cli_account` policy keeps
+  CLI charges and total charge unknown, outside the tracked Jev/API allowance.
+- `/settings` reviews an explicit config/current catalogs before enabling Jev
+  Router; routing Auto remains separate from idle native permission Auto.
 - Recorded-response evaluation with development/holdout group separation,
   synthetic fixture generation, and a separately opted-in synthetic live smoke.
   Evaluator never executes workers or claims worker quality from routing labels.
@@ -78,6 +87,24 @@ supervisor receipt bind the router conversation plus exact summary target.
 Canonical DOXA storage/replay still use `router`. This is not authenticated
 paid review or summary quality evidence.
 
+Native CLI routing verification on 2026-10-11 used six credential-free Linux
+production-daemon fixture tests. All six passed across focused runs: the five
+remaining cases passed together and the corrected advertised-GLM-effort history
+case passed separately. They exercise Claude and protected Codex stdio hosts,
+command/peer-tool approval roundtrips, exact authenticated-catalog/resolved-model
+admission, fresh private identities, one outer registry, API switching/resume,
+optional executable refusal, missing/wrong/excess usage, source changes,
+interruption/process cleanup and no uncertain replay. Fake account metadata is
+controlled fixture data, not live authenticated-account evidence.
+
+Eight focused regressions passed: one core billing-policy/hash check, three
+Claude catalog/authentication checks, two daemon argument/config checks, one
+large private-worker history exclusion and one native permission-picker check.
+The production daemon built with `cargo build --locked --offline -p doxa-daemon`
+and frontend binaries passed `cargo check --locked --offline -p doxa-tui --bins`.
+No paid worker calls, real login changes or live installation were performed.
+CLI account billing/quota and real-task quality remain unmeasured.
+
 The [evaluation record](../router-evaluation.md) binds an authorized six-call
 `jev-1.13.0` synthetic smoke on 2026-10-10 to exact config/input hashes and
 recorded responses. Development agreement was 4/4 and separate synthetic
@@ -105,7 +132,10 @@ usage-based cost are estimates, not live invoices.
   uses the selected API provider while retaining router conversation proof.
 - [ ] Reviewed config/allowance propagation for child sessions, fleets, history
   launches and Docker migration.
-- [ ] Separate Claude/Codex CLI handoff contract, conversation transfer,
-  permission boundary and lifecycle recovery; no automatic CLI fallback.
+- [x] Internal authenticated Claude/protected Codex workers with bounded
+  canonical history transfer, native permission/tool lifecycle and fail-closed
+  recovery. Credential-free Linux local fixtures; no real-account quality claim.
+- [ ] External CLI handoffs and CLI managed-summary targets; no implicit
+  propagation to child/fleet/Docker sessions.
 - [ ] Authenticated platform checks. Local Linux fixtures are not authenticated
   macOS or provider availability evidence.

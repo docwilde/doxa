@@ -11,6 +11,7 @@ mod session_title;
 mod vendor_host;
 mod vendor_tools;
 mod router_host;
+mod router_cli;
 mod isolation_host;
 use claude_host::ClaudeHost;
 use budget_host::BudgetHost;
@@ -109,7 +110,7 @@ struct Options {
 fn initial_task_prompt(task: &str, parent: Option<&str>) -> String {
     // Match Python's receiving-side spawn disclosure before admitting a turn.
     const INTRO: &str = "[SPAWNED SESSION] This session was started by another DOXA session, not by a person typing. The task below was composed by that session's agent and approved, verbatim, by the human who owns both sessions -- so it IS your task, and you should carry it out. This marker is disclosure, not a trust downgrade: it exists so that anyone reading this transcript later can see where the task came from, and so that you can weigh its provenance yourself before doing something genuinely consequential with it -- spending money, running a destructive command, or spawning further sessions of your own.";
-    let origin = parent.map(|id| format!("Spawning session: {}.\n", &id[..id.len().min(8)])).unwrap_or_default();
+    let origin = parent.map(|id| format!("Spawning session: {id}.\nTo address that session, use this full exact ID as peer_send target after checking current peer_list; never shorten it.\n")).unwrap_or_default();
     format!("{INTRO}\n{origin}\n--- task ---\n{task}")
 }
 fn valid_parent_id(id: &str) -> bool {
@@ -264,8 +265,8 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
         router_config=None;
     }
     if engine == Engine::Router {
-        if codex_bin.is_some() || claude_bin.is_some() || effort.is_some() || explicit_sandbox {
-            return Err(invalid("router targets define their effort; CLI executables and sandbox overrides are unsupported"));
+        if effort.is_some() || explicit_sandbox {
+            return Err(invalid("router targets define their effort; sandbox overrides are unsupported"));
         }
         if isolation.is_some_and(|profile|profile!=doxa_isolation::Profile::Native) {
             return Err(invalid("router currently requires native isolation"));
@@ -277,6 +278,12 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
         let path=router_config.as_ref().filter(|path|path.is_absolute())
             .ok_or_else(||invalid("router needs an absolute --router-config PATH"))?;
         let config=doxa_router::Config::load(path).map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
+        let needs_codex=config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Codex);
+        let needs_claude=config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Claude);
+        if needs_codex { codex_bin=codex_bin.map(executable).transpose()?; }
+        else if codex_bin.is_some() {return Err(invalid("--codex-bin requires a configured Codex router candidate"));}
+        if needs_claude { claude_bin=claude_bin.map(executable).transpose()?; }
+        else if claude_bin.is_some() {return Err(invalid("--claude-bin requires a configured Claude router candidate"));}
         if model.as_deref().is_some_and(|id|id!="auto"&&config.candidate(id).is_none()) {
             return Err(invalid("router model must be auto or an exact configured target ID"));
         }
@@ -703,7 +710,8 @@ fn run() -> io::Result<()> {
         Engine::Router => {
             let config=doxa_router::Config::load(options.router_config.as_deref().expect("validated router config"))
                 .map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
-            let host=Arc::new(RouterHost::new(config,&options.cwd,&options.session_id,options.resume,ceiling,
+            let host=Arc::new(RouterHost::new_with_cli(config,&options.cwd,&options.session_id,options.resume,ceiling,
+                router_cli::CliOptions {claude:options.claude_bin.clone(),codex:options.codex_bin.clone()},
                 #[cfg(feature="local-test-server")] options.vendor_endpoint.clone()).map_err(io::Error::other)?);
             if let Some(model)=options.model.as_deref() {
                 host.call("set_model",&json!({"model":model})).map_err(io::Error::other)?;
@@ -752,11 +760,11 @@ fn run() -> io::Result<()> {
     )?);
     let mut provider_args=Vec::new();
     provider_args.extend(["--isolation".into(), profile.key().into()]);
-    if let Some(path)=&options.codex_bin {
+    if options.engine==Engine::Codex { if let Some(path)=&options.codex_bin {
         provider_args.extend(["--codex-bin".into(),path.to_str().ok_or_else(||invalid("Codex executable must be UTF-8 for child launch"))?.into()]);
         let sandbox=match options.sandbox {SandboxMode::ReadOnly=>"read-only",SandboxMode::WorkspaceWrite=>"workspace-write",SandboxMode::DangerFullAccess=>"danger-full-access"};
         provider_args.extend(["--sandbox".into(),sandbox.into()]);
-    }
+    } }
     if let Some(path)=&options.claude_bin {
         provider_args.extend(["--claude-bin".into(),path.to_str().ok_or_else(||invalid("Claude executable must be UTF-8 for child launch"))?.into()]);
     }
@@ -933,11 +941,17 @@ mod tests {
         options_from(args.iter().map(std::ffi::OsString::from))
     }
     #[test]
+    fn spawned_task_preserves_full_parent_peer_address() {
+        let id = "a1234567-89ab-4cde-8123-0123456789ab";
+        let prompt = initial_task_prompt("Reviewed task", Some(id));
+        assert!(prompt.contains(&format!("Spawning session: {id}.")));
+        assert!(!prompt.contains("Spawning session: a1234567."));
+        assert!(prompt.contains("after checking current peer_list"));
+    }
+    #[test]
     fn router_cli_refuses_unsupported_combinations_before_loading_private_config() {
         for (flag,value,expected) in [
             ("--effort","high","targets define their effort"),
-            ("--codex-bin","/missing","targets define their effort"),
-            ("--claude-bin","/missing","targets define their effort"),
             ("--sandbox","workspace-write","sandbox overrides"),
             ("--isolation","docker-open","native isolation"),
             ("--spawn-depth","1","config inheritance"),

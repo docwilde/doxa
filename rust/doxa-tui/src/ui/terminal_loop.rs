@@ -617,6 +617,7 @@ fn run_loop_with_remote(
         }
         changed |= app.poll_vendor_catalog();
         changed |= app.poll_new_session_catalog();
+        changed |= app.poll_router_review();
         changed |= app.poll_model_catalog(Instant::now());
         changed |= app.tick_blink(Instant::now());
         changed |= app.tick_rail_sort(Instant::now());

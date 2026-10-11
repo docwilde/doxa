@@ -9,6 +9,7 @@ provider, daemon, network connection, or user store.
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -26,20 +27,46 @@ ORIGIN = ((SIZE[0] - GRID[0] * CELL[0]) // 2, (SIZE[1] - GRID[1] * CELL[1]) // 2
 SCENES = (
     "hero", "triage", "pane-triage", "project-label", "image-preview", "isolation", "fleet-review", "fleet-dependency", "fleet-release-review", "fleet-view",
     "beliefs", "tool-entries", "memory-management", "commands", "help", "codegraph",
+    "settings", "context", "queued-prompts", "peer-messages", "routing-status", "settings-router",
 )
 FONT = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
 FONT_BOLD = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf")
+FONT_EMOJI = Path("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf")
+
+
+@lru_cache(maxsize=1)
+def robot_glyph() -> Image.Image:
+    """Rasterize the App's actual Unicode robot using the installed emoji font."""
+    font = ImageFont.truetype(FONT_EMOJI, 109)  # Noto's fixed bitmap strike
+    left, top, right, bottom = font.getbbox("🤖")
+    glyph = Image.new("RGBA", (right - left, bottom - top))
+    ImageDraw.Draw(glyph).text((-left, -top), "🤖", font=font, embedded_color=True)
+    scale = min(CELL[0] * 2 / glyph.width, (CELL[1] - 4) / glyph.height)
+    return glyph.resize((round(glyph.width * scale), round(glyph.height * scale)), Image.Resampling.LANCZOS)
 
 
 def capture(binary: Path, scene: str, destination: Path, version: str, env: dict[str, str]) -> None:
     raw = subprocess.check_output([str(binary), scene], cwd=ROOT, env=env, timeout=30)
     frame = json.loads(raw)
+    if frame.get("version") != version:
+        raise ValueError(f"{scene}: binary version differs from manifest {version}")
     if (frame["width"], frame["height"]) != GRID or len(frame["cells"]) != GRID[0] * GRID[1]:
         raise ValueError(f"{scene}: unexpected terminal grid")
     rows = ["".join(frame["cells"][y * GRID[0] + x][0] for x in range(GRID[0]))
             for y in range(GRID[1])]
     if scene == "hero" and version not in "\n".join(rows):
         raise ValueError(f"{scene}: binary version {version} is not visible")
+    required = {
+        "settings": ("Appearance", "Ctrl+S save"),
+        "settings-router": ("Jev Router (on for new sessions)", "Jev Router config", "/private/reviewed-router.json", "Not checked", "no inference"),
+        "context": ("21.0% in use", "42000 / 200000 tokens", "Conversation", "Available"),
+        "routing-status": ("Route auto", "ds-fast", "$0.000004 est", "session cost includes worker calls"),
+        "queued-prompts": ("Queued · q-next", "parser API stable"),
+        "peer-messages": ("Peer Parser reviewer", "q-peer", "reconnect review"),
+    }
+    for label in required.get(scene, ()):
+        if label not in "\n".join(rows):
+            raise ValueError(f"{scene}: expected fixture content not visible: {label}")
 
     canvas = Image.new("RGB", SIZE, (23, 20, 28))
     draw = ImageDraw.Draw(canvas)
@@ -47,11 +74,20 @@ def capture(binary: Path, scene: str, destination: Path, version: str, env: dict
     bold = ImageFont.truetype(FONT_BOLD, 38)
     ox, oy = ORIGIN
     cw, ch = CELL
-    for index, (symbol, foreground, background, modifier) in enumerate(frame["cells"]):
+    # Fill backgrounds before glyphs, so a wide Unicode glyph is not erased by
+    # the following cell's background (Ratatui retains that cell for width).
+    for index, (_, _, background, _) in enumerate(frame["cells"]):
         x, y = index % GRID[0], index // GRID[0]
         left, top = ox + x * cw, oy + y * ch
         draw.rectangle((left, top, left + cw - 1, top + ch - 1), fill=tuple(background))
+    for index, (symbol, foreground, _, modifier) in enumerate(frame["cells"]):
+        x, y = index % GRID[0], index // GRID[0]
+        left, top = ox + x * cw, oy + y * ch
         if not symbol or symbol == " ":
+            continue
+        if symbol == "🤖":
+            glyph = robot_glyph()
+            canvas.paste(glyph, (left, top + (ch - glyph.height) // 2), glyph)
             continue
         font = bold if modifier & 1 else regular
         bbox = font.getbbox(symbol)
@@ -65,6 +101,7 @@ def capture(binary: Path, scene: str, destination: Path, version: str, env: dict
     metadata.add_text("DOXA version", version)
     metadata.add_text("Scene", scene)
     metadata.add_text("Capture", "production App, Ratatui TestBackend, deterministic fixture")
+    metadata.add_text("Fonts", "DejaVu Sans Mono; Noto Color Emoji for the robot glyph")
     destination.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(destination, pnginfo=metadata, optimize=True)
     if Image.open(destination).size != SIZE:
@@ -91,8 +128,11 @@ def main() -> None:
         lore_root = Path(private) / "lore"
         for directory in (home, doxa_home, lore_root):
             directory.mkdir(mode=0o700)
-        env = os.environ.copy()
-        env.update({"HOME": str(home), "DOXA_HOME": str(doxa_home), "LORE_ROOT": str(lore_root)})
+        # Owner settings, key bindings, provider credentials and clock state
+        # must not influence deterministic example frames or child processes.
+        env = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
+        env.update({"HOME": str(home), "DOXA_HOME": str(doxa_home), "LORE_ROOT": str(lore_root),
+                    "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "DOXA_CLOCK_SHOW": "0"})
         for scene in args.scenes:
             capture(binary, scene, args.output_dir / f"rust-{version}-{scene}.png", version, env)
 

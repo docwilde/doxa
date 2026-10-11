@@ -3,6 +3,9 @@
 #[path = "../src/budget_host.rs"] mod budget_host;
 #[path = "../src/vendor_host.rs"] mod vendor_host;
 #[path = "../src/vendor_tools.rs"] mod vendor_tools;
+#[path = "../src/claude_host.rs"] mod claude_host;
+#[path = "../src/codex_host.rs"] mod codex_host;
+#[path = "../src/router_cli.rs"] mod router_cli;
 #[path = "../src/router_host.rs"] mod router_host;
 mod peer_host { pub const PEER_TURN_MARKER: &str = "[PEER-STARTED TURN]"; }
 fn iso_now() -> String { "2026-10-10T23:00:00Z".into() }
@@ -44,7 +47,7 @@ mod tests {
 
     fn config() -> Config {
         let candidate = |id:&str,provider:Provider,model:&str,effort:&str,input,output| Candidate {
-            id:id.into(),provider,model:model.into(),effort:effort.into(),description:format!("Reviewed {id} test target"),
+            id:id.into(),provider,billing:doxa_router::Billing::Api,model:model.into(),effort:effort.into(),description:format!("Reviewed {id} test target"),
             context_tokens:131072,max_output_tokens:512,supports_tools:true,
             input_usd_micros_per_million:input,output_usd_micros_per_million:output };
         Config {version:1,jev_model:doxa_router::JEV_MODEL.into(),criteria_version:"fixture-v1".into(),

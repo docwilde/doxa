@@ -125,6 +125,7 @@ pub(super) fn mermaid_sources(source: &str) -> Vec<String> {
 
 enum Block<'a> {
     Prose(&'a str),
+    Message(super::transcript_messages::Message),
     Image { source: String, alt: String },
     Mermaid { raw: String, key: String },
     Shell(crate::shell::Result),
@@ -320,6 +321,19 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
             Block::Prose(paragraph) => {
                 if !prose.is_empty() { prose.push_str("\n\n"); }
                 prose.push_str(paragraph);
+            }
+            Block::Message(message) => {
+                flush_prose(&mut prose, lines, links, speaker);
+                if !lines.is_empty() && !lines.last().is_some_and(|line| line.spans.is_empty()) {
+                    lines.push(Line::default());
+                }
+                let label = markdown::render(&super::transcript_events::event_field_with_limit(&message.label(), 1024), width);
+                lines.extend(label.into_iter().map(|line| line.style(Style::default().fg(if message.sender.is_some() { theme::PEER } else { theme::MUTED }))));
+                if !message.text.is_empty() {
+                    append_markdown(lines, links, transcript_roles::render_with_links(&message.text, width,
+                        Some(if message.sender.is_some() { Speaker::Peer } else { Speaker::User })));
+                }
+                lines.push(Line::default());
             }
             Block::Image { source, alt } => {
                 flush_prose(&mut prose, lines, links, speaker);
@@ -545,6 +559,15 @@ pub(super) fn render_with_media(
             else { blocks.push(Block::Prose("Local shell output unavailable")); }
         } else if fence.is_none() && paragraph.starts_with(REASONING_PREFIX) {
             blocks.push(reasoning_block(paragraph).unwrap_or(Block::Prose("Reasoning unavailable")));
+        } else if fence.is_none() && paragraph.starts_with(super::transcript_messages::PREFIX) {
+            if let Some(message) = super::transcript_messages::Message::parse(paragraph) {
+                if message.starts_turn {
+                    render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, &mut mermaids,
+                        ready_mermaids, image_rows, width, expanded, selected.clone(), cards, section_offset);
+                    tool_index = None;
+                }
+                blocks.push(Block::Message(message));
+            } else { blocks.push(Block::Prose("Message unavailable")); }
         } else if fence.is_none() && is_tool_row(paragraph) {
             if let Some(index) = tool_index {
                 let Block::Tools(tools) = &mut blocks[index] else { unreachable!() };

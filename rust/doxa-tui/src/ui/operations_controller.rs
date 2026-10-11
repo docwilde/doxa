@@ -641,8 +641,21 @@ impl App {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect::<Vec<_>>();
         let engine = menu.engine.clone();
-        let result =
-            crate::settings::config_path().and_then(|p| crate::settings::save(&p, &edits, &engine));
+        let result = crate::settings::config_path().and_then(|path| {
+            if let Some(router_path)=crate::settings::proposed_router_path(&path,&edits)? {
+                let reviewed=self.router_review_result(&router_path).is_some_and(|review|
+                    review.ready() && review.current(&router_path));
+                if !reviewed {
+                    self.start_router_review(router_path);
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+                        "Review Jev Router config/auth/catalog first; Ctrl+S saves after the check is ready"));
+                }
+            }
+            let review=self.router_review.as_ref().and_then(|review|match &review.state {
+                super::router_settings::ReviewState::Complete(Ok(result))=>Some(result), _=>None,
+            });
+            crate::settings::save_with_review(&path,&edits,&engine,review)
+        });
         match result {
             Ok(()) => {
                 match crate::keybindings::Bindings::load() {
@@ -714,6 +727,12 @@ impl App {
             return true;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+            if menu.rows.get(menu.selected).is_some_and(|row|matches!(row.setting.key,"engine"|"router_config")) {
+                menu.finish_draft();
+                let path=std::path::PathBuf::from(menu.effective_value("router_config"));
+                self.start_router_review(path);
+                return true;
+            }
             if !menu.rows.get(menu.selected).is_some_and(|row|
                 matches!(row.setting.key, "mermaid_renderer" | "mermaid_renderer_root")) {
                 self.notice = "Select a Mermaid renderer setting to run preflight".into();
@@ -760,7 +779,7 @@ impl App {
             return true;
         }
         match key.code {
-            KeyCode::Esc => self.settings_menu = None,
+            KeyCode::Esc => self.close_settings_menu(),
             KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
                 let indices = menu.indices();
                 if let Some(position) = indices.iter().position(|i| *i == menu.selected) {
@@ -1099,11 +1118,15 @@ impl App {
                 lines.push(format!("{label:<11}{}", number(field)));
             }
             lines.push(format!(
-                "cost     {}",
+                "{} {}",
+                if telemetry.is_some_and(|value|value.tracked_cost_only) {"Jev/API tracked"} else {"cost    "},
                 telemetry
                     .and_then(|value| value.session_cost.as_deref())
                     .unwrap_or("not reported by this engine")
             ));
+            if telemetry.is_some_and(|value|value.tracked_cost_only) {
+                lines.push("CLI account charges unknown and excluded; total session spend unknown.".into());
+            }
             if let Some(quota) = telemetry.and_then(|value| value.quota.as_deref()) {
                 lines.push(format!("quota    {}", safe_label(quota)));
             }

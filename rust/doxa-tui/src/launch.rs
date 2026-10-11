@@ -528,8 +528,8 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             }
         }
         Engine::Router => {
-            if options.codex_bin.is_some() || options.claude_bin.is_some() || options.sandbox.is_some() || options.effort.is_some() {
-                return Err(invalid("router targets define their effort; CLI executables and sandbox overrides are unsupported"));
+            if options.sandbox.is_some() || options.effort.is_some() {
+                return Err(invalid("router targets define their effort; sandbox overrides are unsupported"));
             }
             let profile=options.isolation.unwrap_or(doxa_isolation::configured_profile(&doxa_isolation::home()?)?);
             if profile!=doxa_isolation::Profile::Native {return Err(invalid("router currently requires native isolation"));}
@@ -538,6 +538,14 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
                 return Err(invalid("router model must be auto or an exact configured target ID"));
             }
             command.args(["--engine","router","--router-config"]).arg(path);
+            if config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Codex) {
+                let executable=if options.codex_bin.is_some(){Some(codex_executable(options)?)}else{codex_executable(options).ok()};
+                if let Some(path)=executable {command.arg("--codex-bin").arg(path);}
+            } else if options.codex_bin.is_some() {return Err(invalid("--codex-bin requires a configured Codex router candidate"));}
+            if config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Claude) {
+                let executable=if options.claude_bin.is_some(){Some(claude_executable(options)?)}else{claude_executable(options).ok()};
+                if let Some(path)=executable {command.arg("--claude-bin").arg(path);}
+            } else if options.claude_bin.is_some() {return Err(invalid("--claude-bin requires a configured Claude router candidate"));}
             if let Some(model)=&model {command.arg("--model").arg(model);}
             if options.resume.is_some() {command.args(["--resume","true"]);}
         }
@@ -620,7 +628,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
                     Engine::Codex => "Codex authentication and LORE",
                     Engine::Fixture => "fixture",
                     Engine::DeepSeek | Engine::Glm => "vendor API key and LORE",
-                    Engine::Router => "router config, Typesafe and candidate API credentials",
+                    Engine::Router => "router config, TypeSafe and current candidate API/CLI authentication",
                 }
             )));
         }

@@ -11,6 +11,7 @@ pub fn decode(value: &Value) -> Result<Value, Error> {
     for row in rows {
         let valid = |name: &&str| !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control);
         let name = row["value"].as_str().or_else(|| row["model"].as_str()).filter(valid).ok_or(Error::Protocol)?;
+        let resolved=row["resolvedModel"].as_str().filter(valid);
         let mut names = vec![name];
         if let Some(resolved) = row["resolvedModel"].as_str().filter(valid) {
             if resolved != name { names.push(resolved); }
@@ -21,14 +22,31 @@ pub fn decode(value: &Value) -> Result<Value, Error> {
         for name in names {
             if !ids.contains(&name) {
                 ids.push(name);
-                capabilities.push(json!({"model":name,"efforts":efforts}));
+                capabilities.push(json!({"model":name,"efforts":efforts,"resolved_model":resolved}));
             }
         }
     }
     Ok(json!({"models":ids,"capabilities":capabilities,"note":"Live model catalog from the connected Claude CLI"}))
 }
 
+pub fn authenticated(value: &Value) -> bool {
+    let present=|key|value["account"][key].as_str().is_some_and(|text|!text.is_empty()
+        && text.len()<=256 && !text.chars().any(char::is_control) && !matches!(text,"none"|"profile"));
+    // Installed CLI 2.1.296 supplies apiProvider:"firstParty" even when signed
+    // out. Backend identity alone, or an email alone, never authenticates.
+    present("tokenSource") || present("apiKeySource") || (present("subscriptionType") && present("email"))
+}
+
+/// Initialize the connected account without a user prompt. A catalog alone is
+/// not authentication evidence; missing account metadata remains unavailable.
+pub fn discover_authenticated(options: CliOptions<'_>, timeout: Duration) -> Result<Value, Error> {
+    discover_inner(options, timeout, true)
+}
+
 pub fn discover(options: CliOptions<'_>, timeout: Duration) -> Result<Value, Error> {
+    discover_inner(options, timeout, false)
+}
+fn discover_inner(options: CliOptions<'_>, timeout: Duration, require_auth: bool) -> Result<Value, Error> {
     let deadline = Instant::now() + timeout;
     let mut cli = Cli::spawn(options)?;
     let id = cli.control(json!({"subtype":"initialize","sdkMcpServers":[]}))?;
@@ -39,7 +57,9 @@ pub fn discover(options: CliOptions<'_>, timeout: Duration) -> Result<Value, Err
         match frame["type"].as_str() {
             Some("control_response") if frame["response"]["request_id"] == id => {
                 if frame["response"]["subtype"] != "success" { return Err(Error::Protocol); }
-                return decode(&frame["response"]["response"]);
+                let response = &frame["response"]["response"];
+                if require_auth && !authenticated(response) { return Err(Error::Protocol); }
+                return decode(response);
             }
             Some("control_request") => {
                 let request_id = frame["request_id"].as_str().ok_or(Error::Protocol)?;
@@ -55,6 +75,18 @@ pub fn discover(options: CliOptions<'_>, timeout: Duration) -> Result<Value, Err
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn authenticated_catalog_requires_account_evidence_beyond_provider_identity() {
+        for account in [json!({}),json!({"apiProvider":"firstParty"}),json!({"email":"local@example.test"}),
+            json!({"apiKeySource":"none","tokenSource":"profile"}),json!({"tokenSource":"bad\nsource"})] {
+            assert!(!authenticated(&json!({"account":account})));
+        }
+        for account in [json!({"apiKeySource":"ANTHROPIC_API_KEY"}),json!({"tokenSource":"claude.ai"}),
+            json!({"email":"local@example.test","subscriptionType":"account-plan"})] {
+            assert!(authenticated(&json!({"account":account})));
+        }
+    }
 
     #[test]
     fn catalog_discovery_initializes_without_prompts_and_cleans_up_the_cli() {

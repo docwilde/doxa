@@ -706,6 +706,13 @@ impl App {
                     self.request_auto_diff(&id);
                 }
                 match event_type {
+                    "peer_message" => {
+                        let Some(message) = super::transcript_messages::Message::peer(data, self.preferences.on("nerd_font")) else { return false; };
+                        let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else { return false; };
+                        let clipped = super::transcript_messages::append(session, &message);
+                        self.transcript_evicted(&id, clipped);
+                        true
+                    }
                     "routing_selected" | "routing_fallback" => {
                         if !self.sessions.iter().any(|session| session.id == id)
                             || self.session_identity.get(&id).and_then(|pair| pair.0.as_deref()) != Some("router") {
@@ -713,7 +720,9 @@ impl App {
                         }
                         let Some(routing) = super::session_telemetry::RoutingStatus::from_value(data) else { return false; };
                         let summary = super::transcript_events::event_field(&routing.summary());
-                        self.session_telemetry.entry(id.clone()).or_default().routing = Some(routing);
+                        let telemetry=self.session_telemetry.entry(id.clone()).or_default();
+                        telemetry.routing = Some(routing);
+                        telemetry.update_cost_scope(data);
                         let clipped = self.sessions.iter_mut().find(|s| s.id == id)
                             .is_some_and(|session| append_transcript(session, &format!("\n\n*{summary}*\n")));
                         self.transcript_evicted(&id, clipped);
@@ -880,7 +889,12 @@ impl App {
                             self.session_telemetry.entry(id.clone()).or_default().compaction =
                                 super::session_telemetry::CompactionStatus::from_value(&data["compaction"]);
                         }
-                        if let Some(prompt) = data
+                        if let Some(message) = super::transcript_messages::Message::peer_turn(data, self.preferences.on("nerd_font")) {
+                            if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+                                let clipped = super::transcript_messages::append(session, &message);
+                                self.transcript_evicted(&id, clipped);
+                            }
+                        } else if let Some(prompt) = data
                             .get("prompt")
                             .and_then(|v| v.as_str())
                             .filter(|v| !v.is_empty())
@@ -1092,13 +1106,27 @@ impl App {
                         self.append_event(&id, event_type, data)
                     }
                     "prompt_queued" => {
-                        self.session_activity.entry(id.clone()).or_default().1 += 1;
-                        self.append_event(&id, event_type, data)
+                        let Some(message) = super::transcript_messages::Message::queued(data, event.get("timestamp").or(frame.get("timestamp")), self.preferences.on("nerd_font")) else {
+                            return false;
+                        };
+                        let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else { return false; };
+                        let (added, clipped) = super::transcript_messages::enqueue(session, message);
+                        if added { self.session_activity.entry(id.clone()).or_default().1 += 1; }
+                        self.transcript_evicted(&id, clipped);
+                        true
                     }
                     "prompt_dequeued" | "prompt_cancelled" | "prompt_discarded" => {
-                        let activity = self.session_activity.entry(id.clone()).or_default();
-                        activity.1 = activity.1.saturating_sub(1);
-                        self.append_event(&id, event_type, data)
+                        use super::transcript_messages::QueueState;
+                        let state = match event_type { "prompt_dequeued" => QueueState::Started,
+                            "prompt_cancelled" => QueueState::Cancelled, _ => QueueState::Discarded };
+                        let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else { return false; };
+                        let (settled, clipped) = super::transcript_messages::settle(session, data, state);
+                        if settled {
+                            let activity = self.session_activity.entry(id.clone()).or_default();
+                            activity.1 = activity.1.saturating_sub(1);
+                        }
+                        self.transcript_evicted(&id, clipped);
+                        settled
                     }
                     _ => self.append_event(&id, event_type, data),
                 }
@@ -1179,13 +1207,10 @@ impl App {
                         .push("Detailed context metadata not reported by this engine".into());
                     return true;
                 }
+                self.session_telemetry.entry(id.to_owned()).or_default()
+                    .update_context_detail(&frame["detail"]);
                 info.lines.extend(context_detail_lines(&frame["detail"]));
-                if self.size.width >= 65 {
-                    info.lines.extend(crate::preferences::context_grid(
-                        &frame["detail"],
-                        self.preferences.value("context_grid") == "ascii",
-                    ));
-                }
+                info.scroll = 0;
                 true
             }
             "models_reply" => {

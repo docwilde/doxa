@@ -11,6 +11,11 @@ SCRIPT = Path(__file__).resolve().parents[1] / "build-session-image.py"
 spec = importlib.util.spec_from_file_location("session_image", SCRIPT)
 image = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(image)
+installer_spec = importlib.util.spec_from_file_location(
+    "protected_installer", SCRIPT.parent / "install_codex_protected.py")
+installer = importlib.util.module_from_spec(installer_spec)
+installer_spec.loader.exec_module(installer)
+ACTUAL_PATCH_SHA256 = hashlib.sha256(installer.PATCH.read_bytes()).hexdigest()
 
 
 class PackageTests(unittest.TestCase):
@@ -26,7 +31,7 @@ class PackageTests(unittest.TestCase):
         self.provider = self.root / "provider"
         self.provider.mkdir(mode=0o700)
         self.receipt = {"contract": image.CONTRACT, "source_commit": image.SOURCE,
-                        "patch_sha256": image.PATCH,
+                        "patch_sha256": ACTUAL_PATCH_SHA256,
                         "code_mode_host_source_commit": image.SOURCE,
                         "official_cli": "/an/unused/original/path"}
         for name, key in image.CODEX_FILES.items():
@@ -44,6 +49,18 @@ class PackageTests(unittest.TestCase):
         context = self.root / "context"
         context.mkdir(mode=0o700)
         return context
+
+    def test_builder_contract_matches_current_installer_and_patch_source(self):
+        self.assertEqual(image.PATCH, ACTUAL_PATCH_SHA256)
+        self.assertEqual(image.PATCH, installer.PATCH_SHA256)
+        self.assertEqual(image.SOURCE, installer.SOURCE)
+        self.assertEqual(image.CONTRACT, installer.CONTRACT)
+
+    def test_rejects_legacy_protected_patch_receipt(self):
+        self.receipt["patch_sha256"] = installer.LEGACY_PATCH_SHA256
+        self.save_receipt()
+        with self.assertRaises(ValueError):
+            image.populate_context(self.context(), self.worker, None, self.provider)
 
     def test_preserves_verified_receipt_and_excludes_unlisted_secret(self):
         (self.provider / "auth.json").write_text("never copy this")

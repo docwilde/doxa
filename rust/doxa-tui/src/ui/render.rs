@@ -369,7 +369,7 @@ impl App {
                         } else {
                             ' '
                         },
-                        engine
+                        crate::settings::engine_label(engine)
                     ),
                     chooser_row_style(index == self.engine_selected),
                 ));
@@ -381,7 +381,7 @@ impl App {
                 launch::Engine::Claude => "claude",
                 launch::Engine::DeepSeek => "deepseek",
                 launch::Engine::Glm => "glm",
-                launch::Engine::Router => "router",
+                launch::Engine::Router => "Jev Router",
                 launch::Engine::Fixture => "fixture",
             };
             if height < 8 && form.launch_error.is_some() {
@@ -405,7 +405,9 @@ impl App {
                     .0,
                     Style::default().fg(theme::ERROR),
                 ));
-                lines.push(Line::from(if form.retry_allowed {
+                lines.push(Line::from(if form.isolation.docker() {
+                    " Ctrl+O Docker image Settings · Enter retry · Esc close"
+                } else if form.retry_allowed {
                     " Esc close · /setup checks authentication · Enter retry"
                 } else {
                     " Session exists; use doxa-rs attach · Esc close"
@@ -452,7 +454,7 @@ impl App {
             }
             lines.push(Line::styled(
                 format!(" {} Isolation: [{} ▾]{}",if form.field==prompt_field-1{'›'}else{' '},form.isolation.label(),
-                    if form.engine==launch::Engine::Router {" · API chat; no shell or workspace writes"} else {" · Click/Enter choose"}),
+                    if form.engine==launch::Engine::Router {" · native · worker command permissions reviewed separately"} else {" · Click/Enter choose"}),
                 chooser_row_style(form.field==prompt_field-1),
             ));
             lines.push(Line::styled(
@@ -470,11 +472,21 @@ impl App {
             lines.push(Line::styled(
                 if self.launching {
                     " Starting session… · waiting for launch result"
+                } else if form.isolation.docker() && self.docker_setup.as_ref().is_some_and(|setup| !setup.ready()) {
+                    " [ Start session · setup required ]"
                 } else {
                     " [ Start session ]"
                 },
                 chooser_row_style(form.field == prompt_field + 1),
             ));
+            if form.isolation.docker() {
+                let status = self.docker_setup.as_ref().map(|setup| setup.label())
+                    .unwrap_or_else(|| "Start checks image policy and local rootless socket".into());
+                lines.push(Line::styled(clipped_title(&format!(" Docker: {status}"), usize::from(area.width.saturating_sub(2))).0,
+                    Style::default().fg(if self.docker_setup.as_ref().is_some_and(|setup| !setup.ready()) { theme::ERROR } else { theme::MUTED })));
+                lines.push(Line::styled(" [ Docker image Settings · Ctrl+O ]", Style::default().fg(theme::ACCENT)));
+                lines.push(Line::from(format!(" Build/rootless guide: {}", super::docker_setup::GUIDE)));
+            }
         } else if let Some((id, selected)) = &self.permission_picker {
             let engine = self.session_identity.get(id).and_then(|identity| identity.0.as_deref());
             let choices = permission_choices(engine);
@@ -606,7 +618,7 @@ impl App {
         };
         let mut lines = vec![
             Line::from(format!(" env > config.toml > default · {} unsaved", menu.edits.len() + usize::from(menu.draft.is_some()))),
-            super::choice_dropdown::settings_tab_line(area, menu.category),
+            Line::from(""),
         ];
         let (indices, start, visible) = menu.visible_window(area.height);
         for &index in indices.iter().skip(start).take(visible) {
@@ -632,7 +644,8 @@ impl App {
                     if menu.selected == index { '›' } else { ' ' },
                     row.setting.label,
                     if row.setting.kind == crate::settings::Kind::Choice && !row.shadowed && !row.setting.read_only {
-                        format!("[{} ▾]", if shown.is_empty() { "(default)".into() } else { safe_label(shown) })
+                        format!("[{} ▾]", if row.setting.key=="engine" {safe_label(crate::settings::engine_label(shown))}
+                            else if shown.is_empty() { "(default)".into() } else { safe_label(shown) })
                     } else { safe_label(shown) },
                     row.source,
                     if row.shadowed {
@@ -674,7 +687,7 @@ impl App {
                         .choices
                         .iter()
                         .filter(|s| !s.is_empty())
-                        .copied()
+                        .map(|choice|if row.setting.key=="engine" {crate::settings::engine_label(choice)} else {choice})
                         .collect::<Vec<_>>()
                         .join(" | ")
                 )));
@@ -682,7 +695,7 @@ impl App {
             if ["derive_secs", "consult_floor", "graph_context"].contains(&row.setting.key) {
                 lines.push(Line::from(" Claude session memory control; Codex/vendor use their engine's snapshot policy."));
             }
-            if row.setting.key == "session_budget_usd" && menu.engine != "claude" {
+            if row.setting.key == "session_budget_usd" && !matches!(menu.engine.as_str(),"claude"|"router"|"deepseek"|"glm") {
                 lines.push(Line::from(
                     " This engine reports no session dollar cost; ceiling cannot be enforced.",
                 ));
@@ -718,7 +731,16 @@ impl App {
         }
         let mermaid_selected = menu.rows.get(menu.selected).is_some_and(|row|
             matches!(row.setting.key, "mermaid_renderer" | "mermaid_renderer_root"));
-        let preflight_lines = if mermaid_selected {
+        let router_selected=menu.rows.get(menu.selected).is_some_and(|row|matches!(row.setting.key,"engine"|"router_config"));
+        let mut preflight_lines = if router_selected {
+            let path=std::path::PathBuf::from(menu.effective_value("router_config"));
+            let mut footer=vec![Line::styled(" Ctrl+P: review Jev Router config/accounts/catalogs · no inference",
+                Style::default().fg(theme::ACCENT))];
+            let width=usize::from(area.width.saturating_sub(3)).max(1);
+            footer.extend(self.router_review_lines(&path).into_iter().flat_map(|line|
+                crate::memory_menu::wrap_review(&format!(" {line}"),width)).take(4).map(Line::from));
+            footer
+        } else if mermaid_selected {
             let status = self.mermaid_preflight.as_ref()
                 .map(|preflight| preflight.message(&menu.mermaid_paths()))
                 .unwrap_or_else(|| "Not checked".into());
@@ -729,6 +751,7 @@ impl App {
                 .into_iter().take(3).map(Line::from));
             footer
         } else { Vec::new() };
+        preflight_lines.truncate(menu.preflight_rows(area.height));
         // Keep the action hint and preflight result visible even when a note is long.
         lines.truncate(usize::from(area.height.saturating_sub(3)).saturating_sub(preflight_lines.len()));
         lines.extend(preflight_lines);
@@ -741,7 +764,7 @@ impl App {
             Paragraph::new(chooser_list_lines(lines, usize::from(area.width.saturating_sub(3))))
                 .block(
                     Block::default()
-                        .title(" Settings ")
+                        .title(super::choice_dropdown::settings_tab_line(area, menu.category))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(theme::ACCENT)),
                 )
@@ -865,6 +888,17 @@ impl App {
                 area,
             );
             draw_menu_scrollbar(frame, area, info.lines.len(), visible, start);
+            return;
+        }
+        if info.kind == "context" {
+            let lines = self.context_info_lines(usize::from(area.width.saturating_sub(3)).max(1));
+            let visible = usize::from(area.height.saturating_sub(2)).max(1);
+            let start = info.scroll.min(lines.len().saturating_sub(visible));
+            frame.render_widget(Paragraph::new(lines.iter().skip(start).take(visible).cloned().collect::<Vec<_>>())
+                .block(Block::default().title(" Context · ↑↓/PgUp/PgDn scroll · Esc close ").borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::ACCENT)))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
+            draw_menu_scrollbar(frame, area, lines.len(), visible, start);
             return;
         }
         if info.kind == "codegraph" {
