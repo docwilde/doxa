@@ -471,7 +471,7 @@ impl Inner {
                     .unwrap_or_else(|| "[redacted: prompt unavailable]".to_owned());
                 inner.publish(None, json!({"type":"prompt_dequeued","data":{"id":prompt.queue_id,"text":display,
                     "peer_started":prompt.peer_origin.is_some(),"peer_origin":prompt.peer_origin.as_ref().map(PeerTurnOrigin::display_label),
-                    "peer_origin_data":prompt.peer_origin}}));
+                    "peer_origin_data":prompt.peer_origin.as_ref().map(PeerTurnOrigin::to_value)}}));
                 inner.start_turn(prompt.text, turn, prompt.peer_origin);
             }
         });
