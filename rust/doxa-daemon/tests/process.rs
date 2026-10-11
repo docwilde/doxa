@@ -631,6 +631,28 @@ fn registry_peer(runtime: &Path, id: &str, scope: &str, title: &str) -> (UnixLis
     registry.write(&record).unwrap();
     (listener, registry.directory().join(format!("{id}.json")))
 }
+#[cfg(target_os = "linux")]
+fn fill_peer_backlog(listener: &UnixListener, path: &Path) -> Vec<std::os::fd::OwnedFd> {
+    use std::os::unix::ffi::OsStrExt;
+    assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_os_str().as_bytes();
+    assert!(bytes.len() < address.sun_path.len());
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) { *slot = *byte as libc::c_char; }
+    let size = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    let mut queued = Vec::new();
+    for _ in 0..32 {
+        let fd = doxa_peers::credentials::nonblocking_unix_socket().unwrap();
+        if unsafe { libc::connect(fd.as_raw_fd(), (&address as *const libc::sockaddr_un).cast(), size) } == 0 {
+            queued.push(fd);
+        } else {
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EAGAIN));
+            return queued;
+        }
+    }
+    panic!("private peer listener backlog did not fill");
+}
 impl Drop for Process {
     fn drop(&mut self) {
         if !self.exited() {
@@ -3082,6 +3104,67 @@ fn native_peers_rpc_returns_only_scrubbed_same_scope_live_peers() {
     );
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn native_peers_full_backlog_is_bounded_and_exact_healthy_delivery_recovers() {
+    const LIVE: &str = "ae2d13c2-9cc0-4db5-bddb-84a4028b2e41";
+    const BLOCKED: &str = "4c35cceb-4ae3-4ce8-a50c-33920fe3e197";
+    const FOREIGN: &str = "ae2d13c2-9cc0-4db5-bddb-84a4028b2e42";
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("unused-cli"); executable(&codex,"#!/bin/sh\nexit 1\n");
+    let mut process = Process::start_codex(dir.path(), &codex, Path::new("python3"));
+    let (mut reader, mut socket) = process.connect(); receive(&mut reader);
+    send(&mut socket,json!({"type":"attach","cursor":null}));
+    // Warm mandatory scrubbing independently of the timed discovery probe.
+    send(&mut socket,json!({"type":"call","id":1,"method":"peers","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"],true);
+    let (blocked, blocked_record) = registry_peer(dir.path(), BLOCKED, dir.path().to_str().unwrap(), "blocked fixture");
+    let _queued = fill_peer_backlog(&blocked, &dir.path().join(format!("{BLOCKED}.sock")));
+    let before = fs::read(&blocked_record).unwrap();
+    let (healthy, _) = registry_peer(dir.path(), LIVE, dir.path().to_str().unwrap(), "healthy fixture");
+    let (foreign, _) = registry_peer(dir.path(), FOREIGN, "/other-scope", "foreign fixture");
+    let worker = thread::spawn(move || {
+        healthy.set_nonblocking(true).unwrap(); let deadline = Instant::now()+Duration::from_secs(8);
+        loop { match healthy.accept() {
+            Ok((mut stream,_)) => {
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut wire=String::new();stream.read_to_string(&mut wire).unwrap();
+                if !wire.is_empty() { return wire; }
+            },
+            Err(error) if error.kind()==std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now()<deadline,"healthy peer delivery never arrived");thread::sleep(Duration::from_millis(5));
+            },
+            Err(error) => panic!("healthy peer accept failed: {error}"),
+        }}
+    });
+    let started=Instant::now();
+    send(&mut socket,json!({"type":"call","id":2,"method":"peers","params":{}}));
+    let roster=receive(&mut reader); assert_eq!(roster["ok"],true);
+    assert!(started.elapsed()<Duration::from_secs(2),"full backlog stalled native discovery");
+    assert_eq!(roster["peers"],json!([{"session_id":LIVE,"title":"healthy fixture"}]));
+    assert_eq!(fs::read(&blocked_record).unwrap(),before,"failed probe must not reap a live record");
+    send(&mut socket,json!({"type":"call","id":4,"method":"msg","params":{"target":FOREIGN,"text":"unapproved fixture"}}));
+    assert_eq!(receive(&mut reader)["ok"],false);
+    send(&mut socket,json!({"type":"call","id":5,"method":"msg","params":{"target":LIVE,"text":"bounded healthy delivery"}}));
+    let reply=claude_receive_until(&mut reader,|frame|frame["id"]==5);
+    assert_eq!(reply["ok"],true);assert_eq!(reply["delivered_to"],json!([LIVE]));
+    let wire:Value=serde_json::from_str(worker.join().unwrap().trim()).unwrap();
+    assert_eq!(wire["body"],"bounded healthy delivery");
+    let ledger=fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap();
+    assert!(ledger.contains(LIVE));assert!(!ledger.contains(FOREIGN));
+    foreign.set_nonblocking(true).unwrap();
+    while let Ok((mut stream,_))=foreign.accept() {
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut bytes=Vec::new();stream.read_to_end(&mut bytes).unwrap();
+        assert!(bytes.is_empty(),"foreign scoped peer received message data");
+    }
+    send(&mut socket,json!({"type":"call","id":6,"method":"get_state","params":{}}));
+    let state=claude_receive_until(&mut reader,|frame|frame["id"]==6);
+    assert_eq!(state["running"],false);assert_eq!(state["pending_inputs"],json!([]));
+    send(&mut socket,json!({"type":"call","id":7,"method":"stop","params":{}}));
+    assert_eq!(claude_receive_until(&mut reader,|frame|frame["id"]==7)["ok"],true);wait_until(||process.exited());
 }
 
 #[test]

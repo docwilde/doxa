@@ -7,8 +7,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
 use std::path::{Component, Path};
+use std::time::Instant;
 
 pub const MAX_DISPLAY_PEERS: usize = 32;
 const MAX_TITLE_CHARS: usize = 64;
@@ -97,8 +97,12 @@ pub fn list_scoped_readonly_limit(runtime: &Path, scope: &str, self_id: &str, li
         return Ok(Vec::new());
     }
     let paths = doxa_state::registry_paths(&directory)?;
+    let deadline = Instant::now() + crate::delivery::DISCOVERY_TIMEOUT;
     let mut result = Vec::new();
     for path in paths {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "peer socket discovery timed out"));
+        }
         let Ok(peer) = read_one(&path, true) else {
             continue;
         };
@@ -109,7 +113,7 @@ pub fn list_scoped_readonly_limit(runtime: &Path, scope: &str, self_id: &str, li
             || !pid_alive(peer.pid)
             || stale(&peer.heartbeat_at)
             || !safe_socket(runtime, Path::new(&peer.socket_path))
-            || UnixStream::connect(&peer.socket_path).is_err()
+            || !crate::delivery::probe_socket(Path::new(&peer.socket_path), deadline)
         {
             continue;
         }
@@ -121,6 +125,9 @@ pub fn list_scoped_readonly_limit(runtime: &Path, scope: &str, self_id: &str, li
         if result.len() == limit {
             break;
         }
+    }
+    if Instant::now() >= deadline {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, "peer socket discovery timed out"));
     }
     Ok(result)
 }

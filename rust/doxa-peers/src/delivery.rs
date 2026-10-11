@@ -240,9 +240,12 @@ fn connect_before(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     }
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn probe_socket(path: &Path) -> bool {
-    connect_before(path, Instant::now() + Duration::from_millis(100)).is_ok()
+/// Discovery shares one dial allowance across the roster. An unavailable
+/// listener gets only a short probe; a full backlog never blocks the caller.
+pub(crate) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) fn probe_socket(path: &Path, roster_deadline: Instant) -> bool {
+    let deadline = roster_deadline.min(Instant::now() + Duration::from_millis(100));
+    connect_before(path, deadline).and_then(|stream| same_user(&stream)).is_ok()
 }
 
 pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
