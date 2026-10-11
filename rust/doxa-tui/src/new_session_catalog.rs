@@ -8,10 +8,6 @@ use std::{path::Path, sync::atomic::AtomicBool, time::Duration};
 
 const DEADLINE: Duration = Duration::from_secs(20);
 
-pub(crate) fn load(engine: Engine, cwd: &Path) -> Result<Value, &'static str> {
-    load_with_auth(engine, cwd, false, None)
-}
-
 pub(crate) fn load_cancellable(engine: Engine, cwd: &Path, cancel: &AtomicBool) -> Result<Value, &'static str> {
     load_with_auth(engine, cwd, false, Some(cancel))
 }
