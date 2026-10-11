@@ -6395,6 +6395,22 @@ for line in sys.stdin:
             assert_eq!(cached.lines, lines);
             assert_eq!(cached.sections, folds);
         }
+        // Expanded per-call headers and the thinking header keep one paint/hit
+        // row even when the icons add a second terminal cell at small widths.
+        let (_, folds) = transcript_tools::render(&app.sessions[0].transcript, 90, None, None);
+        let mut expanded = folds.into_iter().map(|fold| fold.index).collect::<HashSet<_>>();
+        expanded.insert(transcript_tools::FoldKey::Tool("read-1".into()));
+        for glyphs in [false, true] {
+            for width in [12, 24, 42] {
+                let (lines, folds, _, _, _) = transcript_tools::render_with_media_style(&app.sessions[0].transcript,
+                    width, Some(&expanded), None, app.tool_cards.for_session("s"), 0, 0, None, glyphs);
+                for fold in folds.iter().filter(|fold| fold.index == transcript_tools::FoldKey::Section(0)
+                    || fold.index == transcript_tools::FoldKey::Tool("read-1".into())) {
+                    assert_eq!(fold.height, 1);
+                    assert!(lines[fold.line].width() <= usize::from(width));
+                }
+            }
+        }
     }
 
     #[test]
