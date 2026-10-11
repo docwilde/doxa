@@ -753,37 +753,46 @@ pub fn setup_docker_setting(key: &str, value: &str) -> io::Result<String> {
 pub fn setup_docker_report() -> String { crate::docker_setup::report() }
 pub fn setup_docker_guide() -> String { crate::docker_setup::guide() }
 
+fn setup_ask(question: &str) -> io::Result<String> {
+    use std::io::Write;
+    print!("{question} "); io::stdout().flush()?;
+    let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim().to_owned())
+}
+
+pub fn setup_docker_interactive() -> io::Result<()> {
+    use std::io::IsTerminal;
+    println!("{}", setup_docker_report());
+    if !io::stdin().is_terminal() { return Ok(()); }
+    for (key, label) in [("docker_image", "Reviewed worker image (sha256:CONTENT_ID or NAME@sha256:DIGEST)"),
+        ("docker_host", "Rootless local socket (unix:///run/user/UID/docker.sock)")] {
+        loop {
+            let value = setup_ask(&format!("{label} (Enter keeps current):"))?;
+            if value.is_empty() { break; }
+            match setup_docker_setting(key, &value) {
+                Ok(message) => { println!("{message}"); break; }
+                Err(error) => println!("{error}"),
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn setup_interactive() -> io::Result<()> {
-    use std::io::{IsTerminal, Write};
+    use std::io::IsTerminal;
     println!("{}", setup_report()?);
     if !io::stdin().is_terminal() { return Ok(()); }
-    fn ask(question: &str) -> io::Result<String> {
-        print!("{question} "); io::stdout().flush()?;
-        let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
-        Ok(answer.trim().to_owned())
-    }
-    match ask("LORE store: [d] create DOXA store, [s] share existing Claude store, Enter skip:")?.as_str() {
+    match setup_ask("LORE store: [d] create DOXA store, [s] share existing Claude store, Enter skip:")?.as_str() {
         "d" => println!("{}", setup_choose_store(false)?),
         "s" => println!("{}", setup_choose_store(true)?),
         _ => {}
     }
     for key in ["model", "effort"] {
-        let value = ask(&format!("{key} default (Enter keeps current):"))?;
+        let value = setup_ask(&format!("{key} default (Enter keeps current):"))?;
         if !value.is_empty() { println!("{}", setup_default(key, Some(&value))?); }
     }
-    if ask("Configure Docker isolation? [y] yes, Enter skip:")?.eq_ignore_ascii_case("y") {
-        println!("{}", setup_docker_report());
-        for (key, label) in [("docker_image", "Reviewed worker image (sha256:CONTENT_ID or NAME@sha256:DIGEST)"),
-            ("docker_host", "Rootless local socket (unix:///run/user/UID/docker.sock)")] {
-            loop {
-                let value = ask(&format!("{label} (Enter keeps current):"))?;
-                if value.is_empty() { break; }
-                match setup_docker_setting(key, &value) {
-                    Ok(message) => { println!("{message}"); break; }
-                    Err(error) => println!("{error}"),
-                }
-            }
-        }
+    if setup_ask("Configure Docker isolation? [y] yes, Enter skip:")?.eq_ignore_ascii_case("y") {
+        setup_docker_interactive()?;
     }
     println!("setup complete · Docker readiness is reported below\n{}", setup_report()?);
     Ok(())

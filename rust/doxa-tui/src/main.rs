@@ -252,8 +252,11 @@ fn run(args: &[String]) -> io::Result<()> {
                 return Ok(());
             }
             "setup" => {
-                if args.len() != 1 { return Err(invalid("setup takes no arguments")); }
-                operations::setup_interactive()?;
+                match args {
+                    [_] => operations::setup_interactive()?,
+                    [_,part] if part=="docker" => operations::setup_docker_interactive()?,
+                    _ => return Err(invalid("usage: setup [docker]")),
+                }
                 return Ok(());
             }
             "settings" => {

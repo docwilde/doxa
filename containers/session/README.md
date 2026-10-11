@@ -67,6 +67,9 @@ rootful/remote sockets are rejected before saving. These checks do not connect
 to the Engine; Start verifies rootless mode, cgroup controls and the actual
 local image. Setup reports missing prerequisites even after preferences save.
 
+Use **`/setup docker`** or **`doxa setup docker`** to go directly to this stage
+without provider authentication checks or changing model/LORE defaults.
+
 Set the printed immutable image ID in **Settings → Session → Docker worker image
 digest**. Set a nondefault local Unix endpoint in **Settings → Paths → local
 rootless Docker socket**. Save with Ctrl+S. In New Session, the **Docker image

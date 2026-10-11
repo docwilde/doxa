@@ -39,6 +39,10 @@ impl Menu {
             engine: None, restart_ready: false, restart_complete: None, mesh: None, mesh_revision: 0, worker_thread: None, plugins_changed: false, secret: None, credentials_changed: Vec::new() };
         menu.prepare(); menu
     }
+    pub fn docker_setup() -> Self {
+        let mut menu=Self::new("setup");menu.step=3;menu.prepare();
+        menu.messages=vec![crate::operations::setup_docker_guide()];menu
+    }
     /// Parsing/selection is pure. The UI calls start_requested only after the
     /// popup fits above the prompt, so a hidden popup cannot start authentication.
     pub fn with_auth_args(kind: &str, arguments: &str) -> Result<Self, String> {

@@ -100,6 +100,17 @@ fn terminal_setup_wizard_persists_private_store_and_new_session_defaults() {
 }
 
 #[test]
+fn direct_docker_setup_reports_requirements_without_authentication_or_engine_calls() {
+    let fixture=Fixture::new();
+    let output=fixture.command(&["setup","docker"]).stdin(Stdio::null()).output().unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    let stdout=String::from_utf8_lossy(&output.stdout);
+    for expected in ["Docker prerequisites","Image digest missing","Rootless socket missing","build-session-image.py","cgroup v2"] { assert!(stdout.contains(expected)); }
+    assert!(!fixture.root.path().join("calls").exists());
+    assert!(!fixture.root.path().join("doxa").exists());
+}
+
+#[test]
 fn terminal_setup_configures_reviewed_docker_fields_without_starting_an_engine() {
     let fixture=Fixture::new();
     let docker=fixture.bin.join("docker");
