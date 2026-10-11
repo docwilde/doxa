@@ -3597,6 +3597,131 @@ fn codex_auto_pending(reader: &mut BufReader<UnixStream>, socket: &mut UnixStrea
     panic!("approval did not arrive");
 }
 
+fn codex_peer_permission_fixture(root: &Path) -> PathBuf {
+    let codex = root.join("peer-provider");
+    executable(&codex, include_str!("fixtures/codex_peer_permissions.py"));
+    codex
+}
+fn receive_one_peer_delivery(listener: UnixListener) -> thread::JoinHandle<Value> {
+    thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut body = String::new(); stream.read_to_string(&mut body).unwrap();
+                    if !body.is_empty() { return serde_json::from_str(&body).unwrap(); }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline,"exact peer delivery never arrived");
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("private peer listener failed: {error}"),
+            }
+        }
+    })
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn codex_full_access_builtin_peers_deliver_exact_ids_without_second_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = codex_peer_permission_fixture(dir.path());
+    let target = "195603b4-d233-47b0-8f10-93d3a7c1b6e8";
+    let (recipient, _) = registry_peer(dir.path(), target, dir.path().to_str().unwrap(), "Claude teammate");
+    let (foreign, _) = registry_peer(dir.path(), "195603b4-d233-47b0-8f10-93d3a7c1b6e9", "/other-project", "foreign");
+    let delivery = receive_one_peer_delivery(recipient);
+    let mut process = Process::start_codex_appserver_with_settings(dir.path(), &codex, false, false, true);
+    let (mut reader, mut socket) = process.connect();
+    reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+    receive(&mut reader); send(&mut socket,json!({"type":"attach","cursor":null}));
+    let mut frames = Vec::new();
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,1,"set_permission_mode",json!({"mode":"full-access"}),&mut frames)["ok"],true);
+    send(&mut socket,json!({"type":"prompt","id":2,"text":"Exercise builtin peers under full-access."}));
+    loop {
+        let frame = receive(&mut reader);
+        assert_ne!(frame["event"]["type"],"needs_input","full-access added a second peer approval: {frame}");
+        if frame["event"]["type"] == "turn_done" {
+            assert_ne!(frame["event"]["data"]["is_error"],true); break;
+        }
+        frames.push(frame);
+    }
+    assert_eq!(frames.iter().filter(|row|row["event"]["type"]=="tool_call").count(),5);
+    assert_eq!(frames.iter().filter(|row|row["event"]["type"]=="tool_result").count(),5);
+    assert!(!frames.iter().any(|row|row["event"]["type"]=="needs_input_resolved"));
+    let delivered = delivery.join().unwrap();
+    assert_eq!(delivered["body"],"full-access exact delivery");
+    assert_eq!(delivered["from_id"],"codex-session");
+    let results:Vec<Value>=fs::read_to_string(dir.path().join("peer-permission-results.jsonl")).unwrap()
+        .lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(results.len(),5);
+    for (index, expected) in [true,false,false,true,true].into_iter().enumerate() {
+        assert_eq!(results[index]["response"]["result"]["success"],expected,"step {index}");
+    }
+    let roster = results[0]["response"]["result"]["contentItems"][0]["text"].as_str().unwrap();
+    assert!(roster.contains(target)); assert!(!roster.contains("195603b4-d233-47b0-8f10-93d3a7c1b6e9"));
+    let history = results[4]["response"]["result"]["contentItems"][0]["text"].as_str().unwrap();
+    assert!(history.contains(target)); assert!(!history.contains("foreign must refuse"));
+    foreign.set_nonblocking(true).unwrap();
+    while let Ok((mut stream,_))=foreign.accept() {
+        let mut body=String::new();stream.read_to_string(&mut body).unwrap();assert!(body.is_empty());
+    }
+    let checkpoint:Value=serde_json::from_slice(&fs::read(native_transcript(dir.path(),"codex-session.codex.json")).unwrap()).unwrap();
+    assert_eq!(checkpoint["permission_mode"],"full-access");
+    assert_eq!(checkpoint["turn_incomplete"],false);
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,3,"get_state",json!({}),&mut frames)["pending_inputs"],json!([]));
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,4,"stop",json!({}),&mut frames)["ok"],true);
+    wait_until(||process.exited());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn codex_peer_manual_and_midturn_auto_keep_review_until_idle_full_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = codex_peer_permission_fixture(dir.path());
+    let (recipient, _) = registry_peer(dir.path(), "195603b4-d233-47b0-8f10-93d3a7c1b6e8", dir.path().to_str().unwrap(), "Claude teammate");
+    let mut process = Process::start_codex_appserver_with_settings(dir.path(), &codex, false, false, true);
+    let (mut reader, mut socket) = process.connect();
+    reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+    receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+    let mut frames = Vec::new();
+    send(&mut socket,json!({"type":"prompt","id":1,"text":"Keep manual peer approval."}));
+    let pending = claude_receive_until(&mut reader,|row|row["event"]["type"]=="needs_input")
+        ["event"]["data"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,2,"set_permission_mode",json!({"mode":"full-access"}),&mut frames)["ok"],false);
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,3,"set_permission_mode",json!({"mode":"auto"}),&mut frames)["ok"],true);
+    let state=codex_auto_rpc(&mut reader,&mut socket,4,"get_state",json!({}),&mut frames);
+    assert_eq!(state["pending_inputs"][0]["id"],pending,"Auto must not approve an independent existing peer review");
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,5,"answer_needs_input",json!({"id":pending,"answer":{"decision":"deny"}}),&mut frames)["ok"],true);
+    let done=claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_done");
+    assert_ne!(done["event"]["data"]["is_error"],true);
+    let results=fs::read_to_string(dir.path().join("peer-permission-results.jsonl")).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(results.lines().next().unwrap()).unwrap()["response"]["result"]["success"],false);
+    let delivery=receive_one_peer_delivery(recipient);
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,6,"set_permission_mode",json!({"mode":"full-access"}),&mut frames)["ok"],true);
+    send(&mut socket,json!({"type":"prompt","id":7,"text":"Now use exact builtin peers under full-access."}));
+    loop {
+        let frame=receive(&mut reader);assert_ne!(frame["event"]["type"],"needs_input");
+        if frame["event"]["type"]=="turn_done" {assert_ne!(frame["event"]["data"]["is_error"],true);break;}
+    }
+    assert_eq!(delivery.join().unwrap()["body"],"full-access exact delivery");
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,8,"set_permission_mode",json!({"mode":"auto"}),&mut frames)["ok"],true);
+    send(&mut socket,json!({"type":"prompt","id":9,"text":"Keep a new Auto peer review cancellable."}));
+    let cancelled = claude_receive_until(&mut reader,|row|row["event"]["type"]=="needs_input")
+        ["event"]["data"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,10,"interrupt",json!({}),&mut frames)["ok"],true);
+    claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_done");
+    let state=codex_auto_rpc(&mut reader,&mut socket,11,"get_state",json!({}),&mut frames);
+    assert_eq!(state["pending_inputs"],json!([])); assert_eq!(state["running"],false);
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,12,"answer_needs_input",json!({"id":cancelled,"answer":{"decision":"allow"}}),&mut frames)["ok"],false);
+    // Cancellation keeps the canonical restart guard. A permission change
+    // cannot reset accounting/history uncertainty or replay an old tool.
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,13,"set_permission_mode",json!({"mode":"full-access"}),&mut frames)["ok"],false);
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,14,"stop",json!({}),&mut frames)["ok"],true);
+    wait_until(||process.exited());
+}
+
 #[test]
 #[cfg(target_os = "linux")]
 fn codex_live_auto_pending_command_persists_guard_and_future_turns() {

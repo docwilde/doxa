@@ -614,15 +614,19 @@ impl AppServerDriver {
                         self.decline_auto_approval(&frame, cancel, deadline).await?;
                         continue;
                     }
+                    // Provider JSON cannot supply this authority. Overwrite
+                    // it after thread/turn and registered-tool validation.
+                    frame["doxa_permission_mode"] = json!(self.options.permission.mode());
                     let pending = request(&frame).map_err(|message| AppServerError::Server((self.scrub)(&message)))?;
                     if let Some((event, mut receiver)) = pending {
+                        let human_input = event.kind == "needs_input";
                         let request_id = event.data["id"].clone();
                         let is_peer = frame["method"] == "item/tool/call";
                         if is_peer {
                             let input = (self.scrub)(&frame["params"]["arguments"].to_string());
                             emit(EngineEvent::new("tool_call", json!({"id":frame["params"]["callId"],"name":frame["params"]["tool"],"input":input})));
                         }
-                        emit(event);
+                        if event.kind != "tool_execution_started" { emit(event); }
                         let mut deny_after_switch = false;
                         let answer = loop { tokio::select! {
                             biased;
@@ -637,7 +641,7 @@ impl AppServerDriver {
                             value = &mut receiver => break value.map_err(|_| AppServerError::Server("Codex input request was closed".into())),
                         }};
                         drop(receiver);
-                        emit(EngineEvent::new("needs_input_resolved", json!({"id":request_id})));
+                        if human_input { emit(EngineEvent::new("needs_input_resolved", json!({"id":request_id}))); }
                         if deny_after_switch {
                             self.decline_auto_approval(&frame, cancel, deadline).await?;
                             continue;

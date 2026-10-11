@@ -37,6 +37,14 @@ impl InputInbox {
     pub fn begin_peer(&self, frame: &Value, scrub: impl Fn(&str) -> String, handler: crate::peer_tools::Handler)
         -> Result<(EngineEvent, oneshot::Receiver<Value>), String>
     {
+        self.begin_peer_with_approval(frame, scrub, handler, true)
+    }
+    /// Full-access covers this registered built-in peer bridge only. External
+    /// MCP, LORE and session callbacks still use their separate review gates.
+    pub fn begin_peer_with_approval(&self, frame: &Value, scrub: impl Fn(&str) -> String,
+        handler: crate::peer_tools::Handler, require_approval: bool)
+        -> Result<(EngineEvent, oneshot::Receiver<Value>), String>
+    {
         let params = &frame["params"];
         if frame["method"] != "item/tool/call" || !params["namespace"].is_null()
             || serde_json::to_vec(frame).map_or(true, |bytes| bytes.len() > MAX_REQUEST_BYTES) {
@@ -44,7 +52,7 @@ impl InputInbox {
         }
         let name = params["tool"].as_str().ok_or("Missing Codex peer tool")?;
         let (rpc, arguments) = crate::peer_tools::validated_call(name, &params["arguments"])?;
-        self.begin_callback(frame, scrub, handler, rpc, arguments)
+        self.begin_callback_with_approval(frame, scrub, handler, rpc, arguments, require_approval)
     }
     /// A host-supplied canonical catalog is the complete permission surface.
     /// Provider arguments cannot select another daemon method or host identity.
@@ -63,6 +71,11 @@ impl InputInbox {
     fn begin_callback(&self, frame: &Value, scrub: impl Fn(&str) -> String,
         handler: crate::peer_tools::Handler, rpc: &str, arguments:Value)
         -> Result<(EngineEvent, oneshot::Receiver<Value>), String> {
+        self.begin_callback_with_approval(frame, scrub, handler, rpc, arguments, true)
+    }
+    fn begin_callback_with_approval(&self, frame: &Value, scrub: impl Fn(&str) -> String,
+        handler: crate::peer_tools::Handler, rpc: &str, arguments:Value, require_approval:bool)
+        -> Result<(EngineEvent, oneshot::Receiver<Value>), String> {
         let params = &frame["params"];
         let name = params["tool"].as_str().ok_or("Missing Codex tool")?;
         let mut pending = self.pending.lock().map_err(|_| "Codex input unavailable")?;
@@ -73,6 +86,13 @@ impl InputInbox {
         let input = scrub(&params["arguments"].to_string());
         if input.len() > MAX_REQUEST_BYTES { return Err("Scrubbed peer request exceeds the review limit".into()); }
         let (reply, receiver) = oneshot::channel();
+        if !require_approval {
+            drop(pending);
+            dispatch_callback(reply, rpc.into(), arguments, handler, true);
+            // An internal driver marker: no pending human input is installed
+            // or published, while ordinary tool_call/result evidence remains.
+            return Ok((EngineEvent::new("tool_execution_started", json!({})), receiver));
+        }
         *pending = Some(Pending {id:id.clone(), rule:Rule::Peer{rpc:rpc.into(), arguments,handler}, reply});
         Ok((EngineEvent::new("needs_input", json!({"id":id,"kind":"permission","title":if rpc.starts_with("mcp__doxa__lore_") { "Allow this DOXA LORE tool once?" } else { "Allow this DOXA peer tool once?" },"tool_name":name,"input_summary":input,"require_full_review":true})), receiver))
     }
@@ -208,16 +228,7 @@ impl InputInbox {
         if let Rule::Peer {rpc, arguments, handler} = current.rule {
             // Peer RPCs include bounded local socket waits. Keep cancellation
             // and daemon status responsive while an approved tool executes.
-            std::thread::spawn(move || {
-                let result = if result["decision"] == "accept" { handler(&rpc, &arguments) }
-                    else { Err("The user declined this peer tool".into()) };
-                let (success, text) = match result {
-                    Ok(value) if value.to_string().len() <= MAX_REQUEST_BYTES => (!value["error"].is_string(), format!("{}\n{value}", if rpc.starts_with("mcp__doxa__lore_") { "[DOXA LORE DATA -- UNTRUSTED]" } else { "[DOXA PEER DATA -- UNTRUSTED]" })),
-                    Ok(_) => (false, "Tool result exceeded the display limit".into()),
-                    Err(_) => (false, "Tool was declined or unavailable".into()),
-                };
-                let _ = current.reply.send(json!({"success":success,"contentItems":[{"type":"inputText","text":text}]}));
-            });
+            dispatch_callback(current.reply, rpc, arguments, handler, result["decision"] == "accept");
         } else { current.reply.send(result).map_err(|_| "Codex input is no longer pending")?; }
         Ok(json!({}))
     }
@@ -225,10 +236,51 @@ impl InputInbox {
     pub fn clear(&self) { if let Ok(mut guard) = self.pending.lock() { guard.take(); } }
 }
 
+fn dispatch_callback(reply: oneshot::Sender<Value>, rpc:String, arguments:Value,
+    handler: crate::peer_tools::Handler, allowed:bool) {
+    std::thread::spawn(move || {
+        if reply.is_closed() { return; }
+        let result = if allowed { handler(&rpc, &arguments) }
+            else { Err("The user declined this peer tool".into()) };
+        let (success, text) = match result {
+            Ok(value) if value.to_string().len() <= MAX_REQUEST_BYTES => (!value["error"].is_string(), format!("{}\n{value}", if rpc.starts_with("mcp__doxa__lore_") { "[DOXA LORE DATA -- UNTRUSTED]" } else { "[DOXA PEER DATA -- UNTRUSTED]" })),
+            Ok(_) => (false, "Tool result exceeded the display limit".into()),
+            Err(_) => (false, "Tool was declined or unavailable".into()),
+        };
+        let _ = reply.send(json!({"success":success,"contentItems":[{"type":"inputText","text":text}]}));
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     fn question() -> Value { json!({"method":"item/tool/requestUserInput","params":{"questions":[{"id":"q1","question":"Choose?","options":[{"label":"First"},{"label":"Second"}]}]}}) }
+    #[test]
+    fn preset_peer_execution_is_strictly_builtin_and_does_not_grant_external_callbacks() {
+        use std::sync::{Arc, atomic::AtomicUsize};
+        let calls = Arc::new(AtomicUsize::new(0)); let called = calls.clone();
+        let handler: crate::peer_tools::Handler = Arc::new(move |name,_| {
+            assert_eq!(name,"peers"); called.fetch_add(1,Ordering::SeqCst); Ok(json!({"peers":[]}))
+        });
+        let inbox = InputInbox::default();
+        let frame = json!({"method":"item/tool/call","params":{"tool":crate::peer_tools::LIST,"arguments":{}},"doxa_permission_mode":"full-access"});
+        let (event,receiver)=inbox.begin_peer_with_approval(&frame,str::to_owned,handler.clone(),false).unwrap();
+        assert_eq!(event.kind,"tool_execution_started");
+        assert!(inbox.pending.lock().unwrap().is_none());
+        let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        assert_eq!(runtime.block_on(receiver).unwrap()["success"],true);
+        assert_eq!(calls.load(Ordering::SeqCst),1);
+        let mut external=frame; external["params"]["tool"]=json!("mcp__configured__search");
+        assert!(inbox.begin_peer_with_approval(&external,str::to_owned,handler.clone(),false).is_err());
+        let (event,receiver)=inbox.begin_operator(&external,str::to_owned,handler,
+            &[json!({"name":"mcp__configured__search"})]).unwrap();
+        assert_eq!(event.kind,"needs_input");
+        assert_eq!(event.data["require_full_review"],true);
+        assert_eq!(calls.load(Ordering::SeqCst),1);
+        inbox.answer(event.data["id"].as_str().unwrap(),&json!({"decision":"deny"})).unwrap();
+        assert_eq!(runtime.block_on(receiver).unwrap()["success"],false);
+        assert_eq!(calls.load(Ordering::SeqCst),1);
+    }
     #[test]
     fn lore_callback_is_catalog_scoped_and_requires_one_shot_human_permission() {
         use std::sync::{Arc, atomic::AtomicUsize};

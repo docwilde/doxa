@@ -774,7 +774,15 @@ impl Host for CodexHost {
                                             self.input.begin_operator(frame, scrub, tools.handler(), &tools.callback_definitions())
                                         } else {
                                             let handler = self.peer_tools.lock().unwrap().clone().ok_or("Codex tool unavailable")?;
-                                            self.input.begin_peer(frame, scrub, handler)
+                                            // begin_peer scrubs before dispatch. A failed
+                                            // scrub must withhold even preset-authorized calls.
+                                            let failed = self.scrub_failed.clone();
+                                            let handler: doxa_engines::peer_tools::Handler = Arc::new(move |rpc,args| {
+                                                if failed.load(Ordering::Acquire) { Err("LORE scrub unavailable".into()) }
+                                                else { handler(rpc,args) }
+                                            });
+                                            self.input.begin_peer_with_approval(frame, scrub, handler,
+                                                frame["doxa_permission_mode"] != "full-access")
                                         }
                                     } else { self.input.begin(frame, scrub) };
                                     pending.and_then(|pending| {
