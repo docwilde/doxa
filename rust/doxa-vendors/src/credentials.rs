@@ -286,7 +286,7 @@ pub(crate) fn known_keys() -> io::Result<Vec<String>> {
             if let Ok(key) = valid_key(&value) { keys.push(key.to_owned()); }
         }
         expand_url_variants(&mut keys);
-        keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
+        keys.sort_by(|left,right|right.len().cmp(&left.len()).then_with(||left.cmp(right)));
         keys.dedup();
         Ok(keys)
     })())
@@ -321,6 +321,7 @@ pub fn redact_json(value: &mut Value) -> io::Result<()> {
 /// keys. Raw and common URL-encoded reflections are scrubbed, not arbitrary
 /// transformations of secrets by an untrusted external server.
 pub fn redact_json_with(value: &mut Value, additional:&[String]) -> io::Result<()> {
+    if additional.len()>32 || additional.iter().any(|key|key.is_empty() || key.len()>8192) {return Err(error(io::ErrorKind::InvalidInput));}
     fn visit(value: &mut Value, keys: &[String]) -> io::Result<()> {
         match value {
             Value::String(text)=>for key in keys { *text=text.replace(key,"***"); },
@@ -334,8 +335,8 @@ pub fn redact_json_with(value: &mut Value, additional:&[String]) -> io::Result<(
         Ok(())
     }
     let mut keys=known_keys()?;
-    keys.extend_from_slice(additional);expand_url_variants(&mut keys);
-    keys.sort_by_key(|key|std::cmp::Reverse(key.len()));keys.dedup();
+    let mut references=additional.to_vec();expand_url_variants(&mut references);keys.extend(references);
+    keys.sort_by(|left,right|right.len().cmp(&left.len()).then_with(||left.cmp(right)));keys.dedup();
     visit(value,&keys)
 }
 
