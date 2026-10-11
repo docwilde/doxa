@@ -551,7 +551,9 @@ fn linux_source_open(directory: &File, parts: &[CString]) -> Result<Option<File>
         &how as *const OpenHow, std::mem::size_of::<OpenHow>()) };
     if fd >= 0 { return Ok(Some(unsafe { File::from_raw_fd(fd as i32) })); }
     let error = std::io::Error::last_os_error();
-    if matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EINVAL | libc::EPERM)) {
+    // The bounded relative path may reach PATH_MAX without its terminating
+    // NUL. Resolving each validated component still supports that path.
+    if matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EINVAL | libc::EPERM | libc::ENAMETOOLONG)) {
         return Ok(None);
     }
     Err(format!("file open: {error}"))
@@ -2185,6 +2187,52 @@ mod tests {
                 } else { assert!(result.is_err(), "opened unsafe/missing source {path}"); }
             }
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn source_open_at_relative_path_limit_falls_back_without_weakening_read_guards() {
+        use std::io::Write;
+        let root = worktree();
+        let mut directory = fs::OpenOptions::new().read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(root.path()).unwrap();
+        let mut parts = vec!["d".repeat(250); 16];
+        parts.push(format!("{}.rs", "f".repeat(77)));
+        let relative = parts.join("/");
+        assert_eq!(relative.len(), 4096);
+        assert_eq!(relative.len(), MAX_PATH_BYTES);
+        // Creating the fixture through an absolute pathname would itself hit
+        // PATH_MAX. Each directory/name is valid and created from its parent.
+        for part in &parts[..parts.len() - 1] {
+            let part = CString::new(part.as_str()).unwrap();
+            assert_eq!(unsafe { libc::mkdirat(directory.as_raw_fd(), part.as_ptr(), 0o700) }, 0,
+                "descriptor-relative mkdir: {}", std::io::Error::last_os_error());
+            let fd = unsafe { libc::openat(directory.as_raw_fd(), part.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            assert!(fd >= 0, "descriptor-relative open: {}", std::io::Error::last_os_error());
+            directory = unsafe { File::from_raw_fd(fd) };
+        }
+        let name = CString::new(parts.last().unwrap().as_str()).unwrap();
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
+        assert!(fd >= 0, "descriptor-relative create: {}", std::io::Error::last_os_error());
+        let content = b"fn boundary() {}\n";
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        file.write_all(content).unwrap();
+        drop(file);
+        let (bytes, digest, _) = read_file_bytes(root.path(), &relative, MAX_SOURCE_BYTES).unwrap();
+        assert_eq!(bytes, content);
+        assert_eq!(digest, format!("{:x}", Sha256::digest(content)));
+        assert!(read_file_bytes(root.path(), &relative, content.len() as u64 - 1).is_err(),
+            "long-path fallback bypassed the source byte cap");
+        let outside = root.path().join("outside.rs");
+        fs::write(&outside, "fn must_not_read() {}\n").unwrap();
+        let outside = CString::new(outside.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) }, 0);
+        assert_eq!(unsafe { libc::symlinkat(outside.as_ptr(), directory.as_raw_fd(), name.as_ptr()) }, 0);
+        assert!(read_file_bytes(root.path(), &relative, MAX_SOURCE_BYTES).is_err(),
+            "long-path fallback followed a source symlink");
     }
 
     #[test]
