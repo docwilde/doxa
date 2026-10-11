@@ -750,9 +750,8 @@ impl Host for VendorHost {
         let mut streamed_bytes = 0usize;
         let mut stream_failed = false;
         let mut on_delta = |delta: Delta| {
-            if let Ok(mut events) = tool_events.lock() {
-                for event in events.drain(..) { emit_tool(event); }
-            }
+            let events = tool_events.lock().map(|mut events| std::mem::take(&mut *events)).unwrap_or_default();
+            for event in events { emit_tool(event); }
             if let Delta::Text(text) = delta {
                 if stream_failed { return; }
                 let clean = text_scrubber.push(&text, |value| self.scrub(value)

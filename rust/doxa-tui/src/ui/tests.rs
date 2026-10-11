@@ -1326,6 +1326,36 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn glm_peer_resolution_makes_next_review_visible_and_actionable() {
+        let mut app = App::default(); app.rail_visible = false;
+        app.handle(Event::Resize(100, 30));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"glm-peer","engine":"glm","model":"glm-5.3-flash"}));
+        let event = |kind: &str, data| json!({"type":"event","session_id":"glm-peer","event":{"type":kind,"data":data}});
+        let request = |id: &str| json!({"id":id,"kind":"permission","title":"Approve this peer tool once?",
+            "tool_name":doxa_engines::peer_tools::LIST,"input_summary":"{}","require_full_review":true});
+        app.apply_daemon_frame(&event("needs_input", request("first")));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert!(app.pending_answers.is_empty(), "review remains mandatory");
+        assert!(painted_at(&app, 100, 30).contains(doxa_engines::peer_tools::LIST));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert_eq!(app.pending_answers[0].2, json!({"decision":"allow"}));
+        assert!(app.input_requests[0].sending);
+        app.apply_daemon_frame(&json!({"type":"answer_reply","session_id":"glm-peer","request_id":"first","ok":true}));
+        app.apply_daemon_frame(&event("tool_result", json!({"id":"list-first","name":doxa_engines::peer_tools::LIST,"result_summary":"[]"})));
+        app.apply_daemon_frame(&event("needs_input_resolved", json!({"id":"first"})));
+        app.apply_daemon_frame(&event("needs_input", request("second")));
+        assert_eq!(app.input_requests.len(), 1);
+        assert_eq!(app.input_requests[app.active_request_index().unwrap()].id, "second");
+        assert!(!app.input_requests[0].sending);
+        painted_at(&app, 100, 30);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert_eq!(app.pending_answers, vec![("glm-peer".into(), "second".into(), json!({"decision":"allow"}))]);
+        app.apply_daemon_frame(&event("needs_input_resolved", json!({"id":"second"})));
+        app.apply_daemon_frame(&event("turn_done", json!({"is_error":true,"error":"Vendor turn cancelled"})));
+        assert!(app.input_requests.is_empty() && app.pending_answers.is_empty());
+    }
+
+    #[test]
     fn codex_provider_approvals_never_offer_or_reuse_a_session_grant() {
         for tool in ["command_execution", "file_change", "request_permissions"] {
             let mut app = App::default();

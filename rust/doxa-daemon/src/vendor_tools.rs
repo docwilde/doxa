@@ -196,6 +196,12 @@ impl<'a> NativeVendorGate<'a> {
     }
 }
 impl ToolGate for NativeVendorGate<'_> {
+    fn flush_events(&mut self) {
+        // The async execution future queues events because the host emitter
+        // is turn-local. Release the queue lock before invoking that emitter.
+        let events = self.events.lock().map(|mut events| std::mem::take(&mut *events)).unwrap_or_default();
+        for event in events { (self.emit)(event); }
+    }
     fn definitions(&self) -> Vec<Value> {
         let mut definitions = self.workspace.as_ref().map(ToolGate::definitions).unwrap_or_default();
         if self.peer.is_some() {

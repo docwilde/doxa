@@ -781,6 +781,10 @@ pub trait ToolGate {
     /// OpenAI-compatible function definitions this gate is prepared to execute.
     fn definitions(&self) -> Vec<Value>;
     fn execute<'a>(&'a mut self, call: &'a ToolCall) -> BoxFuture<'a, Result<Value, ()>>;
+    /// Publish deferred host events after execution has released its future.
+    /// Permission resolution must be visible before another tool is offered
+    /// or a provider continuation is sent, even when it emits no text.
+    fn flush_events(&mut self) {}
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1134,6 +1138,7 @@ async fn run_turn_at(
                 _ = wait_cancel(&mut cancel) => return Err(Error::Cancelled),
                 result = tokio::time::timeout(remaining, execute) => result.map_err(|_| Error::Timeout)?.map_err(|_| Error::ToolFailed)?,
             };
+            gate.as_deref_mut().expect("checked gate").flush_events();
             let content = scrub_json(result, &key).to_string();
             if content.len() > MAX_TOOL_RESULT_BYTES {
                 return Err(Error::ToolResultTooLarge);
