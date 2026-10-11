@@ -13,10 +13,9 @@ impl App {
             return vec![Line::from("Session changed; reopen usage")];
         };
         let width = width.max(1);
-        let mut lines = info.lines.iter()
-            .flat_map(|line| crate::memory_menu::wrap_review(line, width))
-            .map(Line::from).collect::<Vec<_>>();
-        lines.push(Line::from(""));
+        // Keep the requested quota bars at the top of the bounded chooser so
+        // session and weekly usage are visible before diagnostic details.
+        let mut lines = Vec::new();
         let telemetry = self.session_telemetry.get(id);
         match telemetry.and_then(|value| value.billing_mode.as_deref()) {
             Some("subscription") => {
@@ -26,6 +25,10 @@ impl App {
             Some("api") => lines.extend(crate::memory_menu::wrap_review("Subscription quota windows are not reported for API billing", width).into_iter().map(Line::from)),
             _ => lines.extend(crate::memory_menu::wrap_review("Subscription quota windows not reported by provider", width).into_iter().map(Line::from)),
         }
+        lines.push(Line::from(""));
+        lines.extend(info.lines.iter()
+            .flat_map(|line| crate::memory_menu::wrap_review(line, width))
+            .map(Line::from));
         lines
     }
 }

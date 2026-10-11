@@ -2241,6 +2241,11 @@ impl App {
             if self.choice_dropdown.is_some() {
                 self.choice_dropdown = None;
             }
+            // A New Session dropdown is itself modal. Dismiss it without
+            // letting the same click activate Start or close the form.
+            if self.new_session.is_some() && self.settings_menu.is_none() {
+                return true;
+            }
         }
         if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Down(_)
             | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
@@ -2626,8 +2631,29 @@ impl App {
                     return true;
                 }
                 // Dismiss the settings stack, then let this same click choose
-                // the prompt, pane, tab, or chip underneath it.
+                // the prompt underneath it only for ordinary session Settings.
+                // Docker setup Settings belong to the New Session form; its
+                // clicks must never fall through to the form's actions.
+                let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+                let layout = self.layout(self.size);
+                let clicked_prompt = match layout.panes {
+                    Some(panes) => panes.into_iter().enumerate().any(|(group, pane)| {
+                        self.groups.get(group).is_some_and(|group| group.active_id().is_some())
+                            && self.pane_regions(group, pane)[4].contains(point)
+                    }),
+                    None => self.groups.get(self.active_group).is_some_and(|group| {
+                        group.active_id().is_some()
+                            && self.pane_regions(self.active_group, layout.body)[4].contains(point)
+                    }),
+                };
+                let forward_to_prompt = self.new_session.is_none()
+                    && !self.docker_settings_open
+                    && self.active_request_index().is_none()
+                    && clicked_prompt;
                 self.close_settings_menu();
+                if !forward_to_prompt {
+                    return true;
+                }
             } else {
                 // Keep the settings stack modal for non-click mouse events.
                 return false;

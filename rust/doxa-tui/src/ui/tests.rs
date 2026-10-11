@@ -833,8 +833,7 @@ use super::*;
             ("right pane draft".into(), "right pane draft".len()),
         );
 
-        // Open Settings through the prompt command, change and save one value
-        // to the private test home, then leave a second dropdown active.
+        // Open Settings through the prompt command.
         app.input = "/settings".into();
         app.input_cursor = app.input.len();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
@@ -842,11 +841,11 @@ use super::*;
 
         // A click outside an active inline editor closes that editor and
         // returns keyboard ownership to the pane selected by the click.
-        app.settings_menu_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE)));
         let renderer = app.settings_menu.as_ref().unwrap().rows.iter()
             .position(|row| row.setting.key == "mermaid_renderer").unwrap();
         app.settings_menu.as_mut().unwrap().selected = renderer;
-        app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.settings_menu.as_ref().unwrap().draft.is_some());
         let panes = app.layout(app.size).panes.unwrap();
         let prompt = app.pane_regions(1, panes[1])[4];
@@ -863,34 +862,66 @@ use super::*;
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)));
         assert_eq!(app.input, "right pane draft?");
 
+        // Leaving the right pane stores the edited draft under its owner.
+        let panes = app.layout(app.size).panes.unwrap();
+        let prompt = app.pane_regions(0, panes[0])[4];
+        app.handle(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: prompt.x + 2,
+            row: prompt.y + 1,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.active_group, 0);
+        assert_eq!(app.input_drafts.get(&(1, "right-session".into())).unwrap().0, "right pane draft?");
+
+        // Leaving the right pane stores its draft before Settings is opened
+        // again from the left prompt.
+        app.input = "/settings".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.settings_menu.is_some());
+        // A click outside all controls dismisses ordinary Settings and still
+        // restores the current pane's prompt focus for typing.
+        app.handle(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.settings_menu.is_none());
+        assert_eq!(app.active_group, 0);
+        assert_eq!(app.focus, Focus::Prompt);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE)));
+        assert_eq!(app.input, "!");
+
         // Reopen Settings through its command, change and save one value to
         // the private test home, then leave a second dropdown active.
         app.input = "/settings".into();
         app.input_cursor = app.input.len();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.settings_menu.is_some());
-        app.settings_menu_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE)));
         let background = app.settings_menu.as_ref().unwrap().rows.iter()
             .position(|row| row.setting.key == "background").unwrap();
         app.settings_menu.as_mut().unwrap().selected = background;
-        app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.choice_dropdown.is_some());
         let transparent = app.settings_menu.as_ref().unwrap().rows[background].setting.choices.iter()
             .position(|choice| *choice == "transparent").unwrap();
-        app.settings_menu_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)));
         for _ in 0..transparent {
-            app.settings_menu_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         }
-        app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.settings_menu.as_ref().unwrap().edits["background"].as_deref(), Some("transparent"));
-        app.settings_menu_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
         let stored = doxa_state::load_config_checked(&crate::settings::config_path().unwrap()).unwrap();
         assert_eq!(stored["background"].as_str(), Some("transparent"));
 
         let rail_entries = app.settings_menu.as_ref().unwrap().rows.iter()
             .position(|row| row.setting.key == "rail_entries").unwrap();
         app.settings_menu.as_mut().unwrap().selected = rail_entries;
-        app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.choice_dropdown.is_some());
         let mut terminal = Terminal::new(TestBackend::new(220, 42)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -900,7 +931,7 @@ use super::*;
         assert!(painted.contains("sessions") || painted.contains("panes"));
 
         let panes = app.layout(app.size).panes.unwrap();
-        let prompt = app.pane_regions(0, panes[0])[4];
+        let prompt = app.pane_regions(1, panes[1])[4];
         app.handle(Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: prompt.x + 2,
@@ -909,17 +940,17 @@ use super::*;
         }));
         assert!(app.settings_menu.is_none());
         assert!(app.choice_dropdown.is_none());
-        assert_eq!(app.active_group, 0);
+        assert_eq!(app.active_group, 1);
         assert_eq!(app.focus, Focus::Prompt);
-        assert_eq!(app.input_drafts.get(&(1, "right-session".into())).unwrap().0, "right pane draft?");
+        assert_eq!(app.input, "right pane draft?");
 
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE)));
-        assert_eq!(app.input, "!");
+        assert_eq!(app.input, "right pane draft?!");
         let mut terminal = Terminal::new(TestBackend::new(220, 42)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let painted = terminal.backend().buffer().content.iter()
             .map(|cell| cell.symbol()).collect::<String>();
-        assert!(painted.contains("!") && painted.contains("left-session"));
+        assert!(painted.contains("right pane draft?!"));
     }
 
     #[test]
@@ -2124,8 +2155,10 @@ for line in sys.stdin:
         let all_rows = app.usage_info_lines(64).iter()
             .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
             .collect::<Vec<_>>().join("\n");
-        assert!(all_rows.contains("opus:55% sonnet:34% included:21% extra:9%"),
-            "provider windows without session/weekly bars remain in the quota summary");
+        for supplied in ["opus:55%", "sonnet:34%", "included:21%", "extra:9%"] {
+            assert!(all_rows.contains(supplied),
+                "provider quota detail {supplied} remains visible across wrapped summary rows");
+        }
 
         let initial_area = app.active_chooser_rect().unwrap();
         assert!(initial_area.height > app.chip_info.as_ref().unwrap().lines.len() as u16 + 2,
@@ -2139,14 +2172,20 @@ for line in sys.stdin:
         let max_scroll = narrow_rows.saturating_sub(narrow_visible);
         let old_static_limit = app.chip_info.as_ref().unwrap().lines.len().saturating_sub(1);
         assert!(max_scroll > old_static_limit, "fixture must exceed the old static-line scroll cap");
+        let weekly_row = app.usage_info_lines(usize::from(narrow_area.width.saturating_sub(3)))
+            .iter().position(|line| line.spans.iter().any(|span| span.content.contains("Weekly quota")))
+            .unwrap();
+        for _ in 0..weekly_row {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        }
+        let rendered = usage_frame(&mut app, 70, 16);
+        assert!(rendered.contains("Weekly quota"));
+        assert!(rendered.contains("Reset at 2030-03-17T"));
         for _ in 0..narrow_rows {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         }
         assert_eq!(app.chip_info.as_ref().unwrap().scroll, max_scroll,
             "keyboard scrolling should reach the final generated quota rows");
-        let rendered = usage_frame(&mut app, 70, 16);
-        assert!(rendered.contains("Weekly quota"));
-        assert!(rendered.contains("Reset at 2030-03-17T"));
 
         for _ in 0..narrow_rows { app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))); }
         assert_eq!(app.chip_info.as_ref().unwrap().scroll, 0);
@@ -2155,6 +2194,12 @@ for line in sys.stdin:
         }
         assert_eq!(app.chip_info.as_ref().unwrap().scroll, max_scroll,
             "wheel scrolling should reach the final generated quota rows");
+        for _ in 0..narrow_rows {
+            app.handle(wheel_event(MouseEventKind::ScrollUp, narrow_area));
+        }
+        for _ in 0..weekly_row {
+            app.handle(wheel_event(MouseEventKind::ScrollDown, narrow_area));
+        }
         let rendered = usage_frame(&mut app, 70, 16);
         assert!(rendered.contains("Weekly quota"));
         assert!(rendered.contains("Reset at 2030-03-17T"));
@@ -3635,6 +3680,7 @@ for line in sys.stdin:
                 "model" => assert!(app.model_picker.is_some()),
                 "effort" => assert!(app.model_picker.is_some() && app.effort_catalog_pending.is_some()),
                 "beliefs" => assert!(app.lore_picker.is_some()),
+                "peers" => assert!(app.map_modal),
                 _ => {
                     assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some(kind));
                     if kind == "memory" { assert!(painted_at(&app, 220, 32).contains("Loading curated facts")); }

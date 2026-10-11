@@ -37,6 +37,11 @@ impl App {
             self.docker_settings_open = false;
             self.refresh_docker_setup();
             self.notice = "Returned to New Session · Docker choice, model and prompt retained".into();
+        } else {
+            // Settings owns key input while open. Restoring this focus even
+            // for a dismissing click on blank space keeps the current prompt
+            // ready to type into; prompt clicks can still switch pane owners.
+            self.focus = super::Focus::Prompt;
         }
     }
 }
