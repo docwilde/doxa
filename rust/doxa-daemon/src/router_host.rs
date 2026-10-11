@@ -447,6 +447,16 @@ impl RouterHost {
             return Err("Router CLI source changed or admission cancelled before submission".into());
         }
         *self.active_worker.lock().unwrap()=Some(worker.clone());
+        struct WorkerAdmission<'a> { slot:&'a Mutex<Option<Arc<Worker>>>, worker:Arc<Worker> }
+        impl Drop for WorkerAdmission<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut slot)=self.slot.lock() {slot.take();}
+                self.worker.shutdown();
+            }
+        }
+        // Clear the outer control handle and stop the native worker even when
+        // a provider callback panics. Shutdown itself is guarded once-only.
+        let _admission=WorkerAdmission{slot:&self.active_worker,worker:worker.clone()};
         emit(json!({"type":"routing_selected","data":selection}));
         let mut output=String::new();let mut overflow=false;let mut terminal=None;
         worker.host().prompt(&packet,&mut |mut event| {
