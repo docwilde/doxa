@@ -1,8 +1,9 @@
 # Beta47 supply and build review fixes
 
-This note records the supply-chain changes applied to the beta47 source tree.
-It keeps the existing opt-in Mermaid CLI major and the current source-build
-installer. No release key, signature format, or trusted attestation was added.
+This note records the supply-chain changes and verification for the integrated
+beta47 tree as of 2026-10-11. It keeps the existing opt-in Mermaid CLI major
+and source-build installer. No release key, signature format, or trusted
+attestation was added.
 
 ## F-REMOTE-002: isolate LORE candidate execution
 
@@ -131,19 +132,15 @@ CLI compatibility evidence, not a DOXA terminal/sandbox rendering proof.
 
 ## Other captured dependency advisories
 
-The captured Rust audit remains the 2026-10-09 report. This branch does not
-edit `Cargo.lock`:
-
-- `rsa` 0.9.10 remains a reported Marvin timing advisory; the parent review
-  owns its reachability and API-boundary assessment.
-- `lru` 0.12.5 is flagged unsound by the captured RustSec database. The listed
-  fixed release is far ahead of the locked 0.12 line, so no blanket override
-  was applied without API and dependency compatibility review.
-- `paste` 1.0.15 is reported as unmaintained, not as a vulnerability. It is
-  left for a targeted replacement review.
-- `yoke-derive` 0.8.3 is yanked but retained in the existing lockfile. A yanked
-  locked version is tracked for an intentional dependency update; this change
-  does not rewrite the workspace graph.
+The integrated dependency update removed the `rsa`/`jwt-simple`/`superboring`
+path. FCM now uses `ring` for RS256 and VAPID uses direct P-256 signing;
+`Cargo.lock` changed as part of that integration. The offline RustSec database at
+`7eebec69c352c7191b1f13eb95dd510eeca5d1de` reported zero vulnerability
+entries. It still reports unsoundness warnings for `lru` 0.12.5
+(`RUSTSEC-2026-0002`, `IterMut`; `RUSTSEC-2026-0253`, `pop`) and a maintenance
+warning for `paste` 1.0.15. No blanket `lru` override or `paste` replacement
+was applied in this supply change. The yanked status of locked `yoke-derive`
+0.8.3 was not refreshed, so this note makes no current yanked-status claim.
 
 ## Verification
 
@@ -156,9 +153,12 @@ sh -n scripts/install.sh
 git diff --check
 ```
 
+Root reports 28 focused Python tests passed, including the installer
+transaction fixture's expected-SHA mismatch with fake Cargo and private
+fixtures. The action-pin linter and `sh -n` checks passed. Root also completed
+the private npm installation/render/audit checks described above. The full
+Rust suites are still in progress.
+
 The Debian and Ubuntu signed-index package checks are recorded in the private
-evidence directory listed above. The Rust setup-help assertions were updated
-but not run locally because this review lane does not run Cargo. The installer
-transaction fixture now also covers an expected-SHA mismatch before Cargo,
-but it was not executed here. No Cargo, Rust build, npm install, image build,
-Docker command, or installer execution was performed.
+evidence directory listed above. No real source install, Docker image build,
+apt package installation, or live deployment was run.
