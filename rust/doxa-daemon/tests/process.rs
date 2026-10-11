@@ -825,12 +825,21 @@ fn missing_unowned_resume_directory_refuses_before_claude_host_starts() {
 #[test]
 fn claude_resume_restores_verified_missing_managed_checkout() {
     let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let main = dir.path().join("repo");
     let runtime = dir.path().join("runtime");
     let home = dir.path().join("home");
+    fs::create_dir(&home).unwrap();
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
     fs::create_dir(&main).unwrap();
+    fs::set_permissions(&main, fs::Permissions::from_mode(0o700)).unwrap();
     let git = |args: &[&str]| {
-        let output = Command::new("git").args(args).current_dir(&main).output().unwrap();
+        let output = Command::new("git").env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+            .env("HOME", &home).env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args).current_dir(&main).output().unwrap();
         assert!(output.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&output.stderr));
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     };
@@ -1792,11 +1801,12 @@ fn claude_reported_spend_blocks_next_prompt_over_daemon_socket() {
 #[test]
 fn claude_legacy_resume_requires_owned_provider_and_lore_source_then_verifies_live_identity() {
     let dir=tempfile::tempdir().unwrap();let script=dir.path().join("legacy-cli");
+    fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
     claude_fixture(&script,"assert '--resume' in args",r#"if frame['type']=='user':
   emit({'type':'system','subtype':'init','session_id':session,'model':model});delta('restored');result()
 "#);
     let project=dir.path().join("home/claude-cli/projects/legacy");fs::create_dir_all(&project).unwrap();
-    for path in [dir.path().join("home/claude-cli"),dir.path().join("home/claude-cli/projects"),project.clone()] {fs::set_permissions(path,fs::Permissions::from_mode(0o700)).unwrap();}
+    for path in [dir.path().join("home"),dir.path().join("home/claude-cli"),dir.path().join("home/claude-cli/projects"),project.clone()] {fs::set_permissions(path,fs::Permissions::from_mode(0o700)).unwrap();}
     let source=format!("{}\n{}\n",json!({"type":"user","engine":"claude","sessionId":CLAUDE_SESSION,"cwd":dir.path(),"message":{"role":"user","content":"saved task"}}),json!({"type":"assistant","engine":"claude","sessionId":CLAUDE_SESSION,"cwd":dir.path(),"message":{"role":"assistant","content":[{"type":"text","text":"saved answer"}]}}));
     fs::write(project.join(format!("{CLAUDE_SESSION}.jsonl")),&source).unwrap();fs::set_permissions(project.join(format!("{CLAUDE_SESSION}.jsonl")),fs::Permissions::from_mode(0o600)).unwrap();
     fs::create_dir_all(native_transcript_dir(dir.path())).unwrap();fs::set_permissions(native_transcript_dir(dir.path()),fs::Permissions::from_mode(0o700)).unwrap();
