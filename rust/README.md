@@ -112,7 +112,11 @@ Settings has numbered category tabs on its title bar: **1 Session · 2 Fleet · 
 
 Choice fields in Settings and New Session open dropdowns with a click or Enter. Use Up/Down, the mouse wheel, Home/End or Page Up/Down to browse; click or Enter selects, and Escape cancels. Tab moves between New Session fields. Settings text edits and dropdown selections are staged until Ctrl+S saves; Escape from Settings discards unsaved changes.
 
-New Session loads Claude and Codex model choices from their connected CLI catalogs and vendor models from the vendor catalog. An open model dropdown updates as the live list arrives; press R inside it to refresh. Loading and lookup failures appear in the form and dropdown. Router target choices come from the owner's router configuration.
+New Session loads Claude and Codex model choices from their connected CLI catalogs and vendor models from the vendor catalog. An open model dropdown updates as the live list arrives; press R inside it to refresh. Loading and lookup failures appear in the form and dropdown. Router target choices come from the owner's private candidate configuration and a read-only authentication/catalog review.
+
+To make Jev Router the default, open **`/settings` → Session**, choose **Jev Router** in the default-engine dropdown, and set the candidate-config path. **Ctrl+P** reviews the private config and current account catalogs without inference; **Ctrl+S** saves after a ready review. The setting applies to new sessions. Choose a fixed engine to disable the Router default. `DOXA_ENGINE` and `DOXA_ROUTER_CONFIG` environment overrides remain read-only.
+
+Router candidates can include authenticated Claude and protected Codex models alongside DeepSeek and GLM API targets. Native CLI tool and permission reviews remain active; routing Auto is separate from permission Auto. The displayed tracked allowance covers Jev and direct API estimates. CLI account charges and the combined total charge remain unknown. [Configuration and accounting](../docs/jev-router.md).
 
 Ctrl+Delete confirms removal of the session and its DOXA transcript. Live daemons stop first; an already-absent transcript still removes the saved window entry after its project identity is checked. Successful removal suppresses late history results and daemon frames so the session cannot reappear in the list. Provider-native history remains separate.
 

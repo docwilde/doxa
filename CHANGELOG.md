@@ -25,6 +25,17 @@ the stable 2.0 release has not been cut.
 - Retain all source hash passes, symlink refusal and read limits, including descriptor-walk fallback for 4096-byte relative paths. Document explicit TUI/CLI access and maintenance.
 - Add Greek **ΔΟΞΑ** block art to help and version output, build metadata and **docwilde <docwilde@proton.me>** author credit. Support **`-V`** as a version alias.
 
+**Jev Router**
+
+- Extend **`RouterHost`** to authenticated Claude and protected Codex targets with native permission/tool reviews, fresh internal worker IDs and source-bound canonical history.
+- Enable **Jev Router** in the Settings engine dropdown after private config and account/catalog review. New Session lists eligible configured targets; fixed-engine defaults disable routing.
+- Add explicit **`CliAccount`** billing: track Jev/API allowance separately from unknown CLI and total charges. Incomplete usage or interrupted worker identity blocks replay; managed summaries require an API target.
+
+**Gallery**
+
+- Regenerate 22 terminal scenes at **3068 × 1734**, including Settings, context, queued prompts, peers and routing. Add a horizontally scrollable README gallery with full-size image links.
+- Move browser and Android screenshots into **`docs/remote-gallery.md`** with their fixture and historical capture records.
+
 ## 2.0.0-beta.45 — 2026-10-11
 
 **Menus**
