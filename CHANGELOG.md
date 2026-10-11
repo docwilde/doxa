@@ -5,6 +5,25 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.45 — 2026-10-11
+
+**Menus**
+
+- Add numbered, clickable **Settings** category tabs 1–9, matching the beliefs picker, with overflow controls for narrow panes.
+- Replace enumerated Settings and New Session fields with **`Dropdown`** menus: click/Enter opens and selects, arrows or wheel browse, and Escape cancels.
+- Stage text edits, choice selections and toggles together. **Ctrl+S** saves validated Settings changes; Escape discards unsaved edits.
+
+**Live models**
+
+- Populate New Session model menus from the live **Claude/Codex CLI catalogs** and vendor lists. Update an open dropdown when the response arrives; **R** refreshes it.
+- Preserve current catalog and effort checks, display loading or failure, and discard replies from a previously selected engine. Catalog discovery starts no inference request.
+
+**Session deletion**
+
+- Fix **Ctrl+Delete** retaining empty sessions: accept an absent transcript after checking its project identity, and remove the session from panes, history, collections and saved restore state.
+- Suppress late history, restore and daemon updates after confirmed removal. Preserve transcripts when daemon shutdown or an existing file's identity cannot be verified.
+- Verify synthetic CLI catalogs, live dropdown updates, isolated Settings persistence, and confirmed deletion followed by history replay and layout reload.
+
 ## 2.0.0-beta.44 — 2026-10-11
 
 **Jev routing**
