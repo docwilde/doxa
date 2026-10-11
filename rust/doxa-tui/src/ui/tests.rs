@@ -548,7 +548,8 @@ use super::*;
         }).collect::<Vec<_>>();
         app.settings_menu = Some(SettingsMenu { rows, selected: 0, category: 0,
             draft: None, edits: HashMap::new(), engine: "claude".into() });
-        for key in ["engine", "router_config", "mermaid_renderer", "mermaid_renderer_root"] {
+        for key in ["engine", "router_config", "mermaid_renderer", "mermaid_renderer_root",
+            "mcp_enabled", "mcp_config", "tavily_api_key", "firecrawl_api_key", "exa_api_key", "brave_api_key"] {
             let menu = app.settings_menu.as_mut().unwrap();
             menu.selected = menu.rows.iter().position(|row| row.setting.key == key).unwrap();
             let setting = menu.rows[menu.selected].setting;

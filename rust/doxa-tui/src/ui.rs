@@ -450,6 +450,7 @@ impl SettingsMenu {
         indices.into_iter().skip(start).take(count).collect()
     }
     fn has_preflight(&self) -> bool {
+        crate::settings::CATEGORIES.get(self.category) == Some(&"MCP") ||
         self.rows.get(self.selected).is_some_and(|row| matches!(row.setting.key,
             "engine" | "router_config" | "mermaid_renderer" | "mermaid_renderer_root"))
     }
