@@ -123,6 +123,7 @@ impl App {
                         }
                     }
                 } else { form.effort = Some(value.clone()); }
+                self.refresh_docker_setup();
             }
         }
     }

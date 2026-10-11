@@ -525,6 +525,7 @@ impl App {
             prompt: String::new(),
             field: 0,
         });
+        self.refresh_docker_setup();
     }
 
     fn request_new_session_catalog(&mut self, engine: launch::Engine) -> bool {
@@ -711,6 +712,9 @@ impl App {
     }
 
     pub(super) fn new_session_key(&mut self, key: KeyEvent) -> bool {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
+            return self.open_docker_settings();
+        }
         if self.choice_dropdown.is_some() { return self.choice_dropdown_key(key); }
         if matches!(key.code, KeyCode::Enter | KeyCode::Left | KeyCode::Right)
             && self.open_new_session_dropdown() { return true; }
@@ -768,6 +772,12 @@ impl App {
                     return true;
                 }
                 if !self.manual_tab_available() {
+                    return true;
+                }
+                self.refresh_docker_setup();
+                if let Some(setup) = self.docker_setup.as_ref().filter(|setup| !setup.ready()) {
+                    self.notice = "Docker setup required · Ctrl+O opens Docker image Settings · containers/session/README.md".into();
+                    self.new_session.as_mut().unwrap().launch_error = Some(format!("Docker setup: {}", setup.label()));
                     return true;
                 }
                 let form = self.new_session.as_ref().unwrap().clone();

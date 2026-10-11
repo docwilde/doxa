@@ -779,7 +779,7 @@ impl App {
             return true;
         }
         match key.code {
-            KeyCode::Esc => self.settings_menu = None,
+            KeyCode::Esc => self.close_settings_menu(),
             KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
                 let indices = menu.indices();
                 if let Some(position) = indices.iter().position(|i| *i == menu.selected) {

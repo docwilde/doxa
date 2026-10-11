@@ -23,6 +23,7 @@ pub(crate) mod panes;
 mod render;
 mod session_controls;
 mod isolation_controls;
+mod docker_setup;
 mod session_navigation;
 mod triage;
 mod terminal_loop;
@@ -1586,6 +1587,8 @@ pub struct App {
     engine_picker: bool,
     engine_selected: usize,
     new_session: Option<NewSession>,
+    docker_setup: Option<docker_setup::Prerequisites>,
+    docker_settings_open: bool,
     new_session_catalog_pending: Option<(launch::Engine, Receiver<Result<serde_json::Value, &'static str>>)>,
     router_review: Option<router_settings::RouterReview>,
     vendor_catalog_pending: Option<(
@@ -1876,6 +1879,8 @@ impl Default for App {
             engine_picker: false,
             engine_selected: 0,
             new_session: None,
+            docker_setup: None,
+            docker_settings_open: false,
             new_session_catalog_pending: None,
             router_review: None,
             vendor_catalog_pending: None,

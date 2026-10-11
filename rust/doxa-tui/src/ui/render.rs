@@ -405,7 +405,9 @@ impl App {
                     .0,
                     Style::default().fg(theme::ERROR),
                 ));
-                lines.push(Line::from(if form.retry_allowed {
+                lines.push(Line::from(if form.isolation.docker() {
+                    " Ctrl+O Docker image Settings · Enter retry · Esc close"
+                } else if form.retry_allowed {
                     " Esc close · /setup checks authentication · Enter retry"
                 } else {
                     " Session exists; use doxa-rs attach · Esc close"
@@ -475,6 +477,14 @@ impl App {
                 },
                 chooser_row_style(form.field == prompt_field + 1),
             ));
+            if form.isolation.docker() {
+                let status = self.docker_setup.as_ref().map(|setup| setup.label())
+                    .unwrap_or_else(|| "Start checks image policy and local rootless socket".into());
+                lines.push(Line::styled(clipped_title(&format!(" Docker: {status}"), usize::from(area.width.saturating_sub(2))).0,
+                    Style::default().fg(if self.docker_setup.as_ref().is_some_and(|setup| !setup.ready()) { theme::ERROR } else { theme::MUTED })));
+                lines.push(Line::styled(" [ Docker image Settings · Ctrl+O ]", Style::default().fg(theme::ACCENT)));
+                lines.push(Line::from(format!(" Build/rootless guide: {}", super::docker_setup::GUIDE)));
+            }
         } else if let Some((id, selected)) = &self.permission_picker {
             let engine = self.session_identity.get(id).and_then(|identity| identity.0.as_deref());
             let choices = permission_choices(engine);

@@ -88,7 +88,7 @@ impl App {
                     self.notice = "Enlarge active pane to inspect queued prompts".into();
                 }
                 if self.settings_menu.is_some() && self.active_chooser_rect().is_none() {
-                    self.settings_menu = None;
+                    self.close_settings_menu();
                     self.choice_dropdown = None;
                     self.notice = "Enlarge active pane to edit settings".into();
                 }
@@ -2587,7 +2587,7 @@ impl App {
                         return self.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                     }
                 } else {
-                    self.settings_menu = None;
+                    self.close_settings_menu();
                 }
                 return true;
             }
@@ -3143,6 +3143,11 @@ impl App {
                     self.select_new_engine();
                 }
                 return true;
+            }
+            if self.new_session.as_ref().is_some_and(|form| form.isolation.docker()) {
+                let fields = if vendor_models(self.new_session.as_ref().unwrap().engine).is_empty() { 3 } else { 4 };
+                let first = y + if height >= 8 { 4 } else { 2 };
+                if mouse.row == first + fields + 2 { return self.open_docker_settings(); }
             }
             if let Some(form) = self.new_session.as_mut() {
                 let first = y + if height >= 8 { 4 } else { 2 };

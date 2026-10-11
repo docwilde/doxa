@@ -35,6 +35,10 @@ the stable 2.0 release has not been cut.
 - Enable **Jev Router** in the Settings engine dropdown after private config and account/catalog review. New Session lists eligible configured targets; fixed-engine defaults disable routing.
 - Add explicit **`CliAccount`** billing: track Jev/API allowance separately from unknown CLI and total charges. Incomplete usage or interrupted worker identity blocks replay; managed summaries require an API target.
 
+**Docker setup**
+
+- Show Docker prerequisites before Start, preserve the New Session draft through image Settings, and accept only the current protected Codex image receipt.
+
 **Gallery**
 
 - Regenerate 22 terminal scenes at **3068 × 1734**, including Settings, context, queued prompts, peers and routing. Add a horizontally scrollable README gallery with full-size image links.

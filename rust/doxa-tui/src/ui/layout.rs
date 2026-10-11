@@ -511,7 +511,9 @@ impl App {
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
-            if !vendor_models(form.engine).is_empty() {
+            if form.isolation.docker() {
+                if vendor_models(form.engine).is_empty() { 12 } else { 13 }
+            } else if !vendor_models(form.engine).is_empty() {
                 10
             } else if form.engine == launch::Engine::Claude {
                 9

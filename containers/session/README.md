@@ -23,6 +23,11 @@ python3 scripts/build-session-image.py \
   --codex-provider "$HOME/.local/share/doxa/providers/codex-current"
 ```
 
+The Codex receipt must match the current `scripts/install_codex_protected.py`
+source/contract and the SHA-256 of `scripts/codex-protected/precompact.patch`.
+Legacy receipts are refused; rerun the protected provider installer and rebuild
+the worker image after an upgrade.
+
 Both provider flags are optional. Omit them for a credential-free fixture
 image. The build copies only the reviewed worker, selected Claude executable,
 and five verified protected-Codex package files. It preserves the existing
@@ -51,3 +56,19 @@ networking also prevents Claude/Codex from reaching their provider until
 networking is re-enabled. CPU, memory and PID limits are enforced separately;
 disk use is monitored and is not a filesystem quota. These profiles do not
 claim a provider-only egress gateway or full credential secrecy.
+
+## Configure and return to New Session
+
+Set the printed immutable image ID in **Settings → Session → Docker worker image
+digest**. Set a nondefault local Unix endpoint in **Settings → Paths → local
+rootless Docker socket**. Save with Ctrl+S. In New Session, the **Docker image
+Settings** action (Ctrl+O) opens the image row and Esc returns to the retained
+model, isolation profile and first prompt. The UI checks only the image policy
+and local socket; it neither installs an Engine nor builds or pulls an image.
+Start performs the existing rootless/cgroup/image admission checks.
+
+A missing socket means the local rootless Engine still needs explicit operator
+provisioning or startup. A missing digest means the reviewed image build and
+configuration remain incomplete. Follow [Docker’s rootless installation procedure](https://docs.docker.com/engine/security/rootless/)
+for your host; never substitute the system rootful
+socket or relax digest pinning to make a profile start.

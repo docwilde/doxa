@@ -1667,6 +1667,73 @@ for line in sys.stdin:
         assert!(prompt.is_none());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn docker_setup_before_launch_settings_return_retains_draft() {
+        // All settings writes and environment changes belong to a private child.
+        if std::env::var_os("DOXA_DOCKER_SETUP_TEST").is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "ui::tests::docker_setup_before_launch_settings_return_retains_draft"])
+                .env("DOXA_HOME", home.path()).env("DOXA_DOCKER_SETUP_TEST", "1");
+            for name in ["DOXA_SESSION_ISOLATION", "DOXA_DOCKER_IMAGE", "DOXA_DOCKER_HOST", "DOCKER_HOST",
+                "DOXA_DOCKER_MEMORY_BYTES", "DOXA_DOCKER_CPUS", "DOXA_DOCKER_PIDS",
+                "DOXA_DOCKER_DISK_SOFT_LIMIT_BYTES", "DOXA_DOCKER_DISK_FREE_FLOOR_BYTES"] { child.env_remove(name); }
+            let output = child.output().unwrap();
+            assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(160, 36));
+        app.new_session = Some(NewSession { engine:launch::Engine::Codex, isolation:doxa_isolation::Profile::Native,
+            router_config:None, model:"fixture-exact-model".into(), models:vec!["fixture-exact-model".into()],
+            model_efforts:HashMap::new(), catalog_note:"Controlled catalog".into(), catalog_pending:false,
+            launch_error:None, retry_allowed:true, effort:None, prompt:"Keep my multiline\nfirst prompt".into(), field:1 });
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.new_session.as_ref().unwrap().isolation, doxa_isolation::Profile::DockerOpen);
+        assert!(app.docker_setup.as_ref().unwrap().label().contains("Image digest missing"));
+        let paint = painted_at(&app, 160, 36);
+        assert!(paint.contains("Image digest missing") && paint.contains("Ctrl+O") && paint.contains("containers/session/README.md"));
+        app.new_session.as_mut().unwrap().field = 2;
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.launching && app.pending_launches.is_empty());
+        assert!(app.new_session.as_ref().unwrap().launch_error.as_ref().unwrap().starts_with("Docker setup:"));
+        assert!(!painted_at(&app, 160, 36).contains("/setup checks authentication"));
+        // Click the actual action row, then return by Escape without losing input.
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind:MouseEventKind::Down(MouseButton::Left),
+            column:menu.x+3, row:menu.y+9, modifiers:KeyModifiers::NONE }));
+        assert!(app.docker_settings_open);
+        assert_eq!(app.settings_menu.as_ref().unwrap().rows[app.settings_menu.as_ref().unwrap().selected].setting.key, "docker_image");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.settings_menu.is_none());
+        assert_eq!(app.new_session.as_ref().unwrap().prompt, "Keep my multiline\nfirst prompt");
+        assert_eq!(app.new_session.as_ref().unwrap().model, "fixture-exact-model");
+        assert_eq!(app.new_session.as_ref().unwrap().isolation, doxa_isolation::Profile::DockerOpen);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+        assert!(app.settings_menu.is_some());
+        // Stage/save only this fixture's private owner config. An owned listening
+        // socket is sufficient for the UI check, never proof of a rootless Engine.
+        let path = doxa_isolation::home().unwrap().join("docker.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let menu = app.settings_menu.as_mut().unwrap();
+        menu.edits.insert("docker_image".into(), Some(format!("sha256:{}", "a".repeat(64))));
+        menu.edits.insert("docker_host".into(), Some(format!("unix://{}", path.display())));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
+        app.handle(Event::Mouse(MouseEvent { kind:MouseEventKind::Down(MouseButton::Left), column:0, row:0, modifiers:KeyModifiers::NONE }));
+        assert!(app.settings_menu.is_none() && app.docker_setup.as_ref().unwrap().ready());
+        assert!(app.new_session.as_ref().unwrap().launch_error.is_none());
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let (options, prompt, _) = app.pending_launches.pop().unwrap();
+        assert_eq!(options.isolation, Some(doxa_isolation::Profile::DockerOpen));
+        assert_eq!(options.model.as_deref(), Some("fixture-exact-model"));
+        assert_eq!(prompt.as_deref(), Some("Keep my multiline\nfirst prompt"));
+        assert!(app.launching); // Backend still owns all actual Engine/image proof.
+    }
+
     #[test]
     fn new_session_form_queues_engine_model_and_first_prompt() {
         let mut app = App::default();
