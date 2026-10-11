@@ -1253,7 +1253,10 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"peer_message","data":{"from_title":"Worker","body":"status only","fleet_admission":{"delivered":true,"unreviewed":true}}}}));
         let transcript=&app.sessions[0].transcript;
         assert!(transcript.contains("Fleet message quarantined: outside approved assignment"));
-        assert!(transcript.contains("Worker [unreviewed fleet message]: status only"));
+        let (lines, _) = super::transcript_tools::render(transcript, 100, None, None);
+        let visible = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(visible.contains("Peer Worker [unreviewed fleet message]"));
+        assert!(visible.contains("│ status only"));
         let row=super::transcript_events::structured_event("fleet_guard",&json!({"delivered":false,"reason":"hold\nfor human\u{1b}"})).unwrap();
         assert!(!row.contains('\u{1b}'));
     }
@@ -5841,6 +5844,120 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
             "event":{"type":"prompt_dequeued", "data":{"id":"q"}}}));
         assert_eq!(app.session_activity["a"].1, 0);
+    }
+
+    #[test]
+    fn queued_prompt_format_matches_user_markdown_and_promotes_without_duplication() {
+        let prompt = "Check **bold** and [the result](https://example.com/result) while this long line wraps.\n\n- first detail\n- second detail\n\n```rust\nlet answer = 42;\n```\n\nvisible queued ending";
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event","session_id":"s","event":{"type":kind,"data":data}});
+        let setup = || {
+            let mut app = App::default();
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+            app.apply_daemon_frame(&event("turn_started",json!({"prompt":"Initial user prompt"})));
+            app.apply_daemon_frame(&event("text_delta",json!({"text":"Current response"})));
+            app
+        };
+        let mut ordinary = setup();
+        ordinary.apply_daemon_frame(&event("turn_done",json!({})));
+        ordinary.apply_daemon_frame(&event("turn_started",json!({"prompt":prompt})));
+        let mut queued = setup();
+        let admission = event("prompt_queued",json!({"id":"q1","text":prompt,"timestamp":"2026-10-11T13:25:00Z"}));
+        queued.apply_daemon_frame(&admission);
+        queued.apply_daemon_frame(&admission);
+        queued.apply_daemon_frame(&json!({"type":"reply","session_id":"s","ok":true,"queued":true}));
+        assert_eq!(queued.session_activity["s"].1,1);
+        let normal = super::transcript_tools::render_with_links(&ordinary.sessions[0].transcript,28,None,None,&[]);
+        let pending = super::transcript_tools::render_with_links(&queued.sessions[0].transcript,28,None,None,&[]);
+        let user_lines = |lines: Vec<ratatui::text::Line<'static>>| lines.into_iter()
+            .filter(|line|line.style.bg == Some(theme::HIGHLIGHT)).collect::<Vec<_>>();
+        assert_eq!(user_lines(pending.0), user_lines(normal.0));
+        assert_eq!(pending.2.iter().map(|link|(link.start,link.end,link.url.clone())).collect::<Vec<_>>(),
+            normal.2.iter().map(|link|(link.start,link.end,link.url.clone())).collect::<Vec<_>>());
+        queued.apply_daemon_frame(&event("text_delta",json!({"text":"Continued assistant work"})));
+        let (continued,_) = super::transcript_tools::render(&queued.sessions[0].transcript,40,None,None);
+        assert!(continued.iter().any(|line|line.to_string().contains("Continued assistant work") && line.style.bg.is_none()));
+        queued.apply_daemon_frame(&event("turn_done",json!({})));
+        let started = event("prompt_dequeued",json!({"id":"q1"}));
+        queued.apply_daemon_frame(&started);
+        queued.apply_daemon_frame(&started);
+        queued.apply_daemon_frame(&event("turn_started",json!({"prompt":prompt})));
+        assert_eq!(queued.session_activity["s"].1,0);
+        assert_eq!(queued.sessions[0].transcript.matches("visible queued ending").count(),1);
+        let (promoted,_) = super::transcript_tools::render(&queued.sessions[0].transcript,80,None,None);
+        let visible = promoted.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(visible.contains("Queued prompt started · q1 · 2026-10-11T13:25:00Z"));
+        assert_eq!(visible.matches("visible queued ending").count(),1);
+    }
+
+    #[test]
+    fn queued_prompt_settlement_preserves_identity_and_does_not_decrement_twice() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event","session_id":"s","event":{"type":kind,"data":data}});
+        for (id,text) in [("q1","Cancel this\n\n**detail**"),("q2","Discard this")] {
+            app.apply_daemon_frame(&event("prompt_queued",json!({"id":id,"text":text,"timestamp":42})));
+        }
+        app.apply_daemon_frame(&event("prompt_cancelled",json!({"id":"q1"})));
+        app.apply_daemon_frame(&event("prompt_cancelled",json!({"id":"q1"})));
+        assert_eq!(app.session_activity["s"].1,1);
+        app.apply_daemon_frame(&event("prompt_discarded",json!({"id":"q2"})));
+        assert_eq!(app.session_activity["s"].1,0);
+        let (lines,_) = super::transcript_tools::render(&app.sessions[0].transcript,80,None,None);
+        let visible = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(visible.contains("Queued prompt cancelled · q1 · 42"));
+        assert!(visible.contains("Queued prompt discarded · q2 · 42"));
+        assert_eq!(visible.matches("Cancel this").count(),1);
+        assert_eq!(visible.matches("Discard this").count(),1);
+    }
+
+    #[test]
+    fn peer_prompt_format_keeps_sender_stripe_and_robot_for_receipts_and_queued_turns() {
+        for nerd_font in [false,true] {
+            let mut app = App::default();
+            app.preferences.set_for_test("nerd_font",if nerd_font {"true"} else {"false"});
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+            let event = |kind: &str, data: serde_json::Value| json!({"type":"event","session_id":"s","event":{"type":kind,"data":data}});
+            let sender = "12345678-1234-1234-1234-123456789abc";
+            app.apply_daemon_frame(&event("peer_message",json!({"from_id":sender,"from_title":"Reviewer","sent_at":"2026-10-11T13:25:00Z",
+                "body":"**You:**\n\nuser: received peer detail that wraps onto another line\n\n**Assistant:**"})));
+            let origin = format!("--- peer message · Reviewer ({sender}) · repo · time ---");
+            let body = "user: queued peer task\n\n**You:**\n\npeer turn detail";
+            app.apply_daemon_frame(&event("prompt_queued",json!({"id":"qp1","text":body,"peer_started":true,"peer_origin":origin})));
+            let (pending,_) = super::transcript_tools::render(&app.sessions[0].transcript,42,None,None);
+            assert!(pending.iter().any(|line|line.to_string().contains("queued peer task")
+                && line.spans[0].style.fg == Some(theme::PEER)));
+            app.apply_daemon_frame(&event("prompt_dequeued",json!({"id":"qp1"})));
+            app.apply_daemon_frame(&event("turn_started",json!({"prompt":body,"peer_started":true,"peer_origin":origin})));
+            let (lines,_) = super::transcript_tools::render(&app.sessions[0].transcript,80,None,None);
+            let visible = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+            assert!(visible.contains(sender));
+            assert!(visible.contains(if nerd_font {"\u{f06a9}"} else {"🤖"}));
+            assert_eq!(visible.matches("peer turn detail").count(),1);
+            assert!(lines.iter().filter(|line|line.to_string().starts_with("│ "))
+                .all(|line|line.spans[0].style.fg == Some(theme::PEER) && line.style.bg == Some(theme::RAISED)));
+            assert!(!lines.iter().any(|line|line.style.bg == Some(theme::HIGHLIGHT)));
+            assert!(!app.sessions[0].transcript.contains("**You:**\n\n"));
+        }
+    }
+
+    #[test]
+    fn peer_turn_keeps_its_own_tool_fold_and_streaming_cache() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        app.sessions[0].transcript = "**You:**\n\nInspect\n\n**Assistant:**\n\nTool: Read started · earlier\n\nTool: Read finished · ok\n\n".into();
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"turn_started","data":{
+            "prompt":"**You:**\n\nPeer task", "peer_started":true,"peer_origin":"Reviewer (12345678-1234-1234-1234-123456789abc)"}}}));
+        let source = &mut app.sessions[0].transcript;
+        assert_eq!(streamed_turn_start(source),source.find(super::transcript_messages::PREFIX));
+        let mut cached = RenderedTranscript::render(0,"s",source,38,None,None,0,&[]);
+        for chunk in ["**Assistant:**\n\nPeer response", "\n\nTool: Bash started · peer task", "\n\nTool: Bash finished · ok", "\n\nMore response"] {
+            source.push_str(chunk);
+            cached.update(source,38,None,None,0,&[]);
+            let (lines,sections) = super::transcript_tools::render(source,38,None,None);
+            assert_eq!(cached.lines,lines);
+            assert_eq!(cached.sections,sections);
+        }
+        assert_eq!(cached.sections.len(),2);
     }
 
     #[test]

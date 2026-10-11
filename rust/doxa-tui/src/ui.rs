@@ -72,6 +72,7 @@ mod transcript_images;
 pub mod transcript_mermaid;
 mod tool_cards;
 mod transcript_roles;
+mod transcript_messages;
 pub(crate) mod transcript_tools;
 use tool_cards::ToolCards;
 
@@ -1189,7 +1190,8 @@ fn streamed_turn_start(source: &str) -> Option<usize> {
     let mut start = 0;
     let mut found = None;
     for paragraph in source.split("\n\n") {
-        if fence.is_none() && paragraph.trim_matches('\n') == "**You:**"
+        if fence.is_none() && (paragraph.trim_matches('\n') == "**You:**"
+            || transcript_messages::Message::parse(paragraph.trim_matches('\n')).is_some_and(|message| message.starts_turn))
         {
             found = Some(start);
         } else {
