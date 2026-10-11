@@ -60,7 +60,7 @@ def capture(binary: Path, scene: str, destination: Path, version: str, env: dict
         "settings": ("Appearance", "Ctrl+S save"),
         "context": ("21.0% in use", "42000 / 200000 tokens", "Conversation", "Available"),
         "routing-status": ("Route auto", "ds-fast", "$0.000004 est", "session cost includes worker calls"),
-        "queued-prompts": ("Queued prompt", "q-next", "parser API stable"),
+        "queued-prompts": ("Queued · q-next", "parser API stable"),
         "peer-messages": ("Peer Parser reviewer", "q-peer", "reconnect review"),
     }
     for label in required.get(scene, ()):
