@@ -49,6 +49,39 @@ sys.stdin.read()
         self.destination = result.parent
         return result
 
+    def test_outer_receipt_restores_legacy_pointer_after_publication(self):
+        self.install()
+        legacy=self.root/"providers"/installer.PROVIDER
+        self.destination.rename(legacy)
+        (self.root/"providers/codex-current").unlink()
+        receipt=self.root/"rollback.json"
+        installer.install(self.binary,self.root/"providers",Path("/usr/bin/true"),self.launcher,self.helper,rollback_receipt=receipt)
+        self.assertTrue((self.root/"providers/codex-current").is_symlink())
+        installer.rollback_publication(receipt)
+        self.assertFalse((self.root/"providers/codex-current").exists())
+        self.assertEqual(installer.active_installation(self.root/"providers"),legacy)
+
+    def test_rollback_refuses_intervening_same_artifact_publication(self):
+        self.install()
+        receipt=self.root/"rollback.json"
+        installer.install(self.binary,self.root/"providers",Path("/usr/bin/true"),self.launcher,self.helper,rollback_receipt=receipt)
+        # A second install creates a different pointer inode even when bytes
+        # and the destination match. The first transaction cannot undo it.
+        self.install()
+        before=os.readlink(self.root/"providers/codex-current")
+        with self.assertRaisesRegex(ValueError,"pointer changed"):
+            installer.rollback_publication(receipt)
+        self.assertEqual(before,os.readlink(self.root/"providers/codex-current"))
+
+    def test_rollback_refuses_unsafe_receipt_without_changing_provider(self):
+        self.install()
+        receipt=self.root/"rollback.json"
+        installer.install(self.binary,self.root/"providers",Path("/usr/bin/true"),self.launcher,self.helper,rollback_receipt=receipt)
+        receipt.chmod(0o644)
+        before=os.readlink(self.root/"providers/codex-current")
+        with self.assertRaises(ValueError): installer.rollback_publication(receipt)
+        self.assertEqual(before,os.readlink(self.root/"providers/codex-current"))
+
     def test_unchanged_reinstall_is_idempotent(self):
         first = self.install()
         before = {file.name: file.read_bytes() for file in self.destination.iterdir()}

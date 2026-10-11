@@ -44,22 +44,27 @@ main() {
   checkout=$(mktemp -d "$cache_dir/checkout.XXXXXXXX") || exit 1
   stage=""
   installing=0
+  completed=0
+  provider_receipt="$checkout/.provider-rollback.json"
   cleanup() {
     trap - EXIT HUP INT TERM
+    restore_failed=0
     if [ "$installing" -eq 1 ]; then
-      restore_failed=0
       for name in doxa doxa-rs doxa-daemon-rs doxa-remote doxa-isolation-worker doxa-plugin-worker doxa-router-eval lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
         rm -f "$bin_dir/$name" || { restore_failed=1; continue; }
         if [ -e "$stage/backup/$name" ] || [ -L "$stage/backup/$name" ]; then
           mv "$stage/backup/$name" "$bin_dir/$name" || restore_failed=1
         fi
       done
-      [ "$restore_failed" -eq 0 ] || {
-        printf 'doxa-install: rollback incomplete; backups remain in %s/backup\n' "$stage" >&2
-        exit 1
-      }
       installing=0
     fi
+    if [ "$completed" -eq 0 ] && [ -f "$provider_receipt" ]; then
+      python3 "$checkout/scripts/install_codex_protected.py" --rollback --rollback-receipt "$provider_receipt" || restore_failed=1
+    fi
+    [ "$restore_failed" -eq 0 ] || {
+      printf 'doxa-install: rollback incomplete; backups and provider receipt remain in %s and %s\n' "$stage" "$checkout" >&2
+      exit 1
+    }
     [ -z "$stage" ] || rm -rf "$stage"
     rm -rf "$checkout"
   }
@@ -121,7 +126,7 @@ main() {
     command -v python3 >/dev/null 2>&1 || { printf 'doxa-install: Python 3.11+ is required only to build/install the private Codex provider\n' >&2; exit 1; }
     printf 'doxa-install: installing private fail-closed Codex app server (isolated Rust 1.95 toolchain/cache)\n'
     CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --package doxa-engines --bin doxa-codex-protected -j 1 || exit 1
-    python3 "$checkout/scripts/install_codex_protected.py" --launcher "$build_dir/$host_target/release/doxa-codex-protected" || exit 1
+    python3 "$checkout/scripts/install_codex_protected.py" --launcher "$build_dir/$host_target/release/doxa-codex-protected" --rollback-receipt "$provider_receipt" || exit 1
   fi
   if [ "$(uname -s)" = Darwin ] && command -v codex >/dev/null 2>&1; then
     printf 'doxa-install: protected Codex requires Linux process supervision; Codex sessions remain unavailable on macOS\n' >&2
@@ -177,7 +182,7 @@ SH
     mv -f "$stage/$name" "$bin_dir/$name" || exit 1
   done
   rm -f "$bin_dir/doxa-claude-sidecar.py" "$bin_dir/.doxa-sidecar-current"
-  installing=0
+  installing=0 completed=1
   printf 'doxa-install: installed Rust doxa at %s/doxa\n' "$bin_dir"
   resolved_doxa=$(command -v doxa 2>/dev/null || :)
   if [ "$resolved_doxa" != "$bin_dir/doxa" ]; then
