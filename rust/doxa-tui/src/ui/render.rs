@@ -2430,7 +2430,7 @@ impl App {
                 if cache.len() == MAX_RENDERED_TRANSCRIPTS {
                     cache.remove(0);
                 }
-                cache.push(RenderedTranscript::render_media(
+                cache.push(RenderedTranscript::render_media_style(
                     index,
                     id,
                     content,
@@ -2442,10 +2442,11 @@ impl App {
                     image_rows,
                     mermaid_revision,
                     Some(&ready_mermaids),
+                    self.preferences.on("nerd_font"),
                 ));
                 cache.len() - 1
             };
-            cache[position].update_media(
+            cache[position].update_media_style(
                 content,
                 inner[1].width.saturating_sub(2),
                 self.expanded_tool_sections.get(id),
@@ -2455,6 +2456,7 @@ impl App {
                 image_rows,
                 mermaid_revision,
                 Some(&ready_mermaids),
+                self.preferences.on("nerd_font"),
             );
             let (window, top) = transcript_window(
                 &cache[position].lines,
@@ -2514,13 +2516,15 @@ impl App {
             }
         };
         for section in sections {
-            if section.line >= top && section.line < top + usize::from(inner[1].height) {
+            let start = section.line.max(top);
+            let end = section.line.saturating_add(section.height).min(top + usize::from(inner[1].height));
+            if start < end {
                 self.visible_tool_sections.borrow_mut().push((
                     Rect::new(
                         inner[1].x.saturating_add(1),
-                        inner[1].y.saturating_add((section.line - top) as u16),
+                        inner[1].y.saturating_add((start - top) as u16),
                         inner[1].width.saturating_sub(2),
-                        1,
+                        (end - start) as u16,
                     ),
                     index,
                     id.to_owned(),

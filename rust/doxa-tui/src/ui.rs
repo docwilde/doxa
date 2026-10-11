@@ -1190,6 +1190,7 @@ struct RenderedTranscript {
     id: String,
     source: String,
     width: u16,
+    glyphs: bool,
     expanded: Option<HashSet<transcript_tools::FoldKey>>,
     selected: Option<transcript_tools::FoldKey>,
     cards_revision: u64,
@@ -1253,6 +1254,7 @@ impl RenderedTranscript {
         Self::render_media(pane, id, source, width, expanded, selected, cards_revision, cards, 0, 0, None)
     }
 
+    #[cfg(test)]
     fn render_media(
         pane: usize,
         id: &str,
@@ -1266,12 +1268,22 @@ impl RenderedTranscript {
         mermaid_revision: u64,
         ready_mermaids: Option<&HashSet<String>>,
     ) -> Self {
-        let (lines, sections, links, images, mermaids) = transcript_tools::render_with_media(
-            source, width, expanded, selected.clone(), cards, image_rows, 0, ready_mermaids);
+        Self::render_media_style(pane, id, source, width, expanded, selected, cards_revision, cards,
+            image_rows, mermaid_revision, ready_mermaids, true)
+    }
+
+    fn render_media_style(
+        pane: usize, id: &str, source: &str, width: u16,
+        expanded: Option<&HashSet<transcript_tools::FoldKey>>, selected: Option<transcript_tools::FoldKey>,
+        cards_revision: u64, cards: &[tool_cards::ToolCard], image_rows: u16,
+        mermaid_revision: u64, ready_mermaids: Option<&HashSet<String>>, glyphs: bool,
+    ) -> Self {
+        let (lines, sections, links, images, mermaids) = transcript_tools::render_with_media_style(
+            source, width, expanded, selected.clone(), cards, image_rows, 0, ready_mermaids, glyphs);
         let turn_start = streamed_turn_start(source);
         let (prefix_lines, prefix_sections) = turn_start.map(|start| {
-            let (prefix, folds, _, _, _) = transcript_tools::render_with_media(
-                &source[..start], width, expanded, selected.clone(), cards, image_rows, 0, ready_mermaids);
+            let (prefix, folds, _, _, _) = transcript_tools::render_with_media_style(
+                &source[..start], width, expanded, selected.clone(), cards, image_rows, 0, ready_mermaids, glyphs);
             (prefix.len(), folds.iter().filter(|fold| matches!(fold.index, transcript_tools::FoldKey::Section(_))).count())
         }).unwrap_or((0, 0));
         Self {
@@ -1279,6 +1291,7 @@ impl RenderedTranscript {
             id: id.to_owned(),
             source: source.to_owned(),
             width,
+            glyphs,
             expanded: expanded.cloned(),
             selected,
             cards_revision,
@@ -1305,6 +1318,7 @@ impl RenderedTranscript {
         self.update_media(source, width, expanded, selected, cards_revision, cards, 0, 0, None);
     }
 
+    #[cfg(test)]
     fn update_media(
         &mut self,
         source: &str,
@@ -1317,7 +1331,17 @@ impl RenderedTranscript {
         mermaid_revision: u64,
         ready_mermaids: Option<&HashSet<String>>,
     ) {
-        if self.width == width
+        self.update_media_style(source, width, expanded, selected, cards_revision, cards,
+            image_rows, mermaid_revision, ready_mermaids, self.glyphs);
+    }
+
+    fn update_media_style(
+        &mut self, source: &str, width: u16,
+        expanded: Option<&HashSet<transcript_tools::FoldKey>>, selected: Option<transcript_tools::FoldKey>,
+        cards_revision: u64, cards: &[tool_cards::ToolCard], image_rows: u16,
+        mermaid_revision: u64, ready_mermaids: Option<&HashSet<String>>, glyphs: bool,
+    ) {
+        if self.width == width && self.glyphs == glyphs
             && self.image_rows == image_rows
             && self.mermaid_revision == mermaid_revision
             && self.expanded.as_ref() == expanded
@@ -1330,9 +1354,9 @@ impl RenderedTranscript {
             if let Some(start) = self.turn_start.filter(|_| source.starts_with(&self.source)) {
                 if streamed_turn_start(source) == Some(start) {
                     let (tail_lines, mut tail_sections, mut tail_links, mut tail_images, mut tail_mermaids) =
-                        transcript_tools::render_with_media(
+                        transcript_tools::render_with_media_style(
                             &source[start..], width, expanded, selected.clone(), cards,
-                            image_rows, self.prefix_sections, ready_mermaids);
+                            image_rows, self.prefix_sections, ready_mermaids, glyphs);
                     self.links.retain(|link| link.row < self.prefix_lines);
                     self.images.retain(|image| image.row < self.prefix_lines);
                     self.mermaids.retain(|diagram| diagram.row < self.prefix_lines);
@@ -1359,7 +1383,7 @@ impl RenderedTranscript {
                 }
             }
         }
-        *self = Self::render_media(
+        *self = Self::render_media_style(
             self.pane,
             &self.id,
             source,
@@ -1371,6 +1395,7 @@ impl RenderedTranscript {
             image_rows,
             mermaid_revision,
             ready_mermaids,
+            glyphs,
         );
     }
 }

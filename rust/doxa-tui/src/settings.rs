@@ -102,7 +102,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "graph_context", env: "DOXA_GRAPH_CONTEXT", label: "graph context", category: "Memory", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Add LORE's graph-backed context block (beliefs reached by a relation, ranked confidence-first) to the act-time consult (doxa.engine.graph_context_enabled)", note: "OFF by default. Calls LORE's OWN builder (lore_core.graph.context_candidates/render_context_block, LORE 0.44.0+) rather than a second ranking implementation, as a SEPARATE stage from the consult floor above -- the two toggle independently. Unlike the consult note (silent unless something clears the relevance floor), this block falls back to the best-supported beliefs in scope when nothing matches the prompt, so once on it rides EVERY turn, budgeted under its own char cap but real, recurring cost -- see the graph_context_chars row in /context." },
     Setting { key: "graph_view", env: "DOXA_GRAPH_VIEW", label: "belief graph view", category: "Memory", kind: Kind::Choice, choices: &["", "browser", "ascii"], default: "browser", read_only: false, help: "How the beliefs picker's 'g graph' row action shows a belief's neighbourhood (doxa.beliefgraph.graph_view_mode): 'browser' writes LORE's pan/zoom mermaid page under $DOXA_HOME/graphs and opens it; 'ascii' inserts LORE's own edge block as rows beneath the belief, in the TUI. Empty = browser.", note: "Per BELIEF, never whole-graph, and that is measured rather than chosen: a whole-graph view filtered to asserted relations fragmented 104 beliefs into 44 clusters, which mermaid stacks vertically -- 1188x13814 pixels, fitting on screen at 5%. A k-hop neighbourhood is connected by construction. 'ascii' is the answer for a headless or SSH session; 'browser' prints the file's path into the transcript either way, so one still ends up with something to scp when no browser opens." },
     Setting { key: "lore_root", env: "LORE_ROOT", label: "lore store", category: "Memory", kind: Kind::Text, choices: &[], default: "", read_only: true, help: "Where the belief store and session index live (lore_core.ROOT)", note: "Shared with the Claude Code LORE plugin -- one store, two carriers. Set LORE_ROOT to point elsewhere; a private store would fork your memory into two divergent halves. /setup makes and stickies this choice -- read_only here because this row is /setup's, not the settings modal's, to edit." },
-    Setting { key: "nerd_font", env: "DOXA_NERD_FONT", label: "nerd font", category: "Appearance", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Use the nerd-font branch glyph instead of the branch sign in the status line (doxa.app.git_branch_symbol)", note: "" },
+    Setting { key: "nerd_font", env: "DOXA_NERD_FONT", label: "nerd font", category: "Appearance", kind: Kind::Bool, choices: &[], default: "1", read_only: false, help: "Use Nerd Font branch glyphs and tool, peer and reasoning icons (enabled by default).", note: "Explicit off preserves plain fold labels and [peer received]/[peer sent] markers; no font is installed. DOXA_NERD_FONTS is an alias; DOXA_NERD_FONT takes precedence when both are set." },
     Setting { key: "ctx_absolute", env: "DOXA_CTX_ABSOLUTE", label: "ctx: absolute tokens", category: "Appearance", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Print used/total tokens beside the ctx% chip (doxa.ui.labels.ctx_chip)", note: "Off, the numbers are still one hover away -- the ctx chip's tooltip carries them either way, and /usage prints them in full. On, they are dropped again on a terminal narrower than 100 columns rather than pushing other chips off the bar. A context limit the CLI never reported reads `?`; DOXA does not guess a window size." },
     Setting { key: "image_mode", env: "DOXA_IMAGE_MODE", label: "image mode", category: "Appearance", kind: Kind::Choice, choices: &["halfblock", "probe", "kgp", "sixel", "iterm2", "text"], default: "halfblock", read_only: false, help: "Render local Markdown image attachments: halfblock works in every terminal; probe detects Kitty, Sixel or iTerm2; text shows alt labels only.", note: "Only absolute image paths inside the verified session workspace render. Probe can pause briefly for terminal replies; forced graphics needs terminal support. File and pixel bounds apply." },
     Setting { key: "mermaid_renderer", env: "DOXA_MERMAID_RENDERER", label: "Mermaid renderer executable", category: "Appearance", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Optional absolute path to a reviewed local mmdc-compatible renderer. Empty keeps Mermaid source fences.", note: "Requires /usr/bin/bwrap and the renderer root below. Runs with no network and only system runtime, renderer package and a private temporary directory mounted. No renderer is downloaded or invoked from PATH." },
@@ -116,7 +116,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "rail_entries", env: "DOXA_RAIL_ENTRIES", label: "rail entries", category: "Appearance", kind: Kind::Choice, choices: &["sessions", "panes"], default: "sessions", read_only: false, help: "Show one row per session or one row per open pane; /collection view switches it.", note: "Pane view navigates the existing pane instead of moving its active tab. Hidden tabs contribute urgency to the pane row. Unknown or mixed project roots do not receive a project hue." },
     Setting { key: "collection_sort", env: "DOXA_COLLECTION_SORT", label: "rail group order", category: "Appearance", kind: Kind::Choice, choices: &["manual", "urgency"], default: "manual", read_only: false, help: "Order collection and project headings by their most urgent session; /collection sort toggles this setting.", note: "Manual is the default. Urgency only moves whole groups after marks settle and the pointer and keyboard have left the rail. Session order within each group stays fixed; Past sessions stay last." },
     Setting { key: "sidebar_width", env: "DOXA_SIDEBAR_WIDTH", label: "session sidebar: width", category: "Appearance", kind: Kind::Number, choices: &[], default: "25", read_only: false, help: "Columns the session rail occupies (doxa.layout.SIDEBAR_WIDTH; clamped to 22–41). Drag the rail's right edge, or Alt+Shift+←/→, to change it", note: "Clamped, never rejected: 25 is derived as the rail's own chrome (9 columns) plus half the tab-label cap the strip writes at, 22 is the width below which a row cannot show the label floor the tab strip keeps legible, and 41 is the width at which the whole capped label fits and wider buys nothing. All three moved by two in v1.5.0: doxa.layout.SIDEBAR_CHROME was re-measured against the rail's DEEPEST row -- a tab row under a pane entry under a heading -- which v1.2.0 added without re-pricing. A drag and the keys write this row, and both refuse at the same floor opening the rail refuses at." },
-    Setting { key: "clock_show", env: "DOXA_CLOCK_SHOW", label: "clock: show", category: "Appearance", kind: Kind::BoolOn, choices: &[], default: "1", read_only: false, help: "Show the fixed-width clock at the right edge of the tab bar (doxa.clock.ClockConfig)", note: "The one bool setting in this app that defaults ON -- an empty field here still means the clock shows; type 0 to turn it off." },
+    Setting { key: "clock_show", env: "DOXA_CLOCK_SHOW", label: "clock: show", category: "Appearance", kind: Kind::BoolOn, choices: &[], default: "1", read_only: false, help: "Show the fixed-width clock at the right edge of the tab bar (doxa.clock.ClockConfig)", note: "An empty field keeps the default visible clock; type 0 to turn it off." },
     Setting { key: "clock_date", env: "DOXA_CLOCK_DATE", label: "clock: show date", category: "Appearance", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Prefix the clock with %Y-%m-%d (doxa.clock.builtin_format)", note: "" },
     Setting { key: "clock_hour", env: "DOXA_CLOCK_HOUR", label: "clock: hour format", category: "Appearance", kind: Kind::Choice, choices: &["", "12", "24"], default: "24", read_only: false, help: "12- or 24-hour clock (doxa.clock.builtin_format)", note: "" },
     Setting { key: "clock_seconds", env: "DOXA_CLOCK_SECONDS", label: "clock: show seconds", category: "Appearance", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Show :SS; also switches the clock's one timer from minute- to second-aligned (doxa.clock.seconds_until_boundary)", note: "" },
@@ -154,12 +154,23 @@ pub fn raw_from(config: &toml::Table, setting: &Setting, override_value: Option<
     if setting.key == "model" && engine != "claude" {
         return config.get("models").and_then(toml::Value::as_table).and_then(|v| v.get(engine)).and_then(toml::Value::as_str).unwrap_or("").trim().into();
     }
+    // This historically boolean setting now defaults on. Preserve old explicit
+    // TOML false rather than treating it like an absent value in raw_setting.
+    if setting.key == "nerd_font" && config.get(setting.key).and_then(toml::Value::as_bool) == Some(false) {
+        return "0".into();
+    }
     doxa_state::raw_setting(None, config, setting.key).trim().into()
 }
+pub(crate) fn environment_override(setting: &Setting) -> Option<(String, &'static str)> {
+    std::env::var(setting.env).ok().filter(|value| !value.trim().is_empty()).map(|value| (value, setting.env))
+        .or_else(|| (setting.key == "nerd_font").then(|| std::env::var("DOXA_NERD_FONTS").ok()
+            .filter(|value| !value.trim().is_empty()).map(|value| (value, "DOXA_NERD_FONTS"))).flatten())
+}
+
 pub fn raw(key: &str) -> String {
     let Ok(s) = find(key) else { return String::new(); };
     let config = config_path().map(|p| doxa_state::load_config(&p)).unwrap_or_default();
-    raw_from(&config, s, std::env::var(s.env).ok().as_deref(), "claude")
+    raw_from(&config, s, environment_override(s).as_ref().map(|(value, _)| value.as_str()), "claude")
 }
 pub fn enabled(key: &str) -> bool {
     let Ok(s) = find(key) else { return false; };
@@ -189,11 +200,13 @@ pub fn rows(engine: &str, session_model: Option<&str>) -> io::Result<Vec<Row>> {
             rows.push(Row {setting:s,value:value.into(),source:source.into(),shadowed:environment,stored:String::new()});
             continue;
         }
-        let override_value = std::env::var(s.env).ok().filter(|v| !v.trim().is_empty() && !(engine == "router" && matches!(s.key, "model" | "effort")));
+        let environment = environment_override(s).filter(|_| !(engine == "router" && matches!(s.key, "model" | "effort")));
+        let override_name = environment.as_ref().map_or(s.env, |(_, name)| *name);
+        let override_value = environment.map(|(value, _)| value);
         let shadowed = override_value.is_some();
         let stored = raw_from(&config, s, None, engine);
         let mut value = raw_from(&config, s, override_value.as_deref(), engine);
-        let mut source = if shadowed { format!("env {} — overrides config", s.env) } else if (s.key != "model" && config.contains_key(s.key)) || !stored.is_empty() { "config.toml".into() } else { "default".into() };
+        let mut source = if shadowed { format!("env {} — overrides config", override_name) } else if (s.key != "model" && config.contains_key(s.key)) || !stored.is_empty() { "config.toml".into() } else { "default".into() };
         if value.is_empty() { value = s.default.into(); }
         if s.env == "DOXA_HOME" { value = home.display().to_string(); }
         if s.env == "DOXA_RUNTIME_DIR" { value = crate::discovery::runtime_dir()?.display().to_string(); }
@@ -292,7 +305,7 @@ pub(crate) fn save_with_review(path: &Path, edits: &[(String, Option<String>)], 
     let mut parsed = Vec::new();
     for (key, value) in edits {
         let s = find(key)?;
-        if std::env::var(s.env).ok().is_some_and(|v| !v.trim().is_empty()) { return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} overrides config.toml; unset it before changing {key}", s.env))); }
+        if let Some((_, name)) = environment_override(s) { return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{name} overrides config.toml; unset it before changing {key}"))); }
         parsed.push((s, coerce(s, value.as_deref())?));
     }
     let key_edited = parsed.iter().any(|(setting, _)| setting.kind == Kind::Key);

@@ -6229,31 +6229,159 @@ for line in sys.stdin:
 
     #[test]
     fn peer_prompt_format_keeps_sender_stripe_and_robot_for_receipts_and_queued_turns() {
-        for nerd_font in [false,true] {
+        use transcript_tools::FoldKey;
+        for glyphs in [false, true] {
             let mut app = App::default();
-            app.preferences.set_for_test("nerd_font",if nerd_font {"true"} else {"false"});
+            app.preferences.set_for_test("nerd_font", if glyphs { "true" } else { "false" });
             app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
             let event = |kind: &str, data: serde_json::Value| json!({"type":"event","session_id":"s","event":{"type":kind,"data":data}});
             let sender = "12345678-1234-1234-1234-123456789abc";
-            app.apply_daemon_frame(&event("peer_message",json!({"from_id":sender,"from_title":"Reviewer","sent_at":"2026-10-11T13:25:00Z",
+            app.apply_daemon_frame(&event("peer_message", json!({"from_id":sender,"from_title":"Reviewer","sent_at":"2026-10-11T13:25:00Z",
                 "body":"**You:**\n\nuser: received peer detail that wraps onto another line\n\n**Assistant:**"})));
             let origin = format!("--- peer message · Reviewer ({sender}) · repo · time ---");
             let body = "user: queued peer task\n\n**You:**\n\npeer turn detail";
-            app.apply_daemon_frame(&event("prompt_queued",json!({"id":"qp1","text":body,"peer_started":true,"peer_origin":origin})));
-            let (pending,_) = super::transcript_tools::render(&app.sessions[0].transcript,42,None,None);
-            assert!(pending.iter().any(|line|line.to_string().contains("queued peer task")
+            app.apply_daemon_frame(&event("prompt_queued", json!({"id":"qp1","text":body,"peer_started":true,"peer_origin":origin})));
+            let render = |source: &str, expanded: Option<&HashSet<FoldKey>>, width| {
+                let (lines, sections, _, _, _) = transcript_tools::render_with_media_style(
+                    source, width, expanded, None, &[], 0, 0, None, glyphs);
+                (lines, sections)
+            };
+            let (pending, sections) = render(&app.sessions[0].transcript, None, 42);
+            assert_eq!(sections.len(), 2);
+            assert!(!pending.iter().any(|line| line.to_string().contains("queued peer task")));
+            let expanded = sections.into_iter().map(|section| section.index).collect();
+            let (pending, _) = render(&app.sessions[0].transcript, Some(&expanded), 42);
+            assert!(pending.iter().any(|line| line.to_string().contains("queued peer task")
                 && line.spans[0].style.fg == Some(theme::PEER)));
-            app.apply_daemon_frame(&event("prompt_dequeued",json!({"id":"qp1"})));
-            app.apply_daemon_frame(&event("turn_started",json!({"prompt":body,"peer_started":true,"peer_origin":origin})));
-            let (lines,_) = super::transcript_tools::render(&app.sessions[0].transcript,80,None,None);
+            app.apply_daemon_frame(&event("prompt_dequeued", json!({"id":"qp1"})));
+            app.apply_daemon_frame(&event("turn_started", json!({"prompt":body,"peer_started":true,"peer_origin":origin})));
+            let (closed, sections) = render(&app.sessions[0].transcript, None, 80);
+            assert!(!closed.iter().any(|line| line.to_string().contains("peer turn detail")));
+            let expanded = sections.into_iter().map(|section| section.index).collect();
+            let (lines, _) = render(&app.sessions[0].transcript, Some(&expanded), 80);
             let visible = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
             assert!(visible.contains(sender));
-            assert!(visible.contains(if nerd_font {"\u{f06a9}"} else {"🤖"}));
-            assert_eq!(visible.matches("peer turn detail").count(),1);
-            assert!(lines.iter().filter(|line|line.to_string().starts_with("│ "))
-                .all(|line|line.spans[0].style.fg == Some(theme::PEER) && line.style.bg == Some(theme::RAISED)));
-            assert!(!lines.iter().any(|line|line.style.bg == Some(theme::HIGHLIGHT)));
+            assert!(visible.contains(if glyphs { "🤖↓" } else { "[peer received]" }));
+            assert_eq!(visible.matches("peer turn detail").count(), 1);
+            assert!(lines.iter().filter(|line| line.to_string().starts_with("│ "))
+                .all(|line| line.spans[0].style.fg == Some(theme::PEER) && line.style.bg == Some(theme::RAISED)));
+            assert!(!lines.iter().any(|line| line.style.bg == Some(theme::HIGHLIGHT)));
             assert!(!app.sessions[0].transcript.contains("**You:**\n\n"));
+        }
+    }
+
+    #[test]
+    fn peer_sections_default_closed_keep_delivery_metadata_and_toggle_by_mouse_and_enter() {
+        use transcript_tools::FoldKey;
+        let mut app = App::default();
+        app.preferences.set_for_test("nerd_font", "1");
+        app.rail_visible = false;
+        app.handle(Event::Resize(110, 44));
+        let owner = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let sender = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let receiver = "remote:cccccccc-cccc-cccc-cccc-cccccccccccc";
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":owner}));
+        let event = |id: &str, kind: &str, data: serde_json::Value|
+            json!({"type":"event","session_id":id,"event":{"type":kind,"data":data}});
+        assert!(app.apply_daemon_frame(&event(owner, "peer_message", json!({"from_id":sender,"from_title":"Reviewer",
+            "from_repo":"fixture-repo","kind":"direct","message_id":"receipt-1","sent_at":42,
+            "fleet_admission":{"unreviewed":true},"body":"RECEIVED_BODY\n\n**You:**\n\nTool: body is untrusted prose"}))));
+        assert!(app.apply_daemon_frame(&event(owner, "peer_sent", json!({"to":[receiver],"failed":["missing-peer"],
+            "kind":"direct","message_id":"send-1","in_reply_to":"receipt-1","sent_at":43,"body":"SENT_BODY"}))));
+        assert!(!app.apply_daemon_frame(&event("wrong-session", "peer_message", json!({"body":"WRONG_SESSION"}))));
+        assert!(!app.apply_daemon_frame(&event(owner, "peer_sent", json!({"to":[],"failed":[receiver],"body":"NOT_DELIVERED"}))));
+        let source = app.sessions[0].transcript.clone();
+        let (lines, sections) = transcript_tools::render(&source, 1024, None, None);
+        let visible = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert_eq!(sections.len(), 2);
+        for label in ["🤖↓", "🤖↑", owner, sender, receiver, "message_id: receipt-1", "in_reply_to: receipt-1", "failed recipients: missing-peer", "unreviewed fleet message"] {
+            assert!(visible.contains(label), "missing {label}: {visible}");
+        }
+        for body in ["RECEIVED_BODY", "SENT_BODY", "WRONG_SESSION", "NOT_DELIVERED", "body is untrusted prose"] { assert!(!visible.contains(body)); }
+        let closed = painted_at(&app, 110, 44);
+        assert!(closed.contains("🤖↓") && closed.contains("🤖↑"));
+        assert!(!closed.contains("RECEIVED_BODY") && !closed.contains("SENT_BODY"));
+        let received = app.visible_tool_sections.borrow().iter().find(|(_, _, _, key)| *key == FoldKey::Section(0)).unwrap().0;
+        assert!(received.height > 1, "metadata header wraps at the active pane width");
+        // Hit the continuation of a wrapped header; it has the same fold identity.
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: received.x + 5, row: received.bottom() - 1, modifiers: KeyModifiers::NONE }));
+        let expanded = painted_at(&app, 110, 44);
+        assert!(expanded.contains("RECEIVED_BODY"));
+        assert!(!expanded.contains("SENT_BODY"));
+        assert_eq!(app.expanded_tool_sections[owner], HashSet::from([FoldKey::Section(0)]));
+        app.focus = Focus::Transcript;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!painted_at(&app, 110, 44).contains("RECEIVED_BODY"));
+        let sent = app.visible_tool_sections.borrow().iter().find(|(_, _, _, key)| *key == FoldKey::Section(1)).unwrap().0;
+        // Robot occupies two display cells. Both belong to this row's click target.
+        for offset in [4, 5] {
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+                column: sent.x + offset, row: sent.y, modifiers: KeyModifiers::NONE }));
+            assert!(painted_at(&app, 110, 44).contains("SENT_BODY"));
+            app.focus = Focus::Transcript;
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+            assert!(!painted_at(&app, 110, 44).contains("SENT_BODY"));
+        }
+        // Display records replay with bodies still folded and no synthesized tool sections.
+        let mut replay = App::default();
+        replay.preferences.set_for_test("nerd_font", "1");
+        replay.apply_daemon_frame(&json!({"type":"hello","session_id":owner}));
+        replay.apply_update(DaemonUpdate::Transcript { id: owner.into(), markdown: source });
+        let (lines, folds) = transcript_tools::render(&replay.sessions[0].transcript, 1024, None, None);
+        assert_eq!(folds.len(), 2);
+        assert_eq!(lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"), visible);
+        assert!(!replay.expanded_tool_sections.get(owner).is_some_and(|set| !set.is_empty()));
+    }
+
+    #[test]
+    fn peer_sent_history_without_body_is_explicit_and_legacy_receipts_still_fold() {
+        use transcript_tools::FoldKey;
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"peer_sent","data":{"to":["receiver"],"kind":"direct"}}}));
+        let expanded = HashSet::from([FoldKey::Section(0)]);
+        let (lines, _) = transcript_tools::render(&app.sessions[0].transcript, 90, Some(&expanded), None);
+        assert!(lines.iter().any(|line| line.to_string().contains("Message body not recorded")));
+        let old = format!("{}{}", transcript_messages::PREFIX, json!({"queue_id":null,"state":null,"text":"legacy received body","timestamp":null,"sender":"Legacy peer"}));
+        let (lines, folds) = transcript_tools::render(&old, 90, None, None);
+        assert_eq!(folds.len(), 1);
+        assert!(!lines.iter().any(|line| line.to_string().contains("legacy received body")));
+        let (lines, _) = transcript_tools::render(&old, 90, Some(&expanded), None);
+        assert!(lines.iter().any(|line| line.to_string().contains("legacy received body")));
+    }
+
+    #[test]
+    fn peer_tool_and_reasoning_icons_follow_font_preference_and_resize_cache() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.preferences.set_for_test("nerd_font", "1");
+        app.preferences.set_for_test("show_reasoning", "1");
+        app.handle(Event::Resize(90, 36));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event","session_id":"s","event":{"type":kind,"data":data}});
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"fixture"})));
+        app.apply_daemon_frame(&event("reasoning_delta", json!({"text":"HIDDEN_THINKING","approx_tokens":7})));
+        app.apply_daemon_frame(&event("tool_call", json!({"id":"read-1","name":"Read","input":"HIDDEN_INPUT"})));
+        app.apply_daemon_frame(&event("peer_message", json!({"from_id":"other-peer","from_title":"Reviewer","body":"HIDDEN_PEER"})));
+        let glyphs = painted_at(&app, 90, 36);
+        for icon in ["🧠", "🛠", "🤖↓"] { assert!(glyphs.contains(icon), "missing {icon}"); }
+        for body in ["HIDDEN_THINKING", "HIDDEN_INPUT", "HIDDEN_PEER"] { assert!(!glyphs.contains(body)); }
+        app.preferences.set_for_test("nerd_font", "0");
+        let plain = painted_at(&app, 90, 36);
+        for icon in ["🧠", "🛠", "🤖"] { assert!(!plain.contains(icon)); }
+        assert!(plain.contains("[peer received]"));
+        assert!(plain.contains("Reasoning/Thinking"));
+        assert!(plain.contains("tool call"));
+        for width in [64, 118] {
+            app.handle(Event::Resize(width, 36));
+            painted_at(&app, width, 36);
+            let cache = app.rendered_transcripts.borrow();
+            let cached = cache.iter().find(|entry| entry.id == "s").unwrap();
+            let (lines, folds, _, _, _) = transcript_tools::render_with_media_style(&app.sessions[0].transcript,
+                cached.width, None, None, app.tool_cards.for_session("s"), cached.image_rows, 0, None, false);
+            assert_eq!(cached.lines, lines);
+            assert_eq!(cached.sections, folds);
         }
     }
 
@@ -6274,7 +6402,7 @@ for line in sys.stdin:
             assert_eq!(cached.lines,lines);
             assert_eq!(cached.sections,sections);
         }
-        assert_eq!(cached.sections.len(),2);
+        assert_eq!(cached.sections.len(),3);
     }
 
     #[test]
