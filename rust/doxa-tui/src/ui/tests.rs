@@ -1724,7 +1724,8 @@ for line in sys.stdin:
         menu.edits.insert("docker_host".into(), Some(format!("unix://{}", path.display())));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
         app.handle(Event::Mouse(MouseEvent { kind:MouseEventKind::Down(MouseButton::Left), column:0, row:0, modifiers:KeyModifiers::NONE }));
-        assert!(app.settings_menu.is_none() && app.docker_setup.as_ref().unwrap().ready());
+        assert!(app.settings_menu.is_none() && app.docker_setup.as_ref().unwrap().ready(),
+            "settings_open={} setup={} notice={}", app.settings_menu.is_some(), app.docker_setup.as_ref().unwrap().label(), app.notice);
         assert!(app.new_session.as_ref().unwrap().launch_error.is_none());
         // Cached success is not launch authority: a changed unpinned image is
         // reread and refused before any launch request is queued.
