@@ -5,6 +5,7 @@ mod claude_host;
 mod budget_host;
 mod codex_host;
 mod peer_host;
+mod peer_wake;
 mod session_spawn;
 mod remote_bridge;
 mod session_title;
@@ -553,9 +554,8 @@ fn run() -> io::Result<()> {
     let _claim = SessionClaim::acquire(&options.runtime, &options.session_id)?;
     // Match Python 1.19's explicit-truthy switch. The native registry owns
     // delivery/admission for every real host, including Claude.
-    let inbound = env::var("DOXA_PEER_INBOUND_TURNS").unwrap_or_default();
-    let inbound_turns = !inbound.trim().is_empty()
-        && !matches!(inbound.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off");
+    let inbound_policy = peer_wake::Policy::from_environment();
+    let inbound_turns = inbound_policy.enabled();
     if inbound_turns && options.engine == Engine::Fixture {
         return Err(invalid("native inbound peer turns require an engine with LORE scrub"));
     }
@@ -825,9 +825,12 @@ fn run() -> io::Result<()> {
         }
         if let Ok(Some(frame)) = inbox.poll_receive(&|s: &str| s.to_owned()) {
             let broadcast = frame.kind.as_deref() == Some("broadcast");
-            if let Ok(event) = peer_host.inbound_event(frame) {
+            if let Ok(mut event) = peer_host.inbound_event(frame) {
+                let wake_enabled = options.engine != Engine::Fixture && inbound_policy.enabled();
+                event["data"]["wake_policy"] = json!(if broadcast { "broadcast" }
+                    else if wake_enabled { "enabled" } else { "disabled" });
                 handle.publish(event.clone());
-                let accepted = if inbound_turns && !broadcast {
+                let accepted = if wake_enabled && !broadcast {
                     match PeerHost::peer_prompt(&event) {
                         Some((prompt, origin)) => match handle.enqueue_peer_prompt(prompt, &origin) {
                             Ok(ExternalPrompt::Started | ExternalPrompt::Queued) => true,

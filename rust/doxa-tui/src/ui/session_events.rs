@@ -719,7 +719,11 @@ impl App {
                     "peer_message" => {
                         let Some(message) = super::transcript_messages::Message::peer(data, self.preferences.on("nerd_font")) else { return false; };
                         let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else { return false; };
-                        let clipped = super::transcript_messages::append(session, &message);
+                        let mut clipped = super::transcript_messages::append(session, &message);
+                        if data["wake_policy"] == "disabled" {
+                            clipped |= append_transcript(session,
+                                "\n\n*Peer message stored for your next turn. Wake on peer messages is off; enable it in /settings → Session to allow incoming direct messages to start or queue turns.*\n");
+                        }
                         self.transcript_evicted(&id, clipped);
                         true
                     }

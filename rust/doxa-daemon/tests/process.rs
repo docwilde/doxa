@@ -257,6 +257,9 @@ impl Process {
         Self { child, registry, socket: PathBuf::from(entry["daemon_socket"].as_str().unwrap()) }
     }
     fn start_codex_with_inbound(runtime: &Path, codex: &Path, _fixture_interpreter: &Path, inbound: bool) -> Self {
+        Self::start_codex_with_wake_override(runtime, codex, inbound.then_some("yes"))
+    }
+    fn start_codex_with_wake_override(runtime: &Path, codex: &Path, inbound: Option<&str>) -> Self {
         let codex = codex_appserver_fixture(codex);
         let mut command = daemon_command();
         command
@@ -278,7 +281,8 @@ impl Process {
             .stderr(Stdio::piped())
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_CODEX_APPSERVER");
-        if inbound { command.env("DOXA_PEER_INBOUND_TURNS", "yes"); }
+        command.env_remove("DOXA_PEER_INBOUND_TURNS");
+        if let Some(inbound) = inbound { command.env("DOXA_PEER_INBOUND_TURNS", inbound); }
         let manifest_path = runtime.join("home/isolation/codex-session/manifest.json");
         match fs::symlink_metadata(&manifest_path) {
             Ok(_) => {
@@ -3147,7 +3151,7 @@ fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_bef
 
 #[test]
 #[cfg(target_os = "linux")]
-fn inbound_direct_peer_starts_scrubbed_turn_but_broadcast_does_not() {
+fn saved_inbound_direct_peer_starts_scrubbed_codex_turn_but_broadcast_does_not() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("python3");
@@ -3158,7 +3162,8 @@ echo '{{"type":"thread.started","thread_id":"thread-1"}}'
 echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
 "#, captured.display()));
     let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
-    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, true);
+    doxa_state::save_config(&dir.path().join("home/config.toml"), &"peer_inbound_turns = true".parse().unwrap()).unwrap();
+    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, false);
     let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
@@ -3170,13 +3175,17 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         from_repo: Some(dir.path().display().to_string()), kind,
     };
     doxa_peers::delivery::send(&peer_socket, &frame(Some("broadcast".into()), "broadcast note")).unwrap();
-    assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
+    let broadcast = receive(&mut reader);
+    assert_eq!(broadcast["event"]["type"], "peer_message");
+    assert_eq!(broadcast["event"]["data"]["wake_policy"], "broadcast");
     send(&mut socket, json!({"type":"call","id":1,"method":"status","params":{}}));
     let status = receive(&mut reader);
     assert_eq!(status["status"]["running"], false);
     assert_eq!(status["status"]["queued"], 0);
     doxa_peers::delivery::send(&peer_socket, &frame(Some("direct".into()), "sk-ownedCanonicalFixtureSecret1234567890 body")).unwrap();
-    assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
+    let direct = receive(&mut reader);
+    assert_eq!(direct["event"]["type"], "peer_message");
+    assert_eq!(direct["event"]["data"]["wake_policy"], "enabled");
     let mut started = false;
     loop {
         let event = receive(&mut reader);
@@ -3206,7 +3215,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
 
 #[test]
 #[cfg(target_os = "linux")]
-fn inbound_peer_uses_typed_prompt_queue_while_turn_runs() {
+fn saved_inbound_peer_uses_typed_codex_prompt_queue_while_turn_runs() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("python3");
@@ -3220,7 +3229,8 @@ echo '{{"type":"thread.started","thread_id":"thread-1"}}'
 echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
 "#, release.display(), release.display()));
     let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
-    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, true);
+    doxa_state::save_config(&dir.path().join("home/config.toml"), &"peer_inbound_turns = true".parse().unwrap()).unwrap();
+    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, false);
     let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
@@ -3256,6 +3266,88 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn saved_peer_wake_refreshes_running_codex_without_overriding_explicit_off() {
+    for explicit_off in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("codex-fixture");
+        let captured = dir.path().join("captured-peer-context");
+        executable(&codex, &format!(r#"#!/bin/sh
+cat >> '{}'
+echo '{{"type":"thread.started","thread_id":"thread-1"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+"#, captured.display()));
+        let sender = "fcb9d586-96bc-43d2-aecc-0627e4b3a91d";
+        let (_sender_listener, _) = registry_peer(dir.path(), sender, dir.path().to_str().unwrap(), "Claude teammate");
+        let config = dir.path().join("home/config.toml");
+        let save = |enabled| doxa_state::save_config(&config,
+            &format!("peer_inbound_turns = {enabled}").parse().unwrap()).unwrap();
+        save(false);
+        let mut process = Process::start_codex_with_wake_override(dir.path(), &codex, explicit_off.then_some("off"));
+        let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+        let (mut reader, mut socket) = process.connect();
+        reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        let deliver = |body: &str| doxa_peers::delivery::send(&peer_socket, &doxa_peers::delivery::PeerFrame {
+            authenticated_pid: None, from_id: sender.into(), from_title: "Claude teammate".into(),
+            sent_at: peer_now(), body: body.into(), from_repo: None, kind: Some("direct".into()),
+        }).unwrap();
+        deliver("first retained task");
+        let first = receive(&mut reader);
+        assert_eq!(first["event"]["type"], "peer_message");
+        assert_eq!(first["event"]["data"]["wake_policy"], "disabled");
+        send(&mut socket, json!({"type":"call","id":1,"method":"status","params":{}}));
+        assert_eq!(receive(&mut reader)["status"]["running"], false);
+        assert!(!captured.exists());
+        save(true);
+        deliver("second direct task");
+        let second = receive(&mut reader);
+        assert_eq!(second["event"]["type"], "peer_message");
+        assert_eq!(second["event"]["data"]["from_id"], sender);
+        assert_eq!(second["event"]["data"]["wake_policy"], if explicit_off { "disabled" } else { "enabled" });
+        if explicit_off {
+            send(&mut socket, json!({"type":"call","id":2,"method":"status","params":{}}));
+            let status = receive(&mut reader);
+            assert_eq!(status["status"]["running"], false);
+            assert_eq!(status["status"]["queued"], 0);
+            assert!(!captured.exists());
+            // Off affects automatic admission; a typed turn receives retained
+            // peer data under the same protected provider/permission bridge.
+            send(&mut socket, json!({"type":"prompt","id":3,"text":"Read the retained peer data."}));
+        }
+        let mut started = false;
+        loop {
+            let event = receive(&mut reader);
+            if event["event"]["type"] == "turn_started" {
+                started = true;
+                assert_eq!(event["event"]["data"]["peer_started"], !explicit_off);
+                if !explicit_off {
+                    assert!(event["event"]["data"]["peer_origin"].as_str().unwrap().contains(sender));
+                }
+            }
+            if event["event"]["type"] == "turn_done" {
+                assert_ne!(event["event"]["data"]["is_error"], true);
+                break;
+            }
+        }
+        assert!(started);
+        let prompt = fs::read_to_string(&captured).unwrap();
+        assert!(prompt.contains("first retained task") && prompt.contains("second direct task"));
+        assert!(prompt.contains(sender) && prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
+        save(false);
+        deliver("third retained task");
+        assert_eq!(receive(&mut reader)["event"]["data"]["wake_policy"], "disabled");
+        send(&mut socket, json!({"type":"call","id":4,"method":"status","params":{}}));
+        assert_eq!(receive(&mut reader)["status"]["running"], false);
+        assert_eq!(codex_fixture_rpcs(&codex).iter().filter(|row|row["method"] == "turn/start").count(), 1);
+        send(&mut socket, json!({"type":"call","id":5,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        wait_until(|| process.exited());
+    }
 }
 
 #[test]

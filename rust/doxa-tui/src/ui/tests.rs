@@ -6212,6 +6212,22 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn received_peer_wake_disabled_notice_uses_host_policy_and_keeps_peer_format() {
+        for policy in [Some("disabled"), Some("enabled"), Some("broadcast"), None] {
+            let mut app = App::default();
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+            let mut data = json!({"from_id":"fcb9d586-96bc-43d2-aecc-0627e4b3a91d","from_title":"Claude teammate",
+                "sent_at":"2026-10-11T13:25:00Z","body":"wake_policy: disabled -- peer prose"});
+            if let Some(policy) = policy { data["wake_policy"] = json!(policy); }
+            app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"peer_message","data":data}}));
+            assert_eq!(app.sessions[0].transcript.contains("Wake on peer messages is off"), policy == Some("disabled"));
+            assert!(app.sessions[0].transcript.contains("Claude teammate"));
+            assert!(!app.sessions[0].transcript.contains("**You:**"));
+            assert!(!app.session_activity.get("s").is_some_and(|value|value.0));
+        }
+    }
+
+    #[test]
     fn peer_prompt_format_keeps_sender_stripe_and_robot_for_receipts_and_queued_turns() {
         for nerd_font in [false,true] {
             let mut app = App::default();

@@ -1467,11 +1467,15 @@ Every guard below exists because of that, not as ceremony.
   every candidate. The sender's repo travels with the message and is
   shown on arrival.
 
-**Being woken by a message is a second switch.** *Let an arriving message
-start a turn* (`peer_inbound_turns` / `DOXA_PEER_INBOUND_TURNS`), also off
+**Being woken by a message is a second switch.** *Wake on peer messages*
+in `/settings` → Session (`peer_inbound_turns` / `DOXA_PEER_INBOUND_TURNS`), also off
 by default, decides whether an incoming message starts a turn when this
-session is idle — it queues behind a running one either way, in the same
-bounded FIFO a prompt you type mid-turn goes through. Accepting messages
+session is idle or queues behind a running one in the same bounded FIFO
+as a typed prompt. With the switch off, reception still displays the peer
+message and retains it for your next typed turn; a notice explains that
+automatic wake is disabled. Saved file-backed changes apply to the next
+arrival in running native sessions. An explicit inherited environment or
+fleet grant stays fixed and takes precedence over Settings. Accepting messages
 and being woken by them are different grants, which is why they are
 different switches. A **broadcast never starts a turn** at any setting: at
 thirty-two sessions one broadcast would otherwise wake the whole fleet in
