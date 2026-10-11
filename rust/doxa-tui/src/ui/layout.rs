@@ -570,6 +570,7 @@ impl App {
                         | "fleet_dependency_review"
                         | "isolation"
                         | "routing"
+                        | "compaction"
                         | "native_plugin"
                         | "native_status"
                 ) {
@@ -667,6 +668,9 @@ impl App {
         if identity.and_then(|pair| pair.0.as_deref()) == Some("router") {
             if let Some(routing) = telemetry.and_then(|value| value.routing.as_ref()) {
                 chips.push(("routing", routing.label()));
+            }
+            if let Some(compaction) = telemetry.and_then(|value| value.compaction.as_ref()) {
+                chips.push(("compaction", compaction.label()));
             }
         }
         let effort = id
@@ -1143,6 +1147,9 @@ impl App {
             else if kind == "routing" { self.groups[group].active_id()
                 .and_then(|id| self.session_telemetry.get(id)).and_then(|t| t.routing.as_ref())
                 .map(|routing| routing.lines()).unwrap_or_default() }
+            else if kind == "compaction" { self.groups[group].active_id()
+                .and_then(|id| self.session_telemetry.get(id)).and_then(|t| t.compaction.as_ref())
+                .map(|compaction| compaction.lines()).unwrap_or_default() }
             else { Vec::new() };
         if kind == "repo" {
             if let Some(detail) = self.repo_detail(group) {
@@ -1156,7 +1163,7 @@ impl App {
             label,
             lines,
             scroll: 0,
-            owner: (kind == "routing").then(|| self.groups[group].active_id()
+            owner: matches!(kind, "routing" | "compaction").then(|| self.groups[group].active_id()
                 .map(|id| (id.to_owned(), String::new()))).flatten(),
         });
         if self.active_chooser_rect().is_none() {

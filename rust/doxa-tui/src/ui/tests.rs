@@ -37,6 +37,102 @@ use super::*;
     }
 
     #[test]
+    fn router_compaction_phases_keep_selection_and_ordinary_route_separate() {
+        for (selection, summary_target, summary_engine, summary_model) in [
+            ("auto", "ds-fixture", "deepseek", "deepseek-flash"),
+            ("glm-fixture", "glm-fixture", "glm", "glm-5.3-flash"),
+        ] {
+            let mut app = App::default();
+            app.handle(Event::Resize(190, 40));
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"route-1","engine":"router","model":selection}));
+            let event = |kind, data| json!({"type":"event","session_id":"route-1","event":{"type":kind,"data":data}});
+            let routing = json!({"target_id":"ds-fixture","engine":"deepseek","model":"deepseek-flash","effort":"high",
+                "route_mode":"auto","fallback_reason":null,"latency_ms":24,"cost_usd":0.000004});
+            app.apply_daemon_frame(&event("routing_selected", routing.clone()));
+            let previous_route = app.session_telemetry["route-1"].routing.clone();
+            let compaction = json!({"target_id":summary_target,"engine":summary_engine,"model":summary_model,"effort":"high",
+                "reviewed":true,"original_messages":12,"source":"private source","summary":"private summary","credentials":"private key"});
+            let mut started_target = compaction.clone();
+            started_target["reviewed"] = json!(false);
+            app.apply_daemon_frame(&event("turn_started", json!({"operation":"compact","prompt":"/compact",
+                "compaction_semantics":"doxa_managed_summary","compaction":started_target})));
+            assert_eq!(app.sessions[0].status, "Reviewing compaction");
+            assert!(!app.session_telemetry["route-1"].compaction.as_ref().unwrap().reviewed());
+            assert!(app.chips(0).iter().any(|(kind,label)| *kind == "compaction" && label.contains(summary_target)));
+            assert!(painted_at(&app,190,40).contains("Reviewing compaction"));
+            app.apply_daemon_frame(&event("lore_review_completed", json!({"before":"compaction"})));
+            assert_eq!(app.sessions[0].status, "Summarizing reviewed context");
+            assert!(painted_at(&app,190,40).contains("Summarizing reviewed context"));
+            app.apply_daemon_frame(&event("compaction_done", json!({"reviewed":true,"original_messages":12,
+                "compaction_semantics":"doxa_managed_summary","compaction":compaction})));
+            app.apply_daemon_frame(&event("turn_done", json!({"operation":"compact","is_error":false,"summary_attempted":true,
+                "usage_complete":true,"model_consistent":true,"cost_usd":0.125,"session_cost_usd":0.25,
+                "cost_is_estimate":true,"routing":routing,"compaction":compaction})));
+            assert_eq!(app.sessions[0].status, "Ready");
+            assert_eq!(app.session_identity["route-1"], (Some("router".into()), Some(selection.into())));
+            assert_eq!(app.session_telemetry["route-1"].routing, previous_route);
+            let chips = app.chips(0);
+            assert!(chips.contains(&("model", selection.into())));
+            assert!(chips.contains(&("routing", "ds-fixture · deepseek/deepseek-flash · high".into())));
+            assert!(chips.contains(&("compaction", format!("Summary {summary_target} · {summary_engine}/{summary_model} · high"))));
+            assert_eq!(app.session_telemetry["route-1"].billing_label(Some("router")).as_deref(), Some("$0.2500 est"));
+            app.open_chip_info("compaction", 0);
+            let info = app.chip_info.as_ref().unwrap();
+            assert_eq!(info.owner, Some(("route-1".into(), String::new())));
+            assert!(info.lines.join("\n").contains("12 original messages retained"));
+            let rendered = painted_at(&app,190,40);
+            assert!(rendered.contains("no Jev selection call"));
+            assert!(!rendered.contains("private"));
+            assert!(app.sessions[0].transcript.contains("Reviewed managed compaction completed"));
+            assert!(!app.sessions[0].transcript.contains("private"));
+            let completed_summary = app.session_telemetry["route-1"].compaction.clone();
+            app.chip_info = None;
+            // A later ordinary turn changes its route but retains the summary checkpoint status.
+            app.apply_daemon_frame(&event("turn_started", json!({"prompt":"Continue the conversation"})));
+            assert_eq!(app.sessions[0].status, "Running");
+            let next_route = json!({"target_id":"glm-fixture","engine":"glm","model":"glm-5.3-flash","effort":"high",
+                "route_mode":if selection == "auto" {"auto"} else {"pinned"},"fallback_reason":null,"latency_ms":20,"cost_usd":0.000004});
+            app.apply_daemon_frame(&event("routing_selected", next_route.clone()));
+            app.apply_daemon_frame(&event("turn_done", json!({"is_error":false,"routing":next_route,
+                "session_cost_usd":0.3,"cost_usd":0.05,"cost_is_estimate":true})));
+            assert_eq!(app.session_telemetry["route-1"].compaction, completed_summary);
+            assert!(app.session_telemetry["route-1"].routing.as_ref().unwrap().label().contains("glm-fixture"));
+            assert_eq!(app.session_identity["route-1"].1.as_deref(), Some(selection));
+        }
+    }
+
+    #[test]
+    fn router_compaction_failure_accounts_usage_without_claiming_completion() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"route-1","engine":"router","model":"auto"}));
+        let event = |kind, data| json!({"type":"event","session_id":"route-1","event":{"type":kind,"data":data}});
+        let compaction = json!({"target_id":"ds-fixture","engine":"deepseek","model":"deepseek-flash","effort":"high",
+            "reviewed":false,"original_messages":12});
+        // Invalid or unreviewed completion frames must not advertise an applied summary.
+        for bad in [json!(null), compaction.clone(), json!({"target_id":"bad\u{1b}id", "engine":"glm",
+            "model":"glm-5.3-flash","effort":"high","reviewed":true,"original_messages":12})] {
+            assert!(!app.apply_daemon_frame(&event("compaction_done", json!({"reviewed":true,
+                "compaction_semantics":"doxa_managed_summary","compaction":bad}))));
+        }
+        assert!(!app.apply_daemon_frame(&event("compaction_done", json!({"reviewed":false,
+            "compaction_semantics":"doxa_managed_summary","compaction":compaction}))));
+        app.apply_daemon_frame(&event("turn_done", json!({"operation":"compact","is_error":true,
+            "error":"Reviewed summary was not accepted","summary_attempted":true,"usage_complete":true,
+            "cost_usd":0.125,"session_cost_usd":0.125,"cost_is_estimate":true,"compaction":compaction})));
+        assert_eq!(app.sessions[0].status, "Error");
+        assert_eq!(app.session_telemetry["route-1"].billing_label(Some("router")).as_deref(), Some("$0.1250 est"));
+        assert!(app.sessions[0].transcript.contains("Compaction failed: Reviewed summary was not accepted"));
+        assert!(!app.sessions[0].transcript.contains("compaction completed"));
+        assert!(app.session_telemetry["route-1"].compaction.as_ref().unwrap().summary().contains("summary unverified"));
+        assert_eq!(app.session_identity["route-1"].1.as_deref(), Some("auto"));
+        app.apply_daemon_frame(&event("turn_done", json!({"operation":"compact","is_error":true,
+            "error":"Summary accounting is unknown","usage_complete":false,"cost_usd":null,"session_cost_usd":null,
+            "cost_is_estimate":true,"compaction":null})));
+        assert_eq!(app.session_telemetry["route-1"].billing_label(Some("router")).as_deref(), Some("$?"));
+        assert!(!app.chips(0).iter().any(|(kind,_)| *kind == "compaction"));
+    }
+
+    #[test]
     fn router_target_form_rotates_only_configured_ids_and_refuses_docker() {
         let mut app=App::default();
         app.new_session=Some(NewSession{engine:launch::Engine::Router,router_config:Some(PathBuf::from("/private/router.json")),

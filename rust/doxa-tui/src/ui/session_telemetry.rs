@@ -2,6 +2,51 @@
 
 use super::safe_label;
 
+fn identifier(data: &serde_json::Value, key: &str, limit: usize) -> Option<String> {
+    let value = data[key].as_str()?;
+    (!value.is_empty() && value.len() <= limit
+        && value.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.:".contains(&c)))
+        .then(|| value.to_owned())
+}
+
+/// Summary worker metadata is separate from ordinary turn routing and controls.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct CompactionStatus {
+    target_id: String,
+    engine: String,
+    model: String,
+    effort: String,
+    reviewed: bool,
+    original_messages: u64,
+}
+
+impl CompactionStatus {
+    pub(super) fn from_value(data: &serde_json::Value) -> Option<Self> {
+        Some(Self {
+            target_id: identifier(data, "target_id", 48)?,
+            engine: data["engine"].as_str().filter(|v| matches!(*v,"deepseek"|"glm"))?.into(),
+            model: identifier(data, "model", 128)?,
+            effort: data["effort"].as_str().filter(|v| matches!(*v,"none"|"low"|"medium"|"high"|"xhigh"|"max"))?.into(),
+            reviewed: data["reviewed"].as_bool()?,
+            original_messages: data["original_messages"].as_u64()?,
+        })
+    }
+
+    pub(super) fn reviewed(&self) -> bool { self.reviewed }
+    pub(super) fn label(&self) -> String {
+        format!("Summary {} · {}/{} · {}", self.target_id, self.engine, self.model, self.effort)
+    }
+    pub(super) fn summary(&self) -> String {
+        format!("{} · {} · {} original messages retained", self.label(),
+            if self.reviewed {"reviewed summary"} else {"summary unverified"}, self.original_messages)
+    }
+    pub(super) fn lines(&self) -> Vec<String> {
+        vec![self.summary(), "A verified managed summary is separate context; canonical originals are retained.".into(),
+            "Auto/pin and the last ordinary routed worker remain unchanged; no Jev selection call.".into(),
+            "Summary call cost is included in the aggregate session estimate.".into()]
+    }
+}
+
 /// Effective turn identity. Never replaces the session's Auto/target selection.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct RoutingStatus {
@@ -17,12 +62,6 @@ pub(super) struct RoutingStatus {
 
 impl RoutingStatus {
     pub(super) fn from_value(data: &serde_json::Value) -> Option<Self> {
-        fn identifier(data: &serde_json::Value, key: &str, limit: usize) -> Option<String> {
-            let value = data[key].as_str()?;
-            (!value.is_empty() && value.len() <= limit
-                && value.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.:".contains(&c)))
-                .then(|| value.to_owned())
-        }
         let engine = data["engine"].as_str().filter(|v| matches!(*v, "deepseek" | "glm"))?;
         let effort = data["effort"].as_str().filter(|v| matches!(*v, "none" | "low" | "medium" | "high" | "xhigh" | "max"))?;
         let mode = data["route_mode"].as_str().filter(|v| matches!(*v, "auto" | "pinned"))?;
@@ -62,6 +101,7 @@ impl RoutingStatus {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct SessionTelemetry {
+    pub(super) compaction: Option<CompactionStatus>,
     pub(super) routing: Option<RoutingStatus>,
     pub(super) isolation: Option<serde_json::Value>,
     pub(super) account: Option<serde_json::Value>,
@@ -119,6 +159,7 @@ impl SessionTelemetry {
     }
 
     pub(super) fn update_turn(&mut self, data: &serde_json::Value) {
+        if let Some(compaction) = data.get("compaction") { self.compaction = CompactionStatus::from_value(compaction); }
         if let Some(routing) = data.get("routing") { self.routing = RoutingStatus::from_value(routing); }
         let context = data["ctx_percentage"]
             .as_f64()
@@ -167,6 +208,7 @@ impl SessionTelemetry {
     }
 
     pub(super) fn update_billing(&mut self, billing: &serde_json::Value) {
+        if let Some(compaction) = billing.get("compaction") { self.compaction = CompactionStatus::from_value(compaction); }
         if let Some(routing) = billing.get("routing") { self.routing = RoutingStatus::from_value(routing); }
         if billing.get("session_cost_usd").is_some() || billing.get("cost_usd").is_some() {
             self.update_turn(billing);
@@ -197,6 +239,7 @@ impl SessionTelemetry {
     }
 
     pub(super) fn update_status(&mut self, status: &serde_json::Value) {
+        if let Some(compaction) = status.get("compaction") { self.compaction = CompactionStatus::from_value(compaction); }
         if let Some(routing) = status.get("routing") { self.routing = RoutingStatus::from_value(routing); }
         if let Some(value)=status.get("isolation") {
             self.isolation=super::isolation_controls::verified_status(value);
@@ -343,6 +386,34 @@ mod tests {
         assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$?"));
         assert!(telemetry.session_cost.is_none());
         assert_eq!(telemetry.input_tokens,Some(55));assert_eq!(telemetry.context.as_deref(),Some("55/1000"));
+    }
+
+    #[test]
+    fn router_compaction_billing_restores_bounded_target_and_clears_unknown_metadata() {
+        let mut telemetry = SessionTelemetry::default();
+        let routing = serde_json::json!({"target_id":"ds-fixture","engine":"deepseek","model":"deepseek-flash","effort":"high",
+            "route_mode":"auto","fallback_reason":null,"latency_ms":24,"cost_usd":0.000004});
+        let compaction = serde_json::json!({"target_id":"glm-fixture","engine":"glm","model":"glm-5.3-flash","effort":"none",
+            "reviewed":true,"original_messages":12,"source":"private source","summary":"private summary"});
+        telemetry.update_status(&json!({"billing":{"mode":"api","routing":routing,"compaction":compaction,
+            "cost_usd":0.125,"session_cost_usd":0.25,"cost_is_estimate":true}}));
+        let previous_route = telemetry.routing.clone();
+        assert!(telemetry.compaction.as_ref().unwrap().summary().contains("glm-fixture"));
+        assert!(!telemetry.compaction.as_ref().unwrap().lines().join("\n").contains("private"));
+        assert_eq!(telemetry.billing_label(Some("router")).as_deref(), Some("$0.2500 est"));
+        telemetry.update_turn(&json!({"operation":"compact","is_error":true,"cost_usd":null,
+            "session_cost_usd":null,"cost_is_estimate":true}));
+        assert!(telemetry.compaction.is_some());
+        assert_eq!(telemetry.routing, previous_route);
+        assert_eq!(telemetry.billing_label(Some("router")).as_deref(), Some("$?"));
+        for malformed in [json!(null), json!({"target_id":"missing fields"}), json!({"target_id":"g".repeat(49),
+            "engine":"glm","model":"glm-5.3-flash","effort":"high","reviewed":true,"original_messages":12})] {
+            telemetry.update_billing(&json!({"compaction":compaction}));
+            assert!(telemetry.compaction.is_some());
+            telemetry.update_status(&json!({"billing":{"compaction":malformed}}));
+            assert!(telemetry.compaction.is_none());
+            assert_eq!(telemetry.routing, previous_route);
+        }
     }
 
     #[test]

@@ -233,7 +233,7 @@ pub(super) fn structured_event(event_type: &str, data: &serde_json::Value) -> Op
                 .unwrap_or_else(|| "none".into())
         ),
         "turn_done" if data.get("is_error").and_then(|v| v.as_bool()) == Some(true) => {
-            format!("Turn failed: {}", field("error"))
+            format!("{} failed: {}",if data["operation"] == "compact" {"Compaction"} else {"Turn"},field("error"))
         }
         _ => return None,
     };

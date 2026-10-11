@@ -506,6 +506,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "engine" => "Engine for new sessions · click to choose",
         "model" => "Model for this session · click to choose",
         "routing" => "Effective API target for this turn · click for routing latency and cost",
+        "compaction" => "Most recent managed summary worker · click for reviewed compaction details",
         "repo" => "Choose a known directory for a new session tab",
         "directory" => "Choose a known directory for a new session tab",
         "effort" => "Effort · current session; click to select the next turn when idle",
