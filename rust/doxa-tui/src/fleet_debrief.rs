@@ -125,10 +125,14 @@ fn render(id: &str, context: &Context, state: &State) -> io::Result<String> {
     lines.push(format!("Review events (retained {}/256): judge quarantine IDs {} · non-aligned supervisor verdicts {supervisor_holds} · human resumes {resumes}",
         state.observations.len(), quarantine_ids.len()));
     lines.push(format!("Current fleet pause: {}", if state.paused { "yes" } else { "no" }));
-    if state.accounting_unknown {
-        lines.push("Review token estimate: unknown (accounting flagged uncertain)".into());
-    } else if state.calls > 0 {
-        lines.push(format!("Recorded review token estimate: ${:.6} across {} reserved calls; actual billed cost unknown", state.actual_estimated_usd, state.calls));
+    if state.calls > 0 {
+        // A reservation count and the truncated event ring cannot prove that
+        // every call settled, including journals written before sticky flags.
+        lines.push(format!("Recorded review known-usage subtotal: ${:.6}; {} reserved calls · ${:.6} reservation retained", state.actual_estimated_usd, state.calls, state.reserved_usd));
+        lines.push(format!("Total review token estimate: unknown{}; actual billed cost unknown",
+            if state.accounting_unknown { " (accounting flagged uncertain)" } else { " (journal has no complete settlement count)" }));
+    } else if state.accounting_unknown {
+        lines.push("Total review token estimate: unknown (accounting flagged uncertain); actual billed cost unknown".into());
     } else {
         lines.push("Recorded review token estimate: $0.000000 across 0 calls; actual billed cost unknown".into());
     }
@@ -209,6 +213,28 @@ mod tests {
         assert!(!report.contains("secret peer text"));
         state.artifacts.remove(&diff_id);
         assert!(render("run", &context, &state).is_err(), "a partial completion receipt must not be reported as completed");
+    }
+
+    #[test]
+    fn debrief_keeps_known_subtotal_and_refuses_a_total_from_failed_or_legacy_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = context(temp.path());
+        for flagged in [false, true] {
+            let state = State { calls: 2, reserved_usd: 0.02, actual_estimated_usd: 0.001,
+                accounting_unknown: flagged, ..State::default() };
+            let report = render("run", &context, &state).unwrap();
+            assert!(report.contains("known-usage subtotal: $0.001000"));
+            assert!(report.contains("2 reserved calls · $0.020000 reservation retained"));
+            assert!(report.contains("Total review token estimate: unknown"));
+            assert!(report.contains("actual billed cost unknown"));
+            assert_eq!(report.contains("accounting flagged uncertain"), flagged);
+            assert!(!report.contains("Recorded review token estimate: $0.001000"));
+        }
+        let state = State { calls: 1, reserved_usd: 0.01, ..State::default() };
+        let report = render("run", &context, &state).unwrap();
+        assert!(report.contains("known-usage subtotal: $0.000000"));
+        assert!(report.contains("Total review token estimate: unknown"));
+        assert!(!report.contains("Recorded review token estimate: $0.000000"));
     }
 
     #[test]
