@@ -92,12 +92,19 @@ impl CommandRouter {
             while let Ok(command)=commands.recv(){
                 let is_remote=command_target(&command).is_some_and(crate::remote_client::valid_target);
                 let target=if is_remote {destination.lock().ok().and_then(|entry|entry.clone())} else {Some(local.clone())};
-                let failed=match target {
-                    Some(target)=>target.send(command).err().map(|failure|failure.0),
-                    None=>Some(command),
+                let failure=match target {
+                    Some(target)=>match target.try_send(command) {
+                        Ok(())=>None,
+                        Err(TrySendError::Full(command))=>Some((command,"Session command queue full; command was not sent")),
+                        Err(TrySendError::Disconnected(command))=>Some((command,"Session command transport is disconnected")),
+                    },
+                    None=>Some((command,"Remote session is disconnected")),
                 };
-                if let Some(command)=failed {
-                    if error_tx.send(crate::bridge::rejection_frame(command,"Remote session is disconnected")).is_err(){break;}
+                if let Some((command,reason))=failure {
+                    // Typed rejection preserves the exact owner and unsent
+                    // payload. Closing the UI result receiver releases this
+                    // bounded send; no target drain is required during exit.
+                    let _=error_tx.send(crate::bridge::rejection_frame(command,reason));
                 }
             }
         });
@@ -741,6 +748,9 @@ fn run_loop_with_remote(
         if let Ok(mut destination)=router.remote.lock(){*destination=None;}
     }
     drop(prompt_sender);
+    // Release result backpressure before joining any producers. The UI has
+    // stopped reducing frames, so retaining this receiver can strand a router.
+    drop(receiver);
     if let Some(worker)=remote_worker{worker.shutdown();}
     if let Some(router)=command_router{router.shutdown();}
     drop(terminal);
@@ -1216,6 +1226,46 @@ pub(super) fn dispatch_peer_messages(
 #[cfg(test)] mod mixed_router_tests {
     use super::*;
     use crate::bridge::WorkerCommand;
+    #[test]
+    fn mixed_router_full_target_returns_owned_refusal_without_delivery_or_replay() {
+        let (local_tx,local_rx)=mpsc::sync_channel(0);
+        let router=CommandRouter::start(local_tx);
+        router.sender.send(WorkerCommand::Prompt("owner".into(),"retain exact draft".into())).unwrap();
+        assert!(matches!(router.errors.recv_timeout(Duration::from_secs(1)).unwrap(),
+            crate::worker_frames::WorkerFrame::PromptFailed {session_id,text,delivery:crate::worker_frames::PromptDelivery::Rejected,..}
+                if session_id=="owner" && text=="retain exact draft"));
+        assert!(matches!(local_rx.try_recv(),Err(TryRecvError::Empty)));
+        router.shutdown();
+        assert!(matches!(local_rx.try_recv(),Err(TryRecvError::Disconnected)));
+    }
+
+    #[test]
+    fn mixed_router_shutdown_is_bounded_with_full_target_and_result_queues() {
+        const CHILD:&str="DOXA_ROUTER_SHUTDOWN_FIXTURE";
+        if std::env::var_os(CHILD).is_some() {
+            let (local_tx,_undrained_local_rx)=mpsc::sync_channel(0);
+            let router=CommandRouter::start(local_tx);
+            // Fill its 32-result queue and 64-input queue. Every admitted
+            // request reaches target admission or a typed refusal; exit never
+            // waits for either undrained receiver to make space.
+            for _ in 0..200 {
+                if router.sender.try_send(WorkerCommand::Stop("owner".into())).is_err() {break;}
+            }
+            std::thread::sleep(Duration::from_millis(40));
+            router.shutdown();
+            return;
+        }
+        let mut child=Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","ui::terminal_loop::mixed_router_tests::mixed_router_shutdown_is_bounded_with_full_target_and_result_queues","--nocapture"])
+            .env(CHILD,"1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let deadline=Instant::now()+Duration::from_secs(2);
+        loop {
+            if let Some(status)=child.try_wait().unwrap() {assert!(status.success());break;}
+            if Instant::now()>=deadline {let _=child.kill();let _=child.wait();panic!("router shutdown waited for an undrained target");}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test] fn mixed_router_sends_each_prompt_to_its_own_transport(){
         let (local_tx,local_rx)=mpsc::sync_channel(4);
         let (remote_tx,remote_rx)=mpsc::sync_channel(4);
