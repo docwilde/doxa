@@ -390,7 +390,7 @@ mod tests {
         assert!(status.summary().contains("unknown cost"));
         assert!(status.summary().contains("pinned"));
         assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$?"));
-        for (key,bad) in [("fallback_reason",json!("provider secret error")),("engine",json!("claude")),("target_id",json!("bad\u{1b}target")),("cost_usd",json!(-1.0)),("route_mode",json!("autoPermissions"))] {
+        for (key,bad) in [("fallback_reason",json!("provider secret error")),("engine",json!("unsupported")),("target_id",json!("bad\u{1b}target")),("cost_usd",json!(-1.0)),("route_mode",json!("autoPermissions"))] {
             let mut malformed=value.clone();malformed[key]=bad;
             assert!(RoutingStatus::from_value(&malformed).is_none(),"{key}");
         }
