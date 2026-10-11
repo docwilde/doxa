@@ -830,6 +830,24 @@ use super::*;
         assert!(preflight.message(&menu.mermaid_paths()).contains("Configuration changed"));
     }
 
+    #[test]
+    fn settings_command_draws_the_accent_preferences_frame() {
+        let mut app = App::default();
+        app.handle(Event::Resize(120, 36));
+        app.input = "/settings".into();
+        assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))));
+        assert!(app.settings_menu.is_some());
+        assert!(app.operations_menu.is_none());
+
+        let area = app.active_chooser_rect().expect("settings chooser fits the pane");
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(120, 36)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let border_row = area.y + area.height / 2;
+        assert_eq!(buffer[(area.x, border_row)].fg, theme::ACCENT);
+        assert_eq!(buffer[(area.right() - 1, border_row)].fg, theme::ACCENT);
+    }
+
     #[cfg(unix)]
     fn belief_review_fixture() -> doxa_lore::BeliefReview {
         use std::os::unix::fs::PermissionsExt;
