@@ -158,7 +158,7 @@ fn glm_account_startup_and_status_are_cached_and_monitor_is_explicit() {
         for (id,method) in [(1,"status"),(2,"refresh_billing"),(3,"status")] {
             send(&mut socket,json!({"type":"call","id":id,"method":method,"params":{}}));
             let reply=loop {let reply=frame(&mut reader);if reply["type"]=="reply" && reply["id"]==id {break reply;}};
-            assert_eq!(reply["ok"],true);let report=&reply["status"]["billing"]["glm_account"];
+            assert_eq!(reply["ok"],true,"{method}: {reply}");let report=&reply["status"]["billing"]["glm_account"];
             assert_eq!(report["provider_charge_status"],"unknown");
             assert_eq!(report["inference_endpoint"],"https://api.z.ai/api/paas/v4/chat/completions");
             assert_eq!(report["plan_monitor"]["quota"]["status"],if monitor && id>1 {"local_fixture"} else if monitor {"not_checked"} else {"disabled"});
