@@ -1,22 +1,43 @@
 package ai.ampiric.doxa.remote
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.DisposableHandle
+import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.nio.charset.CodingErrorAction
 import java.nio.ByteBuffer
 import java.util.UUID
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 
 data class Session(val id: String, val title: String, val engine: String, val encrypted: Boolean, val incarnation: String = "")
 class RemoteRefusal(message: String) : Exception(message)
+
+internal fun decryptEvent(target: String, incarnation: String, key: ByteArray?, frame: JSONObject) {
+    require(frame.optString("type") == "event" && frame.optString("incarnation") == incarnation) {
+        "Remote event belongs to a different session incarnation"
+    }
+    val event = frame.getJSONObject("event")
+    val kind = event.getString("type")
+    val seq = frame.getLong("seq")
+    require(seq >= 0 && key != null && kind != "replay_gap") { "Invalid encrypted event" }
+    val sealed = event.getJSONObject("data").getJSONObject("sealed")
+    event.put("data", Wire.open(key, Wire.eventContext(target, incarnation, seq, kind), sealed))
+}
 
 /** Keeps the exact serialized request while its result is uncertain. Never regenerates its ID on retry. */
 data class PendingCommand(
@@ -29,13 +50,20 @@ data class PendingCommand(
     val encrypted: Boolean
 )
 
-class HubApi(rawOrigin: String, private val key: ByteArray?) {
+class HubApi internal constructor(rawOrigin: String, private val key: ByteArray?,
+                                  private val operationTimeoutMillis: Long,
+                                  private val openConnection: (URL) -> HttpURLConnection) {
+    constructor(rawOrigin: String, key: ByteArray?) : this(rawOrigin, key, OPERATION_TIMEOUT_MS,
+        { url -> url.openConnection() as HttpURLConnection })
+
+    init { require(operationTimeoutMillis in 1..OPERATION_TIMEOUT_MS) { "Invalid Hub operation deadline" } }
+
     private val origin = Wire.origin(rawOrigin)
     @Volatile private var hubBoot: String? = null
     private fun route(path: String): URL = java.net.URI(origin + path).toURL()
 
     private fun connection(path: String, method: String, stream: Boolean = false): HttpURLConnection {
-        val conn = route(path).openConnection() as HttpURLConnection
+        val conn = openConnection(route(path))
         conn.instanceFollowRedirects = false
         conn.requestMethod = method
         conn.connectTimeout = 10_000
@@ -44,6 +72,40 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
         conn.setRequestProperty("Cache-Control", "no-store")
         conn.useCaches = false
         return conn
+    }
+
+    @OptIn(InternalCoroutinesApi::class)
+    private suspend fun cancellationDisconnect(conn: HttpURLConnection): DisposableHandle? =
+        coroutineContext[Job]?.invokeOnCompletion(onCancelling = true, invokeImmediately = true) { cause ->
+            if (cause is CancellationException) conn.disconnect()
+        }
+
+    private suspend fun <T> finiteRequest(path: String, method: String,
+                                          action: (HttpURLConnection) -> T): T = withContext(Dispatchers.IO) {
+        val conn = connection(path, method)
+        val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(operationTimeoutMillis)
+        val timedOut = AtomicBoolean(false)
+        val cancelHook = cancellationDisconnect(conn)
+        val deadline = deadlineExecutor.schedule({
+            timedOut.set(true)
+            conn.disconnect()
+        }, operationTimeoutMillis, TimeUnit.MILLISECONDS)
+        try {
+            val value = action(conn)
+            coroutineContext.ensureActive()
+            if (timedOut.get() || System.nanoTime() >= deadlineNanos)
+                throw SocketTimeoutException("Hub operation deadline exceeded")
+            value
+        } catch (error: Exception) {
+            if (timedOut.get() && error !is SocketTimeoutException) {
+                throw SocketTimeoutException("Hub operation deadline exceeded").also { it.initCause(error) }
+            }
+            throw error
+        } finally {
+            deadline.cancel(false)
+            cancelHook?.dispose()
+            conn.disconnect()
+        }
     }
 
     private fun readBounded(stream: InputStream, max: Int): ByteArray {
@@ -68,35 +130,30 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
         conn.inputStream.use { return JSONObject(decode(readBounded(it, 128_000))) }
     }
 
-    private fun get(path: String): JSONObject {
-        val conn = connection(path, "GET")
-        try { return json(conn) } finally { conn.disconnect() }
-    }
+    private suspend fun get(path: String): JSONObject = finiteRequest(path, "GET", ::json)
 
-    private fun post(path: String, body: JSONObject): JSONObject {
+    private suspend fun post(path: String, body: JSONObject): JSONObject {
         val bytes = body.toString().toByteArray(Charsets.UTF_8)
         require(bytes.size <= 128_000) { "Remote request exceeds bound" }
-        val conn = connection(path, "POST")
-        try {
+        return finiteRequest(path, "POST") { conn ->
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             conn.setFixedLengthStreamingMode(bytes.size)
             conn.outputStream.use { it.write(bytes) }
-            return json(conn)
-        } finally { conn.disconnect() }
+            json(conn)
+        }
     }
 
-    private fun delete(path: String, body: JSONObject): JSONObject {
+    private suspend fun delete(path: String, body: JSONObject): JSONObject {
         val bytes = body.toString().toByteArray(Charsets.UTF_8)
         require(bytes.size <= 8_192) { "Remote request exceeds bound" }
-        val conn = connection(path, "DELETE")
-        try {
+        return finiteRequest(path, "DELETE") { conn ->
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             conn.setFixedLengthStreamingMode(bytes.size)
             conn.outputStream.use { it.write(bytes) }
-            return json(conn)
-        } finally { conn.disconnect() }
+            json(conn)
+        }
     }
 
     suspend fun registerAndroidPush(session: Session, token: String, tag: String): JSONObject = withContext(Dispatchers.IO) {
@@ -174,7 +231,8 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
         WriteFenceResult.decode(result)
     }
 
-    suspend fun submit(command: PendingCommand, encrypted: Boolean): JSONObject = withContext(Dispatchers.IO) {
+    suspend fun submit(command: PendingCommand, encrypted: Boolean): JSONObject =
+        withTimeout(COMMAND_TIMEOUT_MS) { withContext(Dispatchers.IO) {
         require(System.currentTimeMillis() - command.createdAt < 120_000) {
             "Request expired; inspect the session before sending a new request"
         }
@@ -205,7 +263,7 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
             }
         }
         error("Acknowledgement timed out; inspect the session before retrying")
-    }
+        } }
 
     suspend fun transcript(target: String, encrypted: Boolean, before: Long? = null): JSONObject {
         val payload = JSONObject()
@@ -224,13 +282,15 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
         }
     }
 
-    suspend fun events(target: String, encrypted: Boolean, startCursor: Long,
+    suspend fun events(target: String, encrypted: Boolean, incarnation: String, startCursor: Long,
                        onFrame: suspend (JSONObject) -> Unit) = withContext(Dispatchers.IO) {
-        require(Wire.target(target) && startCursor >= 0)
+        require(Wire.target(target) && incarnation.isNotBlank() && incarnation.length <= 128 && startCursor >= 0)
         val conn = connection("api/sessions/$target/events?cursor=$startCursor", "GET", true)
+        val cancelHook = cancellationDisconnect(conn)
         try {
             require(conn.responseCode == 200) { "Remote event stream unavailable (${conn.responseCode})" }
             conn.inputStream.use { input ->
+                var seenHello = false
                 var frameBytes = 0
                 var data: String? = null
                 while (true) {
@@ -241,14 +301,17 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
                     if (line.isEmpty()) {
                         data?.let { raw ->
                             val frame = JSONObject(raw)
-                            if (frame.optString("type") == "event") {
+                            if (frame.optString("type") == "hello") {
+                                require(frame.optString("incarnation") == incarnation) {
+                                    "Remote session incarnation changed"
+                                }
+                                seenHello = true
+                            } else if (frame.optString("type") == "event") {
                                 val event = frame.getJSONObject("event")
                                 val kind = event.getString("type")
                                 if (encrypted && kind != "replay_gap") {
-                                    val seq = frame.getLong("seq")
-                                    require(seq >= 0 && key != null) { "Invalid encrypted event" }
-                                    val sealed = event.getJSONObject("data").getJSONObject("sealed")
-                                    event.put("data", Wire.open(key, "$target|event|$seq|$kind", sealed))
+                                    require(seenHello) { "Encrypted event arrived before the session snapshot" }
+                                    decryptEvent(target, incarnation, key, frame)
                                 } else if (!encrypted && event.optJSONObject("data")?.has("sealed") == true) {
                                     error("Unexpected encrypted event")
                                 }
@@ -260,8 +323,16 @@ class HubApi(rawOrigin: String, private val key: ByteArray?) {
                     } else if (line.startsWith("data: ")) data = line.substring(6)
                 }
             }
-        } finally { conn.disconnect() }
+        } finally { cancelHook?.dispose(); conn.disconnect() }
     }
 
     fun close() { key?.fill(0) }
+
+    companion object {
+        private const val OPERATION_TIMEOUT_MS = 30_000L
+        private const val COMMAND_TIMEOUT_MS = 120_000L
+        private val deadlineExecutor = ScheduledThreadPoolExecutor(1) { task ->
+            Thread(task, "doxa-hub-deadline").apply { isDaemon = true }
+        }.apply { removeOnCancelPolicy = true }
+    }
 }

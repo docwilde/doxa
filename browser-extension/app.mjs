@@ -144,8 +144,9 @@ function recoverSession(sessionId, mine, message) {
 }
 async function followEvents(sessionId, firstCursor, mine, controller) {
   let cursor = firstCursor;
+  const incarnation = activeIncarnation;
   try {
-    await client.events(sessionId, cursor, controller.signal, async frame => {
+    await client.events(sessionId, incarnation, cursor, controller.signal, async frame => {
       if (mine !== generation || !sessionReady) return;
       if (frame.type === 'hello') {
         if (frame.incarnation !== activeIncarnation || (Object.hasOwn(frame, 'pending_inputs') &&

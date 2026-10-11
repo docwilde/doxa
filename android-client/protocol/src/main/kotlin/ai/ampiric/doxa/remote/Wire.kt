@@ -43,6 +43,14 @@ object Wire {
 
     fun id(value: String): Boolean = id.matches(value)
 
+    fun eventContext(targetId: String, incarnation: String, seq: Long, eventType: String): String {
+        require(target(targetId) && incarnation.isNotEmpty() && incarnation.length <= 128 &&
+            '|' !in incarnation && incarnation.none { it.code < 0x20 || it.code == 0x7f } &&
+            seq >= 0 && eventType.isNotEmpty() && eventType.length <= 128 && '|' !in eventType &&
+            eventType.none { it.code < 0x20 || it.code == 0x7f }) { "Invalid remote event context" }
+        return "$targetId|event-v2|$incarnation|$seq|$eventType"
+    }
+
     private fun decode(value: String, max: Int): ByteArray {
         require(value.length <= max * 2 && b64.matches(value)) { "Invalid remote base64" }
         val bytes = try { Base64.getDecoder().decode(value) } catch (_: Exception) {

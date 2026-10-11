@@ -1,13 +1,13 @@
 //! Owner-scoped Web Push. Notifications contain only a generic event kind;
 //! the browser fetches session state after the owner opens the private hub.
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use p256::{ecdsa::{signature::Signer, Signature, SigningKey}, elliptic_curve::sec1::ToEncodedPoint};
 use reqwest::{Client, Url};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{fs::OpenOptions, io::{self, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-    path::Path, sync::Arc, time::Duration};
+    path::Path, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use web_push_native::{Auth, WebPushBuilder, p256::PublicKey,
-    jwt_simple::algorithms::{ECDSAP256PublicKeyLike, ES256KeyPair}};
+use web_push_native::{Auth, WebPushBuilder, p256::PublicKey};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Kind { NeedsInput, TurnDone }
@@ -64,7 +64,7 @@ pub fn subscription(value: &Value) -> io::Result<Subscription> {
 }
 
 pub struct Runtime {
-    key: ES256KeyPair,
+    key: SigningKey,
     public_key: String,
     subject: String,
     http: Client,
@@ -89,7 +89,7 @@ impl Runtime {
         let raw = URL_SAFE_NO_PAD.decode(encoded.trim_end())
             .map_err(|_| invalid("invalid VAPID private key"))?;
         if raw.len()!=32{return Err(invalid("invalid VAPID private key length"));}
-        let key = ES256KeyPair::from_bytes(&raw).map_err(|_| invalid("invalid VAPID private key"))?;
+        let key = SigningKey::from_slice(&raw).map_err(|_| invalid("invalid VAPID private key"))?;
         let subject = std::env::var("DOXA_HUB_VAPID_SUBJECT")
             .map_err(|_| invalid("DOXA_HUB_VAPID_SUBJECT is required when push is enabled"))?;
         if !subject.starts_with("mailto:") || subject.len() > 200
@@ -112,28 +112,44 @@ impl Runtime {
     pub async fn send(&self, subscription: &Subscription, kind: Kind, _permit: OwnedSemaphorePermit) -> bool {
         let Ok(endpoint) = subscription.endpoint.parse() else { return false; };
         let builder = WebPushBuilder::new(endpoint, subscription.public.clone(), subscription.auth.clone())
-            .with_valid_duration(Duration::from_secs(300))
-            .with_vapid(&self.key, &self.subject);
+            .with_valid_duration(Duration::from_secs(300));
         let Ok(request) = builder.build(kind.payload().to_vec()) else { return false; };
         let (parts, body) = request.into_parts();
+        let Some(authorization) = vapid_authorization(&parts.uri.to_string(), &self.subject, &self.key) else {
+            return false;
+        };
         let mut request = self.http.post(parts.uri.to_string()).body(body);
         for (name, value) in &parts.headers {
             let Ok(value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) else { return false; };
             request = request.header(name.as_str(), value);
         }
+        request = request.header(reqwest::header::AUTHORIZATION, authorization);
         let result = request.send().await;
         matches!(result, Ok(response) if response.status().as_u16() == 404 || response.status().as_u16() == 410)
     }
 }
 
-fn public_key(key: &ES256KeyPair) -> String {
-    URL_SAFE_NO_PAD.encode(key.public_key().public_key().to_bytes_uncompressed())
+fn public_key(key: &SigningKey) -> String {
+    URL_SAFE_NO_PAD.encode(key.verifying_key().to_encoded_point(false).as_bytes())
+}
+
+fn vapid_authorization(endpoint: &str, subject: &str, key: &SigningKey) -> Option<String> {
+    let endpoint = Url::parse(endpoint).ok()?;
+    let audience = format!("{}://{}", endpoint.scheme(), endpoint.host_str()?);
+    let expires = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs().checked_add(300)?;
+    let header = URL_SAFE_NO_PAD.encode(br#"{"typ":"JWT","alg":"ES256"}"#);
+    let claims = json!({"aud":audience,"exp":expires,"sub":subject});
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).ok()?);
+    let signing_input = format!("{header}.{payload}");
+    let signature: Signature = key.sign(signing_input.as_bytes());
+    Some(format!("vapid t={signing_input}.{}, k={}",
+        URL_SAFE_NO_PAD.encode(signature.to_bytes()), public_key(key)))
 }
 
 /// Generate a key only on an explicit operator command. The hub otherwise
 /// starts without push support when the private key file is absent.
 pub fn generate(runtime: &Path) -> io::Result<String> {
-    let key = ES256KeyPair::generate();
+    let key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
     let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(runtime.join("vapid.key"))?;
@@ -170,18 +186,32 @@ mod tests {
     }
     #[test]
     fn generated_push_request_encrypts_generic_event_and_signs_vapid() {
-        let vapid=ES256KeyPair::generate();
-        let receiver=ES256KeyPair::generate();
-        let public=PublicKey::from_sec1_bytes(
-            &receiver.public_key().public_key().to_bytes_uncompressed()).unwrap();
+        use p256::ecdsa::signature::Verifier;
+        let vapid=SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let receiver=SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let public=PublicKey::from_sec1_bytes(receiver.verifying_key().to_encoded_point(false).as_bytes()).unwrap();
         let builder=WebPushBuilder::new(
             "https://fcm.googleapis.com/fcm/send/test".parse().unwrap(),
             public,Auth::clone_from_slice(&[4u8;16]))
-            .with_valid_duration(Duration::from_secs(300))
-            .with_vapid(&vapid,"mailto:test@example.com");
+            .with_valid_duration(Duration::from_secs(300));
         let request=builder.build(Kind::NeedsInput.payload().to_vec()).unwrap();
         assert_eq!(request.headers()["content-encoding"],"aes128gcm");
-        assert!(request.headers()["authorization"].to_str().unwrap().starts_with("vapid "));
+        let authorization=vapid_authorization(&request.uri().to_string(),"mailto:test@example.com",&vapid).unwrap();
+        assert!(authorization.starts_with("vapid t="));
+        let token=authorization.strip_prefix("vapid t=").unwrap().split(", k=").next().unwrap();
+        let mut parts=token.split('.');
+        let header=URL_SAFE_NO_PAD.decode(parts.next().unwrap()).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&header).unwrap(),json!({"typ":"JWT","alg":"ES256"}));
+        let payload=URL_SAFE_NO_PAD.decode(parts.next().unwrap()).unwrap();
+        let claims:Value=serde_json::from_slice(&payload).unwrap();
+        assert_eq!(claims["aud"],"https://fcm.googleapis.com");
+        assert_eq!(claims["sub"],"mailto:test@example.com");
+        assert!(claims["exp"].as_u64().unwrap()>SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
+        let signing_input=token.rsplit_once('.').unwrap().0;
+        let signature=URL_SAFE_NO_PAD.decode(parts.next().unwrap()).unwrap();
+        assert_eq!(signature.len(),64);
+        vapid.verifying_key().verify(signing_input.as_bytes(),&Signature::from_slice(&signature).unwrap()).unwrap();
+        assert!(URL_SAFE_NO_PAD.decode(authorization.split(", k=").nth(1).unwrap()).unwrap().len()==65);
         assert!(!request.body().windows(11).any(|window|window==b"needs_input"));
     }
 }

@@ -20,6 +20,17 @@ export function validTarget(id) {
   return parts.length === 2 && parts.every(part => ID.test(part));
 }
 
+export function eventContext(target, incarnation, seq, eventType) {
+  if (!validTarget(target) || typeof incarnation !== 'string' || incarnation.length < 1 ||
+      incarnation.length > 128 || incarnation.includes('|') || /[\u0000-\u001f\u007f]/u.test(incarnation) ||
+      !Number.isSafeInteger(seq) || seq < 0 || typeof eventType !== 'string' ||
+      eventType.length < 1 || eventType.length > 128 || eventType.includes('|') ||
+      /[\u0000-\u001f\u007f]/u.test(eventType)) {
+    throw new Error('Invalid remote event context');
+  }
+  return `${target}|event-v2|${incarnation}|${seq}|${eventType}`;
+}
+
 async function boundedJson(response) {
   if (!response.ok) throw new Error(`Hub refused request (${response.status})`);
   const reader = response.body?.getReader();
@@ -106,8 +117,9 @@ export class DoxaRemoteClient {
     throw new Error('Command acknowledgement timed out; inspect the session before retrying');
   }
 
-  async events(target, cursor, signal, onFrame) {
-    if (!validTarget(target) || !Number.isSafeInteger(cursor) || cursor < 0)
+  async events(target, incarnation, cursor, signal, onFrame) {
+    if (!validTarget(target) || typeof incarnation !== 'string' || incarnation.length < 1 ||
+        incarnation.length > 128 || incarnation.includes('|') || !Number.isSafeInteger(cursor) || cursor < 0)
       throw new Error('Invalid remote event cursor');
     const response = await fetch(this.route(`api/sessions/${target}/events?cursor=${cursor}`), {
       credentials:'include', redirect:'error', cache:'no-store', signal
@@ -129,11 +141,13 @@ export class DoxaRemoteClient {
         let frame;
         try { frame = JSON.parse(line.slice(6)); }
         catch { throw new Error('Invalid remote event'); }
+        if (frame.type === 'hello' && frame.incarnation !== incarnation)
+          throw new Error('Remote session incarnation changed');
         if (frame.type === 'event' && frame.event?.data?.sealed) {
           if (!Number.isSafeInteger(frame.seq) || frame.seq < 0 ||
-              typeof frame.event.type !== 'string') throw new Error('Invalid encrypted event');
+              frame.incarnation !== incarnation || typeof frame.event.type !== 'string') throw new Error('Invalid encrypted event');
           frame.event.data = await open(this.key,
-            `${target}|event|${frame.seq}|${frame.event.type}`, frame.event.data.sealed);
+            eventContext(target, incarnation, frame.seq, frame.event.type), frame.event.data.sealed);
         } else if (frame.type === 'event' && frame.event?.type !== 'replay_gap') {
           throw new Error('Unencrypted remote event refused');
         }

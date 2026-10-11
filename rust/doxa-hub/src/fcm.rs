@@ -1,10 +1,11 @@
 //! Optional, owner-scoped Android FCM data push. No session content leaves the hub.
+use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::{fs::OpenOptions, io::{self, Read}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::Path,
-    sync::Arc, time::{Duration, Instant}};
+    sync::Arc, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
-use web_push_native::jwt_simple::{algorithms::{RS256KeyPair, RSAKeyPairLike}, claims::Claims, prelude::Duration as JwtDuration};
+use ring::{rand::SystemRandom, signature::{RsaKeyPair, RSA_PKCS1_SHA256}};
 use crate::push::Kind;
 
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -26,10 +27,32 @@ pub fn valid_token(token: &str) -> bool {
 
 pub fn valid_tag(tag: &str) -> bool { tag.len() == 32 && tag.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) }
 
+fn pkcs8_der(pem: &str) -> io::Result<Vec<u8>> {
+    let lines: Vec<_> = pem.trim().lines().map(str::trim).collect();
+    if lines.len() < 3 || lines.first() != Some(&"-----BEGIN PRIVATE KEY-----")
+        || lines.last() != Some(&"-----END PRIVATE KEY-----") {
+        return Err(invalid("FCM private key must be PKCS#8 PEM"));
+    }
+    let body = lines[1..lines.len() - 1].concat();
+    if body.is_empty() || body.len() > 16_000 { return Err(invalid("invalid FCM private key")); }
+    STANDARD.decode(body).map_err(|_| invalid("invalid FCM private key"))
+}
+
+fn signed_assertion(email: &str, key: &RsaKeyPair, now: u64) -> Option<String> {
+    let expires = now.checked_add(3600)?;
+    let header = URL_SAFE_NO_PAD.encode(br#"{"typ":"JWT","alg":"RS256"}"#);
+    let claims = json!({"iss":email,"scope":SCOPE,"aud":TOKEN_URL,"iat":now,"exp":expires});
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).ok()?);
+    let input = format!("{header}.{payload}");
+    let mut signature = vec![0; key.public().modulus_len()];
+    key.sign(&RSA_PKCS1_SHA256, &SystemRandom::new(), input.as_bytes(), &mut signature).ok()?;
+    Some(format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature)))
+}
+
 pub struct Runtime {
     project: String,
     email: String,
-    key: RS256KeyPair,
+    key: RsaKeyPair,
     http: Client,
     access: Mutex<Option<(String, Instant)>>,
     slots: Arc<Semaphore>,
@@ -59,7 +82,8 @@ impl Runtime {
         let email = value["client_email"].as_str().filter(|s| s.len() <= 320 && s.ends_with(".gserviceaccount.com")
             && !s.contains(char::is_whitespace)).ok_or_else(|| invalid("invalid FCM service account email"))?;
         let pem = value["private_key"].as_str().ok_or_else(|| invalid("FCM private key missing"))?;
-        let key = RS256KeyPair::from_pem(pem).map_err(|_| invalid("invalid FCM private key"))?;
+        let der = pkcs8_der(pem)?;
+        let key = RsaKeyPair::from_pkcs8(&der).map_err(|_| invalid("invalid FCM private key"))?;
         let http = Client::builder().timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none())
             .build().map_err(io::Error::other)?;
         Ok(Some(Self { project: project.into(), email: email.into(), key, http,
@@ -71,9 +95,8 @@ impl Runtime {
         if let Some((token, expiry)) = cached.as_ref() {
             if *expiry > Instant::now() { return Some(token.clone()); }
         }
-        let claims = Claims::with_custom_claims(json!({"scope":SCOPE}), JwtDuration::from_secs(3600))
-            .with_issuer(&self.email).with_audience(TOKEN_URL);
-        let assertion = self.key.sign(claims).ok()?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        let assertion = signed_assertion(&self.email, &self.key, now)?;
         let response = self.http.post(TOKEN_URL).form(&[
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
             ("assertion", assertion.as_str()),
@@ -132,5 +155,23 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink("outside", &path).unwrap();
         assert!(Runtime::load(dir.path()).is_err());
+    }
+    #[test]
+    fn ring_signs_bounded_fcm_oauth_assertion_from_pkcs8() {
+        let pem = include_str!("../tests/fixtures/fcm-test-private-key.pem");
+        let key = RsaKeyPair::from_pkcs8(&pkcs8_der(pem).unwrap()).unwrap();
+        let assertion = signed_assertion("fixture@example.gserviceaccount.com", &key, 1_800_000_000).unwrap();
+        let parts: Vec<_> = assertion.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        let header: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).unwrap()).unwrap();
+        assert_eq!(header, json!({"typ":"JWT","alg":"RS256"}));
+        let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+        assert_eq!(claims["iss"], "fixture@example.gserviceaccount.com");
+        assert_eq!(claims["scope"], SCOPE);
+        assert_eq!(claims["aud"], TOKEN_URL);
+        assert_eq!(claims["iat"], 1_800_000_000u64);
+        assert_eq!(claims["exp"], 1_800_003_600u64);
+        assert_eq!(URL_SAFE_NO_PAD.decode(parts[2]).unwrap().len(), key.public().modulus_len());
+        assert!(pkcs8_der("-----BEGIN RSA PRIVATE KEY-----\nAA==\n-----END RSA PRIVATE KEY-----").is_err());
     }
 }

@@ -441,6 +441,7 @@ impl Hub {
         let incarnation=host.sessions.iter().find(|item|item["id"]==session_id)
             .and_then(|item|item["incarnation"].as_str()).unwrap_or("").to_owned();
         if encrypted && !frame["event"]["data"]["sealed"].is_object() { return Err("encrypted event required"); }
+        if encrypted && frame["incarnation"].as_str()!=Some(incarnation.as_str()) { return Err("event session incarnation changed"); }
         if !encrypted && frame["event"]["data"].get("sealed").is_some() { return Err("unexpected encrypted event"); }
         let seq=frame["seq"].as_u64().ok_or("event sequence required")?;
         if frame["type"]!="event" || !frame["event"].is_object(){return Err("invalid event frame");}
@@ -523,7 +524,7 @@ impl Hub {
         let mut hub=Hub::new();
         let owner="owner@example.com";
         let registration=hub.register(owner,"workstation",bounded_sessions(&json!([{
-            "id":"s1","title":"Encrypted session","encrypted":true
+            "id":"s1","title":"Encrypted session","encrypted":true,"incarnation":"session-v1"
         }])).unwrap(),None).unwrap();
         let lease=registration["lease"].as_str().unwrap();
         assert_eq!(hub.list(owner)["sessions"][0]["encrypted"],true);
@@ -532,14 +533,16 @@ impl Hub {
         assert!(hub.event(owner,"workstation",lease,"s1",json!({"type":"event","seq":1,
             "event":{"type":"text_delta","data":{"text":"secret"}}})).is_err());
         assert!(hub.event(owner,"workstation",lease,"s1",json!({"type":"event","seq":1,
-            "event":{"type":"text_delta","data":{"sealed":{"v":1}}}})).is_ok());
+            "incarnation":"stale-session","event":{"type":"text_delta","data":{"sealed":{"v":1}}}})).is_err());
+        assert!(hub.event(owner,"workstation",lease,"s1",json!({"type":"event","seq":1,
+            "incarnation":"session-v1","event":{"type":"text_delta","data":{"sealed":{"v":1}}}})).is_ok());
     }
     #[test]fn push_is_owner_scoped_and_duplicate_events_do_not_notify_twice(){
         let mut hub=Hub::new();
-        use web_push_native::jwt_simple::algorithms::{ECDSAP256PublicKeyLike,ES256KeyPair};
-        let key=ES256KeyPair::generate();
+        use p256::{ecdsa::SigningKey, elliptic_curve::{rand_core::OsRng, sec1::ToEncodedPoint}};
+        let key=SigningKey::random(&mut OsRng);
         let public=web_push_native::p256::PublicKey::from_sec1_bytes(
-            &key.public_key().public_key().to_bytes_uncompressed()).unwrap();
+            key.verifying_key().to_encoded_point(false).as_bytes()).unwrap();
         let auth=web_push_native::Auth::clone_from_slice(&[7u8;16]);
         hub.subscribe("owner@example.com",Subscription{
             endpoint:"https://fcm.googleapis.com/fcm/send/owner".into(),
