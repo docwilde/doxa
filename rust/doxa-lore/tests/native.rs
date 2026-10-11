@@ -50,6 +50,60 @@ fn reviewed_codegraph_read_is_scoped_and_rejects_stale_source() {
 }
 
 #[test]
+fn public_python_snapshot_reads_preserve_store_and_reject_changed_source() {
+    let owned = tempfile::tempdir().unwrap();
+    let source = owned.path().join("worktree");
+    std::fs::create_dir(&source).unwrap();
+    assert!(std::process::Command::new("git").args(["init", "-q"])
+        .arg(&source).status().unwrap().success());
+    let file = source.join("service.py");
+    std::fs::write(&file, "import helper\ndef service():\n    return helper.call()\n").unwrap();
+    let cwd = source.to_str().unwrap();
+    let config = lore_core::config::Config::for_root(owned.path().join("store"));
+    let authority = lore_core::gate::Authority::HumanReview {
+        agent: "fixture".into(), engine: "human".into(),
+    };
+    let mut client = LoreClient::open_config(config.clone(), Duration::from_secs(2)).unwrap();
+    assert_eq!(client.codegraph_snapshot(cwd, "file", "service.py").unwrap(),
+        CodegraphSnapshot::Missing);
+    assert!(!config.root.exists(), "missing read created a store");
+    for (kind, query) in [
+        ("file", doxa_codegraph::Query::File("service.py".into())),
+        ("imports", doxa_codegraph::Query::Imports("service.py".into())),
+        ("calls", doxa_codegraph::Query::Calls("service.py".into())),
+        ("modules", doxa_codegraph::Query::Modules("service.py".into())),
+    ] {
+        let graph = serde_json::to_value(doxa_codegraph::query(&source, query).unwrap()).unwrap();
+        lore_core::codegraph_snapshot::store(&config, &serde_json::json!({
+            "cwd":cwd,"query":kind,"path":"service.py","expected_revision":0,
+            "snapshot":{"schema_version":1,"storage":"export_only_not_persisted",
+                "graph_binding":"unknown","curated_purpose":{
+                    "project_key":lore_core::config::project_slug(&source)},"graph":graph}
+        }), &authority).unwrap();
+    }
+    let store_bytes = || {
+        let mut rows = std::fs::read_dir(config.root.join("codegraph-v1")).unwrap()
+            .map(|entry| { let path = entry.unwrap().path();
+                (path.file_name().unwrap().to_owned(), std::fs::read(path).unwrap()) })
+            .collect::<Vec<_>>();
+        rows.sort(); rows
+    };
+    let before = store_bytes();
+    for kind in ["file", "imports", "calls", "modules"] {
+        let CodegraphSnapshot::Current(snapshot) =
+            client.codegraph_snapshot(cwd, kind, "service.py").unwrap()
+            else { panic!("missing reviewed Python {kind} snapshot") };
+        assert_eq!(snapshot.path, "service.py");
+        assert_eq!(snapshot.query, kind);
+        assert_eq!(snapshot.python_scan_inputs.status, "verified");
+    }
+    assert_eq!(store_bytes(), before, "read unexpectedly rewrote the store");
+    std::fs::write(&file, "def changed():\n    return 2\n").unwrap();
+    assert!(client.codegraph_snapshot(cwd, "file", "service.py").is_err());
+    assert_eq!(store_bytes(), before, "stale read rewrote the store");
+}
+
+#[test]
 fn reviewed_module_references_report_current_stale_and_uncheckable_bytes() {
     let owned = tempfile::tempdir().unwrap();
     let source = owned.path().join("worktree");

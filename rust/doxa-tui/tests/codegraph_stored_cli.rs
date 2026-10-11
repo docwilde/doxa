@@ -9,18 +9,24 @@ fn explicit_stored_cli_reports_missing_without_writing_and_rejects_symbol() {
     assert!(Command::new("git").args(["init", "-q"])
         .arg(&worktree).status().unwrap().success());
     fs::write(worktree.join("lib.rs"), "mod child;\n").unwrap();
+    fs::write(worktree.join("service.py"), "import helper\ndef service():\n    return helper.call()\n").unwrap();
     let store = owned.path().join("lore-store");
-    let run = |kind: &str| Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
+    let run = |kind: &str, path: &str| Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
         .env_clear().env("PATH", "/usr/bin:/bin").env("HOME", owned.path())
         .env("LORE_ROOT", &store)
         .args(["codegraph", "--stored", "--root"])
-        .arg(&worktree).args([kind, "lib.rs"]).output().unwrap();
-    let missing = run("modules");
-    assert!(missing.status.success(), "{}", String::from_utf8_lossy(&missing.stderr));
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&missing.stdout).unwrap(),
-        serde_json::json!({"status":"missing"}));
-    assert!(!store.exists(), "read created LORE state");
-    let invalid = run("symbol");
-    assert!(!invalid.status.success());
+        .arg(&worktree).args([kind, path]).output().unwrap();
+    for (kind, path) in [("modules", "lib.rs"), ("file", "service.py"),
+        ("imports", "service.py"), ("calls", "service.py"), ("modules", "service.py")] {
+        let missing = run(kind, path);
+        assert!(missing.status.success(), "{kind} {path}: {}", String::from_utf8_lossy(&missing.stderr));
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&missing.stdout).unwrap(),
+            serde_json::json!({"status":"missing"}));
+        assert!(!store.exists(), "read created LORE state");
+    }
+    for (kind, path) in [("symbol", "lib.rs"), ("file", "service.py.bak"),
+        ("file", "../service.py"), ("file", "service.js")] {
+        assert!(!run(kind, path).status.success(), "unexpected acceptance: {kind} {path}");
+    }
     assert!(!store.exists());
 }
