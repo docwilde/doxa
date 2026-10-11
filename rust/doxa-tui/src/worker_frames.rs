@@ -16,6 +16,7 @@ pub enum WorkerFrame {
     },
     RemoteSnapshot {
         session_id: String,
+        incarnation: String,
         markdown: String,
         pending_inputs: Value,
         pending_inputs_complete: bool,
@@ -206,7 +207,7 @@ impl WorkerFrame {
                 markdown,
             } => json!({"type":"event", "session_id":session_id,
                 "event":{"type":"text_delta", "data":{"text":markdown,"snapshot":true}}}),
-            Self::RemoteSnapshot { session_id, markdown, pending_inputs, pending_inputs_complete,before,has_more } =>
+            Self::RemoteSnapshot { session_id, incarnation: _, markdown, pending_inputs, pending_inputs_complete,before,has_more } =>
                 json!({"type":"remote_snapshot","session_id":session_id,
                     "markdown":markdown,"pending_inputs":pending_inputs,
                     "pending_inputs_complete":pending_inputs_complete,"before":before,"has_more":has_more}),

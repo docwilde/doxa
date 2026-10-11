@@ -196,10 +196,11 @@ impl App {
                 self.refresh_usage_info(&session_id);
                 true
             }
-            WorkerFrame::RemoteSnapshot { session_id, markdown, pending_inputs, pending_inputs_complete,before,has_more } => {
+            WorkerFrame::RemoteSnapshot { session_id, incarnation, markdown, pending_inputs, pending_inputs_complete,before,has_more } => {
                 if !self.sessions.iter().any(|session| session.id == session_id) {
                     false
                 } else {
+                    self.remote_review_incarnations.insert(session_id.clone(), incarnation);
                     if has_more {if let Some(before)=before{self.remote_history_before.insert(session_id.clone(),before);}}
                     else{self.remote_history_before.remove(&session_id);}
                     self.apply_update(DaemonUpdate::Transcript { id: session_id.clone(), markdown });
@@ -234,6 +235,11 @@ impl App {
                 }
             }
             WorkerFrame::RemoteConnectivity { session_id, status } => {
+                if status != "Remote connected" {
+                    self.remote_review_incarnations.remove(&session_id);
+                    self.input_requests.retain(|request| request.session_id != session_id);
+                    self.pending_answers.retain(|(owner,_,_)| owner != &session_id);
+                }
                 self.apply_update(DaemonUpdate::Status { id: session_id, text: status });
                 true
             }

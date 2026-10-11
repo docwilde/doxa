@@ -7618,7 +7618,7 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
         assert_eq!(app.groups[0].tabs, ["host~one"]);
         assert_eq!(app.chips(0)[0], ("remote", "Remote · host".into()));
         app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteSnapshot {
-            session_id: "host~one".into(),
+            session_id: "host~one".into(), incarnation:"first".into(),
             markdown: "**You:**\n\nQuestion\n\n**Assistant:**\n\nAnswer\n\n".into(),
             pending_inputs: json!([{"id":"review-1","kind":"permission","title":"Approve?"}]),
             pending_inputs_complete: true,
@@ -7663,7 +7663,7 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
         let id="host~session";
         app.apply_worker_frame(crate::worker_frames::WorkerFrame::Daemon {session_id:id.into(),
             frame:json!({"type":"hello","session_id":id,"title":"Remote","remote":true})});
-        app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteSnapshot {session_id:id.into(),
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteSnapshot {session_id:id.into(),incarnation:"first".into(),
             markdown:"recent turn".into(),pending_inputs:json!([]),pending_inputs_complete:true,
             before:Some(100),has_more:true});
         app.open_history();
@@ -7675,4 +7675,25 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
             markdown:"older turn".into(),before:None,has_more:false,error:None});
         assert_eq!(app.chip_info.as_ref().unwrap().lines[0],"older turn");
         assert!(!app.remote_history_before.contains_key(id));
+    }
+
+    #[test]
+    fn remote_answers_capture_displayed_request_and_expire_on_reconnect() {
+        let mut app=App::default(); let id="host~session";
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::Daemon{session_id:id.into(),
+            frame:json!({"type":"hello","session_id":id,"remote":true})});
+        let reviewed=json!({"id":"review-1","kind":"permission","title":"Original","input_summary":"echo original"});
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteSnapshot{session_id:id.into(),incarnation:"first".into(),
+            markdown:String::new(),pending_inputs:json!([reviewed]),pending_inputs_complete:true,before:None,has_more:false});
+        app.pending_answers.push((id.into(),"review-1".into(),json!({"decision":"allow"})));
+        let answers=app.take_answers();
+        assert_eq!(answers[0].2["remote_review"]["reviewed_request"],reviewed);
+        assert_eq!(answers[0].2["remote_review"]["incarnation"],"first");
+        // A full writer queue retains the exact original receipt, not a new one.
+        app.pending_answers=answers.clone();
+        assert_eq!(app.take_answers(),answers);
+        app.pending_answers=answers;
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteConnectivity{session_id:id.into(),status:"Remote reconnecting".into()});
+        assert!(app.input_requests.is_empty()); assert!(app.take_answers().is_empty());
+        assert!(!app.remote_review_incarnations.contains_key(id));
     }

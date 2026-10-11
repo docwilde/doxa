@@ -1421,6 +1421,7 @@ pub struct App {
     remote_connect_request: Option<(String, String)>,
     remote_disconnect_requested: bool,
     remote_handoff: Option<RemoteHandoff>,
+    remote_review_incarnations: HashMap<String, String>,
     remote_history_before: HashMap<String, u64>,
     remote_history_loading: HashSet<String>,
     pending_remote_history: Vec<(String, u64)>,
@@ -1728,6 +1729,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             remote_mode: false,
+            remote_review_incarnations: HashMap::new(),
             remote_history_before: HashMap::new(),
             remote_history_loading: HashSet::new(),
             pending_remote_history: Vec::new(),

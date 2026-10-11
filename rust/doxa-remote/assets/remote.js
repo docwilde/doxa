@@ -163,7 +163,9 @@ function showNextQuestion() {
   const mine = generation;
   const title = document.createElement('strong');
   title.textContent = next.title || next.input_summary || next.tool_name || 'Input needed';
-  box.append(title);
+  const reviewed = document.createElement('pre');
+  reviewed.textContent = JSON.stringify(next.reviewed, null, 2);
+  box.append(title, reviewed);
   const answer = async value => {
     if (!sessionReady || mine !== generation || active !== sessionId || pending.get(next.id) !== next) return;
     try {
@@ -183,7 +185,7 @@ function showNextQuestion() {
     const questions = next.questions || [], answers = {};
     let index = 0;
     function step() {
-      box.replaceChildren(title);
+      box.replaceChildren(title, reviewed);
       if (index >= questions.length) { answer({answers}); return; }
       const question = questions[index];
       const label = document.createElement('p');

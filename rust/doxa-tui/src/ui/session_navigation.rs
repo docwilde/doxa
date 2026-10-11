@@ -1107,7 +1107,16 @@ impl App {
     }
 
     pub fn take_answers(&mut self) -> Vec<(String, String, serde_json::Value)> {
-        std::mem::take(&mut self.pending_answers)
+        std::mem::take(&mut self.pending_answers).into_iter().map(|(session,id,answer)| {
+            if !crate::remote_client::valid_target(&session) || answer.get("remote_review").is_some() { return (session,id,answer); }
+            // Capture the request the terminal displayed, before entering the
+            // bounded writer queue. Reconnect never upgrades a stale approval.
+            let reviewed=self.input_requests.iter().find(|request|request.session_id==session&&request.id==id)
+                .map(|request|request.original_payload.clone()).unwrap_or(serde_json::Value::Null);
+            let incarnation=self.remote_review_incarnations.get(&session).cloned();
+            (session,id,serde_json::json!({"answer":answer,"remote_review":{
+                "incarnation":incarnation,"reviewed_request":reviewed}}))
+        }).collect()
     }
 
     pub(super) fn open_selected(&mut self) {

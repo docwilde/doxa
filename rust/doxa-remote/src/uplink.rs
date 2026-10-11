@@ -63,55 +63,136 @@ fn http_client()->io::Result<Client>{
     Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5)).build().map_err(|_|io::Error::other("HTTP client unavailable"))
 }
+const CLIENT_USAGE:&str="usage: doxa remote list URL | send URL SESSION TEXT | review URL SESSION REQUEST_ID | answer URL SESSION REQUEST_ID allow|deny /ABS_PRIVATE_REVIEW.json";
+
+fn review_receipt(target:&str,id:&str,snapshot:&Value)->io::Result<Value>{
+    if snapshot["ok"]!=true || snapshot["pending_inputs_complete"]!=true {
+        return Err(invalid("pending input review incomplete"));
+    }
+    let incarnation=snapshot["incarnation"].as_str().filter(|value|!value.is_empty()&&value.len()<=128)
+        .ok_or_else(||invalid("session incarnation missing"))?;
+    let request=snapshot["pending_inputs"].as_array().filter(|items|items.len()<=64)
+        .and_then(|items|items.iter().find(|item|item["id"]==id&&item.is_object()))
+        .ok_or_else(||invalid("input request changed or expired"))?;
+    Ok(json!({"version":1,"target":target,"incarnation":incarnation,"reviewed_request":request}))
+}
+fn receipt_answer(receipt:&Value,target:&str,id:&str,decision:&str)->io::Result<Value>{
+    if receipt.as_object().is_none_or(|object|object.len()!=4)
+        || receipt["version"]!=1 || receipt["target"]!=target
+        || !receipt["incarnation"].as_str().is_some_and(|value|!value.is_empty()&&value.len()<=128)
+        || !receipt["reviewed_request"].is_object() || receipt["reviewed_request"]["id"]!=id {
+        return Err(invalid("review receipt does not match target/request; run remote review and inspect it"));
+    }
+    Ok(json!({"id":id,"answer":{"decision":decision},"incarnation":receipt["incarnation"],
+        "reviewed_request":receipt["reviewed_request"]}))
+}
+fn read_review(path:&str)->io::Result<Value>{
+    use std::fs::{File,OpenOptions};
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt,OpenOptionsExt};
+    use std::os::unix::io::{AsRawFd,FromRawFd};
+    use std::path::{Component,Path};
+    let path=Path::new(path);
+    if !path.is_absolute(){return Err(invalid("review receipt must be an absolute private file"));}
+    let parts=path.components().collect::<Vec<_>>();
+    if parts.len()<2 || parts.iter().skip(1).any(|part|!matches!(part,Component::Normal(_))) {
+        return Err(invalid("invalid review receipt path"));
+    }
+    let mut directory=OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open("/")?;
+    for (index,part) in parts.iter().enumerate().skip(1){
+        let Component::Normal(name)=part else{return Err(invalid("invalid review receipt path"));};
+        use std::os::unix::ffi::OsStrExt;
+        let name=std::ffi::CString::new(name.as_bytes()).map_err(|_|invalid("invalid review receipt path"))?;
+        let leaf=index==parts.len()-1;
+        let flags=libc::O_RDONLY|libc::O_NOFOLLOW|libc::O_CLOEXEC|if leaf{libc::O_NONBLOCK}else{libc::O_DIRECTORY};
+        let fd=unsafe{libc::openat(directory.as_raw_fd(),name.as_ptr(),flags)};
+        if fd<0{return Err(io::Error::last_os_error());}
+        let mut file=unsafe{File::from_raw_fd(fd)};
+        let meta=file.metadata()?;
+        if leaf {
+            if !meta.is_file() || meta.uid()!=unsafe{libc::geteuid()} || meta.mode()&0o077!=0 || meta.nlink()!=1 || meta.len()>96_000 {
+                return Err(invalid("review receipt must be an owner-only regular file <=96KiB"));
+            }
+            let mut bytes=Vec::new();
+            (&mut file).take(96_001).read_to_end(&mut bytes)?;
+            let after=file.metadata()?;
+            if bytes.len()>96_000 || after.len()!=meta.len() || after.mtime()!=meta.mtime() || after.mtime_nsec()!=meta.mtime_nsec(){
+                return Err(invalid("review receipt changed during read"));
+            }
+            return serde_json::from_slice(&bytes).map_err(|_|invalid("invalid review receipt JSON"));
+        }
+        if !meta.is_dir() || meta.mode()&0o022!=0{return Err(invalid("unsafe review receipt directory"));}
+        directory=file;
+    }
+    Err(invalid("invalid review receipt path"))
+}
 pub async fn client_action(args:&[String])->io::Result<()> {
-    let [action,url,rest @ ..]=args else{return Err(invalid("usage: doxa remote list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny"))};
+    let [action,url,rest @ ..]=args else{return Err(invalid(CLIENT_USAGE))};
     let base=hub_url(url)?;let http=http_client()?;
     let key=wire::configured_key()?;
     if action=="list"&&rest.is_empty(){
-        let value:Value=http.get(base.join("api/sessions").map_err(|_|invalid("invalid hub route"))?)
-            .send().await.map_err(|_|io::Error::other("hub unavailable"))?.error_for_status()
-            .map_err(|_|io::Error::new(io::ErrorKind::PermissionDenied,"hub refused session list"))?
-            .json().await.map_err(|_|io::Error::other("unreadable hub reply"))?;
+        let value=bounded_reply(http.get(base.join("api/sessions").map_err(|_|invalid("invalid hub route"))?)
+            .send().await.map_err(|_|io::Error::other("hub unavailable"))?).await?;
         for session in value["sessions"].as_array().into_iter().flatten(){
             println!("{}  {}",session["id"].as_str().unwrap_or("?"),session["title"].as_str().unwrap_or("session"));
         }
         return Ok(());
     }
     let (session,operation,body)=match (action.as_str(),rest){
-        ("send",[session,text]) if valid_target(session)&&!text.trim().is_empty()&&text.len()<=58_000=>
-            (session.as_str(),"prompt",json!({"text":text})),
-        ("answer",[session,id,decision]) if valid_target(session)&&super::valid_id(id)&&matches!(decision.as_str(),"allow"|"deny")=>
-            (session.as_str(),"answer",json!({"id":id,"answer":{"decision":decision}})),
-        _=>return Err(invalid("usage: doxa remote list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny")),
+        ("review",[session,id]) if valid_target(session)&&super::valid_id(id)=>{
+            let snapshot=client_command(&http,&base,session,"transcript",json!({}),key.as_ref()).await?;
+            println!("{}",serde_json::to_string_pretty(&review_receipt(session,id,&snapshot)?).map_err(|_|invalid("invalid review receipt"))?);
+            return Ok(());
+        },
+        ("send",[session,text]) if valid_target(session)&&!text.trim().is_empty()&&text.len()<=58_000=>{
+            let snapshot=client_command(&http,&base,session,"transcript",json!({}),key.as_ref()).await?;
+            let incarnation=snapshot["incarnation"].as_str().filter(|value|!value.is_empty()&&value.len()<=128)
+                .ok_or_else(||invalid("session incarnation missing"))?;
+            (session.as_str(),"prompt",json!({"text":text,"incarnation":incarnation}))
+        },
+        ("answer",[session,id,decision,path]) if valid_target(session)&&super::valid_id(id)&&matches!(decision.as_str(),"allow"|"deny")=>
+            (session.as_str(),"answer",receipt_answer(&read_review(path)?,session,id,decision)?),
+        ("answer",[_,_,_])=>return Err(invalid("approval requires an inspected private review receipt; run remote review first")),
+        _=>return Err(invalid(CLIENT_USAGE)),
     };
+    let value=client_command(&http,&base,session,operation,body,key.as_ref()).await?;
+    println!("{value}");Ok(())
+}
+async fn bounded_reply(mut response:reqwest::Response)->io::Result<Value>{
+    if !response.status().is_success(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"hub refused request"));}
+    let mut bytes=Vec::new();
+    while let Some(chunk)=response.chunk().await.map_err(|_|io::Error::other("unreadable hub reply"))?{
+        if bytes.len()+chunk.len()>128_000{return Err(invalid("hub reply exceeds bound"));}
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|_|invalid("invalid hub reply"))
+}
+async fn client_command(http:&Client,base:&Url,session:&str,operation:&str,mut body:Value,key:Option<&[u8;32]>)->io::Result<Value>{
     let path=format!("api/sessions/{session}/{operation}");
-    let mut body=body;
     let request_id=if key.is_some(){
         let id=uuid::Uuid::new_v4().to_string();
         body["request_id"]=json!(id);
         Some(id)
     }else{None};
-    let body=if let Some(key)=key.as_ref(){
+    let body=if let Some(key)=key{
         wire::issue_command(&mut body)?;
         json!({"sealed":wire::seal(key,&format!("{session}|command|{operation}"),&body)?,
             "request_id":request_id})
     }else{body};
-    let queued=post(&http,&base,&path,body,None).await?;
+    let queued=post(http,base,&path,body,None).await?;
     let Some(command)=queued["command_id"].as_str().filter(|id|super::valid_id(id)) else{return Err(io::Error::other("hub did not return a command ID"))};
     for _ in 0..240{
         tokio::time::sleep(Duration::from_millis(250)).await;
         let path=format!("api/commands/{command}");
-        let result:Value=http.get(base.join(&path).map_err(|_|invalid("invalid hub path"))?).send().await
-            .map_err(|_|io::Error::other("hub status unavailable"))?.error_for_status()
-            .map_err(|_|io::Error::other("hub command status refused"))?.json().await
-            .map_err(|_|io::Error::other("unreadable command status"))?;
+        let result=bounded_reply(http.get(base.join(&path).map_err(|_|invalid("invalid hub path"))?).send().await
+            .map_err(|_|io::Error::other("hub status unavailable"))?).await?;
         match result["status"].as_str(){
             Some("accepted")=>{
-                let value=if let Some(key)=key.as_ref(){
+                let value=if let Some(key)=key{
                     wire::open(key,&format!("{session}|result|{operation}|{}",request_id.as_deref().unwrap()),&result["result"]["sealed"])?
                 }else{result["result"].clone()};
                 if value["ok"]==false{return Err(io::Error::other(value["error"].as_str().unwrap_or("remote command refused")));}
-                println!("{value}");return Ok(());
+                return Ok(value);
             },
             Some("refused")=>return Err(io::Error::other(result["result"]["error"].as_str().unwrap_or("host refused command"))),
             Some("expired")=>return Err(io::Error::other("command outcome uncertain; inspect session before retrying")),
@@ -167,7 +248,7 @@ fn decode_command(target:&str,op:&str,payload:&Value,key:Option<&[u8;32]>)->Resu
     }
     Ok(payload)
 }
-fn reviewed_android_input_is_current(payload:&Value,current:&Value)->bool {
+pub(super) fn reviewed_input_is_current(payload:&Value,current:&Value)->bool {
     payload.get("reviewed_request")==Some(current)
 }
 fn strict_incarnation(entry:&doxa_peers::PeerRecord)->Option<&str>{
@@ -191,7 +272,7 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
     if android && !android_incarnation_matches(&entry,&payload) {
         return json!({"ok":false,"error":"Android session incarnation changed"});
     }
-    if payload.get("incarnation").is_some() && payload["incarnation"].as_str()!=Some(remote_incarnation(&entry)) {
+    if matches!(op,"prompt"|"answer") && payload["incarnation"].as_str()!=Some(remote_incarnation(&entry)) {
         return json!({"ok":false,"error":"session incarnation changed"});
     }
     let client=match connect(app,&entry,None,None).await{Ok(client)=>client,Err(_)=>return json!({"ok":false,"error":"session unavailable"})};
@@ -215,7 +296,7 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
                 if state["pending_inputs_complete"]!=true{return Err(invalid("pending review incomplete"));}
                 let reviewed=state["pending_inputs"].as_array().and_then(|items|items.iter().find(|item|item["id"]==id))
                     .ok_or_else(||invalid("input request changed or expired"))?;
-                if (android || payload.get("reviewed_request").is_some()) && !reviewed_android_input_is_current(&payload,reviewed) {
+                if !reviewed_input_is_current(&payload,reviewed) {
                     return Err(invalid("reviewed input changed"));
                 }
                 client.call("answer_needs_input",json!({"id":id,"answer":payload["answer"],"reviewed_request":reviewed}))
@@ -348,6 +429,38 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
 }
 
 #[cfg(test)]mod tests{
+    #[test]
+    fn all_clients_require_the_exact_reviewed_snapshot() {
+        let current=json!({"id":"ask-1","kind":"permission","input_summary":"echo B"});
+        assert!(!reviewed_input_is_current(&json!({"id":"ask-1"}),&current));
+        assert!(!reviewed_input_is_current(&json!({"reviewed_request":{"id":"ask-1","kind":"permission","input_summary":"echo A"}}),&current));
+        assert!(reviewed_input_is_current(&json!({"reviewed_request":current}),&current));
+    }
+    #[test]
+    fn cli_receipt_binds_target_request_and_complete_review() {
+        let state=json!({"ok":true,"incarnation":"first","pending_inputs_complete":true,
+            "pending_inputs":[{"id":"ask-1","kind":"permission","input_summary":"echo reviewed"}]});
+        let receipt=review_receipt("host~session","ask-1",&state).unwrap();
+        let answer=receipt_answer(&receipt,"host~session","ask-1","allow").unwrap();
+        assert_eq!(answer["incarnation"],"first");
+        assert!(reviewed_input_is_current(&answer,&state["pending_inputs"][0]));
+        assert!(receipt_answer(&receipt,"host~other","ask-1","allow").is_err());
+        assert!(receipt_answer(&receipt,"host~session","ask-2","allow").is_err());
+        let mut incomplete=state;incomplete["pending_inputs_complete"]=json!(false);
+        assert!(review_receipt("host~session","ask-1",&incomplete).is_err());
+    }
+    #[test]
+    fn cli_receipt_reader_refuses_unsafe_files_and_bounds_json() {
+        use std::os::unix::fs::{PermissionsExt,symlink};
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("review.json");
+        std::fs::write(&path,b"{\"version\":1}").unwrap();
+        std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_review(path.to_str().unwrap()).unwrap()["version"],1);
+        let link=dir.path().join("link.json");symlink(&path,&link).unwrap();assert!(read_review(link.to_str().unwrap()).is_err());
+        let hard=dir.path().join("hard.json");std::fs::hard_link(&path,&hard).unwrap();assert!(read_review(path.to_str().unwrap()).is_err());std::fs::remove_file(hard).unwrap();
+        std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o644)).unwrap();assert!(read_review(path.to_str().unwrap()).is_err());
+        std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();std::fs::write(&path,vec![b' ';96_001]).unwrap();assert!(read_review(path.to_str().unwrap()).is_err());
+    }
     use super::*;
     #[test]fn android_requires_random_registry_incarnation_while_legacy_remote_identity_remains_available(){
         let mut entry:doxa_peers::PeerRecord=serde_json::from_value(json!({
@@ -425,14 +538,14 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
         inner["reviewed_request"]=current.clone();
         plain=inner.clone();plain["android_fence_v1"]=json!(true);
         let decoded=decode_command("host~session","answer",&plain,None).unwrap();
-        assert!(reviewed_android_input_is_current(&decoded,&current));
-        assert!(!reviewed_android_input_is_current(&decoded,
+        assert!(reviewed_input_is_current(&decoded,&current));
+        assert!(!reviewed_input_is_current(&decoded,
             &json!({"id":"input-1","question":"Approve deletion?","options":["yes","always"]})));
         let key=[7u8;32];
         let sealed=wire::seal(&key,"host~session|command|answer",&inner).unwrap();
         let outer=json!({"request_id":id,"hub_boot":boot,"incarnation":"v1",
             "sealed":sealed,"android_fence_v1":true});
-        assert!(reviewed_android_input_is_current(
+        assert!(reviewed_input_is_current(
             &decode_command("host~session","answer",&outer,Some(&key)).unwrap(),&current));
     }
 }

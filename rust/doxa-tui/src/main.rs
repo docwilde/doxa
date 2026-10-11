@@ -99,7 +99,9 @@ Commands:
   remote keygen ABS_PATH Create an owner-only shared key for encrypted remote tabs
   remote send URL SESSION TEXT
                        Send a prompt through the private hub
-  remote answer URL SESSION REQUEST_ID allow|deny
+  remote review URL SESSION REQUEST_ID
+                        Print the pending request as a private review receipt
+  remote answer URL SESSION REQUEST_ID allow|deny /ABS_REVIEW.json
                        Resolve one pending approval through the private hub
 
 Run doxa without a command to restore this project's saved tabs or start
@@ -318,8 +320,10 @@ fn run(args: &[String]) -> io::Result<()> {
                     && !matches!(args, [first, second, _, _] if first == "remote" && second == "connect")
                     && !matches!(args, [first, second, _, _, _] if first == "remote" && second == "send")
                     && !matches!(args, [first, second, _] if first == "remote" && second == "list")
-                    && !matches!(args, [first, second, _, _, _, _] if first == "remote" && second == "answer") {
-                    return Err(invalid("usage: doxa remote serve | connect URL HOST_ID | tui URL [--save-layout] | keygen ABS_PATH | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny"));
+                    && !matches!(args, [first, second, _, _, _] if first == "remote" && second == "review")
+                    && !matches!(args, [first, second, _, _, _, _] if first == "remote" && second == "answer")
+                    && !matches!(args, [first, second, _, _, _, _, _] if first == "remote" && second == "answer") {
+                    return Err(invalid("usage: doxa remote serve | connect URL HOST_ID | tui URL [--save-layout] | keygen ABS_PATH | list URL | send URL SESSION TEXT | review URL SESSION REQUEST_ID | answer URL SESSION REQUEST_ID allow|deny /ABS_REVIEW.json"));
                 }
                 let executable = std::env::var_os("DOXA_REMOTE_BIN").map(PathBuf::from)
                     .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name("doxa-remote"));

@@ -5,6 +5,7 @@ const el = id => document.getElementById(id);
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 let client = null, active = null, generation = 0, stream = null, currentText = null;
 let olderCursor = null, olderLoading = false, currentQuestion = null;
+let sessionReady = false, activeIncarnation = null;
 const pending = new Map();
 
 function status(message) { el('status').textContent = message; }
@@ -28,16 +29,20 @@ function turnBlocks(turn) {
     entries.push(block('tool', `${tool.name || 'Tool'}${tool.result ? ` · ${tool.result}` : ''}`));
   return entries;
 }
-function resetSession() {
+function invalidateControls() {
+  sessionReady = false; pending.clear(); currentQuestion = null;
+  el('question').replaceChildren(); el('question').hidden = true; el('prompt').hidden = true;
+}
+function resetSession(keepDraft = false) {
   generation++;
   stream?.abort(); stream = null; active = null; currentText = null;
-  pending.clear(); currentQuestion = null; olderCursor = null; olderLoading = false;
+  invalidateControls(); activeIncarnation = null; olderCursor = null; olderLoading = false;
   el('turns').replaceChildren(); el('question').hidden = true; el('older').hidden = true;
-  el('prompt').hidden = true; el('prompt-text').value = '';
+  el('prompt').hidden = true; if (!keepDraft) el('prompt-text').value = '';
 }
 
 function showNextQuestion() {
-  if (currentQuestion) return;
+  if (!sessionReady || currentQuestion) return;
   const next = [...pending.values()].find(item => !item.answered);
   const box = el('question'); box.replaceChildren();
   if (!next || !active || !client) { box.hidden = true; return; }
@@ -45,12 +50,15 @@ function showNextQuestion() {
   const sessionId = active, mine = generation;
   const title = document.createElement('strong');
   title.textContent = String(next.title || next.input_summary || next.tool_name || 'Input needed').slice(0, 500);
-  box.append(title);
+  const reviewed = document.createElement('pre');
+  reviewed.textContent = JSON.stringify(next.reviewed, null, 2);
+  box.append(title, reviewed);
   const answer = async value => {
+    if (!sessionReady || mine !== generation || active !== sessionId || pending.get(next.id) !== next) return;
     try {
       status('Sending answer…');
-      await client.command(sessionId, 'answer', {id:next.id, answer:value});
-      if (mine !== generation) return;
+      await client.command(sessionId, 'answer', {id:next.id, answer:value, incarnation:activeIncarnation, reviewed_request:next.reviewed});
+      if (mine !== generation || pending.get(next.id) !== next) return;
       next.answered = true; currentQuestion = null; showNextQuestion();
       status('Answer delivered');
     } catch (error) { if (mine === generation) status(error.message); }
@@ -60,7 +68,7 @@ function showNextQuestion() {
     const answers = {};
     let index = 0;
     function step() {
-      box.replaceChildren(title);
+      box.replaceChildren(title, reviewed);
       if (index >= questions.length) { answer({answers}); return; }
       const question = questions[index];
       const label = document.createElement('p');
@@ -85,7 +93,14 @@ function showNextQuestion() {
 }
 
 function handleFrame(frame) {
-  if (frame.type === 'hello') return;
+  if (frame.type === 'hello') {
+    if (Object.hasOwn(frame, 'pending_inputs')) {
+      pending.clear(); currentQuestion = null;
+      for (const item of frame.pending_inputs) if (item.id) pending.set(item.id, {...item, reviewed:item, answered:false});
+      showNextQuestion();
+    }
+    return;
+  }
   if (frame.type !== 'event') return;
   const event = frame.event || {}, data = event.data || {};
   switch (event.type) {
@@ -99,7 +114,10 @@ function handleFrame(frame) {
       currentText = null;
       if (data.error || data.reason) line('error', data.error || data.reason);
       status('Turn finished'); break;
-    case 'needs_input': pending.set(data.id, {...data, answered:false}); showNextQuestion(); status('Input needed'); break;
+    case 'needs_input':
+      pending.set(data.id, {...data, reviewed:data, answered:false});
+      if (currentQuestion === data.id) currentQuestion = null;
+      showNextQuestion(); status('Input needed'); break;
     case 'needs_input_resolved':
       pending.delete(data.id); if (currentQuestion === data.id) currentQuestion = null;
       showNextQuestion(); break;
@@ -109,40 +127,69 @@ function handleFrame(frame) {
   }
 }
 
+function recoverSession(sessionId, mine, message) {
+  if (mine !== generation || active !== sessionId) return;
+  stream?.abort(); generation++; invalidateControls();
+  status(message);
+  // Disable synchronously; inventory/snapshot failures leave the tab read-only.
+  void (async () => {
+    try {
+      const sessions = await client.sessions();
+      if (generation !== mine + 1 || active !== sessionId) return;
+      const session = sessions.find(item => item.id === sessionId && item.encrypted);
+      if (!session) throw new Error('Remote session offline');
+      await selectSession(session, true);
+    } catch (error) { if (generation === mine + 1) status(error.message); }
+  })();
+}
 async function followEvents(sessionId, firstCursor, mine, controller) {
   let cursor = firstCursor;
-  while (mine === generation && !controller.signal.aborted) {
-    try {
-      await client.events(sessionId, cursor, controller.signal, async frame => {
-        if (mine !== generation) return;
-        if (frame.type === 'event' && Number.isSafeInteger(frame.seq))
-          cursor = Math.max(cursor, frame.seq + 1);
-        handleFrame(frame);
-      });
-      if (mine === generation) status('Reconnecting to events…');
-    } catch (error) {
-      if (controller.signal.aborted || mine !== generation) return;
-      status(`Events: ${error.message}`);
-    }
-    if (mine === generation && !controller.signal.aborted) await pause(1500);
+  try {
+    await client.events(sessionId, cursor, controller.signal, async frame => {
+      if (mine !== generation || !sessionReady) return;
+      if (frame.type === 'hello') {
+        if (frame.incarnation !== activeIncarnation || (Object.hasOwn(frame, 'pending_inputs') &&
+            (!Array.isArray(frame.pending_inputs) || frame.pending_inputs.length > 64 || frame.pending_inputs_complete !== true))) {
+          recoverSession(sessionId, mine, 'Session changed; refreshing review'); return;
+        }
+      } else if (frame.type === 'event') {
+        if (frame.event?.type === 'replay_gap' || !Number.isSafeInteger(frame.seq) || frame.seq < 0 || frame.seq > cursor) {
+          recoverSession(sessionId, mine, 'Events changed; refreshing review'); return;
+        }
+        if (frame.seq < cursor) return;
+        if (frame.seq === Number.MAX_SAFE_INTEGER) {
+          recoverSession(sessionId, mine, 'Invalid event cursor'); return;
+        }
+        cursor = frame.seq + 1;
+      }
+      handleFrame(frame);
+    });
+    if (!controller.signal.aborted) recoverSession(sessionId, mine, 'Reconnecting; refreshing review');
+  } catch (error) {
+    if (!controller.signal.aborted) recoverSession(sessionId, mine, `Events: ${error.message}`);
   }
 }
 
-async function selectSession(session) {
-  if (!client || !session.encrypted || !validTarget(session.id)) return;
-  resetSession();
+async function selectSession(session, keepDraft = false) {
+  if (!client || !session.encrypted || !validTarget(session.id) || typeof session.incarnation !== 'string' || !session.incarnation || session.incarnation.length > 128) return;
+  resetSession(keepDraft);
   const mine = generation, sessionId = session.id;
-  active = sessionId;
+  active = sessionId; activeIncarnation = session.incarnation;
   for (const button of el('sessions').children)
     button.setAttribute('aria-current', String(button.dataset.sessionId === sessionId));
   status(`${session.title || sessionId} · loading`);
   try {
     const history = await client.command(sessionId, 'transcript', {});
     if (mine !== generation) return;
-    if (!Array.isArray(history.turns) || history.turns.length > 80 ||
+    if (history.ok === false || history.incarnation !== activeIncarnation || history.pending_inputs_complete !== true || !Array.isArray(history.turns) || history.turns.length > 80 ||
         !Array.isArray(history.pending_inputs) || history.pending_inputs.length > 64 ||
-        !Number.isSafeInteger(history.next_seq)) throw new Error('Invalid remote transcript');
-    for (const item of history.pending_inputs) if (item.id) pending.set(item.id, {...item, answered:false});
+        !Number.isSafeInteger(history.next_seq) || history.next_seq < 0 || history.next_seq === Number.MAX_SAFE_INTEGER) throw new Error('Invalid remote transcript');
+    const inventory = await client.sessions();
+    if (mine !== generation) return;
+    if (!inventory.some(item => item.id === sessionId && item.encrypted && item.incarnation === activeIncarnation))
+      throw new Error('Session changed while loading');
+    sessionReady = true;
+    for (const item of history.pending_inputs) if (item.id) pending.set(item.id, {...item, reviewed:item, answered:false});
     showNextQuestion();
     for (const turn of history.turns)
       for (const entry of turnBlocks(turn)) el('turns').append(entry);
@@ -171,7 +218,11 @@ async function loadSessions() {
       button.onclick = () => selectSession(session);
       nav.append(button);
     }
-    if (active && !sessions.some(session => session.id === active && session.encrypted)) resetSession();
+    if (active) {
+      const selected = sessions.find(session => session.id === active && session.encrypted);
+      if (!selected) resetSession(true);
+      else if (selected.incarnation !== activeIncarnation) await selectSession(selected, true);
+    }
     if (!active) {
       const first = sessions.find(session => session.encrypted);
       if (first) await selectSession(first);
@@ -214,7 +265,7 @@ el('older').onclick = async () => {
   try {
     const history = await client.command(active, 'transcript', {before});
     if (mine !== generation) return;
-    if (!Array.isArray(history.turns) || !Number.isSafeInteger(history.before) || history.before >= before)
+    if (history.ok === false || history.incarnation !== activeIncarnation || history.pending_inputs_complete !== true || !Array.isArray(history.turns) || !Number.isSafeInteger(history.before) || history.before >= before)
       throw new Error('Invalid history page');
     const viewport = el('conversation'), turns = el('turns');
     const oldHeight = viewport.scrollHeight, oldTop = viewport.scrollTop;
@@ -232,11 +283,11 @@ el('older').onclick = async () => {
 el('prompt').onsubmit = async event => {
   event.preventDefault();
   const text = el('prompt-text').value.trim();
-  if (!client || !active || !text) return;
+  if (!client || !active || !sessionReady || !text) return;
   const sessionId = active, mine = generation, button = el('prompt').querySelector('button');
   button.disabled = true; status('Sending prompt…');
   try {
-    await client.command(sessionId, 'prompt', {text});
+    await client.command(sessionId, 'prompt', {text, incarnation:activeIncarnation});
     if (mine === generation) { el('prompt-text').value = ''; status('Prompt delivered'); }
   } catch (error) { if (mine === generation) status(error.message); }
   finally { button.disabled = false; }

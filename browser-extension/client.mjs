@@ -63,7 +63,7 @@ export class DoxaRemoteClient {
   async sessions() {
     const result = await this.get('api/sessions');
     if (!Array.isArray(result.sessions) || result.sessions.length > 64 ||
-        result.sessions.some(session => !validTarget(session.id)))
+        result.sessions.some(session => !validTarget(session.id) || typeof session.incarnation !== 'string' || !session.incarnation || session.incarnation.length > 128))
       throw new Error('Invalid hub session inventory');
     return result.sessions;
   }
