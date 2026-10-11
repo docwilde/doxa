@@ -19,6 +19,12 @@ const MAX_STREAM_TEXT_BYTES: usize = 8 * 1024 * 1024;
 /// later turn estimates remain useful but the running session sum is unknown.
 struct CostEstimate { spent: f64, complete: bool }
 
+struct RoutedCompaction<'a> {
+    limits: doxa_vendors::TurnLimits,
+    target: &'a Value,
+    admit: &'a mut (dyn FnMut(&Value, &Value) -> Result<(), ()> + Send),
+}
+
 fn priced_turn(vendor: Vendor, model: &str, input: u64, output: u64) -> Option<f64> {
     let price = crate::budget_host::vendor_price(vendor.engine_id(), model)?;
     let cost = (input as f64 * price.input + output as f64 * price.output) / 1_000_000.0;
@@ -306,7 +312,27 @@ impl VendorHost {
         Ok(())
     }
 
+    fn router_source_preflight(&self) -> Result<(), String> {
+        if self.storage_uncertain.load(Ordering::Acquire) || self.scrub_failed.load(Ordering::Acquire) {
+            return Err("Router source storage or scrubbing is unavailable; further provider work withheld".into());
+        }
+        if self.routed {
+            let history = self.history.lock().unwrap();
+            let verified = self.store.read_vendor_messages("router", "router-conversation-v1")
+                .and_then(|saved| {
+                    if saved.as_ref() != Some(&*history) { return Err(std::io::Error::other("Router canonical messages changed")); }
+                    self.store.verify_vendor_transcript("router", &history)
+                });
+            if verified.is_err() {
+                self.storage_uncertain.store(true, Ordering::Release);
+                return Err("Router canonical source changed; further provider work withheld".into());
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn routing_view(&self, text: &str, max_bytes: usize) -> Result<(String, u64, bool, bool), String> {
+        self.router_source_preflight()?;
         let prompt = self.public_prompt(text)?;
         let history = self.history.lock().unwrap();
         let has_assistant = history.iter().any(|message| message["role"] == "assistant");
@@ -412,14 +438,33 @@ impl VendorHost {
         } else { originals.to_vec() }
     }
 
+    pub(super) fn compaction_input_bytes(&self, vendor: Vendor, model: &str, effort: &str,
+        output_tokens: u64) -> Result<u64, String> {
+        self.router_source_preflight()?;
+        let originals = self.history.lock().unwrap();
+        let mut body = doxa_vendors::managed_compaction_body(vendor, model, &self.context_messages(&originals), effort)
+            .map_err(|_| "Managed compaction requires a bounded existing conversation")?;
+        body["max_tokens"] = json!(output_tokens);
+        Ok(serde_json::to_vec(&body).map_err(|_| "Managed compaction body unavailable")?.len() as u64)
+    }
+
+    pub(super) fn compact_routed(&self, limits: doxa_vendors::TurnLimits, target: &Value,
+        admit: &mut (dyn FnMut(&Value, &Value) -> Result<(), ()> + Send), emit: &mut dyn FnMut(Value)) {
+        self.compact_with(Some(RoutedCompaction { limits, target, admit }), emit);
+    }
+
     /// Review the exact durable source, then prepare a bounded managed summary.
     /// Originals remain durable; only the separate context optimization changes.
     fn compact(&self, emit: &mut dyn FnMut(Value)) {
+        self.compact_with(None, emit);
+    }
+
+    fn compact_with(&self, mut routed: Option<RoutedCompaction<'_>>, emit: &mut dyn FnMut(Value)) {
         let model = self.model.lock().unwrap().clone();
         let mut final_data = json!({"operation":"compact","compaction_semantics":"doxa_managed_summary",
             "is_error":true,"model":model,"prompt_tokens":0,"completion_tokens":0,
             "usage_complete":true,"model_consistent":true,"usage_scope":"turn","usage_source":"vendor_response",
-            "cost_usd":null,"session_cost_usd":null});
+            "summary_attempted":false,"original_messages":0,"cost_usd":null,"session_cost_usd":null});
         let run = (|| -> Result<(), &'static str> {
             if !self.lore_enabled || doxa_lore::review_disabled().unwrap_or(true) { return Err("LORE review is disabled; managed compaction blocked"); }
             if self.storage_uncertain.load(Ordering::Acquire) || self.scrub_failed.load(Ordering::Acquire) { return Err("Vendor source storage or scrubbing is unavailable"); }
@@ -433,27 +478,68 @@ impl VendorHost {
             let _active = ActiveTurn(&self.active);
             let originals = self.history.lock().unwrap().clone();
             if originals.is_empty() { return Err("Managed compaction requires an existing conversation"); }
+            final_data["original_messages"] = json!(originals.len());
             let source = self.store.transcript_path();
             let (_, proof) = doxa_engines::compact_hook::safe_read(&source, doxa_transcript::MAX_VENDOR_TRANSCRIPT_BYTES as usize)
-                .map_err(|_| "Vendor transcript source is unsafe")?;
+                .map_err(|_| {self.storage_uncertain.store(true, Ordering::Release); "Vendor transcript source is unsafe"})?;
             let (_, messages_proof) = doxa_engines::compact_hook::safe_read(&self.store.vendor_messages_path(), doxa_transcript::MAX_VENDOR_MESSAGES_BYTES as usize)
-                .map_err(|_| "Vendor saved messages source is unsafe")?;
-            self.store.verify_vendor_transcript(self.storage_engine(), &originals).map_err(|_| "Vendor original records changed")?;
-            let metadata = json!({"cwd":self.cwd,"session_id":self.session_id,"transcript":source,"older":true,"expected_source":proof.json()});
+                .map_err(|_| {self.storage_uncertain.store(true, Ordering::Release); "Vendor saved messages source is unsafe"})?;
+            // Catalog lookup happens after the router's first source check.
+            // A changed messages file cannot become a new trusted proof here.
+            self.router_source_preflight().map_err(|_| "Router canonical source changed; managed compaction withheld")?;
+            self.store.verify_vendor_transcript(self.storage_engine(), &originals).map_err(|_| {
+                self.storage_uncertain.store(true, Ordering::Release); "Vendor original records changed"})?;
+            let mut metadata = json!({"cwd":self.cwd,"session_id":self.session_id,"transcript":source,"older":true,"expected_source":proof.json()});
+            if let Some(routed) = &routed {
+                metadata["conversation_engine"] = json!("router");
+                metadata["summary_target"] = routed.target.clone();
+            }
             let executable = std::env::current_exe().map_err(|_| "Native reviewer owner is unavailable")?;
-            emit(json!({"type":"turn_started","data":{"operation":"compact","prompt":"/compact","compaction_semantics":"doxa_managed_summary"}}));
-            let approved = doxa_engines::review_worker::review(&executable,&metadata,self.storage_engine(),doxa_engines::review_worker::REVIEW_TIMEOUT,
+            emit(json!({"type":"turn_started","data":{"operation":"compact","prompt":"/compact","original_messages":originals.len(),"compaction_semantics":"doxa_managed_summary"}}));
+            // Pinned LORE supports provider authority names. Canonical router
+            // storage and its exact source proof remain unchanged, and the
+            // supervisor receipt binds the router identity and summary target.
+            let review_engine = if routed.is_some() { self.vendor().engine_id() } else { self.storage_engine() };
+            let approved = doxa_engines::review_worker::review(&executable,&metadata,review_engine,doxa_engines::review_worker::REVIEW_TIMEOUT,
                 || *cancel.borrow() || self.closing.load(Ordering::Acquire)).map_err(|_| "LORE review owner failed; original context retained")?;
             if !approved { return Err("LORE review did not complete; original context retained"); }
             emit(json!({"type":"lore_review_completed","data":{"before":"compaction"}}));
             if *cancel.borrow() || self.closing.load(Ordering::Acquire) { return Err("Managed compaction cancelled; original context retained"); }
-            let body = doxa_vendors::managed_compaction_body(self.vendor(),&model,&self.context_messages(&originals),&self.effort.lock().unwrap())
+            let source_matches = || -> std::io::Result<bool> {
+                let matches = (|| Ok(*self.history.lock().unwrap() == originals
+                    && doxa_engines::compact_hook::safe_read(&source,doxa_transcript::MAX_VENDOR_TRANSCRIPT_BYTES as usize)?.1 == proof
+                    && doxa_engines::compact_hook::safe_read(&self.store.vendor_messages_path(),doxa_transcript::MAX_VENDOR_MESSAGES_BYTES as usize)?.1 == messages_proof))();
+                if !matches.as_ref().is_ok_and(|matches|*matches) { self.storage_uncertain.store(true, Ordering::Release); }
+                matches
+            };
+            if !source_matches().unwrap_or(false) { return Err("Reviewed compaction source changed; original context retained"); }
+            let mut body = doxa_vendors::managed_compaction_body(self.vendor(),&model,&self.context_messages(&originals),&self.effort.lock().unwrap())
                 .map_err(|_| "Managed compaction input exceeds its bounded context")?;
+            if let Some(routed) = &routed {
+                body["max_tokens"] = json!(routed.limits.output_tokens);
+                if serde_json::to_vec(&body).map_err(|_| "Managed compaction body unavailable")?.len() > routed.limits.input_bytes {
+                    return Err("Managed compaction request exceeds the configured byte cap");
+                }
+            }
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| "Managed compaction runtime is unavailable")?;
             // Once a request is admitted, missing provider accounting remains
             // unknown to the existing budget owner, even on cancellation.
             final_data["usage_complete"] = json!(false);
-            let outcome = {
+            let attempted = AtomicBool::new(false);
+            let response = if let Some(routed) = &mut routed {
+                let mut admit = |body: &Value| {
+                    if serde_json::to_vec(body).map_err(|_| ())?.len() > routed.limits.input_bytes
+                        || !source_matches().unwrap_or(false) { return Err(()); }
+                    (routed.admit)(body, &metadata)
+                };
+                #[cfg(feature = "local-test-server")]
+                { if let Some(endpoint) = &self.endpoint {
+                    runtime.block_on(doxa_vendors::stream_once_admitted_local(self.vendor(),endpoint,body,cancel.clone(),Duration::from_secs(180),|_|{},&mut admit,&attempted))
+                } else { runtime.block_on(doxa_vendors::stream_once_admitted(self.vendor(),body,cancel.clone(),Duration::from_secs(180),|_|{},&mut admit,&attempted)) } }
+                #[cfg(not(feature = "local-test-server"))]
+                { runtime.block_on(doxa_vendors::stream_once_admitted(self.vendor(),body,cancel.clone(),Duration::from_secs(180),|_|{},&mut admit,&attempted)) }
+            } else {
+                attempted.store(true, Ordering::Release);
                 #[cfg(feature = "local-test-server")]
                 {
                     if let Some(endpoint) = &self.endpoint {
@@ -462,22 +548,34 @@ impl VendorHost {
                 }
                 #[cfg(not(feature = "local-test-server"))]
                 runtime.block_on(doxa_vendors::stream_once(self.vendor(),body,cancel.clone(),Duration::from_secs(180),|_|{}))
-            }.map_err(|_| "Managed compaction request failed; original context retained")?;
-            final_data["model"] = json!(outcome.model);
-            final_data["model_consistent"] = json!(outcome.model.as_deref() == Some(&model));
+            };
+            final_data["summary_attempted"] = json!(attempted.load(Ordering::Acquire));
+            let outcome = response.map_err(|_| "Managed compaction request or admission failed; original context retained")?;
+            if routed.is_none() { final_data["model"] = json!(outcome.model); }
+            final_data["model_consistent"] = json!(!outcome.model_conflict && outcome.model.as_deref() == Some(&model));
+            if routed.is_some() && final_data["model_consistent"] != true { final_data["model"] = Value::Null; }
             if let Some(usage) = &outcome.usage {
                 final_data["prompt_tokens"] = usage["prompt_tokens"].clone();
                 final_data["completion_tokens"] = usage["completion_tokens"].clone();
                 final_data["usage_complete"] = json!(usage["prompt_tokens"].as_u64().is_some() && usage["completion_tokens"].as_u64().is_some());
             }
+            if routed.is_some() && (outcome.usage.as_ref().and_then(|usage|usage["prompt_tokens"].as_u64()).is_none_or(|input|input == 0)
+                || (!outcome.text.is_empty() || !outcome.reasoning.is_empty() || !outcome.tool_calls.is_empty())
+                    && outcome.usage.as_ref().and_then(|usage|usage["completion_tokens"].as_u64()).is_none_or(|output|output == 0)) {
+                final_data["usage_complete"] = json!(false);
+            }
+            if routed.as_ref().is_some_and(|routed| final_data["usage_complete"] != true
+                || final_data["model_consistent"] != true
+                || outcome.usage.as_ref().and_then(|usage|usage["completion_tokens"].as_u64()).is_none_or(|output|output > routed.limits.output_tokens)) {
+                return Err("Managed summary model, usage or output cap was not verified; original context retained");
+            }
             if *cancel.borrow() || self.closing.load(Ordering::Acquire) { return Err("Managed compaction cancelled; original context retained"); }
             if outcome.finish_reason.as_deref() != Some("stop") || !outcome.tool_calls.is_empty()
-                || outcome.text.trim().is_empty() || outcome.text.len() > 64 * 1024 { return Err("Managed summary was incomplete or unsafe; original context retained"); }
+                || outcome.malformed_chunks != 0 || outcome.text.trim().is_empty() || outcome.text.len() > 64 * 1024 { return Err("Managed summary was incomplete or unsafe; original context retained"); }
             let summary = self.scrub(&outcome.text).map_err(|_| "Managed summary scrubbing failed; original context retained")?;
             self.store.try_write_vendor_context(self.storage_engine(), &originals, &summary, &proof.json(), || {
                 if *cancel.borrow() || self.closing.load(Ordering::Acquire) || *self.history.lock().unwrap() != originals { return Ok(false); }
-                Ok(doxa_engines::compact_hook::safe_read(&source,doxa_transcript::MAX_VENDOR_TRANSCRIPT_BYTES as usize)?.1 == proof
-                    && doxa_engines::compact_hook::safe_read(&self.store.vendor_messages_path(),doxa_transcript::MAX_VENDOR_MESSAGES_BYTES as usize)?.1 == messages_proof)
+                source_matches()
             }).map_err(|_| "Reviewed compaction source changed; original context retained")?;
             *self.compact_context.lock().unwrap() = Some((originals.len(),summary));
             emit(json!({"type":"compaction_done","data":{"reviewed":true,"compaction_semantics":"doxa_managed_summary","original_messages":originals.len()}}));

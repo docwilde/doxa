@@ -7,6 +7,7 @@ pub mod credentials;
 use futures_util::{future::BoxFuture, StreamExt};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -403,6 +404,7 @@ pub enum Error {
     MissingReasoningHistory,
     ToolResultTooLarge,
     UsageOverflow,
+    AdmissionDenied,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -464,6 +466,8 @@ pub struct Completion {
     pub text: String,
     pub reasoning: String,
     pub model: Option<String>,
+    /// A stream that changes its model cannot establish exact-model billing.
+    pub model_conflict: bool,
     pub usage: Option<Value>,
     pub finish_reason: Option<String>,
     pub tool_calls: Vec<ToolCall>,
@@ -519,7 +523,9 @@ impl Accumulator {
             return Ok(());
         };
         if let Some(model) = chunk.get("model").and_then(Value::as_str) {
-            self.completion.model = Some(scrub(model, key));
+            let model = scrub(model, key);
+            self.completion.model_conflict |= self.completion.model.as_ref().is_some_and(|previous| *previous != model);
+            self.completion.model = Some(model);
         }
         if let Some(usage) = chunk.get("usage").filter(|v| v.is_object()) {
             self.completion.usage = Some(scrub_json(usage.clone(), key));
@@ -724,6 +730,35 @@ pub async fn stream_once_local(
 ) -> Result<Completion, Error> {
     validate_local_endpoint(endpoint)?;
     stream_at(vendor, endpoint, body, cancel, timeout, on_delta).await
+}
+
+/// One request with durable host admission at the transport boundary. Known
+/// credential/client/body/pre-send cancellation failures never set attempted.
+pub async fn stream_once_admitted(vendor: Vendor, body: Value, cancel: watch::Receiver<bool>,
+    timeout: Duration, on_delta: impl FnMut(Delta),
+    admit: &mut (dyn FnMut(&Value) -> Result<(), ()> + Send), attempted: &AtomicBool) -> Result<Completion, Error> {
+    stream_admitted_at(vendor, vendor.endpoint(), body, cancel, timeout, on_delta, admit, attempted).await
+}
+
+#[cfg(feature = "local-test-server")]
+pub async fn stream_once_admitted_local(vendor: Vendor, endpoint: &str, body: Value,
+    cancel: watch::Receiver<bool>, timeout: Duration, on_delta: impl FnMut(Delta),
+    admit: &mut (dyn FnMut(&Value) -> Result<(), ()> + Send), attempted: &AtomicBool) -> Result<Completion, Error> {
+    validate_local_endpoint(endpoint)?;
+    stream_admitted_at(vendor, endpoint, body, cancel, timeout, on_delta, admit, attempted).await
+}
+
+struct RequestAdmission<'a> {
+    admit: &'a mut (dyn FnMut(&Value) -> Result<(), ()> + Send),
+    attempted: &'a AtomicBool,
+}
+async fn stream_admitted_at(vendor: Vendor, endpoint: &str, body: Value, cancel: watch::Receiver<bool>,
+    timeout: Duration, on_delta: impl FnMut(Delta),
+    admit: &mut (dyn FnMut(&Value) -> Result<(), ()> + Send), attempted: &AtomicBool) -> Result<Completion, Error> {
+    let key = credentials::resolve(vendor).map_err(|_| Error::CredentialStore)?
+        .ok_or(Error::MissingCredential(vendor.env_var()))?;
+    stream_at_with_key(vendor, endpoint, body, &key, cancel, timeout, on_delta,
+        Some(RequestAdmission { admit, attempted })).await
 }
 
 #[cfg(feature = "local-test-server")]
@@ -989,6 +1024,7 @@ async fn run_turn_at(
             cancel.clone(),
             remaining,
             &mut on_delta,
+            None,
         )
         .await?;
         // Provider metadata can echo an inactive credential too. Mask the
@@ -1007,7 +1043,7 @@ async fn run_turn_at(
             }
         }
         outcome.requests += 1;
-        outcome.model_consistent &= completion.model.as_deref() == Some(model);
+        outcome.model_consistent &= !completion.model_conflict && completion.model.as_deref() == Some(model);
         outcome.usage_complete &= completion.usage.as_ref().is_some_and(|usage| {
             usage.get("prompt_tokens").and_then(Value::as_u64).is_some()
                 && usage.get("completion_tokens").and_then(Value::as_u64).is_some()
@@ -1118,7 +1154,7 @@ async fn stream_at(
 ) -> Result<Completion, Error> {
     let key = credentials::resolve(vendor).map_err(|_| Error::CredentialStore)?
         .ok_or(Error::MissingCredential(vendor.env_var()))?;
-    stream_at_with_key(vendor, endpoint, scrub_json(body, &key), &key, cancel, timeout, on_delta).await
+    stream_at_with_key(vendor, endpoint, scrub_json(body, &key), &key, cancel, timeout, on_delta, None).await
 }
 
 async fn stream_at_with_key(
@@ -1129,6 +1165,7 @@ async fn stream_at_with_key(
     mut cancel: watch::Receiver<bool>,
     timeout: Duration,
     mut on_delta: impl FnMut(Delta),
+    mut admission: Option<RequestAdmission<'_>>,
 ) -> Result<Completion, Error> {
     // Reuse the transport's exact-known-key masking for every string in the
     // request, including LORE snapshots, tool definitions and inactive vendors.
@@ -1141,12 +1178,20 @@ async fn stream_at_with_key(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| Error::Transport)?;
-    let run = async {
-        let response = client
+    let request = client
             .post(endpoint)
             .bearer_auth(key)
             .json(&body)
-            .send()
+            .build().map_err(|_| Error::Transport)?;
+    let request_cancel = cancel.clone();
+    let run = async {
+        if let Some(admission) = &mut admission {
+            if *request_cancel.borrow() { return Err(Error::Cancelled); }
+            (admission.admit)(&body).map_err(|_| Error::AdmissionDenied)?;
+            if *request_cancel.borrow() { return Err(Error::Cancelled); }
+            admission.attempted.store(true, Ordering::Release);
+        }
+        let response = client.execute(request)
             .await
             .map_err(map_transport)?;
         let status = response.status();

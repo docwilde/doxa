@@ -28,6 +28,9 @@ fn worker_hold(candidate: &Candidate) -> Option<u64> {
         .checked_mul(doxa_vendors::MAX_TOOL_STEPS as u64 + 1)?;
     priced(input, candidate.max_output_tokens, candidate)
 }
+fn summary_hold(candidate: &Candidate) -> Option<u64> {
+    priced(candidate.context_tokens.checked_sub(candidate.max_output_tokens)?, candidate.max_output_tokens, candidate)
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,6 +52,10 @@ struct State {
     turn: u64,
     incomplete: bool,
     selection: Option<Value>,
+    #[serde(default)]
+    compaction: Option<Value>,
+    #[serde(default)]
+    pending_compaction: Option<Value>,
     receipts: Vec<Value>,
 }
 impl State {
@@ -58,7 +65,7 @@ impl State {
             .checked_add(self.worker.retained_reservation_usd_micros)
     }
     fn unknown(&self) -> bool {
-        self.incomplete || self.router.accounting_unknown || self.worker.accounting_unknown
+        self.incomplete || self.pending_compaction.is_some() || self.router.accounting_unknown || self.worker.accounting_unknown
     }
     fn estimated_spent(&self) -> Option<u64> {
         if self.unknown() { return None; }
@@ -160,7 +167,7 @@ impl RouterHost {
         } else {
             if fs::symlink_metadata(&journal.path).is_ok() { return Err("Router journal already exists; use explicit resume".into()); }
             State { version: 1, identity, router: Ledger::default(), worker: WorkerLedger::default(),
-                pinned: None, turn: 0, incomplete: false, selection: None, receipts: Vec::new() }
+                pinned: None, turn: 0, incomplete: false, selection: None, compaction: None, pending_compaction: None, receipts: Vec::new() }
         };
         let initial = config.candidate(&config.fallback_id).ok_or("Router fallback is missing")?;
         let inner = VendorHost::new_router(vendor(initial.provider), initial.model.clone(), initial.effort.clone(), cwd, id, resume,
@@ -193,9 +200,10 @@ impl RouterHost {
         }
         Ok(())
     }
-    fn eligible(&self, input: u64, tools: bool, assistant: bool, held: u64, pinned: Option<&str>) -> Vec<String> {
+    fn eligible(&self, input: u64, tools: bool, assistant: bool, held: u64, pinned: Option<&str>, summary: bool) -> Vec<String> {
         let mut catalogs = Vec::new();
         for provider in [Provider::Deepseek, Provider::Glm] {
+            if pinned.is_some_and(|id| !self.config.candidates.iter().any(|candidate|candidate.id == id && candidate.provider == provider)) { continue; }
             let selected = vendor(provider);
             if !doxa_vendors::credentials::resolve(selected).ok().flatten().is_some() { continue; }
             if self.cancel.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) { break; }
@@ -232,14 +240,139 @@ impl RouterHost {
                 || candidate.context_tokens.checked_sub(candidate.max_output_tokens).is_none_or(|cap| cap < input)
                 || tools && !candidate.supports_tools
                 || selected == Vendor::DeepSeek && candidate.effort != "none" && tools && assistant { return false; }
-            let Some(reserve) = worker_hold(candidate) else { return false; };
+            let Some(reserve) = (if summary { summary_hold(candidate) } else { worker_hold(candidate) }) else { return false; };
             !self.ceiling_micros.is_some_and(|ceiling| held.checked_add(reserve).is_none_or(|sum| sum > ceiling))
         }).map(|candidate| candidate.id.clone()).collect()
     }
 
+    fn compact(&self, emit: &mut dyn FnMut(Value)) -> Result<(), String> {
+        if self.inner.lore_enabled() != Some(true) || doxa_lore::review_disabled().unwrap_or(true) {
+            return Err("LORE review is disabled; router managed compaction blocked".into());
+        }
+        let (held, target_id) = {
+            let state = self.state.lock().unwrap();
+            if state.unknown() { return Err("Router accounting is incomplete or unknown; compaction withheld without replay".into()); }
+            if state.receipts.len() >= 1024 { return Err("Router receipt capacity reached; compaction withheld".into()); }
+            let last = state.selection.as_ref().map(|selection|selection["target_id"].as_str()
+                .filter(|id|self.config.candidate(id).is_some()).ok_or("Recorded compaction target is invalid")).transpose()?;
+            (state.held().ok_or("Router aggregate allowance overflow")?,
+                state.pinned.as_deref().or(last).unwrap_or(&self.config.fallback_id).to_owned())
+        };
+        let candidate = self.config.candidate(&target_id).ok_or("Configured compaction target is missing")?;
+        let reserve = summary_hold(candidate).ok_or("Summary reservation overflow")?;
+        if self.ceiling_micros.is_some_and(|ceiling| held.checked_add(reserve).is_none_or(|sum|sum > ceiling)) {
+            return Err("Aggregate summary reservation exceeds the session ceiling".into());
+        }
+        let input_bytes = candidate.context_tokens.checked_sub(candidate.max_output_tokens).ok_or("Invalid summary byte cap")?;
+        let required = self.inner.compaction_input_bytes(vendor(candidate.provider), &candidate.model, &candidate.effort, candidate.max_output_tokens)?;
+        if required > input_bytes { return Err("Managed compaction request exceeds the configured byte cap".into()); }
+        if !self.eligible(required, false, false, held, Some(&candidate.id), true).contains(&candidate.id) {
+            return Err("Compaction target fails credentials, catalog, effort, context cap, price or aggregate allowance".into());
+        }
+        if self.cancel.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
+            return Err("Router compaction cancelled before admission".into());
+        }
+        let limits = TurnLimits { input_bytes: usize::try_from(input_bytes).map_err(|_|"Summary byte cap overflow")?,
+            output_tokens: candidate.max_output_tokens };
+        let target = json!({"target_id":candidate.id,"engine":vendor(candidate.provider).engine_id(),
+            "model":candidate.model,"effort":candidate.effort});
+        self.inner.select_route(vendor(candidate.provider), &candidate.model, &candidate.effort, target.clone(), limits)?;
+        let admitted = AtomicBool::new(false);
+        let mut admit = |body: &Value, review: &Value| -> Result<(), ()> {
+            if self.cancel.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire)
+                || body["model"] != candidate.model || body["max_tokens"] != candidate.max_output_tokens
+                || body.get("tools").is_some() || serde_json::to_vec(body).map_err(|_|())?.len() > limits.input_bytes { return Err(()); }
+            let mut state = self.state.lock().map_err(|_|())?;
+            if state.unknown() || admitted.load(Ordering::Acquire)
+                || self.ceiling_micros.is_some_and(|ceiling|state.held().and_then(|sum|sum.checked_add(reserve)).is_none_or(|sum|sum > ceiling)) { return Err(()); }
+            state.worker.retained_reservation_usd_micros = state.worker.retained_reservation_usd_micros.checked_add(reserve).ok_or(())?;
+            use sha2::Digest;
+            state.pending_compaction = Some(json!({"operation":"compact","summary_target":target,
+                "request_sha256":format!("{:x}",sha2::Sha256::digest(serde_json::to_vec(body).map_err(|_|())?)),
+                "source":review["expected_source"],"conversation_engine":"router",
+                "input_cap_bytes":limits.input_bytes,"output_cap_tokens":limits.output_tokens,
+                "worker_reservation_usd_micros":reserve}));
+            state.incomplete = true;
+            self.save(&mut state).map_err(|_|())?;
+            admitted.store(true, Ordering::Release);
+            Ok(())
+        };
+        let mut completed = false;
+        self.inner.compact_routed(limits, &target, &mut admit, &mut |mut event| {
+            if self.cancel.load(Ordering::Acquire) && event["type"] == "turn_started" {
+                let _ = self.inner.call("interrupt", &json!({}));
+            }
+            let metadata = json!({"target_id":candidate.id,"engine":vendor(candidate.provider).engine_id(),
+                "model":candidate.model,"effort":candidate.effort,
+                "reviewed":event["type"] == "compaction_done" || event["data"]["reviewed"] == true,
+                "original_messages":event["data"]["original_messages"].as_u64().unwrap_or(0)});
+            if matches!(event["type"].as_str(),Some("turn_started" | "compaction_done")) {
+                event["data"]["compaction"] = metadata.clone();
+            }
+            if event["type"] == "turn_done" {
+                let mut state = self.state.lock().unwrap();
+                let pending = state.pending_compaction.clone();
+                let attempted = event["data"]["summary_attempted"] == true;
+                let usage = (attempted && event["data"]["usage_complete"] == true
+                    && event["data"]["model_consistent"] == true && event["data"]["model"] == candidate.model)
+                    .then(||event["data"]["prompt_tokens"].as_u64().zip(event["data"]["completion_tokens"].as_u64())).flatten();
+                let mut cost = None;
+                if !attempted {
+                    if admitted.load(Ordering::Acquire) {
+                        state.worker.retained_reservation_usd_micros -= reserve;
+                        state.pending_compaction = None;
+                        state.incomplete = false;
+                    }
+                    if !state.unknown() { cost = Some(0); }
+                } else if admitted.load(Ordering::Acquire) {
+                    if let Some((input,output,charge)) = usage.and_then(|(input,output)|priced(input,output,candidate)
+                        .filter(|charge|*charge <= reserve).map(|charge|(input,output,charge))) {
+                        if let Some((inputs,outputs,charges)) = state.worker.input_tokens.checked_add(input)
+                            .zip(state.worker.output_tokens.checked_add(output))
+                            .zip(state.worker.estimated_actual_usd_micros.checked_add(charge)).map(|((i,o),c)|(i,o,c)) {
+                            state.worker.input_tokens = inputs; state.worker.output_tokens = outputs;
+                            state.worker.estimated_actual_usd_micros = charges;
+                            state.worker.retained_reservation_usd_micros -= reserve;
+                            state.pending_compaction = None;
+                            state.incomplete = false;
+                            cost = Some(charge);
+                        } else { state.worker.accounting_unknown = true; }
+                    } else { state.worker.accounting_unknown = true; }
+                } else { state.worker.accounting_unknown = true; state.incomplete = true; }
+                state.compaction = Some(metadata.clone());
+                let receipt = json!({"operation":"compact","operation_id":state.receipts.len()+1,"turn":state.turn,
+                    "summary_target":target,"summary_attempted":attempted,
+                    "request_sha256":pending.as_ref().map(|pending|&pending["request_sha256"]),
+                    "source":pending.as_ref().map(|pending|&pending["source"]),
+                    "worker_usage":usage.map(|(input,output)|json!({"input_tokens":input,"output_tokens":output})),
+                    "worker_reservation_usd_micros":if admitted.load(Ordering::Acquire){reserve}else{0},
+                    "is_error":event["data"]["is_error"],"complete":!state.unknown()});
+                state.receipts.push(receipt);
+                let _ = self.save(&mut state);
+                event["data"]["engine"] = json!(vendor(candidate.provider).engine_id());
+                event["data"]["compaction"] = metadata;
+                event["data"]["routing"] = state.selection.clone().unwrap_or(Value::Null);
+                event["data"]["cost_usd"] = json!(if state.unknown(){None}else{cost.map(|sum|sum as f64/1_000_000.0)});
+                event["data"]["session_cost_usd"] = json!(state.estimated_spent().map(|sum|sum as f64/1_000_000.0));
+                event["data"]["cost_is_estimate"] = json!(true);
+                event["data"]["cost_basis"] = json!("aggregate_upper_rates");
+                event["data"]["aggregate_held_usd"] = json!(state.held().map(|sum|sum as f64/1_000_000.0));
+                event["data"]["accounting_unknown"] = json!(state.unknown());
+                completed = true;
+            }
+            emit(event);
+        });
+        if !completed && admitted.load(Ordering::Acquire) {
+            let mut state = self.state.lock().unwrap(); state.worker.accounting_unknown = true;
+            self.save(&mut state)?;
+        }
+        Ok(())
+    }
+
     fn route(&self, text: &str, emit: &mut dyn FnMut(Value)) -> Result<(), String> {
         if text.split_whitespace().next() == Some("/compact") {
-            return Err("Managed compaction is unavailable in the first router slice; routed review and compaction accounting are required".into());
+            if text.trim() != "/compact" { return Err("Use /compact without arguments".into()); }
+            return self.compact(emit);
         }
         let (summary, input_tokens, tools, assistant) = self.inner.routing_view(text, self.config.max_input_bytes / 2)?;
         let (held, pinned) = {
@@ -248,7 +381,7 @@ impl RouterHost {
             if state.receipts.len() >= 1024 { return Err("Router receipt capacity reached; further turns withheld".into()); }
             (state.held().ok_or("Router aggregate allowance overflow")?, state.pinned.clone())
         };
-        let allowed = self.eligible(input_tokens, tools, assistant, held, pinned.as_deref());
+        let allowed = self.eligible(input_tokens, tools, assistant, held, pinned.as_deref(), false);
         if allowed.is_empty() { return Err("No configured target satisfies credentials, catalog, effort, tools, context cap and aggregate allowance".into()); }
         // A pinned target replaces the selection fallback only for this turn;
         // it does not alter the durable configuration identity or allowance.
@@ -433,7 +566,7 @@ impl Host for RouterHost {
     fn transcript_snapshot(&self)->io::Result<Option<(PathBuf,u64)>> { self.inner.transcript_snapshot() }
     fn billing_snapshot(&self)->Option<Value> {
         let state = self.state.lock().ok()?;
-        Some(json!({"mode":"api","routing":state.selection,"router_usage":state.router,"worker_usage":state.worker,
+        Some(json!({"mode":"api","routing":state.selection,"compaction":state.compaction,"router_usage":state.router,"worker_usage":state.worker,
             "cost_usd":state.estimated_spent().map(|sum|sum as f64/1_000_000.0),
             "session_cost_usd":state.estimated_spent().map(|sum|sum as f64/1_000_000.0),
             "cost_is_estimate":true,"cost_basis":"aggregate_upper_rates",

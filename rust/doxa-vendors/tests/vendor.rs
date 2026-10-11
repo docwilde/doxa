@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use doxa_vendors::{
     request_body, run_turn_local, run_turn_limited_local, TurnLimits, stream_once_local, Accumulator, Delta, Error, SseDecoder,
-    ToolCall, ToolGate, Vendor, STREAM_LINE_MAX,
+    ToolCall, ToolGate, Vendor, STREAM_LINE_MAX, stream_once_admitted_local,
 };
 use futures_util::future::BoxFuture;
 use serde_json::json;
@@ -30,6 +30,30 @@ async fn credential_guard() -> CredentialGuard {
     std::env::remove_var("DEEPSEEK_API_KEY");
     std::env::remove_var("ZAI_API_KEY");
     CredentialGuard { _lock: lock, _home: home, previous }
+}
+
+#[tokio::test]
+async fn admitted_stream_distinguishes_known_no_call_failures_from_potential_http() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let _credential_guard = credential_guard().await;
+    let listener=TcpListener::bind("127.0.0.1:0").unwrap();listener.set_nonblocking(true).unwrap();
+    let endpoint=format!("http://{}/chat",listener.local_addr().unwrap());
+    let attempted=AtomicBool::new(false);let mut calls=0;
+    let mut admit=|_:&serde_json::Value|{calls+=1;Ok(())};let (_,cancel)=watch::channel(false);
+    assert!(matches!(stream_once_admitted_local(Vendor::DeepSeek,&endpoint,json!({}),cancel,Duration::from_secs(1),|_|{},&mut admit,&attempted).await,Err(Error::MissingCredential(_))));
+    assert_eq!(calls,0);assert!(!attempted.load(Ordering::Acquire));assert!(listener.accept().is_err());
+    std::env::set_var("DEEPSEEK_API_KEY","test-secret-1234");
+    let (sender,cancel)=watch::channel(false);let mut calls=0;
+    let mut admit=|_:&serde_json::Value|{calls+=1;sender.send(true).unwrap();Ok(())};
+    assert!(matches!(stream_once_admitted_local(Vendor::DeepSeek,&endpoint,json!({"private":"test-secret-1234"}),cancel,Duration::from_secs(1),|_|{},&mut admit,&attempted).await,Err(Error::Cancelled)));
+    assert_eq!(calls,1);assert!(!attempted.load(Ordering::Acquire));assert!(listener.accept().is_err());
+    let (_,cancel)=watch::channel(false);let mut admit=|_:&serde_json::Value|Err(());
+    assert!(matches!(stream_once_admitted_local(Vendor::DeepSeek,&endpoint,json!({}),cancel,Duration::from_secs(1),|_|{},&mut admit,&attempted).await,Err(Error::AdmissionDenied)));
+    assert!(!attempted.load(Ordering::Acquire));assert!(listener.accept().is_err());
+    let (endpoint,server)=multi_server(vec!["data: [DONE]\n\n"]);let (_,cancel)=watch::channel(false);
+    let mut admit=|body:&serde_json::Value|{assert!(!body.to_string().contains("test-secret-1234"));Ok(())};
+    let _=stream_once_admitted_local(Vendor::DeepSeek,&endpoint,json!({"private":"test-secret-1234"}),cancel,Duration::from_secs(1),|_|{},&mut admit,&attempted).await;
+    assert!(attempted.load(Ordering::Acquire));assert_eq!(server.join().unwrap().0.len(),1);
 }
 
 #[tokio::test]
