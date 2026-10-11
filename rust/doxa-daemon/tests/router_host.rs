@@ -26,12 +26,15 @@ mod tests {
             static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
             let lock = LOCK.get_or_init(||Mutex::new(())).lock().unwrap_or_else(|p|p.into_inner());
             let root = tempfile::tempdir().unwrap();
-            let values = [("DOXA_HOME",root.path().join("home").into_os_string()),
+            let values = [("HOME",root.path().join("home").into_os_string()),
+                ("DOXA_HOME",root.path().join("home").into_os_string()),
                 ("LORE_ROOT",root.path().join("lore").into_os_string()),
                 ("LORE_PROJECTS_DIR",root.path().join("projects").into_os_string()),
                 ("DEEPSEEK_API_KEY","worker-fixture-key-1234".into()),("ZAI_API_KEY","worker-fixture-key-1234".into()),
                 ("TYPESAFE_API_KEY","jev-fixture-key-1234".into()),("DOXA_LORE","0".into()),
-                ("DOXA_VENDOR_TOOLS","workspace-read".into())];
+                ("DOXA_VENDOR_TOOLS","workspace-read".into()),
+                ("DOXA_MCP_ENABLED","0".into()),
+                ("DOXA_MCP_CONFIG",root.path().join("disabled-mcp.json").into_os_string())];
             let previous = values.iter().map(|(key,_)|(*key,std::env::var_os(key))).collect();
             for (key,value) in values { std::env::set_var(key,value); }
             fs::create_dir(root.path().join("workspace")).unwrap();
@@ -320,7 +323,8 @@ mod tests {
         for tool in [false,true] {
             let env=Env::new();let mut workers=0;
             let server=Server::new(move|method,body| {
-                if method=="GET" {return catalog();}
+                if method=="GET" {return ("application/json".into(),
+                    json!({"data":[{"id":"deepseek-flash"}]}).to_string(),Duration::ZERO);}
                 assert_ne!(body["model"],doxa_router::JEV_MODEL,"single eligible worker needs no Jev call");
                 workers+=1;
                 if workers>1 {return worker(body,false);}
@@ -331,7 +335,10 @@ mod tests {
                     "choices":[{"finish_reason":if tool {"tool_calls"} else {"stop"},"delta":delta}],
                     "usage":{"prompt_tokens":0,"completion_tokens":0}})),Duration::ZERO)
             });
-            let mut cfg=config();cfg.candidates.retain(|candidate|candidate.id=="ds");
+            // Config still requires two targets; the account catalog makes
+            // only the non-thinking DeepSeek target eligible for this turn.
+            let mut cfg=config();cfg.candidates.retain(|candidate|candidate.id!="thinking");
+            cfg.validate().unwrap();
             let host=make_host(&env,cfg.clone(),&server,false,Some(2.0));
             let calls=Arc::new(AtomicUsize::new(0));let executed=calls.clone();
             assert!(host.set_peer_tool_handler(Arc::new(move|_,_|{executed.fetch_add(1,Ordering::SeqCst);Ok(json!({"peers":[]}))})));
