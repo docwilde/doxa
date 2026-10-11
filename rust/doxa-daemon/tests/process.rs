@@ -4483,6 +4483,7 @@ fn router_stop_and_interrupt_reap_stalled_discovery_and_protected_setup_groups()
     for (provider,phase) in [("claude","catalog"),("codex","catalog"),("claude","setup")] {
         for control in ["interrupt","stop"] {
             let dir=tempfile::tempdir().unwrap();
+            let cwd=dir.path().join("workspace");fs::create_dir(&cwd).unwrap();
             let home=dir.path().join("home");fs::create_dir(&home).unwrap();fs::set_permissions(&home,fs::Permissions::from_mode(0o700)).unwrap();
             let cli=dir.path().join("stalled-cli.py");
             executable(&cli,&format!(r#"#!/usr/bin/python3
@@ -4520,7 +4521,7 @@ for line in sys.stdin:
                 "criteria_version":"cleanup-fixture-v1","candidates":[candidate("one"),candidate("two")],"fallback_id":"one",
                 "confidence_threshold":0.8,"max_calls":4,"max_spend_usd_micros":10000,"max_input_bytes":8192,"deadline_ms":1000}).to_string()).unwrap();
             fs::set_permissions(&config,fs::Permissions::from_mode(0o600)).unwrap();
-            let mut command=daemon_command();command.args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),
+            let mut command=daemon_command();command.args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",cwd.to_str().unwrap(),
                 "--session-id","router-cleanup","--engine","router","--router-config",config.to_str().unwrap(),
                 if provider=="claude"{"--claude-bin"}else{"--codex-bin"},cli.to_str().unwrap(),"--linger","10"])
                 .env("DOXA_HOME",&home).env("DOXA_LORE","0").env("DOXA_WORKTREE","0").stdout(Stdio::null()).stderr(Stdio::piped());
