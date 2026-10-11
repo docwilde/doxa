@@ -116,6 +116,7 @@ impl App {
                     self.model_picker = None;
                     self.effort_picker = None;
                     self.engine_picker = false;
+                    self.cancel_new_session_catalog();
                     self.new_session = None;
                     self.permission_picker = None;
                     self.permission_confirm_dont_ask = false;
@@ -3141,6 +3142,7 @@ impl App {
                 || mouse.row >= y + height
             {
                 self.engine_picker = false;
+                self.cancel_new_session_catalog();
                 self.new_session = None;
                 self.model_picker = None;
                 self.effort_picker = None;

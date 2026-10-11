@@ -1,6 +1,8 @@
 //! Model, effort, permission and new-session picker lifecycle controls.
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::Instant;
 
@@ -12,7 +14,29 @@ use super::{
 };
 use crate::launch;
 
+pub(super) struct CatalogJob {
+    pub(super) engine: launch::Engine,
+    pub(super) generation: u64,
+    pub(super) cancel: Arc<AtomicBool>,
+    pub(super) receiver: mpsc::Receiver<Result<serde_json::Value, &'static str>>,
+}
+
+#[derive(Clone)]
+pub(super) struct CatalogRequest {
+    engine: launch::Engine,
+    generation: u64,
+    cwd: PathBuf,
+}
+
 impl App {
+    #[cfg(test)]
+    pub(super) fn install_catalog_receiver_for_test(&mut self, engine: launch::Engine,
+        receiver: mpsc::Receiver<Result<serde_json::Value, &'static str>>) {
+        self.new_session_catalog_pending=Some(CatalogJob {
+            engine, generation:self.catalog_generation, cancel:Arc::new(AtomicBool::new(false)), receiver,
+        });
+    }
+
     pub(super) fn open_model_picker(&mut self) {
         if self.active_remote() { self.notice = "Remote model is controlled on the session host".into(); return; }
         if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
@@ -423,6 +447,7 @@ impl App {
     }
 
     pub(super) fn select_new_engine(&mut self) {
+        self.cancel_new_session_catalog();
         self.choice_dropdown = None;
         if !self.manual_tab_available() {
             self.engine_picker = false;
@@ -438,7 +463,6 @@ impl App {
         self.engine_picker = false;
         self.new_session=None;
         self.docker_setup=None;
-        self.new_session_catalog_pending = None;
         if engine==launch::Engine::Router {
             let (path,config)=match launch::router_config(None) {
                 Ok(value)=>value,
@@ -529,20 +553,50 @@ impl App {
         self.refresh_docker_setup();
     }
 
-    fn request_new_session_catalog(&mut self, engine: launch::Engine) -> bool {
-        self.new_session_catalog_pending = None;
-        if cfg!(test) { return false; }
+    pub(super) fn request_new_session_catalog(&mut self, engine: launch::Engine) -> bool {
         let Ok(cwd) = std::env::current_dir() else { return false; };
-        let (tx, rx) = mpsc::sync_channel(1);
+        let request = CatalogRequest { engine, generation: self.catalog_generation, cwd };
+        if self.new_session_catalog_pending.is_some() {
+            if let Some(job) = self.new_session_catalog_pending.as_ref() {
+                job.cancel.store(true, Ordering::Release);
+            }
+            self.new_session_catalog_queued = Some(request);
+            return true;
+        }
+        self.launch_new_session_catalog(request)
+    }
+
+    fn launch_new_session_catalog(&mut self, request: CatalogRequest) -> bool {
+        if cfg!(test) || request.generation != self.catalog_generation { return false; }
+        let (tx, receiver) = mpsc::sync_channel(1);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let engine = request.engine;
+        let cwd = request.cwd;
         if std::thread::Builder::new().name("new-session-model-catalog".into()).spawn(move || {
-            let _ = tx.send(crate::new_session_catalog::load(engine, &cwd));
+            let result = crate::new_session_catalog::load_cancellable(engine, &cwd, &worker_cancel);
+            let _ = tx.send(result);
         }).is_err() { return false; }
-        self.new_session_catalog_pending = Some((engine, rx));
+        self.new_session_catalog_pending = Some(CatalogJob {
+            engine, generation: request.generation, cancel, receiver,
+        });
         true
+    }
+
+    /// Invalidate results as soon as the form changes and ask an active owned
+    /// provider process to stop. Its receiver remains installed until reaping
+    /// completes, so repeated switches cannot create more than one job.
+    pub(super) fn cancel_new_session_catalog(&mut self) {
+        self.catalog_generation = self.catalog_generation.wrapping_add(1);
+        self.new_session_catalog_queued = None;
+        if let Some(job) = self.new_session_catalog_pending.as_ref() {
+            job.cancel.store(true, Ordering::Release);
+        }
     }
 
     pub(super) fn refresh_new_session_catalog(&mut self) {
         let Some(engine) = self.new_session.as_ref().filter(|form| !form.catalog_pending).map(|form| form.engine) else { return; };
+        self.cancel_new_session_catalog();
         let pending = if matches!(engine, launch::Engine::Codex | launch::Engine::Claude) {
             self.request_new_session_catalog(engine)
         } else if engine == launch::Engine::Router {
@@ -566,16 +620,38 @@ impl App {
     }
 
     pub(super) fn poll_new_session_catalog(&mut self) -> bool {
-        let (engine, result) = match self.new_session_catalog_pending.as_ref() {
-            Some((engine, rx)) => match rx.try_recv() {
-                Ok(result) => (*engine, result),
-                Err(TryRecvError::Disconnected) => (*engine, Err("Live model catalog worker disconnected")),
+        let (engine, generation, result) = match self.new_session_catalog_pending.as_ref() {
+            Some(job) => match job.receiver.try_recv() {
+                Ok(result) => (job.engine, job.generation, result),
+                Err(TryRecvError::Disconnected) => (job.engine, job.generation, Err("Live model catalog worker disconnected")),
                 Err(TryRecvError::Empty) => return false,
             },
             None => return false,
         };
         self.new_session_catalog_pending = None;
-        let Some(form) = self.new_session.as_mut().filter(|form| form.engine == engine) else { return false; };
+        let current = generation == self.catalog_generation
+            && self.new_session.as_ref().is_some_and(|form| form.engine == engine);
+        if current { self.apply_new_session_catalog(engine, result); }
+        let mut changed=current;
+        if let Some(request) = self.new_session_catalog_queued.take() {
+            if request.generation == self.catalog_generation
+                && self.new_session.as_ref().is_some_and(|form| form.engine == request.engine) {
+                changed=true;
+                if !self.launch_new_session_catalog(request) {
+                    if let Some(form) = self.new_session.as_mut() {
+                        form.catalog_pending = false;
+                        form.catalog_note = "Live model catalog unavailable · R retries".into();
+                    }
+                }
+            }
+        }
+        if current { self.refresh_choice_dropdown(); }
+        changed
+    }
+
+    fn apply_new_session_catalog(&mut self, engine: launch::Engine,
+        result: Result<serde_json::Value, &'static str>) {
+        let Some(form) = self.new_session.as_mut().filter(|form| form.engine == engine) else { return; };
         form.catalog_pending = false;
         match result {
             Ok(reply) => {
@@ -594,8 +670,6 @@ impl App {
             }
             Err(error) => { form.models.clear(); form.catalog_note = format!("{error} · R retries; Start uses displayed model/default"); }
         }
-        self.refresh_choice_dropdown();
-        true
     }
 
     pub(super) fn request_vendor_catalog(&mut self, engine: launch::Engine) -> bool {
@@ -721,6 +795,7 @@ impl App {
             && self.open_new_session_dropdown() { return true; }
         if self.launching {
             if key.code == KeyCode::Esc {
+                self.cancel_new_session_catalog();
                 self.new_session = None;
             }
             return true;
@@ -731,7 +806,7 @@ impl App {
         let fields = if vendor { 4 } else { 3 };
         let prompt_field = fields - 1;
         match key.code {
-            KeyCode::Esc => self.new_session = None,
+            KeyCode::Esc => { self.cancel_new_session_catalog(); self.new_session = None; }
             KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
             KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
             KeyCode::Backspace => {

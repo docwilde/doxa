@@ -555,6 +555,7 @@ impl App {
                     )
                 };
                 if frame["ok"] == true {
+                    self.cancel_new_session_catalog();
                     self.new_session = None;
                 } else {
                     if let Some(form) = self.new_session.as_mut() {

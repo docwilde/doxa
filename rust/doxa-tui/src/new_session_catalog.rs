@@ -4,26 +4,31 @@ use crate::launch::{self, Engine, LaunchOptions};
 use doxa_engines::codex_appserver::{AppServerDriver, AppServerOptions, CodexPermission};
 use doxa_engines::codex_driver::SandboxMode;
 use serde_json::{json, Value};
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::atomic::AtomicBool, time::Duration};
 
 const DEADLINE: Duration = Duration::from_secs(20);
 
 pub(crate) fn load(engine: Engine, cwd: &Path) -> Result<Value, &'static str> {
-    load_with_auth(engine, cwd, false)
+    load_with_auth(engine, cwd, false, None)
+}
+
+pub(crate) fn load_cancellable(engine: Engine, cwd: &Path, cancel: &AtomicBool) -> Result<Value, &'static str> {
+    load_with_auth(engine, cwd, false, Some(cancel))
 }
 
 /// Router setup requires account evidence from the connected CLI protocol,
 /// rather than treating a model list or a successful executable lookup as auth.
 pub(crate) fn load_authenticated(engine: Engine, cwd: &Path) -> Result<Value, &'static str> {
-    load_with_auth(engine, cwd, true)
+    load_with_auth(engine, cwd, true, None)
 }
 
-fn load_with_auth(engine: Engine, cwd: &Path, authenticated: bool) -> Result<Value, &'static str> {
+fn load_with_auth(engine: Engine, cwd: &Path, authenticated: bool,
+    cancel: Option<&AtomicBool>) -> Result<Value, &'static str> {
     match engine {
         Engine::Codex => {
             let executable = launch::codex_executable(&LaunchOptions::default())
                 .map_err(|_| "Codex executable unavailable")?;
-            codex_catalog_at(&executable, cwd, authenticated)
+            codex_catalog_at(&executable, cwd, authenticated, cancel)
         }
         Engine::Claude => {
             let options = LaunchOptions { claude_bin: std::env::var_os("DOXA_CLAUDE_BIN").map(Into::into), ..Default::default() };
@@ -35,8 +40,12 @@ fn load_with_auth(engine: Engine, cwd: &Path, authenticated: bool) -> Result<Val
                 executable: &executable, cwd, session_id: &session, resume: false,
                 model: None, effort: None, permission_mode: "manual", config_dir: &config_dir, plugins: &[],
             };
-            let result = if authenticated { doxa_claude::catalog::discover_authenticated(options, DEADLINE) }
-                else { doxa_claude::catalog::discover(options, DEADLINE) };
+            let result = match (authenticated, cancel) {
+                (true, Some(cancel)) => doxa_claude::catalog::discover_authenticated_cancellable(options, DEADLINE, cancel),
+                (false, Some(cancel)) => doxa_claude::catalog::discover_cancellable(options, DEADLINE, cancel),
+                (true, None) => doxa_claude::catalog::discover_authenticated(options, DEADLINE),
+                (false, None) => doxa_claude::catalog::discover(options, DEADLINE),
+            };
             result.map_err(|_| "Claude account/catalog unavailable or unverified")
         }
         _ => Err("This engine uses its own model catalog"),
@@ -45,10 +54,11 @@ fn load_with_auth(engine: Engine, cwd: &Path, authenticated: bool) -> Result<Val
 
 #[cfg(test)]
 fn codex_at(executable: &Path, cwd: &Path) -> Result<Value, &'static str> {
-    codex_catalog_at(executable, cwd, false)
+    codex_catalog_at(executable, cwd, false, None)
 }
 
-fn codex_catalog_at(executable: &Path, cwd: &Path, authenticated: bool) -> Result<Value, &'static str> {
+fn codex_catalog_at(executable: &Path, cwd: &Path, authenticated: bool,
+    cancel: Option<&AtomicBool>) -> Result<Value, &'static str> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
         .map_err(|_| "Codex model catalog unavailable")?;
     let rows = runtime.block_on(async { tokio::time::timeout(DEADLINE, async {
@@ -56,8 +66,12 @@ fn codex_catalog_at(executable: &Path, cwd: &Path, authenticated: bool) -> Resul
             executable: executable.into(), cwd: cwd.into(), model: None, sandbox: SandboxMode::ReadOnly,
             permission: CodexPermission::OnRequest, resume_thread: None, turn_timeout: DEADLINE,
         };
-        if authenticated { AppServerDriver::discover_authenticated_models(options).await }
-        else { AppServerDriver::discover_models(options).await }
+        match (authenticated, cancel) {
+            (true, Some(cancel)) => AppServerDriver::discover_authenticated_models_cancellable(options, cancel).await,
+            (false, Some(cancel)) => AppServerDriver::discover_models_cancellable(options, cancel).await,
+            (true, None) => AppServerDriver::discover_authenticated_models(options).await,
+            (false, None) => AppServerDriver::discover_models(options).await,
+        }
     }).await }).map_err(|_| "Codex account/catalog timed out")?
         .map_err(|_| "Codex account/catalog unavailable or unverified")?;
     Ok(json!({"models":rows.iter().map(|row| row["model"].clone()).collect::<Vec<_>>(),

@@ -224,7 +224,7 @@ use super::*;
             {"model":if provider=="deepseek" {"deepseek-flash"} else {"glm-5.3-flash"},
              "efforts":if provider=="deepseek" {vec!["none"]} else {vec!["high"]}}]}))).unwrap();
         let (tx,rx)=mpsc::sync_channel(1);
-        app.router_review=Some(router_settings::RouterReview{path:path.clone(),state:router_settings::ReviewState::Running(rx)});
+        app.router_review=Some(router_settings::RouterReview{path:path.clone(),state:router_settings::ReviewState::Running(rx),freshness:None});
         tx.send(Ok(review)).unwrap();assert!(app.poll_router_review());
         app.settings_menu_key(KeyEvent::new(KeyCode::Char('s'),KeyModifiers::CONTROL));
         let stored=doxa_state::load_config_checked(&crate::settings::config_path().unwrap()).unwrap();
@@ -295,7 +295,7 @@ use super::*;
             else {Ok(json!({"capabilities":[{"model":"deepseek-flash","efforts":["none"]}]}))}
         }).unwrap();
         let (tx,rx)=mpsc::sync_channel(1);
-        app.router_review=Some(router_settings::RouterReview{path,state:router_settings::ReviewState::Running(rx)});
+        app.router_review=Some(router_settings::RouterReview{path,state:router_settings::ReviewState::Running(rx),freshness:None});
         tx.send(Ok(review)).unwrap();
         assert!(app.poll_router_review());
         let form=app.new_session.as_ref().unwrap();
@@ -306,6 +306,54 @@ use super::*;
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert!(app.pending_launches.is_empty());
         assert!(app.notice.contains("catalog changed"));
+    }
+
+    #[test]
+    fn router_review_paint_uses_cached_freshness_without_reopening_config() {
+        let mut app=App::default();
+        let path=PathBuf::from("/private/nonexistent-router-review.json");
+        let config=crate::router_setup::tests::config();
+        let review=crate::router_setup::review_with(&path,&config,true,|_|
+            Ok(json!({"capabilities":[{"model":"fixture","efforts":["high"]}]}))).unwrap();
+        let summary=review.summary();
+        let hash=review.config_hash.clone();
+        let checked=review.checked;
+        app.router_review=Some(router_settings::RouterReview {
+            path:path.clone(),state:router_settings::ReviewState::Complete(Ok(review)),freshness:None,
+        });
+        let (tx,rx)=mpsc::sync_channel(1);
+        app.router_freshness_pending=Some((path.clone(),hash.clone(),checked,rx));
+        tx.send(true).unwrap();
+        assert!(app.poll_router_review());
+        let lines=app.router_review_lines(&path);
+        assert_eq!(lines.first().map(String::as_str),Some(summary.as_str()));
+
+        let (tx,rx)=mpsc::sync_channel(1);
+        app.router_freshness_pending=Some((path.clone(),hash,checked,rx));
+        tx.send(false).unwrap();
+        assert!(app.poll_router_review());
+        assert!(app.router_review_lines(&path)[0].contains("expired or config/credential changed"));
+    }
+
+    #[test]
+    fn switched_catalog_cancels_old_generation_and_discards_its_result() {
+        let mut app=App::default();
+        app.engine_selected=0;
+        app.select_new_engine();
+        let (tx,rx)=mpsc::sync_channel(1);
+        app.install_catalog_receiver_for_test(launch::Engine::Codex,rx);
+        let cancel=app.new_session_catalog_pending.as_ref().unwrap().cancel.clone();
+
+        app.engine_selected=1;
+        app.select_new_engine();
+        assert!(cancel.load(std::sync::atomic::Ordering::Acquire));
+        assert!(app.new_session_catalog_pending.is_some());
+        assert!(app.new_session_catalog_queued.is_some());
+        tx.send(Ok(json!({"models":["stale-codex-model"]}))).unwrap();
+        assert!(app.poll_new_session_catalog());
+        assert!(app.new_session_catalog_pending.is_none());
+        assert!(app.new_session_catalog_queued.is_none());
+        assert!(!app.new_session.as_ref().unwrap().models.iter().any(|model|model=="stale-codex-model"));
     }
 
     #[test]
@@ -1805,7 +1853,7 @@ for line in sys.stdin:
             column: engines.x + 2, row: engines.y + 3, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
         let (tx, rx) = mpsc::sync_channel(1);
-        app.new_session_catalog_pending = Some((launch::Engine::Claude, rx));
+        app.install_catalog_receiver_for_test(launch::Engine::Claude, rx);
         tx.send(Ok(json!({"models":["sonnet","opus"]}))).unwrap();
         assert!(app.poll_new_session_catalog());
         let form = app.active_chooser_rect().unwrap();

@@ -2,11 +2,15 @@ use super::App;
 use crate::router_setup::{Availability, Review};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self,Receiver,TryRecvError};
+use std::time::{Duration, Instant};
+
+const FRESHNESS_RECHECK: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub(super) struct RouterReview {
     pub path: PathBuf,
     pub state: ReviewState,
+    pub freshness: Option<(bool, Instant)>,
 }
 
 #[derive(Debug)]
@@ -32,7 +36,7 @@ impl App {
         if std::thread::Builder::new().name("router-settings-review".into()).spawn(move || {
             let _=tx.send(crate::router_setup::review(&worker_path,&cwd));
         }).is_err() {self.notice="Router review worker unavailable; retry Ctrl+P".into();return false;}
-        self.router_review=Some(RouterReview{path,state:ReviewState::Running(rx)});
+        self.router_review=Some(RouterReview{path,state:ReviewState::Running(rx),freshness:None});
         self.notice="Checking Router config and current account catalogs; no Jev or worker turn".into();
         true
     }
@@ -50,43 +54,114 @@ impl App {
         match &review.state {
             ReviewState::Running(_)=>vec!["Checking current account catalogs… no Jev or worker turn".into()],
             ReviewState::Complete(Err(reason))=>vec![(*reason).into()],
-            ReviewState::Complete(Ok(result)) if !result.current(path)=>vec!["Review expired or config/credential changed · Ctrl+P refreshes".into()],
-            ReviewState::Complete(Ok(result))=> {
-                let mut lines=vec![result.summary(),result.cost_scope().into()];
-                lines.extend(result.targets.iter().map(|target|target.label()));
-                lines
+            ReviewState::Complete(Ok(result)) if result.checked.elapsed()>crate::router_setup::REVIEW_LIFETIME
+                || review.freshness.is_some_and(|(current,_)|!current)
+                =>vec!["Review expired or config/credential changed · Ctrl+P refreshes".into()],
+            ReviewState::Complete(Ok(result))=>match review.freshness {
+                Some((true, checked)) if checked.elapsed() <= FRESHNESS_RECHECK => {
+                    let mut lines=vec![result.summary(),result.cost_scope().into()];
+                    lines.extend(result.targets.iter().map(|target|target.label()));
+                    lines
+                }
+                _=>vec!["Checking Router config and credential freshness… save/start recheck directly".into()],
             }
         }
     }
 
     pub(super) fn poll_router_review(&mut self) -> bool {
-        let Some(review)=self.router_review.as_mut() else {return false;};
-        let ReviewState::Running(rx)=&review.state else {return false;};
-        let result=match rx.try_recv() {
-            Ok(result)=>result,
-            Err(TryRecvError::Disconnected)=>Err("Account/catalog review worker stopped; retry"),
-            Err(TryRecvError::Empty)=>return false,
-        };
-        self.notice=match &result {
-            Ok(result)=>format!("Jev Router: {} · Ctrl+S saves staged settings",result.summary()),
-            Err(reason)=>format!("Jev Router review: {reason}"),
-        };
-        if let Some(form)=self.new_session.as_mut().filter(|form|
-            form.engine==crate::launch::Engine::Router && form.router_config.as_deref()==Some(review.path.as_path())) {
-            form.catalog_pending=false;
-            form.models=vec!["auto".into()];
-            match &result {
-                Ok(result)=> {
-                    form.models.extend(result.targets.iter().filter(|target|target.availability==Availability::Available)
-                        .map(|target|target.id.clone()));
-                    form.catalog_note=format!("{} · {}",result.summary(),result.cost_scope());
+        let result = self.router_review.as_ref().and_then(|review|match &review.state {
+            ReviewState::Running(rx)=>Some((review.path.clone(),rx.try_recv())),
+            ReviewState::Complete(_)=>None,
+        });
+        let mut changed=false;
+        if let Some((path,received))=result {
+            let result=match received {
+                Ok(result)=>result,
+                Err(TryRecvError::Disconnected)=>Err("Account/catalog review worker stopped; retry"),
+                Err(TryRecvError::Empty)=>return self.poll_router_freshness(),
+            };
+            self.notice=match &result {
+                Ok(result)=>format!("Jev Router: {} · Ctrl+S saves staged settings",result.summary()),
+                Err(reason)=>format!("Jev Router review: {reason}"),
+            };
+            if let Some(form)=self.new_session.as_mut().filter(|form|
+                form.engine==crate::launch::Engine::Router && form.router_config.as_deref()==Some(path.as_path())) {
+                form.catalog_pending=false;
+                form.models=vec!["auto".into()];
+                match &result {
+                    Ok(result)=> {
+                        form.models.extend(result.targets.iter().filter(|target|target.availability==Availability::Available)
+                            .map(|target|target.id.clone()));
+                        form.catalog_note=format!("{} · {}",result.summary(),result.cost_scope());
+                    }
+                    Err(reason)=>{form.catalog_note=format!("{reason} · R retries");},
                 }
-                Err(reason)=>{form.catalog_note=format!("{reason} · R retries");},
+            }
+            if let Some(review)=self.router_review.as_mut().filter(|review|review.path==path) {
+                review.freshness=None;
+                review.state=ReviewState::Complete(result);
+            }
+            self.refresh_choice_dropdown();
+            changed=true;
+        }
+        self.poll_router_freshness() || changed
+    }
+
+    fn poll_router_freshness(&mut self) -> bool {
+        let mut changed=false;
+        let received=self.router_freshness_pending.as_ref().map(|(_,_,_,receiver)|receiver.try_recv());
+        if let Some(received)=received {
+            match received {
+                Ok(current)=> {
+                    let Some((path,hash,checked,_))=self.router_freshness_pending.take() else {return changed;};
+                    if let Some(review)=self.router_review.as_mut().filter(|review|review.path==path) {
+                        if let ReviewState::Complete(Ok(result))=&review.state {
+                            if result.config_hash==hash && result.checked==checked {
+                                review.freshness=Some((current,Instant::now()));
+                                changed=true;
+                            }
+                        }
+                    }
+                }
+                Err(TryRecvError::Disconnected)=> {
+                    let Some((path,hash,checked,_))=self.router_freshness_pending.take() else {return changed;};
+                    if let Some(review)=self.router_review.as_mut().filter(|review|review.path==path) {
+                        if let ReviewState::Complete(Ok(result))=&review.state {
+                            if result.config_hash==hash && result.checked==checked {
+                                review.freshness=Some((false,Instant::now()));
+                                changed=true;
+                            }
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty)=>return changed,
             }
         }
-        review.state=ReviewState::Complete(result);
-        self.refresh_choice_dropdown();
-        true
+        if self.router_freshness_pending.is_none() {
+            if cfg!(test) { return changed; }
+            let due=self.router_review.as_ref().and_then(|review|match &review.state {
+                ReviewState::Complete(Ok(result)) if result.checked.elapsed()<=crate::router_setup::REVIEW_LIFETIME
+                    && review.freshness.is_none_or(|(_,checked)|checked.elapsed()>=FRESHNESS_RECHECK)
+                    =>Some((review.path.clone(),result.clone())),
+                _=>None,
+            });
+            if let Some((path,review))=due {
+                let hash=review.config_hash.clone();
+                let checked=review.checked;
+                let (tx,receiver)=mpsc::sync_channel(1);
+                let worker_path=path.clone();
+                let spawned=std::thread::Builder::new().name("router-review-freshness".into()).spawn(move || {
+                    let _=tx.send(review.current(&worker_path));
+                });
+                if spawned.is_ok() {
+                    self.router_freshness_pending=Some((path,hash,checked,receiver));
+                } else if let Some(review)=self.router_review.as_mut().filter(|review|review.path==path) {
+                    review.freshness=Some((false,Instant::now()));
+                    changed=true;
+                }
+            }
+        }
+        changed
     }
 
     pub(super) fn router_target_label(&self, id: &str) -> String {

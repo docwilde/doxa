@@ -418,6 +418,19 @@ impl AppServerDriver {
         result
     }
 
+    /// Cancellation includes process initialization and model listing. The
+    /// owned discovery process group is killed and reaped before returning.
+    pub async fn discover_models_cancellable(options: AppServerOptions,
+        cancel: &AtomicBool) -> Result<Vec<Value>, AppServerError> {
+        let mut driver = Self::initialize_with_gate_cancel(options, str::to_owned, None, Some(cancel)).await?;
+        let result = tokio::select! { biased;
+            _ = wait_cancelled(cancel) => Err(AppServerError::Cancelled),
+            result = driver.list_models() => result,
+        };
+        driver.shutdown().await;
+        result
+    }
+
     /// Current account and model inventory only: never creates a provider thread
     /// or submits a turn. Authentication does not establish a dollar price.
     pub async fn discover_authenticated_models(options: AppServerOptions) -> Result<Vec<Value>, AppServerError> {
@@ -1041,6 +1054,43 @@ mod web_item_tests {
         assert_eq!(codex_billing(&reply), Some(json!({"mode":"subscription","type":"plus","quota":"5h:67.2% · week:91%"})));
         assert_eq!(codex_billing(&json!({"rateLimits":{"limitId":"codex_other","primary":{"usedPercent":20,"windowDurationMins":300}}})), None);
         assert_eq!(codex_billing(&json!({"rateLimits":{"limitId":"codex","primary":{"usedPercent":101,"windowDurationMins":300}}})), None);
+    }
+
+    #[tokio::test]
+    async fn cancelled_catalog_discovery_kills_and_reaps_its_provider_process() {
+        if std::env::var_os(doxa_isolation::ACTIVE_MANIFEST).is_some() { return; }
+        use std::{fs, os::unix::fs::PermissionsExt, sync::Arc, thread};
+        let root=tempfile::tempdir().unwrap();
+        let executable=root.path().join("codex-fixture");
+        fs::write(&executable,r#"#!/usr/bin/env python3
+import json, os, pathlib, sys, time
+for line in sys.stdin:
+    request = json.loads(line)
+    if request['method'] == 'initialize':
+        pathlib.Path('catalog.pid').write_text(str(os.getpid()))
+        time.sleep(60)
+"#).unwrap();
+        fs::set_permissions(&executable,fs::Permissions::from_mode(0o700)).unwrap();
+        let cancel=Arc::new(AtomicBool::new(false));
+        let worker_cancel=cancel.clone();
+        let pidfile=root.path().join("catalog.pid");
+        let watcher=thread::spawn(move || {
+            let deadline=std::time::Instant::now()+Duration::from_secs(3);
+            while std::time::Instant::now()<deadline {
+                if pidfile.exists() { worker_cancel.store(true,Ordering::Release); return true; }
+                thread::sleep(Duration::from_millis(10));
+            }
+            false
+        });
+        let options=AppServerOptions { executable,cwd:root.path().to_owned(),model:None,
+            sandbox:SandboxMode::ReadOnly,permission:CodexPermission::OnRequest,
+            resume_thread:None,turn_timeout:Duration::from_secs(5) };
+        let result=timeout(Duration::from_secs(6),
+            AppServerDriver::discover_models_cancellable(options,&cancel)).await;
+        assert!(watcher.join().unwrap(),"provider fixture did not start");
+        assert!(matches!(result,Ok(Err(AppServerError::Cancelled))),"{result:?}");
+        let pid=fs::read_to_string(root.path().join("catalog.pid")).unwrap().parse::<i32>().unwrap();
+        assert_eq!(unsafe { libc::kill(pid,0) },-1,"cancelled app-server child was not reaped");
     }
 
     #[test]
