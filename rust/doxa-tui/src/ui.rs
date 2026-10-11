@@ -1,5 +1,6 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 mod actions;
+mod bars;
 mod commands;
 mod choice_dropdown;
 mod codegraph_viewer;

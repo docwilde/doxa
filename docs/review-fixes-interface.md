@@ -90,3 +90,26 @@ The supported conservative retirement/replacement procedure is:
 This procedure preserves the hold outside DOXA's per-run budget journal. It is
 an operator allocation boundary, not a claim that the CLI enforces cumulative
 spend across retired and replacement runs.
+
+## Context usage rendering
+
+The context submenu paints known fills as background-color cells, so its normal
+style does not depend on a terminal font containing block glyphs. The existing
+`ascii` preference still renders explicit markers. Unknown or invalid telemetry
+gets a neutral cell strip and a text status; it never appears as a measured
+zero. If the provider omits categories, the submenu says that the composition
+was not reported. Claude `context_detail` forwards the CLI's validated
+`categories` unchanged, and the UI segments only when their token sum agrees
+with the reported used total. Codex currently reports totals and window size
+but no context composition. The source's Claude CLI fixtures return an empty
+category list; the colored-category frame test is a synthetic UI fixture, not
+a live-provider measurement. No terminal session was run for this change.
+
+Root-owned focused verification:
+
+```sh
+cargo test -p doxa-tui ui::context_usage::tests::reported_components_divide_capacity_with_matching_legend_and_resize -- --exact
+cargo test -p doxa-tui ui::context_usage::tests::context_menu_draws_colored_cells_and_keeps_provider_composition -- --exact
+cargo test -p doxa-tui ui::context_usage::tests::context_totals_without_provider_categories_do_not_claim_a_composition -- --exact
+cargo test -p doxa-tui ui::context_usage::tests::unknown_invalid_and_reported_zero_are_distinct -- --exact
+```
