@@ -90,6 +90,16 @@ unknown for both Rust and Python rows.
 
 ## Freshness and coverage
 
+Rust syntax admission also bounds recursive parser, visitor and AST cleanup
+work before calling `syn`: at most 32 nested delimiter groups and 128 tokens
+across active statement/item regions. The nonrecursive check treats comments,
+quoted/character literals and raw literals as opaque, and resets sibling
+statements/items independently. Large or unusually complex valid syntax may
+therefore be reported as unparseable with an explicit `recursive parsing
+withheld` reason; it never contributes a complete Rust scan digest. This guard
+also applies to declaration checks for semantic evidence. It does not change
+the existing 1 MiB source-file, 64 MiB scan or bounded reply limits.
+
 Every CLI query enumerates the current tracked **and untracked, nonignored** Git
 files and reads Rust and Python bytes afresh. Git root lookup and file enumeration
 use a ten-second subprocess deadline, 4 KiB/4 MiB root/list stdout caps and a

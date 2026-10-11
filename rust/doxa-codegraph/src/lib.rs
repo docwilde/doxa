@@ -21,6 +21,7 @@ pub mod semantic_evidence;
 pub mod semantic_producer;
 pub mod semantic_runtime;
 pub mod cache;
+mod rust_bounds;
 #[cfg(target_os = "linux")]
 mod whole_scan;
 #[cfg(target_os = "linux")]
@@ -918,6 +919,7 @@ fn walk_items(items: &[syn::Item], scope: &str, file: &str, sha: &str, read_unix
 }
 fn parse_rust(content: &str, file: &str, sha: &str, read_unix_ms: u128,
     collect: bool) -> Result<Parsed, String> {
+    rust_bounds::preflight(content)?;
     let syntax = syn::parse_file(content).map_err(|e| format!("Rust parse error: {e}"))?;
     let mut parsed = Parsed { symbols: Vec::new(), imports: Vec::new(), calls: Vec::new(),
         modules: Vec::new(), nested_modules: 0, macro_items: 0, unsupported_syntax: 0 };
