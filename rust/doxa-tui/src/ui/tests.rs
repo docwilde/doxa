@@ -1723,6 +1723,7 @@ for line in sys.stdin:
         menu.edits.insert("docker_image".into(), Some(format!("sha256:{}", "a".repeat(64))));
         menu.edits.insert("docker_host".into(), Some(format!("unix://{}", path.display())));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
+        assert!(app.notice.starts_with("Settings saved"), "{}", app.notice);
         app.handle(Event::Mouse(MouseEvent { kind:MouseEventKind::Down(MouseButton::Left), column:0, row:0, modifiers:KeyModifiers::NONE }));
         assert!(app.settings_menu.is_none() && app.docker_setup.as_ref().unwrap().ready(),
             "settings_open={} setup={} notice={}", app.settings_menu.is_some(), app.docker_setup.as_ref().unwrap().label(), app.notice);
