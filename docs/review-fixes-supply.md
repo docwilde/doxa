@@ -156,8 +156,9 @@ git diff --check
 Root reports 28 focused Python tests passed, including the installer
 transaction fixture's expected-SHA mismatch with fake Cargo and private
 fixtures. The action-pin linter and `sh -n` checks passed. Root also completed
-the private npm installation/render/audit checks described above. The full
-Rust suites are still in progress.
+the private npm installation/render/audit checks described above. The workspace
+build and Rust suites passed through the split runs recorded in
+[the integration note](review-fixes.md).
 
 The Debian and Ubuntu signed-index package checks are recorded in the private
 evidence directory listed above. No real source install, Docker image build,

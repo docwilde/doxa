@@ -13,11 +13,12 @@ transcript therefore avoids reparsing on later draws. Hashing the bounded
 transcript still occurs when Mermaid preview prerequisites are active.
 
 The beta47 review's isolated optimized parser harness measured a 493,425-byte,
-31-fence transcript at 10,694 ms before this change. That measurement did not
-include a TUI frame, Mermaid renderer, or the process sandbox. The linear-work
-regression counts inspected input bytes for valid near-limit diagrams and a
-deeply incomplete fence. A Rust test run is still required on the root-owned
-build lane.
+31-fence transcript at 10,694 ms before this change. Repeating the same fixture
+with the extracted updated production functions measured 8 ms; all eight
+parser cases returned their expected diagrams. These measurements exclude a
+TUI frame, Mermaid renderer, and process sandbox. The linear-work regression
+counts inspected input bytes for valid near-limit diagrams and a deeply
+incomplete fence, avoiding a machine-specific timing assertion.
 
 ## Router review freshness
 
@@ -52,10 +53,11 @@ same restriction before sending the request. A source-only LORE patch is ready
 on branch `feature/codegraph-python-snapshots` at
 `57e26c7e76b34c924b8045ec6fcfaf89d0b3598c` in a separate local worktree. It
 accepts bounded `.py` paths through the same validator and adds Python
-round-trip, stale-source, and invalid-path tests; it is not released or pinned.
+round-trip, stale-source, and invalid-path tests. All six `codegraph_snapshot`
+tests passed offline in a separate build target; it is not released or pinned.
 
-The upstream prerequisite is for the prepared capability to be reviewed,
-tested, and released. Only after DOXA updates its dependency pin to that
+The upstream prerequisite is for the prepared capability to be reviewed and
+released. Only after DOXA updates its dependency pin to that
 released revision should it relax its client guard and cover Python snapshot
 response parsing. Changing the DOXA side alone would still be rejected by the
 pinned LORE service and would leave the stored-snapshot contract unverified.
