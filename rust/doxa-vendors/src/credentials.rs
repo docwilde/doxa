@@ -285,10 +285,28 @@ pub(crate) fn known_keys() -> io::Result<Vec<String>> {
         if let Ok(value) = std::env::var("TYPESAFE_API_KEY") {
             if let Ok(key) = valid_key(&value) { keys.push(key.to_owned()); }
         }
+        expand_url_variants(&mut keys);
         keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
         keys.dedup();
         Ok(keys)
     })())
+}
+fn expand_url_variants(keys:&mut Vec<String>) {
+    let variants=keys.iter().flat_map(|key| {
+        let encoded=key.bytes().map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {(byte as char).to_string()}
+            else {format!("%{byte:02X}")}
+        }).collect::<String>();
+        // Both hex cases are equivalent URL encodings. Only encoded triplets
+        // change case; credential letters retain their exact identity.
+        let mut lower=encoded.clone().into_bytes();let mut index=0;
+        while index+2<lower.len() {
+            if lower[index]==b'%' {lower[index+1]=lower[index+1].to_ascii_lowercase();lower[index+2]=lower[index+2].to_ascii_lowercase();index+=3;}
+            else {index+=1;}
+        }
+        [encoded,String::from_utf8(lower).expect("ASCII percent encoding")]
+    }).collect::<Vec<_>>();
+    keys.extend(variants);
 }
 pub fn redact(text: &str) -> io::Result<String> {
     Ok(known_keys()?.iter().fold(text.to_owned(), |text, key| text.replace(key, "***")))
@@ -297,6 +315,12 @@ pub fn redact(text: &str) -> io::Result<String> {
 /// Scrub all saved/inherited credentials from untrusted structured responses.
 /// Reflections in object keys are rejected rather than changing key identity.
 pub fn redact_json(value: &mut Value) -> io::Result<()> {
+    redact_json_with(value,&[])
+}
+/// Add selected MCP transport credentials without exporting the global store's
+/// keys. Raw and common URL-encoded reflections are scrubbed, not arbitrary
+/// transformations of secrets by an untrusted external server.
+pub fn redact_json_with(value: &mut Value, additional:&[String]) -> io::Result<()> {
     fn visit(value: &mut Value, keys: &[String]) -> io::Result<()> {
         match value {
             Value::String(text)=>for key in keys { *text=text.replace(key,"***"); },
@@ -309,7 +333,10 @@ pub fn redact_json(value: &mut Value) -> io::Result<()> {
         }
         Ok(())
     }
-    visit(value,&known_keys()?)
+    let mut keys=known_keys()?;
+    keys.extend_from_slice(additional);expand_url_variants(&mut keys);
+    keys.sort_by_key(|key|std::cmp::Reverse(key.len()));keys.dedup();
+    visit(value,&keys)
 }
 
 /// Read an explicitly selected owner-private configuration using the same
@@ -412,6 +439,18 @@ pub(crate) mod tests {
         }
         assert_eq!(resolve(Vendor::Glm).unwrap().as_deref(),Some("saved-zai-fixture"));
         assert_eq!(fs::metadata(dir.path().join(FILE_NAME)).unwrap().mode() & 0o777,0o600);
+    }
+    #[test]
+    fn raw_and_percent_encoded_reflections_are_scrubbed_without_exposing_values() {
+        let (_guard,_dir)=fixture();
+        search_save(SearchProvider::Exa,"fixture+search/secret=opaque").unwrap();
+        let upper="fixture%2Bsearch%2Fsecret%3Dopaque";
+        let lower="fixture%2bsearch%2fsecret%3dopaque";
+        assert_eq!(redact(&format!("raw=fixture+search/secret=opaque url={upper} lower={lower}")).unwrap(),"raw=*** url=*** lower=***");
+        let mut value=serde_json::json!({"uri":format!("https://fixture.invalid/?key={upper}"),"text":lower});
+        redact_json(&mut value).unwrap();assert_eq!(value["uri"],"https://fixture.invalid/?key=***");assert_eq!(value["text"],"***");
+        let mut value=serde_json::json!({"uri":"https://fixture.invalid/?key=other%2Fopaque%2Bref"});
+        redact_json_with(&mut value,&["other/opaque+ref".into()]).unwrap();assert_eq!(value["uri"],"https://fixture.invalid/?key=***");
     }
     #[test]
     fn search_environment_does_not_bypass_an_unsafe_store() {

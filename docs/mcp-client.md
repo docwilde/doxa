@@ -119,8 +119,9 @@ arbitrary model-supplied name to select a server.
 `CallResult` retains bounded `content`, optional `structured_content`, and
 `is_error`. A tool-level error is a result, distinct from a JSON-RPC failure.
 All saved/inherited vendor, Jev and search keys plus connection credentials
-are scrubbed from returned strings;
-reflection in object keys is refused. Media/resource content is returned as
+are scrubbed from returned strings in raw and common URL-encoded forms;
+reflection in object keys is refused. Arbitrary secret transformations by an
+external server are outside this exact-value redaction contract. Media/resource content is returned as
 untrusted data, never automatically opened or fetched. The client checks schema
 and result shapes, not full JSON Schema validation. See the official
 [tools contract](https://modelcontextprotocol.io/specification/2025-11-25/server/tools).

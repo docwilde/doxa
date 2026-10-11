@@ -79,7 +79,7 @@ async fn stdio_inherits_only_explicit_env_and_redacts_result_credentials() {
     client.list_tools(cancel()).await.unwrap();
     let result=client.call_tool("search",&json!({}),cancel()).await.unwrap();
     let serialized=serde_json::to_string(&result).unwrap();
-    assert!(!serialized.contains("synthetic-secret-0824")); assert!(serialized.contains("[redacted]"));
+    assert!(!serialized.contains("synthetic-secret-0824")); assert!(serialized.contains("***"));
     client.close().await;
     assert_eq!(journal(&path)[0]["unrelated_env_present"],false);
     std::env::remove_var("DOXA_MCP_FIXTURE_SECRET");std::env::remove_var("DOXA_MCP_UNRELATED");
