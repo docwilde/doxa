@@ -857,7 +857,8 @@ impl Host for VendorHost {
         }
         drop(output);
         if let Some(tools)=&self.agent_tools { for event in tools.take_disabled_events() { emit(event); } }
-        if let Ok(mut events) = tool_events.lock() { for event in events.drain(..) { emit(event); } }
+        let events = tool_events.lock().map(|mut events| std::mem::take(&mut *events)).unwrap_or_default();
+        for event in events { emit(event); }
         if reasoning_chars > 0 && reasoning_chars.div_ceil(4) > reported_tokens {
             emit(json!({"type":"reasoning_progress","data":{"approx_tokens":reasoning_chars.div_ceil(4)}}));
         }

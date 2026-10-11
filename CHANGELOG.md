@@ -19,6 +19,10 @@ the stable 2.0 release has not been cut.
 - Give peer messages a separate stripe and Nerd Font robot marker. Preserve peer attribution through immediate and queued turns using host admission metadata.
 - Verify Claude SDK-MCP list/send/reply delivery with scoped full IDs; refuse prefixes, titles and peers outside the project scope.
 
+**Vendor approvals**
+
+- Fix **`NativeVendorGate`** delaying resolved approvals until model text arrives. Flush each reviewed tool result before the next call so consecutive GLM and DeepSeek approvals stay actionable.
+
 **Code graph and CLI**
 
 - Reduce Linux source-open and bounded Git-wait overhead. Five paired runs measure warmed p95 **117.0 → 91.9 ms**; one optimized pair reaches 101.1 ms. Broader latency validation remains open.
