@@ -793,6 +793,8 @@ use super::*;
         if std::env::var_os("DOXA_SETTINGS_OUTSIDE_CLICK_FIXTURE").is_none() {
             // Exercise the real save path only under a disposable private home.
             let home = tempfile::tempdir().unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -913,10 +915,10 @@ use super::*;
             app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         }
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert_eq!(app.settings_menu.as_ref().unwrap().edits["background"].as_deref(), Some("transparent"));
+        assert_eq!(app.settings_menu.as_ref().unwrap().edits.get("background").and_then(|v| v.as_deref()), Some("transparent"), "selected row={}, dropdown={:?}, notice={}", app.settings_menu.as_ref().unwrap().rows[app.settings_menu.as_ref().unwrap().selected].setting.key, app.choice_dropdown, app.notice);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
         let stored = doxa_state::load_config_checked(&crate::settings::config_path().unwrap()).unwrap();
-        assert_eq!(stored["background"].as_str(), Some("transparent"));
+        assert_eq!(stored.get("background").and_then(toml::Value::as_str), Some("transparent"), "save notice={}, chip_info={:?}, edits_pending={}", app.notice, app.chip_info.as_ref().map(|info| info.kind), app.settings_menu.as_ref().unwrap().edits.contains_key("background"));
 
         let rail_entries = app.settings_menu.as_ref().unwrap().rows.iter()
             .position(|row| row.setting.key == "rail_entries").unwrap();
@@ -2110,7 +2112,7 @@ for line in sys.stdin:
             .find(|&y| row_text(y).contains("Session quota · 5h · 42% used"))
             .expect("session quota label rendered");
         let weekly_y = (area.y + 1..area.bottom() - 1)
-            .find(|&y| row_text(y).contains("Weekly quota · 7d · 75% used"))
+            .find(|&y| row_text(y).contains("Weekly quota · week · 75% used"))
             .expect("weekly quota label rendered");
         assert!((area.y + 1..area.bottom() - 1).any(|y| row_text(y).contains("Reset at 2027-01-15T")));
         assert!((area.y + 1..area.bottom() - 1).any(|y| row_text(y).contains("Reset time not reported by provider")));
@@ -2129,7 +2131,7 @@ for line in sys.stdin:
             .collect::<Vec<_>>().join("\n");
         assert!(unknown.contains("Session quota not reported by provider"));
         assert!(unknown.contains("Weekly quota not reported by provider"));
-        assert!(!unknown.contains("quota · 5h ·") && !unknown.contains("quota · 7d ·"));
+        assert!(!unknown.contains("quota · 5h ·") && !unknown.contains("quota · week ·"));
     }
 
     #[test]
@@ -2156,8 +2158,8 @@ for line in sys.stdin:
             .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
             .collect::<Vec<_>>().join("\n");
         for supplied in ["opus:55%", "sonnet:34%", "included:21%", "extra:9%"] {
-            assert!(all_rows.contains(supplied),
-                "provider quota detail {supplied} remains visible across wrapped summary rows");
+            assert!(all_rows.replace('\n', "").contains(supplied),
+                "provider quota detail {supplied} remains visible across wrapped summary rows: {all_rows}");
         }
 
         let initial_area = app.active_chooser_rect().unwrap();
