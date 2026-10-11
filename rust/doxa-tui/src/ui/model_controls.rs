@@ -421,6 +421,7 @@ impl App {
     }
 
     pub(super) fn select_new_engine(&mut self) {
+        self.choice_dropdown = None;
         if !self.manual_tab_available() {
             self.engine_picker = false;
             return;
@@ -620,6 +621,9 @@ impl App {
     }
 
     pub(super) fn new_session_key(&mut self, key: KeyEvent) -> bool {
+        if self.choice_dropdown.is_some() { return self.choice_dropdown_key(key); }
+        if matches!(key.code, KeyCode::Enter | KeyCode::Left | KeyCode::Right)
+            && self.open_new_session_dropdown() { return true; }
         if self.launching {
             if key.code == KeyCode::Esc {
                 self.new_session = None;
@@ -630,80 +634,11 @@ impl App {
         let vendor = !vendor_models(form.engine).is_empty();
         let router = form.engine==launch::Engine::Router;
         let fields = if vendor { 4 } else { 3 };
-        let isolation_field = fields - 2;
         let prompt_field = fields - 1;
         match key.code {
             KeyCode::Esc => self.new_session = None,
             KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
             KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
-            KeyCode::Left | KeyCode::Right if form.field == isolation_field => {
-                if router {self.notice="Router API sessions currently require native isolation".into();return true;}
-                let profiles = [doxa_isolation::Profile::Native,doxa_isolation::Profile::DockerOpen,doxa_isolation::Profile::DockerOffline];
-                let current = profiles.iter().position(|p|*p==form.isolation).unwrap_or(0);
-                let next = if key.code==KeyCode::Right {(current+1)%profiles.len()}else{(current+profiles.len()-1)%profiles.len()};
-                form.isolation=profiles[next];
-            }
-            KeyCode::Left | KeyCode::Right if router && form.field==0 => {
-                let current=form.models.iter().position(|id|id==&form.model).unwrap_or(0);
-                let len=form.models.len();
-                if len>0 {let next=if key.code==KeyCode::Right {(current+1)%len}else{(current+len-1)%len};form.model=form.models[next].clone();}
-            }
-            KeyCode::Left | KeyCode::Right if vendor && form.field <= 1 => {
-                if form.field == 0 {
-                    let choices = &form.models;
-                    if choices.is_empty() {
-                        return true;
-                    }
-                    let current = choices
-                        .iter()
-                        .position(|model| *model == form.model)
-                        .unwrap_or(0);
-                    let next = if key.code == KeyCode::Right {
-                        (current + 1) % choices.len()
-                    } else {
-                        (current + choices.len() - 1) % choices.len()
-                    };
-                    form.model = choices[next].clone();
-                    // Discard an effort no longer supported by the new model.
-                    let levels = form
-                        .model_efforts
-                        .get(&form.model)
-                        .cloned()
-                        .unwrap_or_default();
-                    if form
-                        .effort
-                        .as_ref()
-                        .is_none_or(|level| !levels.contains(level))
-                    {
-                        form.effort = levels
-                            .iter()
-                            .find(|level| *level == "high")
-                            .cloned()
-                            .or_else(|| levels.first().cloned());
-                    }
-                } else {
-                    let levels = form
-                        .model_efforts
-                        .get(&form.model)
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]);
-                    if levels.is_empty() {
-                        form.effort = None;
-                        return true;
-                    }
-                    let current = form
-                        .effort
-                        .as_deref()
-                        .and_then(|level| levels.iter().position(|x| *x == level))
-                        .unwrap_or(0);
-                    let next = if key.code == KeyCode::Right {
-                        (current + 1) % levels.len()
-                    } else {
-                        (current + levels.len() - 1) % levels.len()
-                    };
-                    form.effort = Some(levels[next].clone());
-                }
-            }
             KeyCode::Backspace => {
                 if form.field == prompt_field {
                     form.prompt.pop();

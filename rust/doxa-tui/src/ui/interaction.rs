@@ -89,6 +89,7 @@ impl App {
                 }
                 if self.settings_menu.is_some() && self.active_chooser_rect().is_none() {
                     self.settings_menu = None;
+                    self.choice_dropdown = None;
                     self.notice = "Enlarge active pane to edit settings".into();
                 }
                 if self.lore_picker.is_some() && (w < 34 || h < 13) {
@@ -748,12 +749,15 @@ impl App {
             return true;
         }
         if self.active_request_index().is_some() {
+            self.choice_dropdown = None;
             if self.navigation_key(key) { return true; }
             return self.request_key(key);
         }
         if self.stop_confirmation.is_some() {
+            self.choice_dropdown = None;
             return self.stop_confirmation_key(key);
         }
+        if self.choice_dropdown.is_some() { return self.choice_dropdown_key(key); }
         if self.chip_info.is_some() {
             if self.fleet_menu.is_some() {
                 if key.code == KeyCode::Esc {
@@ -2172,6 +2176,13 @@ impl App {
         false
     }
     pub(super) fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.choice_dropdown.is_some() {
+            if self.active_request_index().is_none() && self.delete_confirmation.is_none()
+                && self.stop_confirmation.is_none() && !self.diff_modal && !self.map_modal {
+                return self.choice_dropdown_mouse(mouse);
+            }
+            self.choice_dropdown = None;
+        }
         if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Down(_)
             | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
             let inside = self.layout(self.size).rail.is_some_and(|rail|
@@ -2539,6 +2550,12 @@ impl App {
                 if let Some(area) = menu.filter(|area| {
                     area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
                 }) {
+                    if let Some(category) = super::choice_dropdown::settings_tabs(area, self.settings_menu.as_ref().unwrap().category)
+                        .into_iter().find(|(_, rect, _)| rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)))
+                        .map(|(index, _, _)| index) {
+                        self.select_settings_category(category);
+                        return true;
+                    }
                     let offset = usize::from(mouse.row.saturating_sub(area.y.saturating_add(3)));
                     let index = self
                         .settings_menu
@@ -2548,14 +2565,9 @@ impl App {
                         .get(offset)
                         .copied();
                     if let Some(index) = index.filter(|_| mouse.row >= area.y + 3) {
-                        let current = self.settings_menu.as_ref().unwrap().selected;
+                        self.settings_menu.as_mut().unwrap().finish_draft();
                         self.settings_menu.as_mut().unwrap().selected = index;
-                        if current == index {
-                            return self.settings_menu_key(KeyEvent::new(
-                                KeyCode::Enter,
-                                KeyModifiers::NONE,
-                            ));
-                        }
+                        return self.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                     }
                 } else {
                     self.settings_menu = None;
@@ -3118,6 +3130,8 @@ impl App {
                     form.field = usize::from(mouse.row - first);
                     if form.field == fields {
                         self.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                    } else {
+                        self.open_new_session_dropdown();
                     }
                 }
                 return true;

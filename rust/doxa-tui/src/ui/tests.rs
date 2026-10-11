@@ -133,7 +133,7 @@ use super::*;
     }
 
     #[test]
-    fn router_target_form_rotates_only_configured_ids_and_refuses_docker() {
+    fn router_target_dropdown_selects_only_configured_ids_and_refuses_docker() {
         let mut app=App::default();
         app.new_session=Some(NewSession{engine:launch::Engine::Router,router_config:Some(PathBuf::from("/private/router.json")),
             isolation:doxa_isolation::Profile::Native,model:"auto".into(),models:vec!["auto".into(),"ds-fixture".into()],
@@ -141,10 +141,15 @@ use super::*;
             prompt:String::new(),field:0,launch_error:None,retry_allowed:true});
         app.new_session_key(KeyEvent::new(KeyCode::Char('x'),KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().model,"auto");
-        app.new_session_key(KeyEvent::new(KeyCode::Right,KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert_eq!(app.new_session.as_ref().unwrap().model,"auto");
+        app.new_session_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().model,"ds-fixture");
         app.new_session.as_mut().unwrap().field=1;
-        app.new_session_key(KeyEvent::new(KeyCode::Right,KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().isolation,doxa_isolation::Profile::Native);
         app.new_session.as_mut().unwrap().field=2;
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
@@ -1391,6 +1396,8 @@ for line in sys.stdin:
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: form.x + 2, row: first + 1, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.new_session.as_ref().unwrap().field, 1);
+        assert!(app.choice_dropdown.is_some());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: form.x + 2, row: first, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.new_session.as_ref().unwrap().field, 0);
@@ -1421,10 +1428,10 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-flash");
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
         assert_eq!(app.new_session.as_ref().unwrap().effort.as_deref(), Some("high"));
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
         for c in "Explain this".chars() {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
         }
@@ -1601,7 +1608,9 @@ for line in sys.stdin:
         assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-flash");
         assert_eq!(app.new_session.as_ref().unwrap().effort.as_deref(), Some("high"));
         app.new_session.as_mut().unwrap().field = 0;
-        app.new_session_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-v4-pro");
         app.engine_selected = 3;
         app.select_new_engine();

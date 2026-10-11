@@ -102,6 +102,10 @@ The memory chip browses user and project facts; the belief browser supports evid
 
 `/setup` handles provider credentials and defaults. `/plugins` and `/reload-plugins` control sanitized Claude plugin adoption for future sessions. Separately, owner-approved [native text plugins](../docs/native-plugins.md) add read-only local slash commands and owner-produced status values from private files. DOXA bounds refresh and reports failures; it does not start producers or run plugin code. `/settings` edits validated preferences; environment overrides remain read-only.
 
+Settings has numbered category tabs: **1 Session · 2 Fleet · 3 Memory · 4 Appearance · 5 Keys · 6 Notifications · 7 Remote · 8 Paths · 9 About**. Click a tab or press its number when no field editor is open. Narrow panes show the selected tab and overflow arrows.
+
+Choice fields in Settings and New Session open dropdowns with a click or Enter. Use Up/Down, the mouse wheel, Home/End or Page Up/Down to browse; click or Enter selects, and Escape cancels. Tab moves between New Session fields. Settings text edits and dropdown selections are staged until Ctrl+S saves; Escape from Settings discards unsaved changes.
+
 ## Fleets and peers
 
 `fleet preflight` checks capacity, spend ceiling, and socket paths before `fleet start`. Use `--worker-task INDEX:TEXT` to give each worker a frozen deliverable and optional `--worker-path INDEX:RELATIVE_PREFIX` to narrow its file scope. `fleet runs|status|attach|stop|resume` operate on owned manifests and verified slots. `fleet debrief RUN` reads a finished run's host journal and reports assignment outcomes, handoff cycles, signed test receipts, and retained review events without peer text or model calls. `/fleet` shows runs in the TUI; starting or resuming there requires reviewing and arming the complete plan. Budgeted resume needs complete persisted accounting. [Fleet guide](../docs/fleet.md).

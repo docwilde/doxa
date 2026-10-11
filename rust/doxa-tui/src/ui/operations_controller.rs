@@ -568,6 +568,7 @@ impl App {
         }
     }
     pub(super) fn open_settings_menu(&mut self) {
+        self.choice_dropdown = None;
         let identity = self.groups[self.active_group]
             .active_id()
             .and_then(|id| self.session_identity.get(id));
@@ -697,6 +698,14 @@ impl App {
         }
     }
     pub(super) fn settings_menu_key(&mut self, key: KeyEvent) -> bool {
+        if self.choice_dropdown.is_some() { return self.choice_dropdown_key(key); }
+        if self.settings_menu.as_ref().is_some_and(|menu| menu.draft.is_none())
+            && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            if let KeyCode::Char(number @ '1'..='9') = key.code {
+                self.select_settings_category(number as usize - '1' as usize);
+                return true;
+            }
+        }
         let Some(menu) = self.settings_menu.as_mut() else {
             return false;
         };
@@ -744,7 +753,7 @@ impl App {
                 }
                 KeyCode::Enter => {
                     menu.finish_draft();
-                    self.save_settings_menu();
+                    self.notice = "Value staged · Ctrl+S saves Settings".into();
                 }
                 _ => {}
             }
@@ -777,6 +786,8 @@ impl App {
                         format!("{} is read-only. {}", row.setting.label, row.setting.note);
                 } else if matches!(key.code, KeyCode::Char('u') | KeyCode::Delete) {
                     menu.edits.insert(row.setting.key.into(), None);
+                } else if row.setting.kind == crate::settings::Kind::Choice {
+                    self.open_setting_dropdown();
                 } else if matches!(
                     row.setting.kind,
                     crate::settings::Kind::Bool | crate::settings::Kind::BoolOn

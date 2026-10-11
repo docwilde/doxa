@@ -1,6 +1,7 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 mod actions;
 mod commands;
+mod choice_dropdown;
 mod codegraph_viewer;
 mod diff_controller;
 mod fleet_dependency_review;
@@ -1639,6 +1640,7 @@ pub struct App {
     offline_ids: HashSet<String>,
     queue_picker: Option<QueuePicker>,
     settings_menu: Option<SettingsMenu>,
+    choice_dropdown: Option<choice_dropdown::Dropdown>,
     mermaid_preflight: Option<MermaidPreflight>,
     pending_queue_commands: Vec<crate::bridge::WorkerCommand>,
     diff_modal: bool,
@@ -1918,6 +1920,7 @@ impl Default for App {
             offline_ids: HashSet::new(),
             queue_picker: None,
             settings_menu: None,
+            choice_dropdown: None,
             mermaid_preflight: None,
             pending_queue_commands: Vec::new(),
             diff_modal: false,
