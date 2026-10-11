@@ -32,9 +32,28 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-const HELP: &str = r#"DOXA Rust 2.0 beta
+// Delta triangle, Omicron loop, Xi's three bars, Alpha crossbar. The art is
+// ASCII so redirected help remains readable even without a block-glyph font.
+const BANNER: &str = r#"    #        #####    #######      #
+   # #      #     #               # #
+  #   #     #     #   #######    #   #
+ #     #    #     #             #######
+#########    #####    #######   #     #"#;
+const AUTHOR: &str = "docwilde <docwilde@proton.me>";
 
-Usage: doxa [COMMAND] [options]
+fn cli_header() -> String {
+    format!("{BANNER}\n\n  ΔΟΞΑ · DOXA\n  Native agent terminal\n\n  Version  doxa {}\n  Author   {AUTHOR}\n", env!("CARGO_PKG_VERSION"))
+}
+fn help_text() -> String { format!("{}\n{HELP}", cli_header()) }
+fn version_text(commit: Option<&str>) -> String {
+    format!("{}  Build    native Rust · {}\n  Platform {}/{}\n  Commit   {}\n", cli_header(),
+        if cfg!(debug_assertions) { "debug" } else { "release" },
+        std::env::consts::OS, std::env::consts::ARCH,
+        commit.unwrap_or("not recorded for this executable"))
+}
+
+const HELP: &str = r#"Usage
+  doxa [COMMAND] [options]
 
 Commands:
   help                 Show this help
@@ -66,7 +85,7 @@ Commands:
   model-facts ENGINE MODEL [--review-before YYYY-MM-DD] [--check-catalog]
                        Review static facts; optionally check OpenAI API catalog listing
   codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH
-                       Query current Rust syntax and structural module files with source hashes
+                       Query Rust/Python syntax with source hashes; semantic binding is unknown
   codegraph --lore-map [--root WORKTREE] file|imports|calls|modules PATH
   codegraph --stored [--root WORKTREE] file|imports|calls|modules PATH
                        Export one syntax snapshot with read-only LORE purpose candidates
@@ -110,7 +129,7 @@ Fleet: doxa fleet preflight --sessions N --run-budget USD [--supervisor ENGINE[:
        doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD
        doxa fleet runs | status RUN_ID | debrief RUN_ID | stop RUN_ID | attach RUN_ID SLOT
 
-Run doxa doctor --engine NAME to check a provider; doxa --version shows the build.
+Run doxa doctor --engine NAME to check a provider; doxa --version (or -V) shows the build.
 Update requires an installed Rust launcher. From a checkout, use ./task install.
 DOXA_RUST_REPO_URL can select a different update source.
 "#;
@@ -184,7 +203,7 @@ fn run(args: &[String]) -> io::Result<()> {
         match command {
             "help" | "--help" | "-help" | "-h" => {
                 if args.len() != 1 { return Err(invalid("help takes no arguments")); }
-                print!("{HELP}");
+                print!("{}", help_text());
                 return Ok(());
             }
             "update" => {
@@ -337,10 +356,10 @@ fn run(args: &[String]) -> io::Result<()> {
     while index < args.len() {
         let arg = args[index].as_str();
         match arg {
-            "new" | "attach" | "stop" | "list" | "doctor" | "branch" | "--list" | "--demo" | "--version"
+            "new" | "attach" | "stop" | "list" | "doctor" | "branch" | "--list" | "--demo" | "--version" | "-V"
                 if command.is_none() =>
             {
-                command = Some(arg)
+                command = Some(if arg == "-V" { "--version" } else { arg })
             }
             "--session" | "--socket" | "--engine" | "--model" | "--effort" | "--linger"
             | "--sandbox" | "--codex-bin" | "--claude-bin" | "--router-config"
@@ -427,7 +446,9 @@ fn run(args: &[String]) -> io::Result<()> {
     }
     match command {
         Some("--version") => {
-            println!("doxa {}", env!("CARGO_PKG_VERSION"));
+            let commit = std::env::current_exe().ok()
+                .and_then(|path| doxa_tui::installation::installed_commit(&path).ok().flatten());
+            print!("{}", version_text(commit.as_deref()));
             Ok(())
         }
         Some("--demo") => doxa_tui::ui::run(),
