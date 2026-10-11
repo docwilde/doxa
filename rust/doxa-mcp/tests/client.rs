@@ -111,7 +111,15 @@ async fn timeout_cancels_attempted_call_and_cleans_up_process_group() {
     let error=client.call_tool("search",&json!({}),cancel()).await.unwrap_err();
     assert_eq!(error.kind,ErrorKind::Timeout);assert!(error.attempted);assert!(client.is_closed());
     let records=journal(&path);assert!(records.iter().any(|v|v["method"]=="notifications/cancelled"));
-    for pid in records.iter().filter_map(|v|v["pid"].as_u64().or(v["descendant"].as_u64())) { assert!(dead(pid),"PID {pid}"); }
+    for pid in records.iter().filter_map(|v|v["pid"].as_u64().or(v["descendant"].as_u64())) {
+        // SIGKILL is asynchronous for descendants which are not our children.
+        // Require their termination within a bounded scheduling window.
+        let deadline=std::time::Instant::now()+std::time::Duration::from_millis(500);
+        while !dead(pid) && std::time::Instant::now()<deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(dead(pid),"PID {pid}");
+    }
 }
 
 #[tokio::test]
