@@ -172,6 +172,7 @@ fn codex_billing(reply: &Value) -> Option<Value> {
         .or_else(|| reply.get("rateLimits"))?;
     if bucket["limitId"] != "codex" { return None; }
     let mut windows = Vec::new();
+    let mut quota_windows = serde_json::Map::new();
     for name in ["primary", "secondary"] {
         let row = &bucket[name];
         let Some(used) = row["usedPercent"].as_f64()
@@ -184,13 +185,19 @@ fn codex_billing(reply: &Value) -> Option<Value> {
             n => format!("{n}m"),
         };
         windows.push(format!("{window}:{used}%"));
+        let slot = if minutes == 10_080 { Some("weekly") }
+            else if name == "primary" { Some("session") }
+            else { None };
+        if let Some(slot) = slot {
+            quota_windows.insert(slot.into(), json!({"percent":used,"window_minutes":minutes}));
+        }
     }
     if windows.is_empty() { return None; }
     let plan = bucket["planType"].as_str()
         .or_else(|| reply["planType"].as_str())
         .filter(|plan| !plan.is_empty() && plan.len() <= 32
             && plan.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
-    Some(json!({"mode":"subscription","type":plan,"quota":windows.join(" · ")}))
+    Some(json!({"mode":"subscription","type":plan,"quota":windows.join(" · "),"quota_windows":quota_windows}))
 }
 
 impl AppServerDriver {
@@ -1051,7 +1058,8 @@ mod web_item_tests {
             "planType":"plus","primary":{"usedPercent":67.2,"windowDurationMins":300},
             "secondary":{"usedPercent":91,"windowDurationMins":10080}},
             "codex_other":{"limitId":"codex_other","primary":{"usedPercent":100,"windowDurationMins":60}}}});
-        assert_eq!(codex_billing(&reply), Some(json!({"mode":"subscription","type":"plus","quota":"5h:67.2% · week:91%"})));
+        assert_eq!(codex_billing(&reply), Some(json!({"mode":"subscription","type":"plus","quota":"5h:67.2% · week:91%",
+            "quota_windows":{"session":{"percent":67.2,"window_minutes":300},"weekly":{"percent":91,"window_minutes":10080}}})));
         assert_eq!(codex_billing(&json!({"rateLimits":{"limitId":"codex_other","primary":{"usedPercent":20,"windowDurationMins":300}}})), None);
         assert_eq!(codex_billing(&json!({"rateLimits":{"limitId":"codex","primary":{"usedPercent":101,"windowDurationMins":300}}})), None);
     }

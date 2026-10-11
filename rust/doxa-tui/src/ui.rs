@@ -44,6 +44,7 @@ mod session_events;
 mod session_telemetry;
 mod glm_account;
 mod transcript_events;
+mod usage_bars;
 
 use session_telemetry::SessionTelemetry;
 use transcript_events::{append_transcript, transcript_tail, ReasoningStream};

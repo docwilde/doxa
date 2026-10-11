@@ -1826,6 +1826,48 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn usage_submenu_renders_reported_session_and_weekly_quota_and_keeps_unknowns_clear() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(190, 48));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"fixture",
+            "billing":{"mode":"subscription","type":"Max","quota":"5h:42% week:75%",
+                "quota_limits":{"five_hour":{"percent":42,"resets_at":1_800_000_000},
+                    "seven_day":{"percent":75}}}}));
+        app.open_chip_info("cost", 0);
+        let mut terminal = Terminal::new(TestBackend::new(190, 48)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = app.active_chooser_rect().unwrap();
+        let row_text = |y: u16| (area.x + 1..area.right() - 1)
+            .map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        let session_y = (area.y + 1..area.bottom() - 1)
+            .find(|&y| row_text(y).contains("Session quota · 5h · 42% used"))
+            .expect("session quota label rendered");
+        let weekly_y = (area.y + 1..area.bottom() - 1)
+            .find(|&y| row_text(y).contains("Weekly quota · 7d · 75% used"))
+            .expect("weekly quota label rendered");
+        assert!((area.y + 1..area.bottom() - 1).any(|y| row_text(y).contains("Reset at 2027-01-15T")));
+        assert!((area.y + 1..area.bottom() - 1).any(|y| row_text(y).contains("Reset time not reported by provider")));
+        for (y, color, percent) in [(session_y + 1, theme::SUCCESS, 42.0), (weekly_y + 1, theme::WARNING, 75.0)] {
+            assert_eq!(buffer[(area.x + 1, y)].symbol(), "[");
+            let cells = usize::from(area.width.saturating_sub(5));
+            let used = (percent * cells as f64 / 100.0).floor() as usize;
+            assert_eq!(buffer[(area.x + 2, y)].bg, color);
+            assert_eq!(buffer[(area.x + 2 + used as u16, y)].bg, theme::BORDER);
+        }
+
+        assert!(app.apply_daemon_frame(&json!({"type":"event","session_id":"s",
+            "event":{"type":"billing","data":{"mode":"subscription","type":"Max"}}})));
+        let unknown = app.usage_info_lines(usize::from(area.width - 3)).iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>().join("\n");
+        assert!(unknown.contains("Session quota not reported by provider"));
+        assert!(unknown.contains("Weekly quota not reported by provider"));
+        assert!(!unknown.contains("quota · 5h ·") && !unknown.contains("quota · 7d ·"));
+    }
+
+    #[test]
     fn model_picker_refreshes_pending_catalog_and_preserves_selection() {
         let mut app = App::default();
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s",

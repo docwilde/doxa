@@ -1152,9 +1152,6 @@ impl App {
             if telemetry.is_some_and(|value| value.external_mcp_cost_unknown) {
                 lines.push("External MCP charges unknown and outside model allowance; total spend unknown.".into());
             }
-            if let Some(quota) = telemetry.and_then(|value| value.quota.as_deref()) {
-                lines.push(format!("quota    {}", safe_label(quota)));
-            }
             if let Some(account)=telemetry.and_then(|value|value.glm_account.as_ref()) {lines.extend(account.lines());}
         }
         let used = telemetry.and_then(|value| value.context_tokens);

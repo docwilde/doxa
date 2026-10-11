@@ -113,3 +113,21 @@ cargo test -p doxa-tui ui::context_usage::tests::context_menu_draws_colored_cell
 cargo test -p doxa-tui ui::context_usage::tests::context_totals_without_provider_categories_do_not_claim_a_composition -- --exact
 cargo test -p doxa-tui ui::context_usage::tests::unknown_invalid_and_reported_zero_are_distinct -- --exact
 ```
+
+## Subscription quota bars
+
+The usage submenu draws separate session and weekly bars only from validated
+provider percentages. Claude's five-hour and seven-day quota snapshots retain
+their reset timestamps; Codex forwards its existing primary window and
+seven-day secondary window as typed usage fields, without adding a billing
+request. Older `5h`/`week` quota labels remain readable. Unknown windows show
+an explicit provider-unavailable line and no bar. Reset time is printed only
+when the provider supplied a valid timestamp; stale reports are labeled.
+
+Root-owned focused verification:
+
+```sh
+cargo test -p doxa-tui ui::session_telemetry::tests::quota_window_bars_use_only_recognized_provider_windows -- --exact
+cargo test -p doxa-tui ui::tests::usage_submenu_renders_reported_session_and_weekly_quota_and_keeps_unknowns_clear -- --exact
+cargo test -p doxa-engines codex_appserver::tests::billing_uses_only_measured_codex_windows -- --exact
+```
