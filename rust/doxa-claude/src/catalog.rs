@@ -11,6 +11,7 @@ pub fn decode(value: &Value) -> Result<Value, Error> {
     for row in rows {
         let valid = |name: &&str| !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control);
         let name = row["value"].as_str().or_else(|| row["model"].as_str()).filter(valid).ok_or(Error::Protocol)?;
+        let resolved=row["resolvedModel"].as_str().filter(valid);
         let mut names = vec![name];
         if let Some(resolved) = row["resolvedModel"].as_str().filter(valid) {
             if resolved != name { names.push(resolved); }
@@ -21,7 +22,7 @@ pub fn decode(value: &Value) -> Result<Value, Error> {
         for name in names {
             if !ids.contains(&name) {
                 ids.push(name);
-                capabilities.push(json!({"model":name,"efforts":efforts}));
+                capabilities.push(json!({"model":name,"efforts":efforts,"resolved_model":resolved}));
             }
         }
     }

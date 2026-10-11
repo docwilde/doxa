@@ -103,7 +103,7 @@ for line in sys.stdin:
         else: send({'id':row.get('id'),'error':{'code':-32601,'message':'unknown local fixture RPC'}})
     elif row['type']=='control_request':
         req=row['request'];sub=req['subtype'];capture(sub,req);response={}
-        if sub=='initialize': response={'models':[{'value':expected,'resolvedModel':expected,'supportedEfforts':[] if mode()=='missing-effort' else ['high']}],
+        if sub=='initialize': response={'models':[{'value':expected,'resolvedModel':'different-resolved-model' if mode()=='alias' else expected,'supportedEfforts':[] if mode()=='missing-effort' else ['high']}],
             'account':{'apiProvider':'firstParty'} if mode()=='no-auth' else {'apiProvider':'firstParty','apiKeySource':'local-fixture'}}
         elif sub=='get_settings': response={'applied':{'model':model,'effort':effort}}
         elif sub=='get_context_usage': response={'totalTokens':12,'maxTokens':131072,'percentage':.01}

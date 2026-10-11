@@ -10,6 +10,12 @@ use std::{io::Read,path::{Path,PathBuf},sync::{Arc,atomic::{AtomicBool,Ordering}
 #[derive(Clone,Default)]
 pub struct CliOptions { pub claude: Option<PathBuf>, pub codex: Option<PathBuf> }
 
+pub(super) fn advertised(candidate:&Candidate,row:&Value)->bool {
+    row["model"] == candidate.model
+        && row["resolved_model"].as_str().is_none_or(|resolved|resolved == candidate.model)
+        && row["efforts"].as_array().is_some_and(|efforts|efforts.iter().any(|effort|effort == &candidate.effort))
+}
+
 enum WorkerKind { Claude(ClaudeHost), Codex(CodexHost) }
 pub(super) struct Worker { inner: WorkerKind, closed: AtomicBool }
 impl Worker {
@@ -53,8 +59,7 @@ impl CliOptions {
         // Fresh current account/catalog check immediately before native worker
         // admission. Jev's earlier shortlist cannot bypass a changed account.
         let rows = self.catalog(candidate.provider,cwd)?;
-        if !rows.iter().any(|row|row["model"] == candidate.model && row["efforts"].as_array()
-            .is_some_and(|efforts|efforts.iter().any(|effort|effort == &candidate.effort))) {
+        if !rows.iter().any(|row|advertised(candidate,row)) {
             return Err("Router CLI selected model or effort is no longer authenticated and advertised".into());
         }
         let worker = match candidate.provider {

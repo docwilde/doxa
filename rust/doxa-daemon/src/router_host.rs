@@ -263,8 +263,7 @@ impl RouterHost {
                 if summary || candidate.billing != Billing::CliAccount || tools && !candidate.supports_tools
                     || candidate.context_tokens.checked_sub(candidate.max_output_tokens).is_none_or(|cap|cap < input) { return false; }
                 return cli_catalogs.iter().find(|(provider,_)|*provider == candidate.provider)
-                    .is_some_and(|(_,rows)|rows.iter().any(|row|row["model"] == candidate.model
-                        && row["efforts"].as_array().is_some_and(|efforts|efforts.iter().any(|effort|effort == &candidate.effort))));
+                    .is_some_and(|(_,rows)|rows.iter().any(|row|crate::router_cli::advertised(candidate,row)));
             }
             let Some((_, catalog)) = catalogs.iter().find(|(provider, _)| *provider == candidate.provider) else { return false; };
             let selected = vendor(candidate.provider);

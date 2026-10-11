@@ -140,6 +140,9 @@ fn changed_auth_or_effort_is_ineligible_and_auth_change_after_jev_submits_no_cli
         daemon.call("set_model",json!({"model":"codex"}));assert_eq!(daemon.prompt("unavailable Codex")["type"],"turn_refused");assert!(server.posts().is_empty());daemon.stop();}
     let env=Env::new();let mode=env.path().join("mode");let server=Server::new(move||{fs::write(&mode,"no-auth").unwrap();"claude".into()});let mut daemon=env.daemon(&server,false,true);
     assert_eq!(daemon.prompt("account changed after shortlist")["type"],"turn_refused");assert!(!env.capture().iter().any(|row|row["kind"]=="prompt"||row["kind"]=="turn/start"));assert!(env.state()["pending_cli"].is_null());daemon.stop();
+    let env=Env::new();env.mode("alias");let server=Server::new(||"ds".into());let mut daemon=env.daemon(&server,false,true);
+    daemon.call("set_model",json!({"model":"claude"}));assert_eq!(daemon.prompt("require resolved model")["type"],"turn_refused");
+    assert!(server.posts().is_empty());assert!(!env.capture().iter().any(|row|row["kind"]=="prompt"));daemon.stop();
 }
 
 #[test]

@@ -420,6 +420,11 @@ impl ClaudeHost {
             if !model_applied(&initial, requested, effective.0.as_deref()) {
                 return Err("Claude did not apply requested startup model".into());
             }
+            if require_auth && (effective.0.as_deref()!=Some(requested)
+                || initial["models"].as_array().into_iter().flatten().any(|row|row["value"] == requested
+                    && row["resolvedModel"].as_str().is_some_and(|resolved|resolved!=requested))) {
+                return Err("Router Claude requires the exact resolved startup model".into());
+            }
         }
         *shared.selection.lock().unwrap() = (effective.0, effective.1, mode);
         *shared.account.lock().unwrap() = display_account(&initial["account"]);
