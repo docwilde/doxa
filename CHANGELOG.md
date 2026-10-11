@@ -5,6 +5,26 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.46 — 2026-10-11
+
+**Interface**
+
+- Place numbered **Settings** tabs on the submenu title bar, preserving clickable overflow and staged edits.
+- Add responsive **`ContextUsage`** bars with validated token totals, component colors and ASCII support. Unknown or inconsistent usage stays explicit.
+- Render queued prompts with ordinary user Markdown and stripe formatting; remove pending previews when dequeued or canceled.
+
+**Peer messages**
+
+- Fix **`PeerHost`** and spawned-session prompts truncating sender IDs. Preserve full addresses and tell Claude to refresh **`peer_list`** after an exact-target refusal.
+- Give peer messages a separate stripe and Nerd Font robot marker. Preserve peer attribution through immediate and queued turns using host admission metadata.
+- Verify Claude SDK-MCP list/send/reply delivery with scoped full IDs; refuse prefixes, titles and peers outside the project scope.
+
+**Code graph and CLI**
+
+- Reduce Linux source-open and bounded Git-wait overhead. Five paired runs measure warmed p95 **117.0 → 91.9 ms**; one optimized pair reaches 101.1 ms. Broader latency validation remains open.
+- Retain all source hash passes, symlink refusal and read limits, including descriptor-walk fallback for 4096-byte relative paths. Document explicit TUI/CLI access and maintenance.
+- Add Greek **ΔΟΞΑ** block art to help and version output, build metadata and **docwilde <docwilde@proton.me>** author credit. Support **`-V`** as a version alias.
+
 ## 2.0.0-beta.45 — 2026-10-11
 
 **Menus**
