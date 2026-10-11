@@ -2812,8 +2812,8 @@ mod vendor_process {
         let mut changed = first.clone(); changed["input_summary"] = json!("{\"limit\":100}");
         glm_reviewed_answer(&mut socket, 2, &changed, "allow");
         assert_eq!(receive(&mut reader)["ok"], false);
-        send(&mut socket, json!({"type":"call","id":3,"method":"status","params":{}}));
-        let status = receive(&mut reader); assert_eq!(status["status"]["pending_inputs"], json!([first]));
+        send(&mut socket, json!({"type":"call","id":3,"method":"get_state","params":{}}));
+        let state = receive(&mut reader); assert_eq!(state["pending_inputs"], json!([first]));
         glm_reviewed_answer(&mut socket, 4, &first, "allow");
         let second = glm_approval(&mut reader, &mut events);
         let first_resolved = events.iter().position(|event| event["type"] == "needs_input_resolved" && event["data"]["id"] == first["id"]).expect("first approval must resolve before the second opens");
@@ -2834,8 +2834,8 @@ mod vendor_process {
         }
         assert_eq!(terminal.unwrap()["is_error"], false);
         assert_eq!(events.iter().filter(|event| event["type"] == "needs_input_resolved").count(), 3);
-        send(&mut socket, json!({"type":"call","id":7,"method":"status","params":{}}));
-        assert_eq!(receive(&mut reader)["status"]["pending_inputs"], json!([]));
+        send(&mut socket, json!({"type":"call","id":7,"method":"get_state","params":{}}));
+        assert_eq!(receive(&mut reader)["pending_inputs"], json!([]));
         send(&mut socket, json!({"type":"call","id":8,"method":"stop","params":{}}));
         assert_eq!(receive(&mut reader)["ok"], true); wait_until(|| process.exited());
         let requests = server.join().unwrap(); assert_eq!(requests.len(), 3);
@@ -2871,8 +2871,8 @@ mod vendor_process {
         assert!(events.iter().any(|event| event["type"] == "needs_input_resolved" && event["data"]["id"] == ask["id"]));
         assert!(!events.iter().any(|event| event["type"] == "tool_result"));
         glm_reviewed_answer(&mut socket, 3, &ask, "allow"); assert_eq!(receive(&mut reader)["ok"], false);
-        send(&mut socket, json!({"type":"call","id":4,"method":"status","params":{}}));
-        let status = receive(&mut reader); assert_eq!(status["status"]["pending_inputs"], json!([])); assert_eq!(status["status"]["running"], false);
+        send(&mut socket, json!({"type":"call","id":4,"method":"get_state","params":{}}));
+        let state = receive(&mut reader); assert_eq!(state["pending_inputs"], json!([])); assert_eq!(state["running"], false);
         assert!(!native_transcript(dir.path(), "vendor-session.messages.json").exists());
         send(&mut socket, json!({"type":"call","id":5,"method":"stop","params":{}}));
         assert_eq!(receive(&mut reader)["ok"], true); wait_until(|| process.exited());
