@@ -1726,6 +1726,16 @@ for line in sys.stdin:
         app.handle(Event::Mouse(MouseEvent { kind:MouseEventKind::Down(MouseButton::Left), column:0, row:0, modifiers:KeyModifiers::NONE }));
         assert!(app.settings_menu.is_none() && app.docker_setup.as_ref().unwrap().ready());
         assert!(app.new_session.as_ref().unwrap().launch_error.is_none());
+        // Cached success is not launch authority: a changed unpinned image is
+        // reread and refused before any launch request is queued.
+        let config_path = crate::settings::config_path().unwrap();
+        let mut config = doxa_state::load_config_checked(&config_path).unwrap();
+        config.insert("docker_image".into(), toml::Value::String("unreviewed:latest".into()));
+        doxa_state::save_config(&config_path, &config).unwrap();
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.launching && app.pending_launches.is_empty());
+        config.insert("docker_image".into(), toml::Value::String(format!("sha256:{}", "a".repeat(64))));
+        doxa_state::save_config(&config_path, &config).unwrap();
         app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let (options, prompt, _) = app.pending_launches.pop().unwrap();
         assert_eq!(options.isolation, Some(doxa_isolation::Profile::DockerOpen));

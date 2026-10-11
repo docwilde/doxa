@@ -437,6 +437,7 @@ impl App {
         };
         self.engine_picker = false;
         self.new_session=None;
+        self.docker_setup=None;
         self.new_session_catalog_pending = None;
         if engine==launch::Engine::Router {
             let (path,config)=match launch::router_config(None) {

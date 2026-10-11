@@ -472,6 +472,8 @@ impl App {
             lines.push(Line::styled(
                 if self.launching {
                     " Starting session… · waiting for launch result"
+                } else if form.isolation.docker() && self.docker_setup.as_ref().is_some_and(|setup| !setup.ready()) {
+                    " [ Start session · setup required ]"
                 } else {
                     " [ Start session ]"
                 },
