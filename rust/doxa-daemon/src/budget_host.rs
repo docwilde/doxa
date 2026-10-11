@@ -213,6 +213,7 @@ impl Host for BudgetHost {
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
     fn initial_permission_mode(&self) -> String { self.inner.initial_permission_mode() }
     fn can_set_model(&self) -> bool { self.pricing.is_none() && self.inner.can_set_model() }
+    fn model_change_requires_idle(&self) -> bool { self.inner.model_change_requires_idle() }
     fn can_set_permission_mode(&self) -> bool { self.inner.can_set_permission_mode() }
     fn permission_change_requires_idle(&self) -> bool { self.inner.permission_change_requires_idle() }
     fn can_set_permission_mode_while_running(&self, mode: &str) -> bool { self.inner.can_set_permission_mode_while_running(mode) }
@@ -482,3 +483,7 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+#[path = "budget_host_queue_tests.rs"]
+mod queue_tests;
