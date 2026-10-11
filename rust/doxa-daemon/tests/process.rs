@@ -4729,7 +4729,20 @@ mod engine_known_key_redaction {
         send(&mut socket,json!({"type":"call","id":1,"method":"peers","params":{}}));
         let peers=claude_receive_until(&mut reader,|frame|frame["id"]==1);assert_clean(&peers.to_string());assert_eq!(peers["peers"][0]["title"],"***");
         send(&mut socket,json!({"type":"call","id":2,"method":"msg","params":{"target":peer,"text":format!("{SAVED} {INHERITED} {JEV}")}}));
-        let delivered=claude_receive_until(&mut reader,|frame|frame["id"]==2);assert_eq!(delivered["ok"],true);assert_clean(&delivered.to_string());
+        // The callback reply and its event are independently queued. Check
+        // both orders so expandable sent text cannot leak an inactive key.
+        let (mut delivered,mut sent)=(None,None);
+        for _ in 0..32 {
+            let frame=receive(&mut reader);assert_clean(&frame.to_string());
+            if frame["id"]==2 { delivered=Some(frame.clone()); }
+            if frame["event"]["type"]=="peer_sent" { sent=Some(frame); }
+            if delivered.is_some() && sent.is_some() { break; }
+        }
+        assert_eq!(delivered.expect("peer delivery reply")["ok"],true);
+        let sent=sent.expect("successful peer sent event");
+        assert_eq!(sent["event"]["data"]["body"],"*** *** ***");
+        assert_eq!(sent["event"]["data"]["to"],json!([peer]));
+        assert_eq!(sent["event"]["data"]["failed"],json!([]));
         let wire=worker.join().unwrap();assert_clean(&wire);assert!(wire.contains("***"));
         assert_clean(&fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap());
         stop(&mut process,&mut reader,&mut socket);
