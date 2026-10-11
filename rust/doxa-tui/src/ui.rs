@@ -82,6 +82,39 @@ mod transcript_messages;
 pub(crate) mod transcript_tools;
 use tool_cards::ToolCards;
 
+/// Turn a validated, host-scrubbed peer journal row into the same typed
+/// transcript card used for live peer events. Unknown or legacy rows stay prose.
+pub(crate) fn restored_peer_message(event_type: &str, data: &serde_json::Value, owner: &str) -> Option<String> {
+    let session_id = |key: &str| data[key].as_str().is_some_and(doxa_transcript::valid_session_id);
+    let has_message_id = data["message_id"].as_str().is_some_and(|id| {
+        !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    });
+    if !has_message_id { return None; }
+    let message = match event_type {
+        "peer_message" if session_id("from_id") => transcript_messages::Message::peer(data, true)?,
+        "peer_sent" => {
+            if !data["to"].as_array().is_some_and(|rows| !rows.is_empty() && rows.len() <= 256
+                && rows.iter().all(|row| row.as_str().is_some_and(doxa_transcript::valid_session_id)))
+                || !data["failed"].is_null() && !data["failed"].as_array().is_some_and(|rows| rows.len() <= 256
+                    && rows.iter().all(|row| row.as_str().is_some_and(doxa_transcript::valid_session_id))) {
+                return None;
+            }
+            transcript_messages::Message::sent(data, owner, true)?
+        }
+        _ => return None,
+    };
+    Some(message.encoded())
+}
+
+pub(crate) fn peer_origin_message_id(value: &serde_json::Value) -> Option<String> {
+    if value["source"] != "peer_message" { return None; }
+    parse_peer_origin_for_restore(value).and_then(|(_, message_id)| message_id)
+}
+
+fn parse_peer_origin_for_restore(value: &serde_json::Value) -> Option<(String, Option<String>)> {
+    transcript_messages::parse_peer_origin(value)
+}
+
 const MIN_PANE_WIDTH: u16 = 28;
 const MIN_PANE_HEIGHT: u16 = 8;
 const MIN_RAIL_WIDTH: u16 = 12;
@@ -1602,6 +1635,7 @@ pub struct App {
     session_capabilities: HashMap<String, EngineCapabilities>,
     permission_modes: HashMap<String, String>,
     session_activity: HashMap<String, (bool, usize)>,
+    peer_message_ids: HashMap<String, transcript_messages::MessageIdIndex>,
     unread_sessions: HashSet<String>,
     streaming_text: HashSet<String>,
     reasoning_streams: HashMap<String, ReasoningStream>,
@@ -1904,6 +1938,7 @@ impl Default for App {
             session_capabilities: HashMap::new(),
             permission_modes: HashMap::new(),
             session_activity: HashMap::new(),
+            peer_message_ids: HashMap::new(),
             unread_sessions: HashSet::new(),
             streaming_text: HashSet::new(),
             reasoning_streams: HashMap::new(),

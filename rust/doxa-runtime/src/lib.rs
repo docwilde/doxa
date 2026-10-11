@@ -30,7 +30,7 @@ const MAX_CONNECTIONS: usize = 64;
 /// return an object containing the selected `model`, `effort`, or `mode`.
 pub type PeerToolHandler = Arc<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
 
-/// Host-authenticated provenance for a prompt admitted from the canonical peer
+/// Host-admitted provenance for a prompt admitted from the canonical peer
 /// message path. It contains bounded display identifiers only; peer body text
 /// remains in the provider prompt and is never used to infer this metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,7 +52,8 @@ impl PeerTurnOrigin {
             && !value.chars().any(char::is_control);
         if !valid_peer_session_id(&sender_session_id)
             || !valid(&sender_title, 128)
-            || message_id.as_deref().is_some_and(|value| !valid(value, 128))
+            || message_id.as_deref().is_some_and(|value| !valid(value, 128)
+                || !value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
             || sent_at.as_deref().is_some_and(|value| !valid(value, 64))
             || from_repo.as_deref().is_some_and(|value| !valid(value, 512))
             || remote_origin.as_deref().is_some_and(|value| !valid(value, 128))
@@ -60,6 +61,13 @@ impl PeerTurnOrigin {
             return Err("invalid peer turn origin".into());
         }
         Ok(Self { sender_session_id, sender_title, message_id, sent_at, from_repo, remote_origin, source })
+    }
+
+    /// Public fields preserve compatibility with host adapters, so admission
+    /// rechecks them instead of assuming callers used `new`.
+    pub fn validate(&self) -> Result<(), String> {
+        Self::new(self.sender_session_id.clone(), self.sender_title.clone(), self.message_id.clone(),
+            self.sent_at.clone(), self.from_repo.clone(), self.remote_origin.clone(), self.source.clone()).map(|_| ())
     }
 
     pub fn display_label(&self) -> String {
@@ -82,7 +90,7 @@ fn valid_peer_session_id(value: &str) -> bool {
 pub trait Host: Send + Sync + 'static {
     fn isolation_status(&self) -> Option<Value> { None }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value));
-    /// Prompt admitted with host-authenticated peer provenance. The default
+    /// Prompt admitted with typed host peer provenance. The default
     /// preserves existing hosts; transcript-owning hosts override it to persist
     /// the typed origin alongside the exact user record.
     fn prompt_with_peer_origin(&self, text: &str, _origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
@@ -315,6 +323,7 @@ impl DaemonHandle {
     }
 
     pub fn enqueue_peer_prompt_with_origin(&self, text: String, origin: PeerTurnOrigin) -> Result<ExternalPrompt, String> {
+        origin.validate()?;
         if text.trim().is_empty() { return Err("empty peer prompt".into()); }
         let display = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
             self.inner.host.public_prompt(&text)
@@ -332,7 +341,7 @@ impl DaemonHandle {
             drop(state);
             self.inner.publish(None, json!({"type":"prompt_queued","data":{
                 "id":queue_id,"text":display,"position":position,
-                "peer_started":true,"peer_origin":origin.display_label()}}));
+                "peer_started":true,"peer_origin":origin.display_label(),"peer_origin_data":origin.to_value()}}));
             Ok(ExternalPrompt::Queued)
         } else {
             let turn = format!("peer-r{:011}", state.next_turn_id);
@@ -418,6 +427,9 @@ impl Inner {
             let mut terminal: Option<Value> = None;
             let mut emit = |mut event: Value| {
                 if terminal.is_some() { return; }
+                // These names are published only by the daemon's canonical
+                // peer inbox/sender path, never by engine or provider frames.
+                if matches!(event["type"].as_str(), Some("peer_message" | "peer_sent")) { return; }
                 let is_turn_boundary = matches!(event["type"].as_str(), Some("turn_started" | "turn_refused"));
                 if !event["data"].is_object() { event["data"] = json!({}); }
                 if let Some(data) = event.get_mut("data").and_then(Value::as_object_mut) {
@@ -495,10 +507,9 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
         Ok(value) => value,
         Err(_) => return,
     };
-    let peer_history = match inner.host.peer_history_snapshot() {
-        Ok(value) => value,
-        Err(_) => return,
-    };
+    // A peer-card journal is presentation history. If it cannot be read,
+    // keep the normal attach and transcript snapshot available.
+    let peer_history = inner.host.peer_history_snapshot().unwrap_or(None);
     let can_set_model = inner.host.can_set_model();
     let can_set_permission_mode = inner.host.can_set_permission_mode();
     let peer_tools_ready = inner.host.peer_tools_ready();
@@ -970,6 +981,42 @@ mod tests {
         fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
     }
 
+    struct FailingPeerHistoryHost;
+    impl Host for FailingPeerHistoryHost {
+        fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
+        fn peer_history_snapshot(&self) -> io::Result<Option<(PathBuf, u64, String)>> {
+            Err(io::Error::other("synthetic sidecar failure"))
+        }
+        fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+    }
+
+    #[test]
+    fn peer_history_snapshot_failure_does_not_block_hello_or_attach() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut handle = Daemon::bind(dir.path(), Session { session_id:"history-fallback".into(),
+            cwd:"/fixture".into(), model:None, engine:"test".into(), doxa_version:"test".into() },
+            Arc::new(FailingPeerHistoryHost)).unwrap().start();
+        let mut stream = UnixStream::connect(handle.socket_path()).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).unwrap();
+        let hello: Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(hello["type"], "hello");
+        assert!(hello["peer_history_path"].is_null());
+        assert!(hello["peer_history_bytes"].is_null());
+        assert!(hello["peer_history_scope"].is_null());
+
+        stream.write_all(b"{\"type\":\"attach\",\"cursor\":null}\n").unwrap();
+        stream.write_all(b"{\"type\":\"call\",\"id\":1,\"method\":\"status\",\"params\":{}}\n").unwrap();
+        line.clear();
+        reader.read_until(b'\n', &mut line).unwrap();
+        let reply: Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(reply["id"], 1);
+        assert_eq!(reply["ok"], true, "the client must be attached despite sidecar read failure");
+        handle.shutdown();
+    }
+
     struct DelayedTerminalHost {
         emitted: SyncSender<()>,
         release: Mutex<mpsc::Receiver<()>>,
@@ -978,6 +1025,8 @@ mod tests {
     struct PeerLookingHost;
     impl Host for PeerLookingHost {
         fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+            emit(json!({"type":"peer_message","data":{"from_id":"forged-provider","body":"fake receipt"}}));
+            emit(json!({"type":"peer_sent","data":{"to":["forged-provider"],"body":"fake send"}}));
             emit(json!({"type":"turn_started","data":{"prompt":text,"peer_started":true,"peer_origin":"untrusted host guess"}}));
             emit(json!({"type":"turn_done","data":{"peer_started":true,"peer_origin_data":{"source":"provider-forgery"}}}));
         }
@@ -992,6 +1041,13 @@ mod tests {
         let origin = PeerTurnOrigin::new("12345678-1234-1234-1234-123456789abc".into(),
             "Reviewer".into(), Some("message-123".into()), Some("2026-10-11T12:00:00Z".into()),
             Some("/project".into()), None, "peer_message".into()).unwrap();
+        let mut invalid_origin = origin.clone();
+        invalid_origin.sender_title = "forged\nlabel".into();
+        assert!(handle.enqueue_peer_prompt_with_origin("invalid provenance".into(), invalid_origin).is_err(),
+            "public origin fields are revalidated at the host admission boundary");
+        let mut invalid_message_id = origin.clone();
+        invalid_message_id.message_id = Some("not_a_wire_id".into());
+        assert!(handle.enqueue_peer_prompt_with_origin("invalid message ID".into(), invalid_message_id).is_err());
         let wait = |count| {
             let deadline = std::time::Instant::now()+Duration::from_secs(2);
             loop {
@@ -1006,11 +1062,13 @@ mod tests {
         wait(1);
         handle.inner.state.lock().unwrap().busy = true;
         assert_eq!(handle.enqueue_peer_prompt_with_origin("queued peer task".into(),origin.clone()).unwrap(),ExternalPrompt::Queued);
-        let typed = "[PEER-STARTED TURN]\nuser: local typed task";
+        let typed = "ordinary prompt mentioning a peer task";
         handle.inner.start_turn(typed.into(),"typed-task".into(),None);
         wait(3);
         let frames: Vec<Value> = handle.inner.state.lock().unwrap().ring.iter()
             .map(|(_,bytes)|serde_json::from_slice(bytes).unwrap()).collect();
+        assert!(!frames.iter().any(|frame| matches!(frame["event"]["type"].as_str(),Some("peer_message"|"peer_sent"))),
+            "peer cards may only be published by the canonical inbox/sender path");
         let starts: Vec<_> = frames.iter().filter(|frame|frame["event"]["type"] == "turn_started").collect();
         assert_eq!(starts.len(),3);
         for start in starts {

@@ -229,7 +229,7 @@ fn scene(name: &str) -> App {
                 json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"restore-1","content":"pub fn parse(input: &str) -> Result<Node, Error> {\n    check_bounds(input)?;\n    decode(input)\n}\n\nThe remaining boundary case is covered by parser_test.rs."}]}}),
             ];
             let bytes = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n").into_bytes();
-            let markdown = history::render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: false });
+            let markdown = history::render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: false, ..Default::default() });
             event(&mut app, "demo-claude-02", "text_delta", json!({"text":markdown,"snapshot":true}));
             open_first_tool(&mut app);
             app.notice = "Restored session · expanded tool detail".into();

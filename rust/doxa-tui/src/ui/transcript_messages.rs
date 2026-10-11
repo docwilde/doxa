@@ -2,11 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{HashSet, VecDeque};
 
 use super::{transcript_events::{append_transcript, transcript_tail}, Session, MAX_INPUT_BYTES, MAX_TRANSCRIPT_BYTES};
 use crate::markdown;
 
 pub(super) const PREFIX: &str = "\u{001e}DOXA_MESSAGE:";
+const MAX_PEER_MESSAGE_IDS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +40,36 @@ pub(super) struct Message {
     pub metadata: Vec<String>,
 }
 
+/// A bounded per-session dedup index. It is seeded once when a transcript is
+/// restored and updated in O(1) as live peer events arrive.
+#[derive(Default)]
+pub(super) struct MessageIdIndex {
+    seen: HashSet<(String, bool)>,
+    order: VecDeque<(String, bool)>,
+}
+
+impl MessageIdIndex {
+    pub(super) fn from_transcript(source: &str) -> Self {
+        let mut index = Self::default();
+        for paragraph in source.split("\n\n") {
+            if let Some(message) = Message::parse(paragraph.trim_matches('\n')) {
+                if let Some(id) = message.message_id.as_deref() { index.remember(id, message.sent); }
+            }
+        }
+        index
+    }
+
+    fn remember(&mut self, id: &str, sent: bool) -> bool {
+        let key = (id.to_owned(), sent);
+        if !self.seen.insert(key.clone()) { return false; }
+        self.order.push_back(key);
+        while self.order.len() > MAX_PEER_MESSAGE_IDS {
+            if let Some(expired) = self.order.pop_front() { self.seen.remove(&expired); }
+        }
+        true
+    }
+}
+
 fn queue_id(data: &Value) -> Option<String> {
     let id = data["id"].as_str()?;
     (!id.is_empty() && id.len() <= 128
@@ -67,13 +99,18 @@ fn body(text: &str) -> String {
 
 impl Message {
     pub(super) fn queued(data: &Value, event_timestamp: Option<&Value>, nerd_font: bool) -> Option<Self> {
+        let (sender, message_id) = if data["peer_started"] == true {
+            let (label, message_id) = parse_peer_origin(&data["peer_origin_data"])?;
+            if data["peer_origin"].as_str() != Some(label.as_str()) { return None; }
+            (Some(attribution(&label)), message_id)
+        } else { (None, None) };
         Some(Self {
             queue_id: Some(queue_id(data)?), state: Some(QueueState::Queued),
             text: body(data["text"].as_str()?),
             timestamp: timestamp(data.get("timestamp").or(event_timestamp)),
-            sender: (data["peer_started"] == true).then(|| attribution(data["peer_origin"].as_str().unwrap_or("Peer"))),
+            sender,
             nerd_font, unreviewed: false, starts_turn: false, sent: false,
-            message_id: valid_message_id(data["message_id"].as_str()), recipients: vec![], failed: vec![], metadata: vec![],
+            message_id, recipients: vec![], failed: vec![], metadata: vec![],
         })
     }
 
@@ -90,16 +127,11 @@ impl Message {
 
     pub(super) fn peer_turn(data: &Value, nerd_font: bool) -> Option<Self> {
         if data["peer_started"] != true { return None; }
-        let (sender, message_id) = if let Some(origin) = data.get("peer_origin_data") {
-            let (label, message_id) = parse_peer_origin(origin)?;
-            if data["peer_origin"].as_str() != Some(label.as_str()) { return None; }
-            (attribution(&label), message_id)
-        } else {
-            (attribution(data["peer_origin"].as_str().filter(|value| !value.is_empty())?), None)
-        };
+        let (label, message_id) = parse_peer_origin(&data["peer_origin_data"])?;
+        if data["peer_origin"].as_str() != Some(label.as_str()) { return None; }
         Some(Self { queue_id: None, state: None,
             text: body(data["prompt"].as_str().unwrap_or("")), timestamp: timestamp(data.get("timestamp")),
-            message_id, sender: Some(sender), nerd_font, unreviewed: false, starts_turn: true,
+            message_id, sender: Some(attribution(&label)), nerd_font, unreviewed: false, starts_turn: true,
             sent: false, recipients: vec![], failed: vec![], metadata: vec![] })
     }
 
@@ -186,7 +218,7 @@ fn valid_display_field(value: &str, max: usize) -> bool {
 
 fn valid_peer_source(value: &str) -> bool { matches!(value, "peer_message" | "child_task") }
 
-fn parse_peer_origin(value: &Value) -> Option<(String, Option<String>)> {
+pub(super) fn parse_peer_origin(value: &Value) -> Option<(String, Option<String>)> {
     let fields = value.as_object()?;
     if fields.len() != 7 || fields.keys().any(|key| !matches!(key.as_str(),
         "sender_session_id" | "sender_title" | "message_id" | "sent_at" | "from_repo" | "remote_origin" | "source")) {
@@ -220,12 +252,19 @@ fn attribution(text: &str) -> String {
     markdown::sanitize(text).replace(['\n', '\r'], " ").chars().take(512).collect()
 }
 
-pub(super) fn append(session: &mut Session, message: &Message) -> bool {
+pub(super) fn append(session: &mut Session, message: &Message, index: &mut MessageIdIndex) -> bool {
     if let Some(message_id) = message.message_id.as_deref() {
-        let duplicate = session.transcript.split("\n\n").filter_map(|paragraph| Message::parse(paragraph.trim_matches('\n')))
-            .any(|previous| previous.message_id.as_deref() == Some(message_id)
-                && previous.sent == message.sent && previous.starts_turn == message.starts_turn);
-        if duplicate { return false; }
+        if !index.remember(message_id, message.sent) {
+            if let Some((range, mut previous)) = find_message_id_tail(&session.transcript, message_id, message.sent) {
+            // One admitted receipt may be followed by its typed host-admitted
+            // turn_started event. Keep one card and retain the started state.
+                if message.starts_turn && !previous.starts_turn {
+                    previous.starts_turn = true;
+                    return replace(session, range, &previous);
+                }
+            }
+            return false;
+        }
     }
     append_transcript(session, &format!("\n\n{}\n\n", message.encoded()))
 }
@@ -247,6 +286,32 @@ fn find(source: &str, id: &str) -> Option<(std::ops::Range<usize>, Message)> {
         start += paragraph.len() + 2;
     }
     None
+}
+
+fn find_message_id(source: &str, id: &str, sent: bool) -> Option<(std::ops::Range<usize>, Message)> {
+    let mut start = 0;
+    for paragraph in source.split("\n\n") {
+        let leading = paragraph.len() - paragraph.trim_start_matches('\n').len();
+        let end = start + paragraph.trim_end_matches('\n').len();
+        if let Some(message) = Message::parse(paragraph.trim_matches('\n'))
+            .filter(|message| message.message_id.as_deref() == Some(id) && message.sent == sent) {
+            return Some((start + leading..end, message));
+        }
+        start += paragraph.len() + 2;
+    }
+    None
+}
+
+fn find_message_id_tail(source: &str, id: &str, sent: bool) -> Option<(std::ops::Range<usize>, Message)> {
+    const MAX_SCAN_BYTES: usize = 64 * 1024;
+    let mut base = source.len().saturating_sub(MAX_SCAN_BYTES);
+    while !source.is_char_boundary(base) { base += 1; }
+    if base > 0 {
+        base = source[base..].find("\n\n").map_or(source.len(), |offset| base + offset + 2);
+    }
+    find_message_id(&source[base..], id, sent).map(|(range, message)| {
+        (range.start + base..range.end + base, message)
+    })
 }
 
 /// Returns (new admission, display tail evicted). Replayed queue events update

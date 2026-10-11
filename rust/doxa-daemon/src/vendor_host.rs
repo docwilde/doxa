@@ -110,7 +110,6 @@ pub struct VendorHost {
     turns: AtomicU64,
     estimated_cost: Mutex<CostEstimate>,
     closing: AtomicBool,
-    peer_origin: Mutex<Option<PeerTurnOrigin>>,
     balance: Arc<Mutex<Option<String>>>,
     balance_generation: Arc<AtomicU64>,
     balance_refreshing: Arc<AtomicBool>,
@@ -275,7 +274,6 @@ impl VendorHost {
             turns: AtomicU64::new(restored_turns),
             estimated_cost: Mutex::new(CostEstimate { spent: 0.0, complete: !resume }),
             closing: AtomicBool::new(false),
-            peer_origin: Mutex::new(None),
             balance: Arc::new(Mutex::new(None)),
             balance_generation: Arc::new(AtomicU64::new(0)),
             balance_refreshing: Arc::new(AtomicBool::new(false)),
@@ -781,57 +779,12 @@ impl Drop for ActiveTurn<'_> {
     fn drop(&mut self) { *self.0.lock().unwrap() = None; }
 }
 
-impl Host for VendorHost {
-    fn has_active_work(&self) -> bool { self.active.try_lock().map_or(true, |active| active.is_some()) }
-    fn peer_tools_ready(&self) -> bool {
-        !self.closing.load(Ordering::Acquire) && self.peer_tools.lock().is_ok_and(|handler| handler.is_some())
-    }
-    fn set_session_tool_handler(&self,handler:doxa_runtime::PeerToolHandler)->bool {
-        if self.active.lock().unwrap().is_some(){return false;}let mut slot=self.session_tools.lock().unwrap();if slot.is_some(){return false;}*slot=Some(handler);true
-    }
-    fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool {
-        if let Ok(active) = self.active.lock() {
-            if active.is_some() || self.closing.load(Ordering::Acquire) { return false; }
-            if let Ok(mut peer) = self.peer_tools.lock() { *peer = Some(handler); return true; }
+impl VendorHost {
+    fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
+            emit(done("Invalid host peer provenance"));
+            return;
         }
-        false
-    }
-
-    fn can_set_model(&self) -> bool { true }
-    fn model_change_requires_idle(&self) -> bool { true }
-    fn initial_model(&self) -> Option<String> { Some(self.model.lock().unwrap().clone()) }
-    fn initial_effort(&self) -> Option<String> { Some(self.effort.lock().unwrap().clone()) }
-    fn billing_snapshot(&self) -> Option<Value> {
-        let mut data = if self.vendor() == Vendor::Glm {
-            Some(self.glm_billing_snapshot())
-        } else {
-            self.balance.lock().ok().and_then(|value| value.as_ref()
-                .map(|label| json!({"mode":"api","balance":label})))
-        };
-        if let Some(telemetry) = self.external_mcp() {
-            let data = data.get_or_insert_with(|| json!({"mode":"api"}));
-            data["external_mcp"] = telemetry;
-            data["total_cost_usd"] = Value::Null;
-        }
-        data
-    }
-    fn lore_enabled(&self) -> Option<bool> { Some(self.lore_enabled) }
-    fn lore_status(&self) -> Option<Value> { self.agent_tools.as_ref()?.status() }
-    fn lore_scrub_status(&self) -> Option<&'static str> {
-        Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
-    }
-    fn public_prompt(&self, text: &str) -> Result<String, String> {
-        self.scrub(text)
-            .map_err(|_| "LORE scrub failed; prompt withheld".into())
-    }
-
-    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
-        *self.peer_origin.lock().unwrap_or_else(|poison| poison.into_inner()) = origin.cloned();
-        self.prompt(text, emit);
-    }
-
-    fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
-        let peer_origin = self.peer_origin.lock().unwrap_or_else(|poison| poison.into_inner()).take();
         let mut decorated = |mut event| { self.decorate_mcp(&mut event); emit(event); };
         let emit: &mut dyn FnMut(Value) = &mut decorated;
         if text.split_whitespace().next() == Some("/compact") {
@@ -1062,13 +1015,13 @@ impl Host for VendorHost {
                     let timestamp = crate::iso_now();
                     let append = if self.routed {
                         let selection = self.route.lock().unwrap().as_ref().expect("router selected before turn").clone();
-                        if let Some(origin) = &peer_origin {
+                        if let Some(origin) = peer_origin {
                             self.store.try_append_router_turn_with_peer_origin(&self.cwd, &prompt, &text, &timestamp,
                                 &selection, &origin.to_value(),
                                 |value| self.scrub(value).map_err(|_| std::io::Error::other("LORE scrub failed")))
                         } else { self.store.try_append_router_turn(&self.cwd, &prompt, &text, &timestamp,
                             &selection, |value| self.scrub(value).map_err(|_| std::io::Error::other("LORE scrub failed"))) }
-                    } else if let Some(origin) = &peer_origin {
+                    } else if let Some(origin) = peer_origin {
                         self.store.try_append_vendor_turn_with_peer_origin(
                             self.storage_engine(), &self.cwd, &prompt, &text, &timestamp, &origin.to_value(),
                             |value| self.scrub(value).map_err(|_| std::io::Error::other("LORE scrub failed")))
@@ -1155,6 +1108,60 @@ impl Host for VendorHost {
                 }));
             },
         }
+
+    }
+}
+
+impl Host for VendorHost {
+    fn has_active_work(&self) -> bool { self.active.try_lock().map_or(true, |active| active.is_some()) }
+    fn peer_tools_ready(&self) -> bool {
+        !self.closing.load(Ordering::Acquire) && self.peer_tools.lock().is_ok_and(|handler| handler.is_some())
+    }
+    fn set_session_tool_handler(&self,handler:doxa_runtime::PeerToolHandler)->bool {
+        if self.active.lock().unwrap().is_some(){return false;}let mut slot=self.session_tools.lock().unwrap();if slot.is_some(){return false;}*slot=Some(handler);true
+    }
+    fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool {
+        if let Ok(active) = self.active.lock() {
+            if active.is_some() || self.closing.load(Ordering::Acquire) { return false; }
+            if let Ok(mut peer) = self.peer_tools.lock() { *peer = Some(handler); return true; }
+        }
+        false
+    }
+
+    fn can_set_model(&self) -> bool { true }
+    fn model_change_requires_idle(&self) -> bool { true }
+    fn initial_model(&self) -> Option<String> { Some(self.model.lock().unwrap().clone()) }
+    fn initial_effort(&self) -> Option<String> { Some(self.effort.lock().unwrap().clone()) }
+    fn billing_snapshot(&self) -> Option<Value> {
+        let mut data = if self.vendor() == Vendor::Glm {
+            Some(self.glm_billing_snapshot())
+        } else {
+            self.balance.lock().ok().and_then(|value| value.as_ref()
+                .map(|label| json!({"mode":"api","balance":label})))
+        };
+        if let Some(telemetry) = self.external_mcp() {
+            let data = data.get_or_insert_with(|| json!({"mode":"api"}));
+            data["external_mcp"] = telemetry;
+            data["total_cost_usd"] = Value::Null;
+        }
+        data
+    }
+    fn lore_enabled(&self) -> Option<bool> { Some(self.lore_enabled) }
+    fn lore_status(&self) -> Option<Value> { self.agent_tools.as_ref()?.status() }
+    fn lore_scrub_status(&self) -> Option<&'static str> {
+        Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
+    }
+    fn public_prompt(&self, text: &str) -> Result<String, String> {
+        self.scrub(text)
+            .map_err(|_| "LORE scrub failed; prompt withheld".into())
+    }
+
+    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, origin, emit);
+    }
+
+    fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, None, emit);
     }
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {

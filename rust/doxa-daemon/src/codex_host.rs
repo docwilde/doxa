@@ -73,7 +73,6 @@ pub struct CodexHost {
     transport: &'static str,
     closing: AtomicBool,
     routed: bool,
-    peer_origin: Mutex<Option<PeerTurnOrigin>>,
 }
 
 enum CodexTransport {
@@ -328,7 +327,6 @@ impl CodexHost {
             rollout_path: Mutex::new(rollout_path),
             transport,
             closing: AtomicBool::new(false), routed,
-            peer_origin: Mutex::new(None),
         };
         let effort = host.initial_effort();
         if transport == "app-server" {
@@ -364,18 +362,36 @@ impl CodexHost {
         }
     }
 
-    fn persist(&self, mut record: Value) -> io::Result<()> {
+    fn persist(&self, record: Value) -> io::Result<()> {
+        self.persist_with_peer_origin(record, None)
+    }
+
+    fn persist_peer(&self, record: Value, origin: &PeerTurnOrigin) -> io::Result<()> {
+        origin.validate().map_err(|_| io::Error::other("invalid host peer provenance"))?;
+        self.persist_with_peer_origin(record, Some(origin))
+    }
+
+    fn persist_with_peer_origin(
+        &self,
+        mut record: Value,
+        peer_origin: Option<&PeerTurnOrigin>,
+    ) -> io::Result<()> {
         if self.routed {record["router_worker"]=json!(true);}
         let _guard = self.thread_record_lock.lock().unwrap();
-        let peer_origin = record.get("doxa_peer_origin").cloned();
+        if let Some(origin) = peer_origin {
+            if record["type"] != "user" { return Err(io::Error::other("only admitted user rows can carry peer provenance")); }
+            record["doxa_peer_origin"] = origin.to_value();
+        } else if let Some(fields) = record.as_object_mut() {
+            fields.remove("doxa_peer_origin");
+        }
         let mut scrub = |text: &str| {
             self.lore.lock().unwrap().scrub(text).map_err(|_| {
                 self.scrub_failed.store(true, Ordering::Release);
                 io::Error::other("LORE scrub failed")
             })
         };
-        let result = if let Some(origin) = peer_origin.as_ref() {
-            self.store.try_append_with_peer_origin(record, "codex", origin, &mut scrub)
+        let result = if let Some(origin) = peer_origin {
+            self.store.try_append_with_peer_origin(record, "codex", &origin.to_value(), &mut scrub)
         } else { self.store.try_append(record, "codex", &mut scrub) };
         if let Err(error) = &result {
             eprintln!("doxa-daemon: transcript append failed: {error}");
@@ -518,49 +534,12 @@ mod tests {
     }
 }
 
-impl Host for CodexHost {
-    fn has_active_work(&self) -> bool { self.active.try_lock().map_or(true, |active| active.is_some()) }
-    fn peer_tools_ready(&self) -> bool {
-        self.peer_tools_allowed && self.peer_tools.lock().unwrap().is_some()
-    }
-    fn set_session_tool_handler(&self,handler:doxa_runtime::PeerToolHandler)->bool {
-        if self.active.lock().unwrap().is_some(){return false;}let mut slot=self.session_tools.lock().unwrap();if slot.is_some(){return false;}*slot=Some(handler);true
-    }
-    fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool {
-        if !self.peer_tools_allowed || self.active.lock().unwrap().is_some() { return false; }
-        let mut tools = self.peer_tools.lock().unwrap();
-        if tools.is_some() { return false; }
-        *tools = Some(handler); true
-    }
-    fn can_set_model(&self) -> bool { self.transport == "app-server" }
-    fn model_change_requires_idle(&self) -> bool { true }
-    fn can_set_permission_mode(&self) -> bool { self.transport == "app-server" }
-    fn permission_change_requires_idle(&self) -> bool { true }
-    fn can_set_permission_mode_while_running(&self, mode: &str) -> bool {
-        mode == "auto" && self.transport == "app-server"
-            && self.catalog_options.sandbox != doxa_engines::codex_driver::SandboxMode::DangerFullAccess
-            && matches!(*self.permission.lock().unwrap(), CodexPermission::OnRequest | CodexPermission::Auto)
-    }
-    fn initial_permission_mode(&self) -> String {
-        if self.transport == "app-server" { self.permission.lock().unwrap().mode() } else { "never" }.to_owned()
-    }
-    fn initial_model(&self) -> Option<String> { self.selection.lock().unwrap().0.clone() }
-    fn initial_effort(&self) -> Option<String> { self.selection.lock().unwrap().1.clone() }
-    fn billing_snapshot(&self) -> Option<Value> { self.billing.lock().ok()?.clone() }
-    fn lore_enabled(&self) -> Option<bool> { Some(self.lore_enabled) }
-    fn lore_status(&self) -> Option<Value> { self.agent_tools.as_ref()?.status() }
-    fn lore_scrub_status(&self) -> Option<&'static str> {
-        Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
-    }
-    fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
-        self.store.transcript_snapshot()
-    }
-    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
-        *self.peer_origin.lock().unwrap_or_else(|poison|poison.into_inner()) = origin.cloned();
-        self.prompt(text, emit);
-    }
-    fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
-        let peer_origin = self.peer_origin.lock().unwrap_or_else(|poison|poison.into_inner()).take();
+impl CodexHost {
+    fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
+            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Invalid host peer provenance"}}));
+            return;
+        }
         let text = match doxa_vendors::credentials::redact(text) {
             Ok(text) => text,
             Err(_) => {
@@ -620,12 +599,14 @@ impl Host for CodexHost {
         let user_record = if compaction {
             json!({"type":"doxa_command","command":"compact","cwd":self.cwd,"sessionId":self.session_id,"timestamp":crate::iso_now()})
         } else {
-            let mut record = json!({"type":"user", "message":{"role":"user","content":text},
-                "cwd":self.cwd, "sessionId":self.session_id, "timestamp":crate::iso_now()});
-            if let Some(origin) = peer_origin { record["doxa_peer_origin"] = origin.to_value(); }
-            record
+            json!({"type":"user", "message":{"role":"user","content":text},
+                "cwd":self.cwd, "sessionId":self.session_id, "timestamp":crate::iso_now()})
         };
-        if self.persist(user_record).is_err() {
+        let persisted = match (user_record["type"] == "user", peer_origin) {
+            (true, Some(origin)) => self.persist_peer(user_record, origin),
+            _ => self.persist(user_record),
+        };
+        if persisted.is_err() {
             *self.active.lock().unwrap() = None;
             let reason = if self.scrub_failed.load(Ordering::Acquire) {
                 "LORE scrub failed; prompt withheld"
@@ -936,8 +917,53 @@ impl Host for CodexHost {
                 emit(json!({"type":"turn_done","data":{"is_error":true,"error":reason}}));
             }
         }
-    }
 
+    }
+}
+
+impl Host for CodexHost {
+    fn has_active_work(&self) -> bool { self.active.try_lock().map_or(true, |active| active.is_some()) }
+    fn peer_tools_ready(&self) -> bool {
+        self.peer_tools_allowed && self.peer_tools.lock().unwrap().is_some()
+    }
+    fn set_session_tool_handler(&self,handler:doxa_runtime::PeerToolHandler)->bool {
+        if self.active.lock().unwrap().is_some(){return false;}let mut slot=self.session_tools.lock().unwrap();if slot.is_some(){return false;}*slot=Some(handler);true
+    }
+    fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool {
+        if !self.peer_tools_allowed || self.active.lock().unwrap().is_some() { return false; }
+        let mut tools = self.peer_tools.lock().unwrap();
+        if tools.is_some() { return false; }
+        *tools = Some(handler); true
+    }
+    fn can_set_model(&self) -> bool { self.transport == "app-server" }
+    fn model_change_requires_idle(&self) -> bool { true }
+    fn can_set_permission_mode(&self) -> bool { self.transport == "app-server" }
+    fn permission_change_requires_idle(&self) -> bool { true }
+    fn can_set_permission_mode_while_running(&self, mode: &str) -> bool {
+        mode == "auto" && self.transport == "app-server"
+            && self.catalog_options.sandbox != doxa_engines::codex_driver::SandboxMode::DangerFullAccess
+            && matches!(*self.permission.lock().unwrap(), CodexPermission::OnRequest | CodexPermission::Auto)
+    }
+    fn initial_permission_mode(&self) -> String {
+        if self.transport == "app-server" { self.permission.lock().unwrap().mode() } else { "never" }.to_owned()
+    }
+    fn initial_model(&self) -> Option<String> { self.selection.lock().unwrap().0.clone() }
+    fn initial_effort(&self) -> Option<String> { self.selection.lock().unwrap().1.clone() }
+    fn billing_snapshot(&self) -> Option<Value> { self.billing.lock().ok()?.clone() }
+    fn lore_enabled(&self) -> Option<bool> { Some(self.lore_enabled) }
+    fn lore_status(&self) -> Option<Value> { self.agent_tools.as_ref()?.status() }
+    fn lore_scrub_status(&self) -> Option<&'static str> {
+        Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
+    }
+    fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
+        self.store.transcript_snapshot()
+    }
+    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, origin, emit);
+    }
+    fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, None, emit);
+    }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
             "verify_resume" => {

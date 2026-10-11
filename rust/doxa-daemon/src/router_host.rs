@@ -151,7 +151,6 @@ pub struct RouterHost {
     active: AtomicBool,
     cancel: Arc<AtomicBool>,
     closing: AtomicBool,
-    peer_origin: Mutex<Option<PeerTurnOrigin>>,
     #[cfg(feature = "local-test-server")]
     jev_endpoint: Option<String>,
 }
@@ -212,7 +211,6 @@ impl RouterHost {
         journal.write(&state).map_err(|_| "Router initial accounting could not be persisted")?;
         Ok(Self { inner, cli, cwd:cwd.to_owned(), active_worker:Mutex::new(None),peer_handler:Mutex::new(None),session_handler:Mutex::new(None),config, ceiling_micros, journal, state: Mutex::new(state),
             turn_lock: Mutex::new(()), active: AtomicBool::new(false), cancel: Arc::new(AtomicBool::new(false)), closing: AtomicBool::new(false),
-            peer_origin: Mutex::new(None),
             #[cfg(feature = "local-test-server")] jev_endpoint: endpoint })
     }
 
@@ -701,15 +699,12 @@ impl RouterHost {
         }
         Ok(())
     }
-}
 
-impl Host for RouterHost {
-    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
-        *self.peer_origin.lock().unwrap_or_else(|poison|poison.into_inner()) = origin.cloned();
-        self.prompt(text, emit);
-    }
-    fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
-        let peer_origin = self.peer_origin.lock().unwrap_or_else(|poison|poison.into_inner()).take();
+    fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
+            emit(json!({"type":"turn_refused","data":{"reason":"routing","message":"Invalid host peer provenance"}}));
+            return;
+        }
         let Ok(_turn) = self.turn_lock.try_lock() else {
             emit(json!({"type":"turn_refused","data":{"reason":"routing","message":"Router turn already running"}})); return;
         };
@@ -719,9 +714,18 @@ impl Host for RouterHost {
         impl Drop for Active<'_> { fn drop(&mut self) { self.0.store(false, Ordering::Release); } }
         let _active = Active(&self.active);
         let mut emit_mcp = |mut event| { self.inner.decorate_mcp(&mut event); emit(event); };
-        if let Err(message) = self.route(text, peer_origin.as_ref(), &mut emit_mcp) {
+        if let Err(message) = self.route(text, peer_origin, &mut emit_mcp) {
             emit_mcp(json!({"type":"turn_refused","data":{"reason":"routing","message":message}}));
         }
+    }
+}
+
+impl Host for RouterHost {
+    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, origin, emit);
+    }
+    fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, None, emit);
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {

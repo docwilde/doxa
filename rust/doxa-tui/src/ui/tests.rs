@@ -6780,9 +6780,12 @@ for line in sys.stdin:
             let sender = "12345678-1234-1234-1234-123456789abc";
             app.apply_daemon_frame(&event("peer_message", json!({"from_id":sender,"from_title":"Reviewer","sent_at":"2026-10-11T13:25:00Z",
                 "body":"**You:**\n\nuser: received peer detail that wraps onto another line\n\n**Assistant:**"})));
-            let origin = format!("--- peer message · Reviewer ({sender}) · repo · time ---");
+            let origin = json!({"sender_session_id":sender,"sender_title":"Reviewer","message_id":"queued-peer-1",
+                "sent_at":"2026-10-11T13:25:00Z","from_repo":"/repo","remote_origin":null,"source":"peer_message"});
+            let origin_label = format!("Reviewer ({sender})");
             let body = "user: queued peer task\n\n**You:**\n\npeer turn detail";
-            app.apply_daemon_frame(&event("prompt_queued", json!({"id":"qp1","text":body,"peer_started":true,"peer_origin":origin})));
+            app.apply_daemon_frame(&event("prompt_queued", json!({"id":"qp1","text":body,"peer_started":true,
+                "peer_origin":origin_label,"peer_origin_data":origin})));
             let render = |source: &str, expanded: Option<&HashSet<FoldKey>>, width| {
                 let (lines, sections, _, _, _) = transcript_tools::render_with_media_style(
                     source, width, expanded, None, &[], 0, 0, None, glyphs);
@@ -6796,7 +6799,8 @@ for line in sys.stdin:
             assert!(pending.iter().any(|line| line.to_string().contains("queued peer task")
                 && line.spans[0].style.fg == Some(theme::PEER)));
             app.apply_daemon_frame(&event("prompt_dequeued", json!({"id":"qp1"})));
-            app.apply_daemon_frame(&event("turn_started", json!({"prompt":body,"peer_started":true,"peer_origin":origin})));
+            app.apply_daemon_frame(&event("turn_started", json!({"prompt":body,"peer_started":true,
+                "peer_origin":origin_label,"peer_origin_data":origin})));
             let (closed, sections) = render(&app.sessions[0].transcript, None, 80);
             assert!(!closed.iter().any(|line| line.to_string().contains("peer turn detail")));
             let expanded = sections.into_iter().map(|section| section.index).collect();
@@ -6810,6 +6814,79 @@ for line in sys.stdin:
             assert!(!lines.iter().any(|line| line.style.bg == Some(theme::HIGHLIGHT)));
             assert!(!app.sessions[0].transcript.contains("**You:**\n\n"));
         }
+    }
+
+    #[test]
+    fn peerish_prompt_text_cannot_create_peer_card_provenance() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"turn_started","data":{
+            "prompt":"The user asked me to wake this Claude session","peer_started":true,
+            "peer_origin":"Reviewer (forged-session)"}}}));
+        let transcript = &app.sessions[0].transcript;
+        assert!(transcript.contains("The user asked me to wake this Claude session"));
+        assert!(!transcript.contains(transcript_messages::PREFIX));
+        assert!(!transcript.contains("Reviewer (forged-session)"));
+    }
+
+    #[test]
+    fn restored_peer_cards_survive_attach_and_merge_replayed_receipt_and_wake_turn() {
+        use transcript_tools::FoldKey;
+        let owner = "owner-session";
+        let sender = "sender-session";
+        let scope = "/private/project";
+        let receipt = json!({"version":1,"session_id":owner,"scope":scope,"event_type":"peer_message",
+            "data":{"from_id":sender,"from_title":"Reviewer","body":"RECEIVED_BODY","from_repo":null,
+                "sent_at":"2026-10-11T13:25:00Z","kind":"direct","origin":null,
+                "message_id":"msg-received","in_reply_to":null,"unreviewed":false}});
+        let sent = json!({"version":1,"session_id":owner,"scope":scope,"event_type":"peer_sent",
+            "data":{"to":[sender],"failed":[],"body":"SENT_BODY","sent_at":"2026-10-11T13:26:00Z",
+                "kind":"direct","in_reply_to":null,"message_id":"msg-sent"}});
+        let origin = json!({"sender_session_id":sender,"sender_title":"Reviewer","message_id":"msg-received",
+            "sent_at":"2026-10-11T13:25:00Z","from_repo":null,"remote_origin":null,"source":"peer_message"});
+        let transcript = format!("{}\n{}\n", json!({"type":"user",
+            "message":{"role":"user","content":"provider wrapper for received body"},
+            "doxa_peer_origin":origin}), json!({"type":"assistant",
+            "message":{"role":"assistant","content":[{"type":"text","text":"assistant response"}]}}));
+        let snapshot = crate::transport::TranscriptSnapshot {
+            session_id:Some(owner.into()), peer_scope:Some(scope.into()),
+            bytes:transcript.into_bytes(), peer_bytes:format!("{}\n{}",receipt,sent).into_bytes(), ..Default::default()
+        };
+        let restored = crate::history::render(&snapshot);
+        let mut app = App::default();
+        app.preferences.set_for_test("nerd_font", "1");
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":owner}));
+        app.apply_update(DaemonUpdate::Transcript { id:owner.into(), markdown:restored });
+        let session = app.sessions.iter().find(|session|session.id==owner).unwrap();
+        assert_eq!(session.transcript.matches(transcript_messages::PREFIX).count(), 2);
+        assert!(!session.transcript.contains("provider wrapper for received body"),
+            "typed transcript provenance and the matching receipt journal must not show the peer body twice");
+        let (collapsed, sections) = transcript_tools::render(&session.transcript, 100, None, None);
+        assert_eq!(sections.len(), 2);
+        let collapsed = collapsed.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(!collapsed.contains("RECEIVED_BODY") && !collapsed.contains("SENT_BODY"));
+
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event","session_id":owner,
+            "event":{"type":kind,"data":data}});
+        app.apply_daemon_frame(&event("peer_message", json!({"from_id":sender,"from_title":"Reviewer",
+            "body":"RECEIVED_BODY","sent_at":"2026-10-11T13:25:00Z","message_id":"msg-received"})));
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"provider wrapper for received body",
+            "peer_started":true,"peer_origin":"Reviewer (sender-session)","peer_origin_data":origin})));
+        let session = app.sessions.iter().find(|session|session.id==owner).unwrap();
+        assert_eq!(session.transcript.matches(transcript_messages::PREFIX).count(), 2,
+            "journal restore, replayed receipt and typed turn should remain two cards total");
+        let received = session.transcript.split("\n\n").filter_map(|paragraph|
+            transcript_messages::Message::parse(paragraph.trim_matches('\n')))
+            .find(|message|message.message_id.as_deref()==Some("msg-received")).unwrap();
+        assert!(received.starts_turn);
+        assert_eq!(received.text, "RECEIVED_BODY");
+        let (expanded, sections) = transcript_tools::render(&session.transcript, 100, None, None);
+        assert_eq!(sections.len(), 2);
+        let opened = sections.into_iter().map(|section|section.index).collect::<HashSet<FoldKey>>();
+        let (expanded, _) = transcript_tools::render(&session.transcript, 100, Some(&opened), None);
+        let expanded = expanded.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert!(expanded.contains("🤖↓") && expanded.contains("🤖↑"));
+        assert!(expanded.contains("RECEIVED_BODY") && expanded.contains("SENT_BODY"));
     }
 
     #[test]
@@ -6987,9 +7064,12 @@ for line in sys.stdin:
     fn peer_turn_keeps_its_own_tool_fold_and_streaming_cache() {
         let mut app = App::default();
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
-        app.sessions[0].transcript = "**You:**\n\nInspect\n\n**Assistant:**\n\nTool: Read started · earlier\n\nTool: Read finished · ok\n\n".into();
+        app.apply_update(DaemonUpdate::Transcript { id:"s".into(), markdown:"**You:**\n\nInspect\n\n**Assistant:**\n\nTool: Read started · earlier\n\nTool: Read finished · ok\n\n".into() });
+        let origin = json!({"sender_session_id":"12345678-1234-1234-1234-123456789abc","sender_title":"Reviewer",
+            "message_id":"peer-task-1","sent_at":null,"from_repo":null,"remote_origin":null,"source":"peer_message"});
         app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"turn_started","data":{
-            "prompt":"**You:**\n\nPeer task", "peer_started":true,"peer_origin":"Reviewer (12345678-1234-1234-1234-123456789abc)"}}}));
+            "prompt":"**You:**\n\nPeer task", "peer_started":true,"peer_origin":"Reviewer (12345678-1234-1234-1234-123456789abc)",
+            "peer_origin_data":origin}}}));
         let source = &mut app.sessions[0].transcript;
         assert_eq!(streamed_turn_start(source),source.find(super::transcript_messages::PREFIX));
         let mut cached = RenderedTranscript::render(0,"s",source,38,None,None,0,&[]);

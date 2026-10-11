@@ -56,6 +56,12 @@ impl App {
             DaemonUpdate::Upsert(mut session) => {
                 if self.deleted_this_run.contains(&session.id) { return; }
                 session.transcript = transcript_tail(&session.transcript).to_owned();
+                let index_changed = self.sessions.iter().find(|old| old.id == session.id)
+                    .is_none_or(|old| old.transcript != session.transcript);
+                if index_changed {
+                    let index = super::transcript_messages::MessageIdIndex::from_transcript(&session.transcript);
+                    self.peer_message_ids.insert(session.id.clone(), index);
+                }
                 if self.sessions.iter().find(|old| old.id == session.id)
                     .is_some_and(|old| old.transcript != session.transcript) {
                     self.forget_positional_folds(&session.id);
@@ -73,6 +79,10 @@ impl App {
             }
             DaemonUpdate::Transcript { id, markdown } => {
                 let retained = transcript_tail(&markdown);
+                if !self.peer_message_ids.contains_key(&id)
+                    || self.sessions.iter().find(|session| session.id == id).is_none_or(|session| session.transcript != retained) {
+                    self.peer_message_ids.insert(id.clone(), super::transcript_messages::MessageIdIndex::from_transcript(retained));
+                }
                 if self.sessions.iter().find(|s| s.id == id).is_some_and(|s| s.transcript != retained) {
                     self.forget_positional_folds(&id);
                 }
@@ -86,6 +96,7 @@ impl App {
                 }
             }
         }
+        self.peer_message_ids.retain(|id, _| self.sessions.iter().any(|session| &session.id == id));
         self.rail_selected = self
             .rail_selected
             .min(self.rail_order().len().saturating_sub(1));
@@ -719,9 +730,10 @@ impl App {
                 match event_type {
                     "peer_message" => {
                         let Some(mut message) = super::transcript_messages::Message::peer(data, self.preferences.on("nerd_font")) else { return false; };
+                        let Some(index) = self.peer_message_ids.get_mut(&id) else { return false; };
                         let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else { return false; };
                         message.recipients.push(id.clone());
-                        let mut clipped = super::transcript_messages::append(session, &message);
+                        let mut clipped = super::transcript_messages::append(session, &message, index);
                         if data["wake_policy"] == "disabled" {
                             clipped |= append_transcript(session,
                                 "\n\n*Peer message stored for your next turn. Wake on peer messages is off; enable it in /settings → Session to allow incoming direct messages to start or queue turns.*\n");
@@ -731,8 +743,9 @@ impl App {
                     }
                     "peer_sent" => {
                         let Some(message) = super::transcript_messages::Message::sent(data, &id, self.preferences.on("nerd_font")) else { return false; };
+                        let Some(index) = self.peer_message_ids.get_mut(&id) else { return false; };
                         let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else { return false; };
-                        let clipped = super::transcript_messages::append(session, &message);
+                        let clipped = super::transcript_messages::append(session, &message, index);
                         self.transcript_evicted(&id, clipped);
                         true
                     }
@@ -914,8 +927,9 @@ impl App {
                                 super::session_telemetry::CompactionStatus::from_value(&data["compaction"]);
                         }
                         if let Some(message) = super::transcript_messages::Message::peer_turn(data, self.preferences.on("nerd_font")) {
+                            let Some(index) = self.peer_message_ids.get_mut(&id) else { return false; };
                             if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
-                                let clipped = super::transcript_messages::append(session, &message);
+                                let clipped = super::transcript_messages::append(session, &message, index);
                                 self.transcript_evicted(&id, clipped);
                             }
                         } else if let Some(prompt) = data

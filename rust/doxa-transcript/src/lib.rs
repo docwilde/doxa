@@ -38,6 +38,23 @@ pub fn valid_session_id(id: &str) -> bool {
             .all(|(i, b)| b.is_ascii_alphanumeric() || (i > 0 && b == b'-'))
 }
 
+fn valid_peer_origin_value(value: &Value) -> bool {
+    let Some(fields) = value.as_object() else { return false; };
+    if fields.len() != 7 || fields.keys().any(|key| !matches!(key.as_str(),
+        "sender_session_id" | "sender_title" | "message_id" | "sent_at" | "from_repo" | "remote_origin" | "source")) {
+        return false;
+    }
+    let Some(sender) = value["sender_session_id"].as_str() else { return false; };
+    let Some(title) = value["sender_title"].as_str() else { return false; };
+    if !valid_session_id(sender) || title.is_empty() || title.len() > 128 || title.chars().any(char::is_control)
+        || !matches!(value["source"].as_str(), Some("peer_message" | "child_task")) { return false; }
+    let valid_optional = |key: &str, max: usize| value[key].is_null()
+        || value[key].as_str().is_some_and(|text| !text.is_empty() && text.len() <= max && !text.chars().any(char::is_control));
+    if !valid_optional("sent_at", 64) || !valid_optional("from_repo", 512) || !valid_optional("remote_origin", 128) { return false; }
+    value["message_id"].is_null() || value["message_id"].as_str().is_some_and(|id| !id.is_empty()
+        && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+}
+
 fn valid_slug(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= 255
@@ -292,7 +309,10 @@ impl TranscriptStore {
         owned_dir(&self.dir)?;
         let mut user = serde_json::json!({"type":"user", "message":{"role":"user","content":prompt},
             "cwd":cwd,"sessionId":self.session_id,"timestamp":timestamp});
-        if let Some(origin) = peer_origin { user["doxa_peer_origin"] = origin.clone(); }
+        if let Some(origin) = peer_origin {
+            if !valid_peer_origin_value(origin) { return Err(bad_data()); }
+            user["doxa_peer_origin"] = origin.clone();
+        }
         let assistant = serde_json::json!({"type":"assistant",
             "message":{"role":"assistant","content":[{"type":"text","text":answer}]},
             "sessionId":self.session_id,"timestamp":timestamp});
@@ -601,7 +621,10 @@ impl TranscriptStore {
         &self, record: Value, engine: &str, peer_origin: &Value,
         scrub: impl FnMut(&str) -> io::Result<String>,
     ) -> io::Result<()> {
-        if record.get("doxa_peer_origin") != Some(peer_origin) { return Err(bad_data()); }
+        if record["type"] != "user" || record["sessionId"].as_str() != Some(self.session_id.as_str())
+            || record.get("doxa_peer_origin") != Some(peer_origin) || !valid_peer_origin_value(peer_origin) {
+            return Err(bad_data());
+        }
         self.try_append_metadata(record, engine, Some(peer_origin), scrub)
     }
 
@@ -613,6 +636,13 @@ impl TranscriptStore {
         mut scrub: impl FnMut(&str) -> io::Result<String>,
     ) -> io::Result<()> {
         owned_dir(&self.dir)?;
+        if let Some(origin) = peer_origin {
+            if record["type"] != "user" || !valid_peer_origin_value(origin) { return Err(bad_data()); }
+        } else if let Some(fields) = record.as_object_mut() {
+            // Provider records may carry arbitrary extension fields. This
+            // namespace is reserved for explicit host admission only.
+            fields.remove("doxa_peer_origin");
+        }
         let fields = record.as_object_mut().ok_or_else(bad_data)?;
         fields.insert("engine".into(), Value::String(engine.to_owned()));
         try_scrub_value(&mut record, &mut scrub)?;
@@ -809,6 +839,18 @@ mod checkpoint_tests {
         assert!(store.try_append_with_peer_origin(record(), "claude", &origin,
             |text| Ok(if text == "sender-123" { "scrubbed-id".into() } else { text.into() })).is_err());
         assert_eq!(store.read_records().unwrap().len(), 1, "rejected metadata must append no partial row");
+        let mut cross_session = record();
+        cross_session["sessionId"] = json!("other-session");
+        assert!(store.try_append_with_peer_origin(cross_session, "claude", &origin, str::to_owned).is_err());
+        let mut non_user = record();
+        non_user["type"] = json!("assistant");
+        assert!(store.try_append_with_peer_origin(non_user, "claude", &origin, str::to_owned).is_err());
+        assert_eq!(store.read_records().unwrap().len(), 1, "cross-session and non-user rows are not admitted");
+        store.try_append(record(), "claude", str::to_owned).unwrap();
+        let records = store.read_records().unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records[1].get("doxa_peer_origin").is_none(),
+            "generic provider persistence strips the reserved host provenance field");
     }
 
     fn fixture() -> (tempfile::TempDir, TranscriptStore) {

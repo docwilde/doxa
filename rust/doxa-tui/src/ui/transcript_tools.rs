@@ -1022,6 +1022,7 @@ mod tests {
         let source = crate::history::render(&crate::transport::TranscriptSnapshot {
             bytes: records.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n").into_bytes(),
             earlier_bytes_omitted: false,
+            ..Default::default()
         });
         let keys = HashSet::from([FoldKey::Section(0), FoldKey::Tool("a".into())]);
         let (lines, sections) = render(&source, 80, Some(&keys), None);
@@ -1039,7 +1040,7 @@ mod tests {
             serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"path":"src/main.rs"}}]}}),
             serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":result}]}}));
         let source = crate::history::render(&crate::transport::TranscriptSnapshot {
-            bytes: records.into_bytes(), earlier_bytes_omitted: false,
+            bytes: records.into_bytes(), earlier_bytes_omitted: false, ..Default::default()
         });
         let (collapsed, sections) = render(&source, 80, None, None);
         assert_eq!(sections.len(), 1);
@@ -1065,6 +1066,7 @@ mod tests {
         let source = crate::history::render(&crate::transport::TranscriptSnapshot {
             bytes: records.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n").into_bytes(),
             earlier_bytes_omitted: false,
+            ..Default::default()
         });
         let (collapsed, sections) = render(&source, 80, None, None);
         assert_eq!(sections.len(), 1);
