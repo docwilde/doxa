@@ -692,7 +692,7 @@ fn target_matches(session_id: &str, target: &str, exact: bool) -> bool {
 
 #[cfg(test)]
 mod provider_target_tests {
-    use super::target_matches;
+    use super::{target_matches, PEER_UNTRUSTED_INTRO};
     #[test]
     fn provider_send_cannot_retarget_a_reviewed_prefix_after_roster_change() {
         assert!(target_matches("peer-original", "peer", false));
