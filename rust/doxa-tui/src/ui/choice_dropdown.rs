@@ -392,9 +392,9 @@ mod tests {
         assert!(app.choice_dropdown.is_some());
         let dropdown = app.choice_dropdown_rect().unwrap();
         assert!(menu.contains(Position::new(dropdown.x, dropdown.y)));
-        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), dropdown.x + 2, dropdown.y + 2);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), dropdown.x + 2, dropdown.y + 3);
         assert!(app.choice_dropdown.is_none());
-        assert_eq!(app.settings_menu.as_ref().unwrap().edits["session_isolation"].as_deref(), Some("docker-open"));
+        assert_eq!(app.settings_menu.as_ref().unwrap().edits["engine"].as_deref(), Some("codex"));
         assert!(app.settings_menu.as_ref().unwrap().draft.is_none());
         assert!(app.pending_launches.is_empty());
     }
