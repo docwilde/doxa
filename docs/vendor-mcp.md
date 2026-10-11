@@ -72,6 +72,5 @@ The production daemon fixture source covers DeepSeek with local stdio, GLM
 with local HTTP, routed API inheritance, mandatory reviews in Auto, consecutive
 approvals, exact scrubbed argument transmission, denial/cancellation, changed
 config/credentials/schema, bounded output, process shutdown and restart/resume refusal for an unresolved attempt. Its Linux
-process checks use `/proc` for reaping evidence. This checkpoint is awaiting
-compilation and execution; source fixtures are not test results. No live search
+process checks use `/proc` for reaping evidence. All seven Linux daemon fixtures passed in the isolated beta47 integration lane; they use real daemon processes with local fake providers and MCP transports. No live search
 provider or paid model call has been made for this integration.

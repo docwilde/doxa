@@ -151,3 +151,12 @@ Run `./task test` for the Rust suite. CI checks portable crates, daemon behavior
 The protected Codex build verifies a pinned synchronous `PreCompact` hook before starting a thread. Missing or failed LORE review blocks compaction; stock app servers cannot run protected turns. The private Linux launcher owns and reaps provider descendants. [Codex engine contract](doxa-engines/README.md) records exact build and verification details. [Current gallery](../docs/rust-gallery.md) shows deterministic Ratatui frames and isolated browser samples.
 
 Python 1.x is archived at [v1.19.0](https://github.com/docwilde/doxa/tree/v1.19.0); its [manual](../docs/manual.md) documents that version.
+
+### Search services and Docker setup
+
+`/settings` → `0 MCP` contains the four masked search API-key editors, explicit
+server config and MCP switch. Ctrl+P probes connection/catalog only; the
+[client guide](../docs/mcp-client.md) and [API worker guide](../docs/vendor-mcp.md)
+explain tool review, private configuration and external cost reporting.
+`/setup docker` opens rootless Engine and reviewed-image requirements directly;
+`doxa setup docker` offers the same terminal configuration.

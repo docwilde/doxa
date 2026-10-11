@@ -76,6 +76,20 @@ Remote control is opt in. `doxa remote serve` exposes a private Rust browser vie
 
 See the [browser and Android gallery](docs/remote-gallery.md) for client screenshots and capture details.
 
+## Search and MCP
+
+Open **`/settings` → `0 MCP`** to save Tavily, Firecrawl, Exa and Brave Search
+API keys in the masked private editors. Select an owner-private server config,
+then **Ctrl+P** checks configured servers without calling tools. MCP is opt-in
+for DeepSeek, GLM and Router API workers. [Configuration and templates](docs/mcp-client.md),
+[tool review and accounting](docs/vendor-mcp.md).
+
+Use **`/setup docker`** for rootless Docker prerequisites and reviewed worker
+image/socket configuration. [Docker setup](containers/session/README.md).
+GLM exposes an owner-declared API bundle profile and a separate optional quota
+monitor; cash balance and bundle remainder remain unknown.
+[GLM account reporting](docs/glm-account-reporting.md).
+
 ## Gallery
 
 **← Scroll left/right →** with the gallery scrollbar or a horizontal trackpad gesture. Click a screenshot to open it at full size.
