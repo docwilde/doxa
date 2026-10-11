@@ -1066,14 +1066,7 @@ impl App {
             return true;
         }
         if self.keybindings.matches(KeyAction::PeerMap, key) {
-            self.map_modal = true;
-            self.peer_map.selected = 0;
-            self.pending_peer_refresh = Some(
-                self.groups[self.active_group]
-                    .active_id()
-                    .unwrap_or("")
-                    .to_owned(),
-            );
+            self.open_peer_map(self.active_group);
             return true;
         }
         if self.tool_modal {
@@ -1431,9 +1424,7 @@ impl App {
                         } else if self.active_remote() && (self.input == "/peers" || self.input == "/mesh" || self.input == "/msg" || self.input.starts_with("/msg ")) {
                             self.notice = "Peer controls are available on the session host".into();
                         } else if self.input == "/peers" || self.input == "/mesh" {
-                            self.map_modal = true;
-                            self.peer_map.selected = 0;
-                            self.pending_peer_refresh = Some(id.to_owned());
+                            self.open_peer_map(self.active_group);
                             self.input.clear();
                             self.input_cursor = 0;
                         } else if self.input == "/msg" || self.input.starts_with("/msg ") {

@@ -764,6 +764,16 @@ impl App {
             .filter(|label| label.ends_with(" beliefs"))
             .unwrap_or("Beliefs");
         chips.push(("beliefs", beliefs.to_owned()));
+        if let Some(id) = id.filter(|id| !self.offline_ids.contains(*id)) {
+            let peers = self
+                .peer_map
+                .reported_count(id)
+                .map(|count| format!("Peers {count}"))
+                .unwrap_or_else(|| "Peers".to_owned());
+            // The local peer map is a host feature, independent of whether a
+            // provider was given model-facing peer tools.
+            chips.push(("peers", peers));
+        }
         let engine = identity.and_then(|pair| pair.0.as_deref());
         if engine == Some("glm") {
             if let Some(account)=telemetry.and_then(|value|value.glm_account.as_ref()) {chips.push(("glm_account",account.label()));}
@@ -944,6 +954,7 @@ impl App {
             "effort" => self.open_effort_picker(),
             "isolation" => self.open_isolation_info(group),
             "beliefs" => self.open_lore_picker(),
+            "peers" => self.open_peer_map(group),
             "repo" | "directory" => self.open_repo_picker(group),
             "memory" => self.open_memory_menu(group),
             "more" => {
@@ -962,6 +973,30 @@ impl App {
             }
             kind => self.open_chip_info(kind, group),
         }
+    }
+
+    pub(super) fn open_peer_map(&mut self, group: usize) {
+        let Some(owner) = self
+            .groups
+            .get(group)
+            .and_then(|group| group.active_id())
+            .map(str::to_owned)
+        else {
+            self.notice = "Select a session before opening the peer map".into();
+            return;
+        };
+        if self.pane_remote(group) {
+            self.notice = "Peer controls are available on the session host".into();
+            return;
+        }
+        if self.offline_ids.contains(&owner) {
+            self.notice = "Archived transcript is read-only".into();
+            return;
+        }
+        self.active_group = group;
+        self.map_modal = true;
+        self.peer_map.selected = 0;
+        self.pending_peer_refresh = Some(owner);
     }
 
     pub(super) fn chip_window(&self, index: usize, width: usize) -> Vec<(&'static str, String)> {

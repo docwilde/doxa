@@ -542,6 +542,7 @@ impl Host for CodexHost {
     fn initial_effort(&self) -> Option<String> { self.selection.lock().unwrap().1.clone() }
     fn billing_snapshot(&self) -> Option<Value> { self.billing.lock().ok()?.clone() }
     fn lore_enabled(&self) -> Option<bool> { Some(self.lore_enabled) }
+    fn lore_status(&self) -> Option<Value> { self.agent_tools.as_ref()?.status() }
     fn lore_scrub_status(&self) -> Option<&'static str> {
         Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
     }

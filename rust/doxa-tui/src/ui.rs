@@ -549,6 +549,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "context" => "Current session context usage · click for details",
         "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
+        "peers" => "Same-scope peer map · click to refresh roster",
         "cost" => "Provider billing and quota information",
         "glm_account" => "GLM declared API profile, unknown cash/bundle remainder and external quota monitor",
         "balance" => "Current DeepSeek API account balance",

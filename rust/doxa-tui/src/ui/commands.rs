@@ -409,14 +409,7 @@ impl App {
             LocalCommand::Beliefs => self.open_lore_picker(),
             LocalCommand::Diff => self.open_diff(),
             LocalCommand::Peers => {
-                self.map_modal = true;
-                self.peer_map.selected = 0;
-                self.pending_peer_refresh = Some(
-                    self.groups[self.active_group]
-                        .active_id()
-                        .unwrap_or("")
-                        .to_owned(),
-                );
+                self.open_peer_map(self.active_group);
             }
             LocalCommand::Split => {
                 self.split_active_pane(Split::Horizontal);

@@ -47,6 +47,7 @@ struct Hover {
 #[derive(Clone, Debug, Default)]
 struct Scope {
     peers: Vec<Peer>,
+    reported_count: Option<usize>,
     observations: VecDeque<(String, bool)>,
     available: bool,
     reason: String,
@@ -120,6 +121,15 @@ fn tooltip_rect(rects: MapRects) -> Rect {
         width, height)
 }
 impl PeerMap {
+    /// Return the last complete roster size for this exact session owner.
+    /// Event-derived observations are not a complete roster and stay unknown.
+    pub fn reported_count(&self, owner: &str) -> Option<usize> {
+        if !safe_id(owner) {
+            return None;
+        }
+        self.scopes.get(owner)?.reported_count
+    }
+
     pub fn history(&mut self, owner: &str, frame: &Value) -> bool {
         if !safe_id(owner) { return false; }
         let scope = self.scopes.entry(owner.to_owned()).or_default();
@@ -162,18 +172,21 @@ impl PeerMap {
             scope.available = false;
             scope.reason = "Peer discovery unavailable on this daemon".into();
             scope.peers.clear();
+            scope.reported_count = None;
             return true;
         }
         let Some(rows) = frame.get("peers").and_then(Value::as_array) else {
             scope.available = false;
             scope.reason = "Peer discovery returned malformed data".into();
             scope.peers.clear();
+            scope.reported_count = None;
             return true;
         };
         if rows.len() > MAX_PEERS {
             scope.available = false;
             scope.reason = "Peer roster exceeds display limit".into();
             scope.peers.clear();
+            scope.reported_count = None;
             return true;
         }
         let mut peers = Vec::new();
@@ -205,8 +218,10 @@ impl PeerMap {
                 received: old.map_or(0, |p| p.received),
             });
         }
+        let reported_count = (rejected == 0).then_some(peers.len());
         scope.peers = peers;
         scope.rejected = rejected;
+        scope.reported_count = reported_count;
         scope.available = rows.is_empty() || !scope.peers.is_empty();
         scope.reason = if scope.available {
             String::new()
@@ -221,7 +236,7 @@ impl PeerMap {
             return false;
         }
         let scope = self.scopes.entry(owner.to_owned()).or_default();
-        match kind {
+        let changed = match kind {
             "peer_joined" => {
                 let Some(id) = data
                     .get("session_id")
@@ -238,22 +253,23 @@ impl PeerMap {
                     .unwrap_or_else(|| id.chars().take(12).collect());
                 if let Some(peer) = scope.peers.iter_mut().find(|peer| peer.id == id) {
                     if peer.title == title {
-                        return false;
+                        false
+                    } else {
+                        peer.title = title;
+                        true
                     }
-                    peer.title = title;
-                    return true;
+                } else if scope.peers.len() >= MAX_PEERS {
+                    false
+                } else {
+                    scope.peers.push(Peer {
+                        id: id.into(),
+                        title,
+                        sent: 0,
+                        received: 0,
+                    });
+                    scope.available = true;
+                    true
                 }
-                if scope.peers.len() >= MAX_PEERS {
-                    return false;
-                }
-                scope.peers.push(Peer {
-                    id: id.into(),
-                    title,
-                    sent: 0,
-                    received: 0,
-                });
-                scope.available = true;
-                true
             }
             "peer_left" => {
                 let Some(id) = data
@@ -301,7 +317,11 @@ impl PeerMap {
                 changed
             }
             _ => false,
+        };
+        if changed {
+            scope.reported_count = None;
         }
+        changed
     }
 
     pub fn move_selected(&mut self, owner: &str, delta: i32) {
@@ -599,6 +619,25 @@ mod interaction_tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
     use serde_json::json;
+
+    #[test]
+    fn complete_roster_counts_are_owner_scoped_and_incomplete_counts_stay_unknown() {
+        let mut map = PeerMap::default();
+        assert_eq!(map.reported_count("owner-a"), None);
+        assert!(map.roster("owner-a", &json!({"ok":true,"peers":[]})));
+        assert!(map.roster("owner-b", &json!({"ok":true,"peers":[
+            {"session_id":"peer-b","title":"Peer B"}]})));
+        assert_eq!(map.reported_count("owner-a"), Some(0));
+        assert_eq!(map.reported_count("owner-b"), Some(1));
+
+        assert!(map.event("owner-a", "peer_joined", &json!({"session_id":"peer-a"})));
+        assert_eq!(map.reported_count("owner-a"), None);
+        assert_eq!(map.reported_count("owner-b"), Some(1));
+
+        assert!(map.roster("owner-b", &json!({"ok":true,"peers":[{}]})));
+        assert_eq!(map.reported_count("owner-b"), None);
+        assert_eq!(map.reported_count("owner-a"), None);
+    }
 
     #[test]
     fn graph_nodes_select_peers_and_history_tooltips_wait_for_dwell() {

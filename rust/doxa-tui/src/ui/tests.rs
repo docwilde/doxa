@@ -916,6 +916,106 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn belief_and_peer_chips_follow_engine_status_and_exact_session_owner() {
+        let sessions = [
+            ("claude-owner", "claude", 3),
+            ("codex-owner", "codex", 5),
+            ("vendor-owner", "deepseek", 7),
+        ];
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(220, 40));
+        for (id, engine, count) in sessions {
+            app.apply_daemon_frame(&json!({"type":"hello", "session_id":id,
+                "engine":engine, "model":"fixture", "belief_count":count, "lore_scrub":"ready"}));
+        }
+        app.groups[0].tabs = sessions.iter().map(|(id, _, _)| (*id).into()).collect();
+        for (index, (id, _, count)) in sessions.iter().enumerate() {
+            app.groups[0].active = index;
+            assert!(app.chips(0).contains(&("beliefs", format!("{count} beliefs"))));
+            assert!(app.chips(0).contains(&("peers", "Peers".into())), "missing affordance for {id}");
+        }
+
+        // The worker telemetry path updates only the named session, and is
+        // shared by every engine rather than gated on the provider family.
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::Telemetry {
+            session_id: "codex-owner".into(),
+            reply: json!({"status":{"belief_count":11}}),
+        });
+        app.groups[0].active = 1;
+        let chips = app.chips(0);
+        assert!(chips.contains(&("beliefs", "11 beliefs".into())));
+        assert!(chips.contains(&("peers", "Peers".into())));
+
+        let mut terminal = Terminal::new(TestBackend::new(220, 40)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let painted = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(painted.contains("11 beliefs"));
+        let peers_hit = app.rendered_chip_hits.borrow().as_ref().unwrap()
+            .iter().find(|hit| hit.kind == "peers").cloned().unwrap();
+        app.handle(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: peers_hit.rect.x + peers_hit.rect.width / 2,
+            row: peers_hit.rect.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.map_modal);
+        assert_eq!(app.pending_peer_refresh.as_deref(), Some("codex-owner"));
+
+        app.apply_daemon_frame(&json!({"type":"peer_roster", "session_id":"codex-owner",
+            "ok":true, "peers":[{"session_id":"codex-peer", "title":"CODEX_ONLY_PEER"}]}));
+        app.apply_daemon_frame(&json!({"type":"peer_roster", "session_id":"claude-owner",
+            "ok":true, "peers":[{"session_id":"claude-peer", "title":"CLAUDE_ONLY_PEER"}]}));
+        app.apply_daemon_frame(&json!({"type":"peer_roster", "session_id":"vendor-owner",
+            "ok":true, "peers":[]}));
+        assert!(app.chips(0).contains(&("peers", "Peers 1".into())));
+
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let codex_map = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(codex_map.contains("CODEX_ONLY_PEER"));
+        assert!(!codex_map.contains("CLAUDE_ONLY_PEER"));
+
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        app.groups[0].active = 0;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let peers_hit = app.rendered_chip_hits.borrow().as_ref().unwrap()
+            .iter().find(|hit| hit.kind == "peers").cloned().unwrap();
+        app.handle(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: peers_hit.rect.x + peers_hit.rect.width / 2,
+            row: peers_hit.rect.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.pending_peer_refresh.as_deref(), Some("claude-owner"));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let claude_map = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(claude_map.contains("CLAUDE_ONLY_PEER"));
+        assert!(!claude_map.contains("CODEX_ONLY_PEER"));
+
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        app.groups[0].active = 2;
+        assert!(app.chips(0).contains(&("peers", "Peers 0".into())));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let peers_hit = app.rendered_chip_hits.borrow().as_ref().unwrap()
+            .iter().find(|hit| hit.kind == "peers").cloned().unwrap();
+        app.handle(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: peers_hit.rect.x + peers_hit.rect.width / 2,
+            row: peers_hit.rect.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let empty_map = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(empty_map.contains("No live peers reported in this session's scope."));
+        assert!(!empty_map.contains("CODEX_ONLY_PEER"));
+        assert!(!empty_map.contains("CLAUDE_ONLY_PEER"));
+    }
+
+    #[test]
     fn peer_message_usage_and_uncertain_delivery_are_explicit() {
         let mut app = App::default();
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"session-1"}));
