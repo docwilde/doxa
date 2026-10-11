@@ -214,6 +214,23 @@ fn main_root(cwd: &Path) -> Option<PathBuf> {
     if common.file_name()? != ".git" { return None; }
     common.parent()?.canonicalize().ok()
 }
+
+/// Read-only common-root observation for startup and memory scope discovery.
+/// Git has a two-second deadline and 64 KiB output cap; its owned group is
+/// retired before the leader is reaped. Unknown stays unknown, including a
+/// Docker checkout whose container paths cannot establish a host Git root.
+pub fn observed_main_repo_root(cwd: &Path) -> Option<PathBuf> {
+    if doxa_isolation::workspace::manifest_for(cwd).ok()?
+        .is_some_and(|manifest| manifest.profile.docker()) { return None; }
+    let (ok, bytes) = git(cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        Duration::from_secs(2))?;
+    if !ok { return None; }
+    let common = PathBuf::from(std::str::from_utf8(&bytes).ok()?.trim());
+    if !common.is_absolute() || common.file_name()? != ".git" { return None; }
+    common.parent()?.canonicalize().ok()
+}
+
 /// The stable project identity for display grouping. Resolve managed Docker
 /// checkouts to their host source; otherwise use Git's common root. A plain
 /// directory has its own identity. Failure remains unknown to the caller.
