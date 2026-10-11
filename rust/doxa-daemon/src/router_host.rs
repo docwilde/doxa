@@ -155,6 +155,7 @@ pub struct RouterHost {
 }
 
 impl RouterHost {
+    #[cfg(test)]
     pub fn new(config: Config, cwd: &Path, id: &str, resume: bool, ceiling: Option<f64>,
         #[cfg(feature = "local-test-server")] endpoint: Option<String>) -> Result<Self, String> {
         Self::new_with_cli(config,cwd,id,resume,ceiling,CliOptions::default(),

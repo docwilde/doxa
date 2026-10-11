@@ -113,7 +113,11 @@ for line in sys.stdin:
     elif row['type']=='control_response':
         capture('response',row['response']);rid=row['response']['request_id']
         if rid=='approval-1': assert row['response']['response']['behavior']=='allow';peer()
-        elif rid=='peer-1': capture('peer-result',row['response']);finish()
+        elif rid=='peer-1':
+            capture('peer-result',row['response'])
+            send({'type':'user','session_id':session,'message':{'role':'user','content':[
+                {'type':'tool_result','tool_use_id':'peer-call-1','content':'local peer tool completed'}]}})
+            finish()
     elif row['type']=='user':
         active=True;capture('prompt',row['message']['content'])
         send({'type':'control_request','request_id':'approval-1','request':{'subtype':'can_use_tool','tool_name':'Bash','input':{'command':'echo local fixture'}}})

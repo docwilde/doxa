@@ -88,7 +88,9 @@ fn authenticated_native_workers_review_tools_keep_canonical_history_and_resume_a
     }
     assert!(daemon.events.iter().filter(|event|event["type"]=="needs_input").count()>=4);
     assert!(daemon.events.iter().filter(|event|event["type"]=="turn_started").all(|event|!event["data"]["prompt"].as_str().unwrap().contains("DOXA ROUTER CONVERSATION CONTEXT")));
-    assert_eq!(fs::read_dir(daemon.run.join("registry")).unwrap().count(),1);
+    let mut entries=fs::read_dir(daemon.run.join("registry")).unwrap().map(|entry|entry.unwrap().file_name())
+        .filter(|name|Path::new(name).extension().is_some_and(|extension|extension=="json")).collect::<Vec<_>>();entries.sort();
+    assert_eq!(entries,[std::ffi::OsString::from("routed.json")],"internal worker entered the public registry");
     let capture=env.capture();assert_eq!(capture.iter().filter(|row|row["kind"]=="peer-result").count(),2);
     let claude_pid=&capture.iter().find(|row|row["provider"]=="claude"&&row["kind"]=="prompt").unwrap()["pid"];
     assert_eq!(capture.iter().filter(|row|row["pid"]==*claude_pid&&row["kind"]=="interrupt").count(),1,"worker teardown ran twice");
