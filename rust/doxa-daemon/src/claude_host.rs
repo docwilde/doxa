@@ -674,6 +674,10 @@ fn dispatch_mcp(
                 Ok(text) => json!({"content":[{"type":"text","text":text}]}),
                 Err(_) => json!({"isError":true,"content":[{"type":"text","text":"Canonical tool scrub failed"}]}),
             },
+            // This exact static host error is safe and tells the model how to
+            // recover without exposing provider errors or peer message prose.
+            Err(error) if error == doxa_engines::peer_tools::EXACT_TARGET_REQUIRED =>
+                json!({"isError":true,"content":[{"type":"text","text":doxa_engines::peer_tools::EXACT_TARGET_REQUIRED}]}),
             Err(_) => json!({"isError":true,"content":[{"type":"text","text":"Tool request refused or failed; no success was verified"}]}),
         };
         let _ = tx.send((id, json!({"mcp_response":{"jsonrpc":"2.0","id":request["message"]["id"],"result":response}})));

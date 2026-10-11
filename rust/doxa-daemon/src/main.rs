@@ -109,7 +109,7 @@ struct Options {
 fn initial_task_prompt(task: &str, parent: Option<&str>) -> String {
     // Match Python's receiving-side spawn disclosure before admitting a turn.
     const INTRO: &str = "[SPAWNED SESSION] This session was started by another DOXA session, not by a person typing. The task below was composed by that session's agent and approved, verbatim, by the human who owns both sessions -- so it IS your task, and you should carry it out. This marker is disclosure, not a trust downgrade: it exists so that anyone reading this transcript later can see where the task came from, and so that you can weigh its provenance yourself before doing something genuinely consequential with it -- spending money, running a destructive command, or spawning further sessions of your own.";
-    let origin = parent.map(|id| format!("Spawning session: {}.\n", &id[..id.len().min(8)])).unwrap_or_default();
+    let origin = parent.map(|id| format!("Spawning session: {id}.\nTo address that session, use this full exact ID as peer_send target after checking current peer_list; never shorten it.\n")).unwrap_or_default();
     format!("{INTRO}\n{origin}\n--- task ---\n{task}")
 }
 fn valid_parent_id(id: &str) -> bool {
@@ -931,6 +931,14 @@ mod tests {
 
     fn parse(args:&[&str])->io::Result<Options> {
         options_from(args.iter().map(std::ffi::OsString::from))
+    }
+    #[test]
+    fn spawned_task_preserves_full_parent_peer_address() {
+        let id = "a1234567-89ab-4cde-8123-0123456789ab";
+        let prompt = initial_task_prompt("Reviewed task", Some(id));
+        assert!(prompt.contains(&format!("Spawning session: {id}.")));
+        assert!(!prompt.contains("Spawning session: a1234567."));
+        assert!(prompt.contains("after checking current peer_list"));
     }
     #[test]
     fn router_cli_refuses_unsupported_combinations_before_loading_private_config() {

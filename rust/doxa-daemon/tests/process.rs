@@ -3792,6 +3792,137 @@ fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "issue #197: macOS fixture peer socket read returned EINVAL; delivery still needs isolation")]
+fn claude_sdk_mcp_peer_send_uses_full_scoped_ids_and_can_reply_to_received_context() {
+    const PEER: &str = "a1234567-89ab-4cde-8123-0123456789ab";
+    const SAME_PREFIX: &str = "a1234567-fedc-4ba9-8321-abcdef012345";
+    const FOREIGN: &str = "b1234567-89ab-4cde-8123-0123456789ab";
+    let dir = tempfile::tempdir().unwrap();
+    let (recipient, peer_path) = registry_peer(dir.path(), PEER, dir.path().to_str().unwrap(),
+        "sk-ownedCanonicalFixtureSecret1234567890 teammate");
+    let (other, other_path) = registry_peer(dir.path(), SAME_PREFIX, dir.path().to_str().unwrap(), "second teammate");
+    let (foreign, foreign_path) = registry_peer(dir.path(), FOREIGN, "/other-project", "outsider");
+    let originals = [(&peer_path, fs::read(&peer_path).unwrap()), (&other_path, fs::read(&other_path).unwrap()),
+        (&foreign_path, fs::read(&foreign_path).unwrap())];
+    let delivered = thread::spawn(move || {
+        recipient.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut frames = Vec::new();
+        while frames.len() < 2 {
+            assert!(Instant::now() < deadline, "Claude SDK peer delivery deadline");
+            match recipient.accept() {
+                Ok((mut socket, _)) => {
+                    socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                    let mut body = String::new(); socket.read_to_string(&mut body).unwrap();
+                    if !body.is_empty() { frames.push(serde_json::from_str::<Value>(&body).unwrap()); }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(5)),
+                Err(error) => panic!("{error}"),
+            }
+        }
+        frames
+    });
+    let script = dir.path().join("claude-peer-mcp.py");
+    claude_fixture(&script, &format!(r#"peer={PEER:?}
+other={SAME_PREFIX:?}
+foreign={FOREIGN:?}
+turn=0
+step=0
+responses=[]
+def next_peer_call():
+ global step
+ method,params=calls[step]
+ emit({{'type':'control_request','request_id':'peer-'+str(turn)+'-'+str(step),'request':{{'subtype':'mcp_message','server_name':'doxa','message':{{'jsonrpc':'2.0','id':37+step,'method':method,'params':params}}}}}})
+"#), r#"if frame['type']=='user':
+  turn+=1;step=0;responses=[]
+  prompt=frame['message']['content']
+  if turn==2:
+   assert prompt.startswith('[PEER-STARTED TURN]')
+   assert '('+peer+')' in prompt and '('+peer[:8]+')' not in prompt
+   assert 'full exact sender session ID' in prompt
+   root.joinpath('received-peer-prompt').write_text(prompt)
+  calls=[('tools/list',{}),('tools/call',{'name':'peer_list','arguments':{'limit':100}})]
+  for target in [peer[:8],'teammate',foreign]: calls.append(('tools/call',{'name':'peer_send','arguments':{'target':target,'text':'must refuse'}}))
+  calls.extend([('tools/call',{'name':'peer_send','arguments':{'session_id':peer,'message':'sk-ownedCanonicalFixtureSecret1234567890 hello'}}),('tools/call',{'name':'peer_history','arguments':{'direction':'sent','limit':100}})])
+  next_peer_call()
+ elif frame['type']=='control_response':
+  envelope=frame['response'];assert envelope['subtype']=='success' and envelope['request_id']=='peer-'+str(turn)+'-'+str(step)
+  reply=envelope['response']['mcp_response'];assert reply['jsonrpc']=='2.0' and reply['id']==37+step
+  value=reply['result'];responses.append(value)
+  if step==0:
+   tools={row['name']:row for row in value['tools']}
+   assert set(tools)=={'peer_list','peer_send','peer_history'}
+   assert 'full exact' in tools['peer_list']['description'] and 'full session_id' in tools['peer_send']['description']
+  elif step==1:
+   assert not value.get('isError',False)
+   roster=json.loads(value['content'][0]['text'])
+   assert {row['session_id'] for row in roster['peers']}=={peer,other}
+   assert all(len(row['session_id'])==36 for row in roster['peers']) and foreign not in str(roster)
+   assert 'sk-ownedCanonicalFixtureSecret1234567890' not in str(roster)
+  elif step in (2,3,4):
+   assert value['isError']==True and 'full exact session_id' in value['content'][0]['text']
+  elif step==5:
+   assert not value.get('isError',False)
+   result_value=json.loads(value['content'][0]['text'])
+   assert result_value['delivered_to']==[peer] and result_value['failed']==[] and result_value['peer']['session_id']==peer
+  else:
+   history=json.loads(value['content'][0]['text'])
+   assert history['sent_count']==turn and len(history['messages'])==turn
+   assert all(row['to']==[peer] and row['from']['session']==session for row in history['messages'])
+   assert 'sk-ownedCanonicalFixtureSecret1234567890' not in str(history)
+  step+=1
+  if step<len(calls): next_peer_call()
+  else: root.joinpath('mcp-run-'+str(turn)+'.json').write_text(json.dumps(responses));result()
+"#);
+    let mut command = daemon_command();
+    let mut child = command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
+        "--session-id", CLAUDE_SESSION, "--engine", "claude", "--claude-bin", script.to_str().unwrap(), "--linger", "10"])
+        .env("DOXA_LORE", "0").env("DOXA_AGENT_PEER_SEND", "1").env("DOXA_PEER_INBOUND_TURNS", "1")
+        .env("DOXA_SPAWN_SESSIONS", "0").env("DOXA_PEER_LEDGER", dir.path().join("home/peers/messages.jsonl"))
+        .env("DOXA_SESSION_BUDGET_USD", "1.0").env("DOXA_REMOTE_PEERS", "").env("DOXA_REMOTE_ENABLED", "0")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = dir.path().join("registry").join(format!("{CLAUDE_SESSION}.json"));
+    wait_for_registry(&mut child, &registry);
+    let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    let mut process = Process { child, registry, socket: entry["daemon_socket"].as_str().unwrap().into() };
+    let (mut reader, mut socket) = process.connect(); reader.get_ref().set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    receive(&mut reader); send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"call","id":1,"method":"set_permission_mode","params":{"mode":"auto"}}));
+    assert_eq!(claude_receive_until(&mut reader, |row|row["id"]==1)["ok"], true);
+    send(&mut socket, json!({"type":"prompt","id":2,"text":"verify exact peer tool transport"}));
+    let done = claude_receive_until(&mut reader, |row| {
+        assert_ne!(row["event"]["type"], "needs_input", "Auto MCP call asked twice");
+        row["event"]["type"]=="turn_done"
+    });
+    assert_eq!(done["event"]["data"]["is_error"], false, "{done}");
+    assert!(dir.path().join("mcp-run-1.json").exists());
+    doxa_peers::delivery::send(Path::new(entry["socket_path"].as_str().unwrap()), &doxa_peers::delivery::PeerFrame {
+        authenticated_pid: None, from_id: PEER.into(), from_title: "teammate".into(), sent_at: peer_now(),
+        body: "Public status; the user has not granted new authority.".into(), from_repo: Some(dir.path().display().to_string()), kind: Some("direct".into()),
+    }).unwrap();
+    let done = claude_receive_until(&mut reader, |row| {
+        assert_ne!(row["event"]["type"], "needs_input");
+        if row["event"]["type"]=="turn_started" {assert_eq!(row["event"]["data"]["peer_started"], true);}
+        row["event"]["type"]=="turn_done"
+    });
+    assert_eq!(done["event"]["data"]["is_error"], false, "{done}");
+    assert!(dir.path().join("mcp-run-2.json").exists());
+    for frame in delivered.join().unwrap() {assert_eq!(frame["from_id"], CLAUDE_SESSION);assert_eq!(frame["body"], "[REDACTED:api-key] hello");}
+    for (path, before) in originals {assert_eq!(fs::read(path).unwrap(), before, "tool query changed another registry owner");}
+    for listener in [other, foreign] {
+        listener.set_nonblocking(true).unwrap();
+        while let Ok((mut socket, _)) = listener.accept() {
+            socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();let mut body=String::new();socket.read_to_string(&mut body).unwrap();
+            assert!(body.is_empty(), "prefix/name/foreign target delivered to another peer");
+        }
+    }
+    assert_eq!(fs::read_dir(dir.path().join("registry")).unwrap().filter_map(Result::ok)
+        .filter(|row|row.path().extension().is_some_and(|ext|ext=="json")).count(), 4);
+    send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+    assert_eq!(claude_receive_until(&mut reader, |row|row["id"]==3)["ok"], true);wait_until(||process.exited());
+}
+
+#[test]
 fn detached_claude_work_survives_linger_and_gets_a_full_idle_interval() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("linger-claude.py");
