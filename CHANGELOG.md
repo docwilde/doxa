@@ -9,7 +9,7 @@ the stable 2.0 release has not been cut.
 
 **Interface**
 
-- Place numbered **Settings** tabs on the submenu title bar, preserving clickable overflow and staged edits.
+- Place numbered **Settings** tabs on the submenu title bar, preserving clickable overflow, staged edits and the selected row above review footers.
 - Add responsive **`ContextUsage`** bars with validated token totals, component colors and ASCII support. Unknown or inconsistent usage stays explicit.
 - Render queued prompts with ordinary user Markdown and stripe formatting; remove pending previews when dequeued or canceled.
 
