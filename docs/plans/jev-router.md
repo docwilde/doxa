@@ -3,7 +3,7 @@
 Status: first native API slice implemented for integration on 2026-10-10;
 fixture validation and a measured synthetic smoke are recorded below. Real-task
 routing evaluation remains open. Reviewed managed compaction was implemented
-and locally verified on 2026-10-11. The feature remains unreleased in draft PR #249.
+and locally verified on 2026-10-11; beta.44 ships this scope through PR #249.
 
 ## Implemented scope
 
