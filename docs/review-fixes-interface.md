@@ -163,7 +163,8 @@ invalidates the count instead of displaying a guessed zero.
 ## Settings dismissal and prompt focus
 
 An outside left-click closes Settings and its transient text/credential
-editors and dropdown. The click can then select a normal pane or prompt. A
+editors and dropdown, and returns focus to the current prompt. A click on
+another session prompt also selects that pane and restores its draft. A
 nested New Session form keeps its own input and admission behavior. The
 regression uses an isolated test home, changes and saves a setting, dismisses
 both an editor and a dropdown, and checks typing and draft retention in two
@@ -180,3 +181,16 @@ GNOME Terminal users need `wl-clipboard` or `xclip` available for this desktop
 path. Warp's OSC52 path remains available. Tests write only to a private fake
 helper, including Unicode/control characters, bounds, failure and timeout;
 no system clipboard or live GNOME/Warp session was accessed.
+
+
+## Follow-up verification
+
+The full TUI library suite passed **818 tests**, with six intentionally ignored
+acceptance/performance cases, using the released native LORE carrier. The
+Settings fixture enters the real command, stages and saves a setting in a
+private `0700` test home, dismisses an inline editor and dropdown, clicks blank
+space and another pane's prompt, and verifies typing and draft ownership.
+Clipboard fixtures never read or write the desktop clipboard. The focused
+Codex quota projection and Codex host compilation tests passed as well.
+Initial runs caught nested-menu routing regressions and fixture mismatches;
+the final suite was run after those were corrected.

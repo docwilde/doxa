@@ -35,8 +35,9 @@ Hardened modes remain unavailable pending that proof.
 The workspace build passed. Workspace Rust testing was split after the first
 900-second command limit, with no assertion failures before the limit. The
 remaining engine suites, remaining workspace packages, and excluded library
-doc-test targets then passed. The TUI library suite passed **800 tests**, with
-six intentionally ignored tests. The native LORE carrier was built from the
+doc-test targets then passed. The initial TUI library suite passed **800 tests**. After the UI follow-ups,
+the full TUI library suite passed **818 tests**, with six intentionally ignored
+tests. The native LORE carrier was built from the
 existing released pin and configured for history/picker fixtures; the
 unreleased upstream patch did not replace that carrier.
 
@@ -79,7 +80,10 @@ The integration also includes portable context and quota bars, session-bound
 last-context restoration, Codex belief-count forwarding, the Peers chip,
 Settings dismissal/focus handling, desktop-helper clipboard copy, and clearer
 canonical peer-send guidance. Verification of these follow-ups is recorded
-with their final test results below and in the detailed interface record.
+in the detailed interface record. The full 818-test TUI suite covers Settings
+save/dismiss/type, nested-menu admission, pane drafts, context restoration,
+quota validation/scrolling, chips, and private clipboard helpers. Focused Codex
+quota, Codex host, and canonical peer-guidance tests also passed.
 
 Mid-turn steering was investigated from the pinned Codex source and installed
 Claude CLI. Codex offers acknowledged `turn/steer`; Claude exposes a queued
