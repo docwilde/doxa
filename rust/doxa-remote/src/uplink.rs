@@ -158,14 +158,21 @@ pub async fn client_action(args:&[String])->io::Result<()> {
     let value=client_command(&http,&base,session,operation,body,key.as_ref()).await?;
     println!("{value}");Ok(())
 }
-async fn bounded_reply(mut response:reqwest::Response)->io::Result<Value>{
-    if !response.status().is_success(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"hub refused request"));}
-    let mut bytes=Vec::new();
-    while let Some(chunk)=response.chunk().await.map_err(|_|io::Error::other("unreadable hub reply"))?{
-        if bytes.len()+chunk.len()>128_000{return Err(invalid("hub reply exceeds bound"));}
-        bytes.extend_from_slice(&chunk);
-    }
-    serde_json::from_slice(&bytes).map_err(|_|invalid("invalid hub reply"))
+const MAX_HUB_COMMAND_BATCH:usize=1_200_000; // Eight bounded 128,000-byte commands plus envelopes.
+async fn bounded_reply(response:reqwest::Response)->io::Result<Value>{
+    bounded_reply_limit(response,128_000,Duration::from_secs(5)).await
+}
+async fn bounded_reply_limit(mut response:reqwest::Response,limit:usize,deadline:Duration)->io::Result<Value>{
+    tokio::time::timeout(deadline,async {
+        if !response.status().is_success(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"hub refused request"));}
+        if response.content_length().is_some_and(|size|size>limit as u64){return Err(invalid("hub reply exceeds bound"));}
+        let mut bytes=Vec::new();
+        while let Some(chunk)=response.chunk().await.map_err(|_|io::Error::other("unreadable hub reply"))?{
+            if bytes.len().saturating_add(chunk.len())>limit{return Err(invalid("hub reply exceeds bound"));}
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).map_err(|_|invalid("invalid hub reply"))
+    }).await.map_err(|_|io::Error::new(io::ErrorKind::TimedOut,"hub reply timed out"))?
 }
 async fn client_command(http:&Client,base:&Url,session:&str,operation:&str,mut body:Value,key:Option<&[u8;32]>)->io::Result<Value>{
     let path=format!("api/sessions/{session}/{operation}");
@@ -206,8 +213,7 @@ async fn post(client:&Client,base:&Url,path:&str,body:Value,lease:Option<&str>)-
     let mut request=client.post(url).json(&body);
     if let Some(lease)=lease{request=request.header("x-doxa-host-lease",lease);}
     let response=request.send().await.map_err(|_|io::Error::other("hub request failed"))?;
-    if !response.status().is_success(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"hub refused request"));}
-    response.json().await.map_err(|_|io::Error::other("unreadable hub reply"))
+    bounded_reply_limit(response,MAX_HUB_COMMAND_BATCH,Duration::from_secs(5)).await
 }
 async fn publish_batch(http:&Client,base:&Url,host:&str,lease:&str,session:&str,
     batch:&mut Vec<Value>,last:Option<u64>,cursors:&mut HashMap<String,u64>)->bool{
@@ -460,6 +466,32 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
         let hard=dir.path().join("hard.json");std::fs::hard_link(&path,&hard).unwrap();assert!(read_review(path.to_str().unwrap()).is_err());std::fs::remove_file(hard).unwrap();
         std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o644)).unwrap();assert!(read_review(path.to_str().unwrap()).is_err());
         std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();std::fs::write(&path,vec![b' ';96_001]).unwrap();assert!(read_review(path.to_str().unwrap()).is_err());
+    }
+    #[tokio::test]
+    async fn hub_response_bound_accepts_full_queue_and_rejects_hostile_bodies() {
+        use tokio::io::{AsyncReadExt,AsyncWriteExt};
+        async fn response(body:String,chunked:bool,slow:bool)->reqwest::Response {
+            let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr=listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (mut socket,_)=listener.accept().await.unwrap();let mut input=[0;4096];let _=socket.read(&mut input).await;
+                let header=if chunked{"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".into()}
+                    else{format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",body.len())};
+                let _=socket.write_all(header.as_bytes()).await;
+                if slow{tokio::time::sleep(Duration::from_millis(100)).await;}
+                if chunked{let _=socket.write_all(format!("{:x}\r\n{}\r\n0\r\n\r\n",body.len(),body).as_bytes()).await;}
+                else{let _=socket.write_all(body.as_bytes()).await;}
+            });
+            http_client().unwrap().get(format!("http://{addr}/")).send().await.unwrap()
+        }
+        let batch=json!({"commands":(0..8).map(|_|json!({"payload":{"text":"x".repeat(127_000)}})).collect::<Vec<_>>()});
+        let body=batch.to_string();assert!(body.len()>1_000_000);
+        assert_eq!(bounded_reply_limit(response(body,false,false).await,MAX_HUB_COMMAND_BATCH,Duration::from_secs(1)).await.unwrap(),batch);
+        for chunked in [false,true]{
+            let body=format!("{{\"data\":\"{}\"}}","x".repeat(MAX_HUB_COMMAND_BATCH));
+            assert_eq!(bounded_reply_limit(response(body,chunked,false).await,MAX_HUB_COMMAND_BATCH,Duration::from_secs(1)).await.unwrap_err().kind(),io::ErrorKind::InvalidInput);
+        }
+        assert_eq!(bounded_reply_limit(response("{}".into(),true,true).await,MAX_HUB_COMMAND_BATCH,Duration::from_millis(10)).await.unwrap_err().kind(),io::ErrorKind::TimedOut);
     }
     use super::*;
     #[test]fn android_requires_random_registry_incarnation_while_legacy_remote_identity_remains_available(){

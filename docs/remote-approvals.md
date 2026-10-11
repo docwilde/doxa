@@ -45,3 +45,8 @@ the same snapshot boundary. Rust fixtures cover host review refusal, protected
 receipt reads, captured native TUI reviews and native hub recovery. Local fixtures
 use no accounts, provider requests or user notification services. Rust execution
 is recorded separately by the integration gate.
+
+Hub replies are bounded before JSON parsing. A connector response permits at
+most 1,200,000 bytes for the eight-command queue; single CLI results permit
+128,000 bytes. Body reads have a total five-second deadline, including chunked
+responses. Oversized or stalled replies are refused without automatic replay.
