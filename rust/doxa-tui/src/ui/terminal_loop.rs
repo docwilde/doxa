@@ -598,14 +598,31 @@ fn run_loop_with_remote(
         changed |= app.poll_memory_menu();
         changed |= app.poll_shell();
         changed |= app.poll_clipboard();
-        if let Some(bytes) = app.pending_clipboard_copy.take() {
+        let mut terminal_copy = None;
+        if let Some(text) = app.pending_clipboard_copy.take() {
+            app.clipboard_copy_job = None;
+            match crate::clipboard::CopyJob::start(text.clone()) {
+                Ok(job) => app.clipboard_copy_job = Some(job),
+                Err(_) => terminal_copy = Some(text),
+            }
+            changed = true;
+        }
+        if let Some(result) = app.clipboard_copy_job.as_ref().and_then(|job| job.poll()) {
+            let job = app.clipboard_copy_job.take().unwrap();
+            match result {
+                Ok(()) => app.notice = "Selection copied to desktop clipboard".into(),
+                Err(_) => terminal_copy = Some(job.text.clone()),
+            }
+            changed = true;
+        }
+        if let Some(text) = terminal_copy {
             let mut out = io::stdout();
+            let bytes = crate::clipboard::osc52(&text);
             app.notice = if out.write_all(&bytes).and_then(|_| out.flush()).is_err() {
                 "Clipboard copy failed · use terminal selection and Ctrl+Shift+C"
             } else {
-                "Selection sent to terminal clipboard · OSC52 support required"
-            }
-            .into();
+                "Selection sent via OSC52 · if unsupported, install wl-clipboard/xclip or use terminal Ctrl+Shift+C"
+            }.into();
             changed = true;
         }
         changed |= app.poll_plugin_commands();

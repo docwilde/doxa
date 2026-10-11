@@ -1195,7 +1195,7 @@ impl App {
         ));
         lines.push(format!("{} or /mode: permission picker", self.keybindings.display(KeyAction::Permission)));
         lines.push("Drag transcript text to select · Ctrl+C / Ctrl+Shift+C copy · Esc clears · Ctrl+V paste into prompt".into());
-        lines.push("Terminal fallback: Shift+drag, Ctrl+Shift+C / Ctrl+Shift+V; OSC52 support required for native copy".into());
+        lines.push("Copy uses wl-copy/xclip/pbcopy when available, otherwise OSC52; terminal fallback: Shift+drag, Ctrl+Shift+C / Ctrl+Shift+V".into());
         for row in COMMANDS {
             lines.push(format!("{} · {}", row.form, row.summary));
             lines.push(format!("  {}", row.support));

@@ -662,8 +662,8 @@ impl App {
             };
             let selected = self.transcript_selection.borrow().text(&owner);
             if let Some(text) = selected.filter(|text| !text.is_empty()) {
-                self.pending_clipboard_copy = Some(crate::clipboard::osc52(&text));
-                self.notice = "Clipboard copy queued for terminal · OSC52 support required".into();
+                self.pending_clipboard_copy = Some(text);
+                self.notice = "Clipboard copy queued".into();
                 return true;
             }
             if key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::Char('C') {
