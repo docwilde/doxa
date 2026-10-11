@@ -189,7 +189,10 @@ fn codex_billing(reply: &Value) -> Option<Value> {
             else if name == "primary" { Some("session") }
             else { None };
         if let Some(slot) = slot {
-            quota_windows.insert(slot.into(), json!({"percent":used,"window_minutes":minutes}));
+            let resets_at = row["resetsAt"].as_u64().filter(|stamp| *stamp <= 253_402_300_799);
+            let mut window = json!({"percent":used,"window_minutes":minutes});
+            if let Some(resets_at) = resets_at { window["resets_at"] = json!(resets_at); }
+            quota_windows.insert(slot.into(), window);
         }
     }
     if windows.is_empty() { return None; }
@@ -1055,11 +1058,16 @@ mod web_item_tests {
     #[test]
     fn billing_uses_only_measured_codex_windows() {
         let reply = json!({"rateLimitsByLimitId":{"codex":{"limitId":"codex",
-            "planType":"plus","primary":{"usedPercent":67.2,"windowDurationMins":300},
-            "secondary":{"usedPercent":91,"windowDurationMins":10080}},
+            "planType":"plus","primary":{"usedPercent":67.2,"windowDurationMins":300,"resetsAt":1_800_000_000},
+            "secondary":{"usedPercent":91,"windowDurationMins":10080,"resetsAt":1_900_000_000}},
             "codex_other":{"limitId":"codex_other","primary":{"usedPercent":100,"windowDurationMins":60}}}});
         assert_eq!(codex_billing(&reply), Some(json!({"mode":"subscription","type":"plus","quota":"5h:67.2% · week:91%",
-            "quota_windows":{"session":{"percent":67.2,"window_minutes":300},"weekly":{"percent":91,"window_minutes":10080}}})));
+            "quota_windows":{"session":{"percent":67.2,"window_minutes":300,"resets_at":1_800_000_000},
+                "weekly":{"percent":91,"window_minutes":10080,"resets_at":1_900_000_000}}})));
+        let invalid_reset = codex_billing(&json!({"rateLimits":{"limitId":"codex",
+            "primary":{"usedPercent":50,"windowDurationMins":300,"resetsAt":253_402_300_800}}})).unwrap();
+        assert!(invalid_reset["quota_windows"]["session"].get("resets_at").is_none(),
+            "an out-of-range timestamp must not be forwarded to the UI");
         assert_eq!(codex_billing(&json!({"rateLimits":{"limitId":"codex_other","primary":{"usedPercent":20,"windowDurationMins":300}}})), None);
         assert_eq!(codex_billing(&json!({"rateLimits":{"limitId":"codex","primary":{"usedPercent":101,"windowDurationMins":300}}})), None);
     }

@@ -1868,6 +1868,65 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn usage_submenu_keyboard_wheel_and_resize_reach_late_quota_rows() {
+        fn usage_frame(app: &mut App, width: u16, height: u16) -> String {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..height).map(|row| (0..width).map(|column| buffer[(column, row)].symbol())
+                .collect::<String>()).collect::<Vec<_>>().join("\n")
+        }
+
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 30));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"quota-scroll","engine":"claude","model":"fixture",
+            "billing":{"mode":"subscription","type":"Max","quota":"5h:42% week:75% opus:55% sonnet:34% included:21% extra:9%",
+                "quota_limits":{"five_hour":{"percent":42,"resets_at":1_800_000_000},
+                    "seven_day":{"percent":75,"resets_at":1_900_000_000},
+                    "seven_day_opus":{"percent":55},"seven_day_sonnet":{"percent":34},
+                    "seven_day_overage_included":{"percent":21},"overage":{"percent":9}}}}));
+        app.open_chip_info("cost", 0);
+        let all_rows = app.usage_info_lines(64).iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>().join("\n");
+        assert!(all_rows.contains("opus:55% sonnet:34% included:21% extra:9%"),
+            "provider windows without session/weekly bars remain in the quota summary");
+
+        let initial_area = app.active_chooser_rect().unwrap();
+        assert!(initial_area.height > app.chip_info.as_ref().unwrap().lines.len() as u16 + 2,
+            "chooser height should include generated quota rows instead of static diagnostic lines");
+
+        app.handle(Event::Resize(70, 16));
+        let narrow_area = app.active_chooser_rect().unwrap();
+        let narrow_rows = app.usage_info_lines(usize::from(narrow_area.width.saturating_sub(3))).len();
+        let narrow_visible = usize::from(narrow_area.height.saturating_sub(2)).max(1);
+        assert!(narrow_rows > narrow_visible, "resized menu must retain access to rows beyond the viewport");
+        let max_scroll = narrow_rows.saturating_sub(narrow_visible);
+        let old_static_limit = app.chip_info.as_ref().unwrap().lines.len().saturating_sub(1);
+        assert!(max_scroll > old_static_limit, "fixture must exceed the old static-line scroll cap");
+        for _ in 0..narrow_rows {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        }
+        assert_eq!(app.chip_info.as_ref().unwrap().scroll, max_scroll,
+            "keyboard scrolling should reach the final generated quota rows");
+        let rendered = usage_frame(&mut app, 70, 16);
+        assert!(rendered.contains("Weekly quota"));
+        assert!(rendered.contains("Reset at 2030-03-17T"));
+
+        for _ in 0..narrow_rows { app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))); }
+        assert_eq!(app.chip_info.as_ref().unwrap().scroll, 0);
+        for _ in 0..narrow_rows {
+            app.handle(wheel_event(MouseEventKind::ScrollDown, narrow_area));
+        }
+        assert_eq!(app.chip_info.as_ref().unwrap().scroll, max_scroll,
+            "wheel scrolling should reach the final generated quota rows");
+        let rendered = usage_frame(&mut app, 70, 16);
+        assert!(rendered.contains("Weekly quota"));
+        assert!(rendered.contains("Reset at 2030-03-17T"));
+    }
+
+    #[test]
     fn model_picker_refreshes_pending_catalog_and_preserves_selection() {
         let mut app = App::default();
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s",

@@ -68,6 +68,16 @@ impl App {
                     self.fleet_review = None;
                     self.fleet_dependency_review = None;
                 }
+                if self.chip_info.as_ref().is_some_and(|info| info.kind == "usage") {
+                    let max_scroll = self.active_chooser_rect().map_or(0, |area| {
+                        let width = usize::from(area.width.saturating_sub(3)).max(1);
+                        let count = self.usage_info_lines(width).len();
+                        count.saturating_sub(usize::from(area.height.saturating_sub(2)).max(1))
+                    });
+                    if let Some(info) = &mut self.chip_info {
+                        info.scroll = info.scroll.min(max_scroll);
+                    }
+                }
                 if self.history_modal && self.active_chooser_rect().is_none() {
                     self.history_modal = false;
                     self.cancel_history_query();
@@ -894,15 +904,24 @@ impl App {
                 }
             }
             let codegraph_area = self.active_chooser_rect();
-            let context_rows = self.chip_info.as_ref().filter(|info| info.kind == "context")
-                .map(|_| self.context_info_lines(codegraph_area.map_or(1, |area| usize::from(area.width.saturating_sub(3)).max(1))).len());
+            let dynamic_rows = self.chip_info.as_ref().and_then(|info| match info.kind {
+                "context" => {
+                    let width = codegraph_area.map_or(1, |area| usize::from(area.width.saturating_sub(3)).max(1));
+                    Some(self.context_info_lines(width).len())
+                }
+                "usage" => {
+                    let width = codegraph_area.map_or(1, |area| usize::from(area.width.saturating_sub(3)).max(1));
+                    Some(self.usage_info_lines(width).len())
+                }
+                _ => None,
+            });
             if let Some(info) = self.chip_info.as_mut().filter(|info| {
                 matches!(
                     info.kind,
                     "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "routing" | "compaction" | "native_plugin" | "native_status" | "codegraph"
                 )
             }) {
-                if let Some(count) = context_rows {
+                if let Some(count) = dynamic_rows {
                     let page = codegraph_area.map_or(1, |area| usize::from(area.height.saturating_sub(2)).max(1));
                     match key.code {
                         KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
@@ -2716,7 +2735,9 @@ impl App {
             let inside_menu = self.active_chooser_rect().is_some_and(|area| {
                 area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
             });
-            if inside_menu && self.chip_info.as_ref().is_some_and(|info| info.kind == "context") {
+            if inside_menu
+                && self.chip_info.as_ref().is_some_and(|info| matches!(info.kind, "context" | "usage"))
+            {
                 let key = match mouse.kind {
                     MouseEventKind::ScrollUp => Some(KeyCode::Up),
                     MouseEventKind::ScrollDown => Some(KeyCode::Down),

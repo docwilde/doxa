@@ -562,6 +562,10 @@ impl App {
                 if info.kind == "context" {
                     return (self.context_info_lines(usize::from(pane.width.saturating_sub(3)).max(1)).len() + 2).clamp(7, 19) as u16;
                 }
+                if info.kind == "usage" {
+                    let width = usize::from(pane.width.saturating_sub(3)).max(1);
+                    return (self.usage_info_lines(width).len() + 2).clamp(7, 19) as u16;
+                }
                 if matches!(
                     info.kind,
                     "memory"

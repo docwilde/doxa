@@ -11,14 +11,27 @@ pub(super) struct QuotaWindow {
 }
 
 impl QuotaWindow {
-    fn from_value(value: &serde_json::Value, default_duration: &str, stale: bool) -> Option<Self> {
+    fn from_value(
+        value: &serde_json::Value,
+        default_duration: &str,
+        expected_minutes: Option<u64>,
+        reject_weekly_duration: bool,
+        duration_required: bool,
+        stale: bool,
+    ) -> Option<Self> {
         let percent = value["percent"].as_u64().map(|n| n as f64)
             .or_else(|| value["percent"].as_f64())
             .filter(|n| n.is_finite() && (0.0..=100.0).contains(n))?;
-        let duration = value["window_minutes"].as_u64()
-            .filter(|n| *n > 0 && *n <= 10_080)
-            .map(duration_label)
-            .unwrap_or_else(|| default_duration.to_owned());
+        let duration = match value.get("window_minutes") {
+            Some(value) => {
+                let minutes = value.as_u64().filter(|n| *n > 0 && *n <= 10_080)?;
+                if expected_minutes.is_some_and(|expected| expected != minutes) { return None; }
+                if reject_weekly_duration && minutes == 10_080 { return None; }
+                duration_label(minutes)
+            }
+            None if duration_required => return None,
+            None => default_duration.to_owned(),
+        };
         let resets_at = value["resets_at"].as_u64().filter(|n| *n <= 253_402_300_799);
         Some(Self { percent, duration, resets_at, stale })
     }
@@ -323,10 +336,27 @@ impl SessionTelemetry {
         let structured = billing.get("quota_windows").filter(|value| value.is_object())
             .or_else(|| billing.get("quota_limits").filter(|value| value.is_object()));
         if let Some(windows) = structured {
-            self.session_quota = windows.get("session").or_else(|| windows.get("five_hour"))
-                .and_then(|value| QuotaWindow::from_value(value, "5h", stale));
-            self.weekly_quota = windows.get("weekly").or_else(|| windows.get("seven_day"))
-                .and_then(|value| QuotaWindow::from_value(value, "week", stale));
+            let codex_windows = billing.get("quota_windows").is_some_and(serde_json::Value::is_object);
+            let session = if codex_windows { windows.get("session") } else { windows.get("five_hour") };
+            let weekly = if codex_windows { windows.get("weekly") } else { windows.get("seven_day") };
+            self.session_quota = session
+                .and_then(|value| QuotaWindow::from_value(
+                    value,
+                    "5h",
+                    if codex_windows { None } else { Some(300) },
+                    codex_windows,
+                    codex_windows,
+                    stale,
+                ));
+            self.weekly_quota = weekly
+                .and_then(|value| QuotaWindow::from_value(
+                    value,
+                    "week",
+                    Some(10_080),
+                    false,
+                    codex_windows,
+                    stale,
+                ));
         } else if let Some(quota) = billing["quota"].as_str() {
             self.session_quota = QuotaWindow::from_text(quota, "5h", "5h", stale);
             self.weekly_quota = QuotaWindow::from_text(quota, "week", "week", stale);
@@ -612,5 +642,33 @@ mod tests {
         telemetry.update_billing(&json!({"mode":"subscription"}));
         assert!(telemetry.session_quota.is_none());
         assert!(telemetry.weekly_quota.is_none());
+    }
+
+    #[test]
+    fn explicit_quota_window_durations_must_be_valid_for_their_slot() {
+        for invalid in [json!(0), json!(10_081), json!("300"), json!(null)] {
+            let mut telemetry = SessionTelemetry::default();
+            telemetry.update_billing(&json!({"mode":"subscription","quota":"5h:42%",
+                "quota_windows":{"session":{"percent":42,"window_minutes":invalid}}}));
+            assert!(telemetry.session_quota.is_none(), "invalid duration must not use the 5h default: {invalid}");
+        }
+        let mut telemetry = SessionTelemetry::default();
+        telemetry.update_billing(&json!({"mode":"subscription","quota_windows":{
+            "session":{"percent":42},"weekly":{"percent":75,"window_minutes":300}}}));
+        assert!(telemetry.session_quota.is_none(), "typed Codex windows require duration metadata");
+        assert!(telemetry.weekly_quota.is_none(), "weekly slot must carry a seven-day duration");
+        telemetry.update_billing(&json!({"mode":"subscription","quota_windows":{
+            "session":{"percent":42,"window_minutes":10_080}}}));
+        assert!(telemetry.session_quota.is_none(), "a seven-day window must not be described as the session window");
+
+        telemetry.update_billing(&json!({"mode":"subscription","quota_limits":{
+            "five_hour":{"percent":42,"window_minutes":10_080},"seven_day":{"percent":75,"window_minutes":300}}}));
+        assert!(telemetry.session_quota.is_none());
+        assert!(telemetry.weekly_quota.is_none());
+
+        telemetry.update_billing(&json!({"mode":"subscription","quota_limits":{
+            "five_hour":{"percent":42},"seven_day":{"percent":75}}}));
+        assert_eq!(telemetry.session_quota.as_ref().unwrap().duration, "5h");
+        assert_eq!(telemetry.weekly_quota.as_ref().unwrap().duration, "week");
     }
 }
