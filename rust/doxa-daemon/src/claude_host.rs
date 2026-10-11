@@ -1220,7 +1220,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         if !ready {
                             return Err("Claude prompt cancelled before admission".into());
                         }
-                        let mut record = json!({"type":"user","message":{"role":"user","content":text},"cwd":shared.cwd,"sessionId":shared.session,"timestamp":crate::iso_now()});
+                        let record = json!({"type":"user","message":{"role":"user","content":text},"cwd":shared.cwd,"sessionId":shared.session,"timestamp":crate::iso_now()});
                         if let Some(origin) = &peer_origin { shared.persist_peer(record, origin)?; }
                         else { shared.persist(record)?; }
                         shared.checkpoint(true)?;
