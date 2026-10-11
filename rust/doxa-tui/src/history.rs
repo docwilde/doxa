@@ -767,6 +767,7 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
     }
     if !peer_cards.is_empty() {
         append_text(&mut out, "**Recovered peer history (original transcript placement unavailable):**");
+        out.push_str("\n\n");
     }
     for marker in peer_cards {
         out.push_str(&marker);
@@ -864,6 +865,9 @@ for line in sys.stdin:
         assert!(rendered.contains("Recovered peer history (original transcript placement unavailable)"));
         assert!(!rendered.contains("wrong session") && !rendered.contains("wrong scope"));
         assert_eq!(rendered.matches("\u{001e}DOXA_MESSAGE:").count(), 2);
+        assert_eq!(rendered.split("\n\n")
+            .filter(|paragraph| paragraph.trim_matches('\n').starts_with("\u{001e}DOXA_MESSAGE:"))
+            .count(), 2, "each recovered card must occupy its own renderable paragraph");
 
         let stale = render(&TranscriptSnapshot { session_id:Some("another-session".into()),
             peer_scope:Some(scope.into()), peer_bytes, ..Default::default() });
