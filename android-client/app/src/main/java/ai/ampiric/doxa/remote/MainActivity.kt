@@ -653,8 +653,8 @@ class MainActivity : ComponentActivity() {
         } }
     }
 
-    override fun onStart() { super.onStart(); LocalAlerts.appVisible = true; if (::alerts.isInitialized) alerts.visible = true }
-    override fun onStop() { LocalAlerts.appVisible = false; if (::alerts.isInitialized) alerts.visible = false; super.onStop() }
+    override fun onStart() { super.onStart(); LocalAlerts.appVisible = true; if (::alerts.isInitialized) alerts.visible = true; if (::push.isInitialized) push.foreground(true) }
+    override fun onStop() { LocalAlerts.appVisible = false; if (::alerts.isInitialized) alerts.visible = false; if (::push.isInitialized) push.foreground(false); super.onStop() }
 
     override fun onDestroy() {
         state.close()

@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -18,6 +19,9 @@ import com.google.firebase.FirebaseOptions
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -51,6 +55,10 @@ internal class BackgroundPush(private val context: Context, private val prefs: S
         private set
     var registered by mutableStateOf(false)
         private set
+    private val lease = AndroidPushLease()
+    private var foreground = false
+    private var renewal: Job? = null
+    private var attempt = 0L
     private var currentOrigin: String? = null
     private var currentSession: Session? = null
 
@@ -77,7 +85,28 @@ internal class BackgroundPush(private val context: Context, private val prefs: S
         register()
     }
 
-    fun clearSelection() { currentOrigin = null; currentSession = null }
+    fun clearSelection() {
+        attempt++; renewal?.cancel(); renewal = null; lease.clear(); registered = false
+        currentOrigin = null; currentSession = null
+    }
+
+    fun foreground(visible: Boolean) {
+        foreground = visible
+        renewal?.cancel(); renewal = null
+        registered = enabled && lease.current(SystemClock.elapsedRealtime())
+        if (visible) scheduleRenewal()
+    }
+
+    private fun scheduleRenewal(retry: Boolean = false) {
+        renewal?.cancel(); renewal = null
+        if (!foreground || !enabled || currentSession == null || currentOrigin == null) return
+        val wait = if (retry) 3_000L else lease.renewIn(SystemClock.elapsedRealtime())
+        renewal = scope.launch {
+            delay(wait)
+            renewal = null
+            if (foreground && enabled) register()
+        }
+    }
 
     fun enable() {
         val origin = currentOrigin
@@ -94,6 +123,7 @@ internal class BackgroundPush(private val context: Context, private val prefs: S
     }
 
     fun disable() {
+        attempt++; renewal?.cancel(); renewal = null; lease.clear()
         enabled = false
         registered = false
         val origin = prefs.getString("push_origin", null)
@@ -111,26 +141,47 @@ internal class BackgroundPush(private val context: Context, private val prefs: S
     }
 
     private fun register() {
+        val mine = ++attempt
+        renewal?.cancel(); renewal = null; lease.clear()
         registered = false
         val origin = currentOrigin ?: return
         val session = currentSession ?: return
         val tag = prefs.getString("push_tag", null) ?: return
         if (!enabled || !FcmConfiguration.initialize(context) || !AndroidPushWire.validTag(tag)) return
         FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
-            if (!AndroidPushWire.token(token) || !enabled || prefs.getString("push_tag", null) != tag) return@addOnSuccessListener
+            if (!AndroidPushWire.token(token) || !enabled || mine != attempt || prefs.getString("push_tag", null) != tag) return@addOnSuccessListener
             prefs.edit().putString("push_token", token).apply()
             scope.launch(Dispatchers.IO) {
                 try {
-                    HubApi(origin, null).registerAndroidPush(session, token, tag)
-                    if (enabled && prefs.getString("push_tag", null) == tag) {
-                        withContext(Dispatchers.Main.immediate) {
+                    val reply = HubApi(origin, null).registerAndroidPush(session, token, tag)
+                    withContext(Dispatchers.Main.immediate) {
+                        if (enabled && mine == attempt && prefs.getString("push_tag", null) == tag) {
+                            require(reply.optBoolean("subscribed") && lease.accept(SystemClock.elapsedRealtime(), reply.optLong("expires_in"))) {
+                                "Background registration returned an invalid lease"
+                            }
                             registered = true
                             status("Background alerts enabled for ${session.title}")
+                            scheduleRenewal()
                         }
                     }
-                } catch (error: Exception) { status(error.message ?: "Background registration failed; reconnect to retry") }
+                } catch (error: CancellationException) { throw error }
+                catch (error: Exception) {
+                    withContext(Dispatchers.Main.immediate) {
+                        if (enabled && mine == attempt && prefs.getString("push_tag", null) == tag) {
+                            lease.clear(); registered = false
+                            status(error.message ?: "Background registration failed; retrying while visible")
+                            scheduleRenewal(retry = true)
+                        }
+                    }
+                }
             }
-        }.addOnFailureListener { status("FCM token unavailable; reconnect to retry") }
+        }.addOnFailureListener {
+            if (enabled && mine == attempt) {
+                lease.clear(); registered = false
+                status("FCM token unavailable; retrying while visible")
+                scheduleRenewal(retry = true)
+            }
+        }
     }
 
     private fun permission(): Boolean {
