@@ -11,6 +11,7 @@ mod session_title;
 mod vendor_host;
 mod vendor_tools;
 mod router_host;
+mod router_cli;
 mod isolation_host;
 use claude_host::ClaudeHost;
 use budget_host::BudgetHost;
@@ -264,8 +265,8 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
         router_config=None;
     }
     if engine == Engine::Router {
-        if codex_bin.is_some() || claude_bin.is_some() || effort.is_some() || explicit_sandbox {
-            return Err(invalid("router targets define their effort; CLI executables and sandbox overrides are unsupported"));
+        if effort.is_some() || explicit_sandbox {
+            return Err(invalid("router targets define their effort; sandbox overrides are unsupported"));
         }
         if isolation.is_some_and(|profile|profile!=doxa_isolation::Profile::Native) {
             return Err(invalid("router currently requires native isolation"));
@@ -277,6 +278,12 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
         let path=router_config.as_ref().filter(|path|path.is_absolute())
             .ok_or_else(||invalid("router needs an absolute --router-config PATH"))?;
         let config=doxa_router::Config::load(path).map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
+        let needs_codex=config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Codex);
+        let needs_claude=config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Claude);
+        if needs_codex { codex_bin=Some(executable(codex_bin.ok_or_else(||invalid("router Codex candidates need --codex-bin"))?)?); }
+        else if codex_bin.is_some() {return Err(invalid("--codex-bin requires a configured Codex router candidate"));}
+        if needs_claude { claude_bin=Some(executable(claude_bin.ok_or_else(||invalid("router Claude candidates need --claude-bin"))?)?); }
+        else if claude_bin.is_some() {return Err(invalid("--claude-bin requires a configured Claude router candidate"));}
         if model.as_deref().is_some_and(|id|id!="auto"&&config.candidate(id).is_none()) {
             return Err(invalid("router model must be auto or an exact configured target ID"));
         }
@@ -703,7 +710,8 @@ fn run() -> io::Result<()> {
         Engine::Router => {
             let config=doxa_router::Config::load(options.router_config.as_deref().expect("validated router config"))
                 .map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
-            let host=Arc::new(RouterHost::new(config,&options.cwd,&options.session_id,options.resume,ceiling,
+            let host=Arc::new(RouterHost::new_with_cli(config,&options.cwd,&options.session_id,options.resume,ceiling,
+                router_cli::CliOptions {claude:options.claude_bin.clone(),codex:options.codex_bin.clone()},
                 #[cfg(feature="local-test-server")] options.vendor_endpoint.clone()).map_err(io::Error::other)?);
             if let Some(model)=options.model.as_deref() {
                 host.call("set_model",&json!({"model":model})).map_err(io::Error::other)?;
@@ -752,11 +760,11 @@ fn run() -> io::Result<()> {
     )?);
     let mut provider_args=Vec::new();
     provider_args.extend(["--isolation".into(), profile.key().into()]);
-    if let Some(path)=&options.codex_bin {
+    if options.engine==Engine::Codex { if let Some(path)=&options.codex_bin {
         provider_args.extend(["--codex-bin".into(),path.to_str().ok_or_else(||invalid("Codex executable must be UTF-8 for child launch"))?.into()]);
         let sandbox=match options.sandbox {SandboxMode::ReadOnly=>"read-only",SandboxMode::WorkspaceWrite=>"workspace-write",SandboxMode::DangerFullAccess=>"danger-full-access"};
         provider_args.extend(["--sandbox".into(),sandbox.into()]);
-    }
+    } }
     if let Some(path)=&options.claude_bin {
         provider_args.extend(["--claude-bin".into(),path.to_str().ok_or_else(||invalid("Claude executable must be UTF-8 for child launch"))?.into()]);
     }
@@ -944,8 +952,6 @@ mod tests {
     fn router_cli_refuses_unsupported_combinations_before_loading_private_config() {
         for (flag,value,expected) in [
             ("--effort","high","targets define their effort"),
-            ("--codex-bin","/missing","targets define their effort"),
-            ("--claude-bin","/missing","targets define their effort"),
             ("--sandbox","workspace-write","sandbox overrides"),
             ("--isolation","docker-open","native isolation"),
             ("--spawn-depth","1","config inheritance"),

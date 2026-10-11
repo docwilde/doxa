@@ -200,9 +200,15 @@ const CODEX_PERMISSION_CHOICES: [(&str, &str); 3] = [
     ("full-access", "No prompts; no sandbox"),
 ];
 
+const ROUTER_PERMISSION_CHOICES: [(&str,&str);2] = [
+    ("default","Manual · native worker asks before protected calls"),
+    ("auto","Native worker Auto · separate from automatic model routing"),
+];
+
 fn permission_choices(engine: Option<&str>) -> &'static [(&'static str, &'static str)] {
     match engine {
         Some("codex") => &CODEX_PERMISSION_CHOICES,
+        Some("router") => &ROUTER_PERMISSION_CHOICES,
         _ => &CLAUDE_PERMISSION_CHOICES,
     }
 }
@@ -215,7 +221,7 @@ fn permission_index(mode: &str, engine: Option<&str>) -> Option<usize> {
 
 fn permission_display_mode(mode: &str, engine: Option<&str>) -> bool {
     match engine {
-        Some("claude") => permission_index(mode, engine).is_some(),
+        Some("claude" | "router") => permission_index(mode, engine).is_some(),
         Some("codex") => matches!(mode, "on-request" | "auto" | "full-access" | "never"),
         _ => false,
     }

@@ -28,7 +28,21 @@ pub fn decode(value: &Value) -> Result<Value, Error> {
     Ok(json!({"models":ids,"capabilities":capabilities,"note":"Live model catalog from the connected Claude CLI"}))
 }
 
+pub fn authenticated(value: &Value) -> bool {
+    ["email", "apiProvider", "subscriptionType"].iter().any(|key| value["account"][key].as_str()
+        .is_some_and(|text| !text.is_empty() && text.len() <= 256 && !text.chars().any(char::is_control)))
+}
+
+/// Initialize the connected account without a user prompt. A catalog alone is
+/// not authentication evidence; missing account metadata remains unavailable.
+pub fn discover_authenticated(options: CliOptions<'_>, timeout: Duration) -> Result<Value, Error> {
+    discover_inner(options, timeout, true)
+}
+
 pub fn discover(options: CliOptions<'_>, timeout: Duration) -> Result<Value, Error> {
+    discover_inner(options, timeout, false)
+}
+fn discover_inner(options: CliOptions<'_>, timeout: Duration, require_auth: bool) -> Result<Value, Error> {
     let deadline = Instant::now() + timeout;
     let mut cli = Cli::spawn(options)?;
     let id = cli.control(json!({"subtype":"initialize","sdkMcpServers":[]}))?;
@@ -39,7 +53,9 @@ pub fn discover(options: CliOptions<'_>, timeout: Duration) -> Result<Value, Err
         match frame["type"].as_str() {
             Some("control_response") if frame["response"]["request_id"] == id => {
                 if frame["response"]["subtype"] != "success" { return Err(Error::Protocol); }
-                return decode(&frame["response"]["response"]);
+                let response = &frame["response"]["response"];
+                if require_auth && !authenticated(response) { return Err(Error::Protocol); }
+                return decode(response);
             }
             Some("control_request") => {
                 let request_id = frame["request_id"].as_str().ok_or(Error::Protocol)?;

@@ -12,20 +12,39 @@ pub const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum Provider { Deepseek, Glm }
+pub enum Provider { Deepseek, Glm, Claude, Codex }
+impl Provider {
+    pub fn engine_id(self) -> &'static str {
+        match self { Self::Deepseek => "deepseek", Self::Glm => "glm", Self::Claude => "claude", Self::Codex => "codex" }
+    }
+    pub fn is_cli(self) -> bool { matches!(self, Self::Claude | Self::Codex) }
+}
+
+/// CLI account charges are provider-managed and excluded from the tracked
+/// Jev/API USD allowance. Authentication never proves subscription billing.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Billing { #[default] Api, CliAccount }
+impl Billing { fn is_api(&self) -> bool { *self == Self::Api } }
+fn zero(value: &u64) -> bool { *value == 0 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Candidate {
     pub id: String,
     pub provider: Provider,
+    #[serde(default, skip_serializing_if = "Billing::is_api")]
+    pub billing: Billing,
     pub model: String,
     pub effort: String,
     pub description: String,
     pub context_tokens: u64,
     pub max_output_tokens: u64,
     pub supports_tools: bool,
+    // Absent for CLI account targets; zero is an absence sentinel, never a price.
+    #[serde(default, skip_serializing_if = "zero")]
     pub input_usd_micros_per_million: u64,
+    #[serde(default, skip_serializing_if = "zero")]
     pub output_usd_micros_per_million: u64,
 }
 
@@ -174,8 +193,11 @@ impl Config {
                 || !matches!(row.effort.as_str(), "none" | "low" | "medium" | "high" | "xhigh" | "max")
                 || !bounded(&row.description, 1200) || !(1..=2_000_000).contains(&row.context_tokens)
                 || row.max_output_tokens == 0 || row.max_output_tokens > row.context_tokens
-                || row.input_usd_micros_per_million == 0 || row.input_usd_micros_per_million > 1_000_000_000
-                || row.output_usd_micros_per_million == 0 || row.output_usd_micros_per_million > 1_000_000_000 {
+                || row.provider.is_cli() != (row.billing == Billing::CliAccount)
+                || (row.billing == Billing::Api && (row.input_usd_micros_per_million == 0
+                    || row.input_usd_micros_per_million > 1_000_000_000 || row.output_usd_micros_per_million == 0
+                    || row.output_usd_micros_per_million > 1_000_000_000))
+                || (row.billing == Billing::CliAccount && (row.input_usd_micros_per_million != 0 || row.output_usd_micros_per_million != 0)) {
                 return Err(invalid("invalid router candidate; unknown caps and prices cannot be zero"));
             }
         }
@@ -195,6 +217,7 @@ pub fn token_cost(input: u64, output: u64, input_rate: u64, output_rate: u64) ->
 }
 
 pub fn candidate_cost(candidate: &Candidate, input: &RoutingInput) -> io::Result<u64> {
+    if candidate.billing != Billing::Api { return Err(invalid("CLI account worker charge is unknown; not a USD price")); }
     token_cost(input.estimated_input_tokens, input.max_output_tokens,
         candidate.input_usd_micros_per_million, candidate.output_usd_micros_per_million)
 }

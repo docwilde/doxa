@@ -394,6 +394,26 @@ impl AppServerDriver {
         result
     }
 
+    /// Current account and model inventory only: never creates a provider thread
+    /// or submits a turn. Authentication does not establish a dollar price.
+    pub async fn discover_authenticated_models(options: AppServerOptions) -> Result<Vec<Value>, AppServerError> {
+        let mut driver = Self::initialize(options, str::to_owned).await?;
+        let result = async {
+            driver.verify_authenticated().await?;
+            driver.list_models().await
+        }.await;
+        driver.shutdown().await;
+        result
+    }
+
+    pub async fn verify_authenticated(&mut self) -> Result<(), AppServerError> {
+        let response = self.request("account/read", json!({"refreshToken":false})).await?;
+        if !matches!(response["account"]["type"].as_str(), Some("chatgpt" | "apiKey")) {
+            return Err(AppServerError::Protocol("current Codex account authentication unavailable"));
+        }
+        Ok(())
+    }
+
     /// Read only the documented Codex subscription bucket. API-key sessions
     /// and malformed or unrelated buckets remain unknown.
     pub async fn read_rate_limits(&mut self) -> Option<Value> {

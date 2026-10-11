@@ -72,6 +72,7 @@ pub struct CodexHost {
     rollout_path: Mutex<Option<PathBuf>>,
     transport: &'static str,
     closing: AtomicBool,
+    routed: bool,
 }
 
 enum CodexTransport {
@@ -107,6 +108,16 @@ impl CodexHost {
         session_id: &str,
         resume: bool,
     ) -> Result<Self, String> {
+        Self::new_identity(options,session_id,resume,None,false)
+    }
+
+    pub(super) fn new_routed(options: DriverOptions, worker_id: &str,
+        agent: Option<Arc<crate::agent_tools::AgentTools>>) -> Result<Self,String> {
+        Self::new_identity(options,worker_id,false,Some(agent),true)
+    }
+
+    fn new_identity(mut options: DriverOptions, session_id: &str, resume: bool,
+        routed_agent: Option<Option<Arc<crate::agent_tools::AgentTools>>>, routed: bool) -> Result<Self,String> {
         let lore_enabled = doxa_state::lore_enabled_default();
         let mut client = LoreClient::open(Duration::from_secs(5))
             .map_err(|_| "LORE sidecar is unavailable; Codex session was not started".to_owned())?;
@@ -215,13 +226,13 @@ impl CodexHost {
             // start_thread uses thread/resume and refuses a different ID.
             "app-server"
         } else { saved_transport.unwrap_or_else(|| {
-            if std::env::var("DOXA_CODEX_APPSERVER").as_deref() == Ok("0") { "exec" } else { "app-server" }
+            if !routed && std::env::var("DOXA_CODEX_APPSERVER").as_deref() == Ok("0") { "exec" } else { "app-server" }
         }) };
         if doxa_isolation::active().map_err(|e| e.to_string())?.is_some() && transport != "app-server" {
             return Err("Docker Codex requires the protected app-server transport; legacy exec cannot preserve its host compaction boundary".into());
         }
         let agent_tools = if transport == "app-server" && (options.resume_thread.is_none() || saved_lore_tools) {
-            crate::agent_tools::AgentTools::new(&cwd, session_id, "codex", lore_enabled)
+            routed_agent.unwrap_or_else(|| crate::agent_tools::AgentTools::new(&cwd, session_id, "codex", lore_enabled))
         } else { None };
         if saved_lore_tools && agent_tools.is_none() {
             return Err("Codex saved LORE tools are unavailable; refusing to resume the thread".into());
@@ -315,7 +326,7 @@ impl CodexHost {
             billing: Mutex::new(None),
             rollout_path: Mutex::new(rollout_path),
             transport,
-            closing: AtomicBool::new(false),
+            closing: AtomicBool::new(false), routed,
         };
         let effort = host.initial_effort();
         if transport == "app-server" {
@@ -350,7 +361,8 @@ impl CodexHost {
         }
     }
 
-    fn persist(&self, record: Value) -> io::Result<()> {
+    fn persist(&self, mut record: Value) -> io::Result<()> {
+        if self.routed {record["router_worker"]=json!(true);}
         let _guard = self.thread_record_lock.lock().unwrap();
         let result = self.store.try_append(record, "codex", |text| {
             self.lore.lock().unwrap().scrub(text).map_err(|_| {
@@ -454,7 +466,7 @@ impl CodexHost {
     pub fn shutdown(&self) -> bool {
         self.closing.store(true, Ordering::Release);
         self.cancel();
-        if let Some(tools) = &self.agent_tools { tools.close(); }
+        if !self.routed { if let Some(tools) = &self.agent_tools { tools.close(); } }
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.active.lock().unwrap().is_some() {
             if Instant::now() >= deadline {
@@ -692,7 +704,11 @@ impl Host for CodexHost {
                                     } => result,
                                 }
                             }) {
-                                Ok(app) => {
+                                Ok(mut app) => {
+                                    if self.routed && runtime.block_on(app.verify_authenticated()).is_err() {
+                                        runtime.block_on(app.shutdown());
+                                        startup_error = Some("Current Codex account authentication unavailable".to_owned());
+                                    } else {
                                     if let Some(model) = app.model() {
                                         self.selection.lock().unwrap().0 = Some(model.to_owned());
                                         handle_event(doxa_engines::EngineEvent::new("model_changed", json!({"model":model})));
@@ -704,6 +720,7 @@ impl Host for CodexHost {
                                         token.cancel();
                                     }
                                     *active = Some(app);
+                                    }
                                 }
                                 Err(error) => {
                                     let cancelled_startup = matches!(error, AppServerError::Cancelled);
@@ -1043,7 +1060,10 @@ impl Host for CodexHost {
                 let mut catalog = self.catalog.lock().unwrap();
                 if catalog.is_empty() || method == "list_models" {
                     *catalog = self.runtime.lock().unwrap().block_on(async { tokio::time::timeout(
-                        Duration::from_secs(20), AppServerDriver::discover_models(self.catalog_options.clone())
+                        Duration::from_secs(20), async {
+                            if self.routed { AppServerDriver::discover_authenticated_models(self.catalog_options.clone()).await }
+                            else { AppServerDriver::discover_models(self.catalog_options.clone()).await }
+                        }
                     ).await }).map_err(|_| "Codex model catalog timed out")?
                         .map_err(|_| "Codex model catalog unavailable")?;
                 }

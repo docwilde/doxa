@@ -137,6 +137,9 @@ fn recorded_cwd(file: &mut File) -> Option<PathBuf> {
     file.take(64 * 1024).read_to_end(&mut head).ok()?;
     for line in head.split(|byte| *byte == b'\n').take(128) {
         let Ok(record) = serde_json::from_slice::<Value>(line) else { continue };
+        // Native CLI worker artifacts are private proof for the parent router,
+        // not separately selectable/resumable UI conversations.
+        if record["router_worker"] == true { return None; }
         if record["type"] != "user" { continue; }
         let Some(cwd) = record["cwd"].as_str() else { continue; };
         if cwd.len() <= 4096 && !cwd.contains('\0') && Path::new(cwd).is_absolute() {

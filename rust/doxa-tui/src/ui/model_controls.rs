@@ -208,8 +208,9 @@ impl App {
         {
             self.notice = match self.session_identity.get(&id).and_then(|identity| identity.0.as_deref()) {
                 Some("codex") => "This Codex transport cannot change permission modes".into(),
-                Some("deepseek" | "glm" | "router") =>
+                Some("deepseek" | "glm") =>
                     "API vendors have no provider permission mode; DOXA asks for peer and LORE tool calls".into(),
+                Some("router") => "This router has no configured CLI permission surface".into(),
                 _ => "This session cannot change permission modes".into(),
             };
             return;
