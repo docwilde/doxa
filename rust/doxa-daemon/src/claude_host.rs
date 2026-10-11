@@ -426,6 +426,9 @@ impl ClaudeHost {
         if let Some(account) = shared.account.lock().unwrap().as_ref() {
             set_billing_account(&shared, account);
         }
+        // Keep the private worker marker in a small first record. A bounded
+        // history scan must not need to parse a large canonical context packet.
+        if shared.routed {shared.persist(json!({"type":"router_worker","session_id":session_id}))?;}
         let (tx, rx) = mpsc::channel();
         let owned = shared.clone();
         let worker = thread::spawn(move || broker(cli, rx, owned));

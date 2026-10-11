@@ -332,6 +332,7 @@ impl CodexHost {
         if transport == "app-server" {
             if let Some(effort) = effort { host.call("set_effort", &json!({"effort":effort}))?; }
         }
+        if host.routed {host.persist(json!({"type":"router_worker","session_id":session_id})).map_err(|_|"Private Codex worker proof unavailable")?;}
         Ok(host)
     }
 

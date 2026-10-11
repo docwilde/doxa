@@ -1069,8 +1069,10 @@ for line in sys.stdin:
         let temp=tempfile::tempdir().unwrap();let root=temp.path().join("projects");
         fs::create_dir_all(root.join("project")).unwrap();
         for (id,worker) in [("worker-uuid",true),("outer-router",false)] {
-            fs::write(root.join(format!("project/{id}.jsonl")),serde_json::json!({"type":"user",
-                "router_worker":worker,"cwd":temp.path(),"message":{"content":"same searchable request"}}).to_string()).unwrap();
+            let header=if worker {serde_json::json!({"type":"router_worker","router_worker":true}).to_string()+"\n"}else{String::new()};
+            let content=if worker {"x".repeat(128*1024)}else{"same searchable request {\"router_worker\":true}".into()};
+            fs::write(root.join(format!("project/{id}.jsonl")),header+&serde_json::json!({"type":"user",
+                "router_worker":worker,"cwd":temp.path(),"message":{"content":content}}).to_string()).unwrap();
         }
         assert_eq!(discover_in(&root,None,None).iter().map(|entry|entry.id.as_str()).collect::<Vec<_>>(),["outer-router"]);
         assert!(discover_in(&root,Some("worker-uuid"),None).is_empty());
