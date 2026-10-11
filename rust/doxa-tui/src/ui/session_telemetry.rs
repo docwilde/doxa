@@ -185,6 +185,8 @@ pub(super) struct SessionTelemetry {
     pub(super) context_percent: Option<f64>,
     pub(super) context_tokens: Option<u64>,
     pub(super) context_limit: Option<u64>,
+    pub(super) context_last_reported: bool,
+    pub(super) context_snapshot_dirty: bool,
     pub(super) turns: Option<u64>,
     pub(super) input_tokens: Option<u64>,
     pub(super) output_tokens: Option<u64>,
@@ -220,22 +222,42 @@ impl SessionTelemetry {
             if let Some(routing)=self.routing.as_mut() {routing.tracked_cost_only=true;}
         }
     }
-    fn store_context(&mut self, context: super::context_usage::ContextUsage) {
+    pub(super) fn store_context(&mut self, context: super::context_usage::ContextUsage, last_reported: bool, dirty: bool) {
         self.context = context.chip_label();
-        self.context_percent = context.percentage;
+        self.context_percent = context.fill_percentage();
         self.context_tokens = context.used;
         self.context_limit = context.capacity;
         self.context_usage = context;
+        self.context_last_reported = last_reported;
+        self.context_snapshot_dirty = dirty;
     }
 
-    fn update_context(&mut self, report: &serde_json::Value) {
-        if ["ctx_percentage", "ctx_tokens", "ctx_max_tokens"].iter().any(|key| report.get(key).is_some()) {
-            self.store_context(super::context_usage::ContextUsage::reported(report, "ctx_tokens", "ctx_max_tokens", "ctx_percentage"));
+    fn update_context_status(&mut self, report: &serde_json::Value) {
+        let keys = ["ctx_percentage", "ctx_tokens", "ctx_max_tokens"];
+        if keys.iter().any(|key| report.get(key).is_some_and(|value| !value.is_null())) {
+            self.store_context(super::context_usage::ContextUsage::reported(report, "ctx_tokens", "ctx_max_tokens", "ctx_percentage"), false, true);
         }
     }
 
+    fn update_context_turn(&mut self, report: &serde_json::Value) {
+        self.store_context(super::context_usage::ContextUsage::reported(report, "ctx_tokens", "ctx_max_tokens", "ctx_percentage"), false, true);
+    }
+
     pub(super) fn update_context_detail(&mut self, detail: &serde_json::Value) {
-        self.store_context(self.context_usage.detail(detail));
+        let has_totals = ["total_tokens", "max_tokens", "percentage"]
+            .iter()
+            .any(|key| detail.get(key).is_some_and(|value| !value.is_null()));
+        let has_categories = detail["categories"].is_array();
+        if !has_totals && !has_categories {
+            self.store_context(super::context_usage::ContextUsage::default(), false, true);
+            return;
+        }
+        let base = if self.context_last_reported {
+            super::context_usage::ContextUsage::default()
+        } else {
+            self.context_usage.clone()
+        };
+        self.store_context(base.detail(detail), false, true);
     }
 
     /// The most consumed reported window determines the subscription warning.
@@ -273,10 +295,14 @@ impl SessionTelemetry {
     }
 
     pub(super) fn update_turn(&mut self, data: &serde_json::Value) {
+        self.update_turn_inner(data, true);
+    }
+
+    fn update_turn_inner(&mut self, data: &serde_json::Value, authoritative_context: bool) {
         if let Some(compaction) = data.get("compaction") { self.compaction = CompactionStatus::from_value(compaction); }
         if let Some(routing) = data.get("routing") { self.routing = RoutingStatus::from_value(routing); }
         self.update_cost_scope(data);
-        self.update_context(data);
+        if authoritative_context { self.update_context_turn(data); }
         if data["usage_scope"] == "session" {
             self.turns = data["num_turns"].as_u64().or(self.turns);
             self.input_tokens = data["input_tokens"].as_u64().or(self.input_tokens);
@@ -312,8 +338,9 @@ impl SessionTelemetry {
         if let Some(routing) = billing.get("routing") { self.routing = RoutingStatus::from_value(routing); }
         self.update_cost_scope(billing);
         if billing.get("session_cost_usd").is_some() || billing.get("cost_usd").is_some() {
-            self.update_turn(billing);
+            self.update_turn_inner(billing, false);
         }
+        self.update_context_status(billing);
         self.billing_mode = match billing["mode"].as_str() {
             Some("api") => Some("api".into()),
             Some("subscription") => Some("subscription".into()),
@@ -398,7 +425,7 @@ impl SessionTelemetry {
         if let Some(billing) = status.get("billing") {
             self.update_billing(billing);
         }
-        self.update_context(status);
+        self.update_context_status(status);
         if let Some(usage) = status.get("usage") {
             self.turns = usage["num_turns"].as_u64();
             self.input_tokens = usage["input_tokens"].as_u64();

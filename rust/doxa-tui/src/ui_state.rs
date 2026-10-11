@@ -31,9 +31,18 @@ pub struct LayoutSignature {
     rail_visible: bool,
     rail_width: u16,
     collections: Vec<Collection>,
+    context_reports: Vec<(String, bool, bool, Option<Value>)>,
 }
 impl LayoutSignature {
     pub fn capture(app: &App) -> Self {
+        let mut context_ids: HashSet<String> = app.groups.iter().flat_map(|group| group.tabs.iter())
+            .filter(|id| !crate::remote_client::valid_target(id)).cloned().collect();
+        context_ids.extend(app.detached_this_run.iter()
+            .filter(|id| !crate::remote_client::valid_target(id)).cloned());
+        let mut context_reports: Vec<_> = context_ids.into_iter().filter_map(|id| {
+            app.context_report_state(&id).map(|(last_reported, dirty, report)| (id, last_reported, dirty, report))
+        }).collect();
+        context_reports.sort_by(|a, b| a.0.cmp(&b.0));
         Self {
             groups: app.groups.iter().map(|g| {
                 let selected=g.tabs.get(g.active);
@@ -64,6 +73,7 @@ impl LayoutSignature {
             rail_visible: app.rail_visible,
             rail_width: app.rail_width,
             collections: app.collections.clone(),
+            context_reports,
         }
     }
 }
@@ -203,6 +213,18 @@ impl UiStateStore {
         if tabs.len() > MAX_TABS + usize::from(self.startup_overflow_id.is_some()) { app.notice = "Saved tab count exceeds supported bounds".into(); return false; }
         if tabs.is_empty() {
             return false;
+        }
+        let live_local: HashSet<&str> = live_ids.iter().map(String::as_str)
+            .filter(|id| !crate::remote_client::valid_target(id)).collect();
+        if let Some(reports) = record.raw.get("rust_ui").and_then(|ui| ui.get("last_context_reports")).and_then(Value::as_object)
+            .filter(|reports| reports.len() <= crate::startup_restore::MAX_STARTUP_TABS) {
+            for tab in &record.tabs {
+                if live_local.contains(tab.session_id.as_str()) {
+                    if let Some(report) = reports.get(&tab.session_id) {
+                        app.restore_context_report(&tab.session_id, report);
+                    }
+                }
+            }
         }
         let active = record
             .active_session_id
@@ -489,6 +511,25 @@ impl UiStateStore {
         if titles.is_empty(){rust_ui.remove("default_titles");}
         else{rust_ui.insert("default_titles".into(),Value::Object(titles));}
         if app.fleet_views.is_empty(){rust_ui.remove("fleet_views");}else{rust_ui.insert("fleet_views".into(),serde_json::to_value(&app.fleet_views).map_err(io::Error::other)?);}
+        let old_context_reports = rust_ui.get("last_context_reports").and_then(Value::as_object)
+            .filter(|reports| reports.len() <= crate::startup_restore::MAX_STARTUP_TABS)
+            .cloned().unwrap_or_default();
+        let mut context_reports = serde_json::Map::new();
+        for tab in &record.tabs {
+            let id = tab.session_id.as_str();
+            let state = app.context_report_state(id);
+            if state.as_ref().is_some_and(|(_, dirty, _)| *dirty) {
+                if let Some(report) = app.context_report_record(id) {
+                    context_reports.insert(id.to_owned(), report);
+                }
+                continue;
+            }
+            let report = app.context_report_record(id)
+                .or_else(|| old_context_reports.get(id).and_then(|value| App::normalize_context_report_record(id, value)));
+            if let Some(report) = report { context_reports.insert(id.to_owned(), report); }
+        }
+        if context_reports.is_empty() { rust_ui.remove("last_context_reports"); }
+        else { rust_ui.insert("last_context_reports".into(), Value::Object(context_reports)); }
         let keep: HashSet<String> = record.tabs.iter().map(|tab| tab.session_id.clone()).collect();
         let collections = collections::to_json(&app.collections, &keep);
         // A legacy empty tabset can carry an empty collection row as inert
@@ -813,6 +854,74 @@ mod tests {
         assert!(store.restore(&mut restored,&["session-1".into()]));
         restored.apply_daemon_frame(&json!({"type":"hello","session_id":"session-1","model":"gpt-6-sol"}));
         assert_eq!(restored.sessions[0].title,"gpt-6-sol@main/doxa");
+    }
+
+    #[test]
+    fn last_context_report_restores_as_historical_until_authoritative_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = ["session-one".to_owned(), "session-two".to_owned()];
+        let mut store = UiStateStore::new(dir.path(), "/project", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs = ids.to_vec();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"session-one",
+            "ctx_tokens":300,"ctx_max_tokens":1000,"ctx_percentage":30.0}));
+        store.save(&app).unwrap();
+        let saved = load_tabset(store.path(), "/project").unwrap();
+        assert_eq!(saved.raw["rust_ui"]["last_context_reports"]["session-one"]["session_id"], "session-one");
+        assert_eq!(saved.raw["rust_ui"]["last_context_reports"]["session-one"]["report"]["used"], 300);
+
+        let mut restored = App::default();
+        let mut reloaded = UiStateStore::new(dir.path(), "/project", "machine").unwrap();
+        assert!(reloaded.restore(&mut restored, &ids));
+        assert_eq!(restored.context_report_state("session-one"), Some((true, false, Some(json!({
+            "version":1,"used":300,"capacity":1000
+        })))));
+        assert_eq!(restored.context_report_state("session-two"), None);
+
+        // A reconnect hello with placeholder nulls is not a new measurement.
+        restored.apply_daemon_frame(&json!({"type":"hello","session_id":"session-one",
+            "ctx_tokens":null,"ctx_max_tokens":null,"ctx_percentage":null}));
+        assert_eq!(restored.context_report_state("session-one").unwrap().0, true);
+        assert!(restored.chips(0).iter().any(|(kind, text)| *kind == "context"
+            && text == "Last reported · Ctx 30%"));
+
+        // The other restored tab remains unknown; changing owner cannot leak
+        // the first session's historical usage into its chip.
+        restored.groups[0].active = 1;
+        assert!(restored.chips(0).iter().any(|(kind, text)| *kind == "context" && text == "Ctx ?"));
+        restored.groups[0].active = 0;
+
+        restored.apply_daemon_frame(&json!({"type":"event","session_id":"session-one","event":{"type":"turn_done","data":{
+            "ctx_tokens":400,"ctx_max_tokens":1000,"ctx_percentage":40.0}}}));
+        assert_eq!(restored.context_report_state("session-one").unwrap().0, false);
+        assert_eq!(restored.context_report_state("session-one").unwrap().2.as_ref().unwrap()["used"], 400);
+        assert!(restored.chips(0).iter().any(|(kind, text)| *kind == "context" && text == "Ctx 40%"));
+        restored.apply_daemon_frame(&json!({"type":"event","session_id":"session-one","event":{"type":"turn_done","data":{}}}));
+        assert_eq!(restored.context_report_state("session-one"), Some((false, true, None)));
+        assert!(restored.chips(0).iter().any(|(kind, text)| *kind == "context" && text == "Ctx ?"));
+        assert!(reloaded.save_if_complete(&restored, &Mutex::new(true)).unwrap());
+        let cleared = load_tabset(reloaded.path(), "/project").unwrap();
+        assert!(cleared.raw["rust_ui"].get("last_context_reports").is_none());
+    }
+
+    #[test]
+    fn corrupt_or_cross_session_context_cache_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = UiStateStore::new(dir.path(), "/project", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs = vec!["session-one".into()];
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"session-one",
+            "ctx_tokens":300,"ctx_max_tokens":1000}));
+        store.save(&app).unwrap();
+
+        let mut raw = load_tabset(store.path(), "/project").unwrap();
+        raw.raw["rust_ui"]["last_context_reports"]["session-one"]["session_id"] = json!("session-other");
+        save_tabset(store.path(), &raw).unwrap();
+        let reloaded = UiStateStore::new(dir.path(), "/project", "machine").unwrap();
+        let mut restored = App::default();
+        assert!(reloaded.restore(&mut restored, &["session-one".into()]));
+        assert_eq!(restored.context_report_state("session-one"), None);
+        assert!(restored.chips(0).iter().any(|(kind, text)| *kind == "context" && text == "Ctx ?"));
     }
     use serde_json::json;
 

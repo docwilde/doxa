@@ -726,7 +726,16 @@ impl App {
         } else {
             String::new()
         };
-        chips.push(("context", format!("Ctx {context}{absolute}")));
+        let historical = if telemetry.is_some_and(|value| value.context_last_reported) {
+            "Last reported · "
+        } else {
+            ""
+        };
+        if historical.is_empty() {
+            chips.push(("context", format!("Ctx {context}{absolute}")));
+        } else {
+            chips.push(("context", format!("{historical}Ctx {context}{absolute}")));
+        }
         let memory = self
             .memory_cache
             .get(id.unwrap_or(""))

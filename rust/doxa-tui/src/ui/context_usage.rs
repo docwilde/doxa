@@ -1,6 +1,7 @@
 //! A reported context window is independent of billing totals and LORE chars.
 use ratatui::{style::{Color, Style}, text::{Line, Span}};
 use serde_json::Value;
+use doxa_state::valid_session_id;
 use super::{App, safe_label, theme};
 
 #[derive(Clone, Debug, Default)]
@@ -96,6 +97,55 @@ impl ContextUsage {
             .or_else(|| self.used.zip(self.capacity).map(|(u, c)| format!("{u}/{c}")))
     }
 
+    /// A deliberately small, normalized cache for the native tabset. Provider
+    /// responses never cross this persistence boundary.
+    pub(super) fn persistence_value(&self) -> Option<Value> {
+        let (used, capacity) = self.used.zip(self.capacity)?;
+        if self.invalid || capacity == 0 || used > capacity {
+            return None;
+        }
+        let mut value = serde_json::json!({
+            "version": 1,
+            "used": used,
+            "capacity": capacity,
+        });
+        if !self.components.is_empty() && !self.invalid_components {
+            value["categories"] = serde_json::json!(self.components.iter()
+                .map(|(name, tokens)| serde_json::json!({"name":name,"tokens":tokens}))
+                .collect::<Vec<_>>());
+        }
+        Some(value)
+    }
+
+    /// Decode only the cache schema emitted above, then run category counts
+    /// through the same consistency checks as a live provider report.
+    pub(super) fn from_persistence(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        if object.keys().any(|key| !matches!(key.as_str(), "version" | "used" | "capacity" | "categories"))
+            || value["version"].as_u64() != Some(1) {
+            return None;
+        }
+        let used = value["used"].as_u64()?;
+        let capacity = value["capacity"].as_u64()?;
+        let mut detail = serde_json::json!({"total_tokens":used,"max_tokens":capacity});
+        if let Some(categories) = object.get("categories") {
+            let rows = categories.as_array()?;
+            if rows.is_empty() || rows.len() > 4 {
+                return None;
+            }
+            for row in rows {
+                let row = row.as_object()?;
+                if row.keys().any(|key| !matches!(key.as_str(), "name" | "tokens")) {
+                    return None;
+                }
+            }
+            detail["categories"] = categories.clone();
+        }
+        let usage = Self::default().detail(&detail);
+        (usage.used == Some(used) && usage.capacity == Some(capacity)
+            && !usage.invalid && !usage.invalid_components).then_some(usage)
+    }
+
     fn lines(&self, width: usize, ascii: bool) -> Vec<Line<'static>> {
         let width = width.max(3);
         let heading = match self.fill_percentage() {
@@ -180,6 +230,51 @@ impl ContextUsage {
     }
 }
 
+fn normalized_context_record(session_id: &str, value: &Value) -> Option<Value> {
+    if !valid_session_id(session_id) { return None; }
+    let object = value.as_object()?;
+    if object.len() != 2
+        || object.get("session_id")?.as_str()? != session_id
+        || !object.contains_key("report") {
+        return None;
+    }
+    let report = ContextUsage::from_persistence(&object["report"])?.persistence_value()?;
+    Some(serde_json::json!({"session_id":session_id,"report":report}))
+}
+
+impl App {
+    pub(crate) fn context_report_record(&self, session_id: &str) -> Option<Value> {
+        if !valid_session_id(session_id) { return None; }
+        let report = self.session_telemetry.get(session_id)?.context_usage.persistence_value()?;
+        Some(serde_json::json!({"session_id":session_id,"report":report}))
+    }
+
+    pub(crate) fn context_report_state(&self, session_id: &str) -> Option<(bool, bool, Option<Value>)> {
+        if !valid_session_id(session_id) { return None; }
+        let telemetry = self.session_telemetry.get(session_id)?;
+        Some((telemetry.context_last_reported, telemetry.context_snapshot_dirty,
+            telemetry.context_usage.persistence_value()))
+    }
+
+    pub(crate) fn restore_context_report(&mut self, session_id: &str, value: &Value) -> bool {
+        let Some(record) = normalized_context_record(session_id, value) else { return false; };
+        let Some(usage) = ContextUsage::from_persistence(&record["report"]) else { return false; };
+        let telemetry = self.session_telemetry.entry(session_id.to_owned()).or_default();
+        // A report delivered during startup is newer than the cache and must
+        // never be replaced by persisted history.
+        if telemetry.context_snapshot_dirty
+            || (!telemetry.context_last_reported && telemetry.context_usage.persistence_value().is_some()) {
+            return false;
+        }
+        telemetry.store_context(usage, true, false);
+        true
+    }
+
+    pub(crate) fn normalize_context_report_record(session_id: &str, value: &Value) -> Option<Value> {
+        normalized_context_record(session_id, value)
+    }
+}
+
 fn component_marker(index: usize) -> char {
     // Distinct ASCII markers remain readable without color or glyph coverage.
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-"[index] as char
@@ -197,8 +292,12 @@ impl App {
             return vec![Line::from("Session changed; reopen context")];
         };
         let unknown = ContextUsage::default();
-        let usage = self.session_telemetry.get(id).map(|t| &t.context_usage).unwrap_or(&unknown);
+        let telemetry = self.session_telemetry.get(id);
+        let usage = telemetry.map(|t| &t.context_usage).unwrap_or(&unknown);
         let mut lines = usage.lines(width, self.preferences.value("context_grid") == "ascii");
+        if telemetry.is_some_and(|value| value.context_last_reported) {
+            lines.insert(0, Line::from("Last reported before this restore"));
+        }
         lines.push(Line::from(""));
         lines.extend(info.lines.iter().filter(|line| !line.starts_with("context  ") && !line.starts_with("in use   "))
             .flat_map(|line| crate::memory_menu::wrap_review(line, width.max(1))).map(Line::from));
@@ -281,6 +380,27 @@ mod tests {
     }
 
     #[test]
+    fn persisted_context_is_bounded_normalized_and_rejects_tampering() {
+        let usage = measured();
+        let value = usage.persistence_value().unwrap();
+        assert_eq!(value, json!({"version":1,"used":300,"capacity":1000,
+            "categories":[{"name":"System","tokens":100},{"name":"Tools","tokens":200}]}));
+        let restored = ContextUsage::from_persistence(&value).unwrap();
+        assert_eq!(restored.used, Some(300));
+        assert_eq!(restored.capacity, Some(1000));
+        assert_eq!(restored.components, [("System".into(), 100), ("Tools".into(), 200)]);
+        for corrupt in [
+            json!({"version":1,"used":300,"capacity":1000,"credential":"not allowed"}),
+            json!({"version":1,"used":1001,"capacity":1000}),
+            json!({"version":2,"used":300,"capacity":1000}),
+            json!({"version":1,"used":300,"capacity":1000,"categories":[{"name":"System\nsecret","tokens":300}]}),
+            json!({"version":1,"used":300,"capacity":1000,"categories":[{"name":"System","tokens":300,"raw":"not allowed"}]}),
+        ] {
+            assert!(ContextUsage::from_persistence(&corrupt).is_none(), "{corrupt}");
+        }
+    }
+
+    #[test]
     fn telemetry_updates_clear_old_breakdown_and_invalid_counts() {
         let mut telemetry = super::super::session_telemetry::SessionTelemetry::default();
         telemetry.update_status(&json!({"ctx_tokens":300,"ctx_max_tokens":1000}));
@@ -293,6 +413,52 @@ mod tests {
         assert!(telemetry.context_tokens.is_none());
         assert!(telemetry.context.is_none());
         assert_eq!(bar(&telemetry.context_usage, 12), "[          ]");
+    }
+
+    #[test]
+    fn restored_context_survives_status_placeholders_but_authoritative_unknown_clears_it() {
+        let mut app = App::default();
+        let record = json!({"session_id":"session-one","report":{"version":1,"used":300,"capacity":1000}});
+        assert!(app.restore_context_report("session-one", &record));
+        assert!(!app.restore_context_report("session-two", &record));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"session-one",
+            "ctx_tokens":null,"ctx_max_tokens":null,"ctx_percentage":null}));
+        assert_eq!(app.context_report_state("session-one").unwrap().0, true);
+        app.apply_daemon_frame(&json!({"type":"telemetry_status","session_id":"session-one","status":{
+            "ctx_tokens":null,"ctx_max_tokens":null,"ctx_percentage":null}}));
+        assert_eq!(app.context_report_state("session-one").unwrap().0, true);
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"session-one","event":{"type":"turn_done","data":{}}}));
+        assert_eq!(app.context_report_state("session-one"), Some((false, true, None)));
+
+        let mut detail_app = App::default();
+        assert!(detail_app.restore_context_report("session-one", &record));
+        detail_app.session_telemetry.get_mut("session-one").unwrap().update_context_detail(&json!({}));
+        assert_eq!(detail_app.context_report_state("session-one"), Some((false, true, None)));
+    }
+
+    #[test]
+    fn validated_categories_round_trip_through_the_owner_tabset() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = crate::ui_state::UiStateStore::new(dir.path(), "/project", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs = vec!["session-one".into()];
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"session-one",
+            "ctx_tokens":300,"ctx_max_tokens":1000}));
+        app.session_telemetry.get_mut("session-one").unwrap().update_context_detail(&json!({
+            "total_tokens":300,"max_tokens":1000,
+            "categories":[{"name":"System","tokens":100},{"name":"Tools","tokens":200}]
+        }));
+        store.save(&app).unwrap();
+
+        let saved = doxa_state::load_tabset(store.path(), "/project").unwrap();
+        assert_eq!(saved.raw["rust_ui"]["last_context_reports"]["session-one"]["report"]["categories"].as_array().unwrap().len(), 2);
+        let reloaded = crate::ui_state::UiStateStore::new(dir.path(), "/project", "machine").unwrap();
+        let mut restored = App::default();
+        assert!(reloaded.restore(&mut restored, &["session-one".into()]));
+        assert_eq!(restored.context_report_state("session-one").unwrap(), (true, false, Some(json!({
+            "version":1,"used":300,"capacity":1000,
+            "categories":[{"name":"System","tokens":100},{"name":"Tools","tokens":200}]
+        }))));
     }
 
     #[test]
