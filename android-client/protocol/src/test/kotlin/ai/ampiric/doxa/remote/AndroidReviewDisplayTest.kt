@@ -5,6 +5,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AndroidReviewDisplayTest {
+    @Test fun staleSameIdControlCannotClaimTheNewRequestWasDisplayed() {
+        val displayed = JSONObject().put("id", "review-1").put("input_summary", "echo A")
+        assertTrue(AndroidReview.sameDisplayedRequest(displayed, JSONObject(displayed.toString())))
+        assertFalse(AndroidReview.sameDisplayedRequest(displayed, JSONObject().put("id", "review-1").put("input_summary", "echo B")))
+        assertFalse(AndroidReview.sameDisplayedRequest(displayed, null))
+    }
     @Test fun titledApprovalStillDisplaysCompleteArgumentsAndIdentity() {
         val request = JSONObject().put("id", "review-1").put("kind", "permission")
             .put("title", "Approve tool?").put("tool_name", "Bash")
