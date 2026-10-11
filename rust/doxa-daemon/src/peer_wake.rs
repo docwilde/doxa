@@ -30,9 +30,11 @@ impl Policy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     #[test]
     fn saved_grant_refreshes_without_overriding_explicit_launch_policy() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let config = dir.path().join("config.toml");
         let policy = Policy { inherited: None, config: Some(config.clone()) };
         assert!(!policy.enabled());
