@@ -96,7 +96,7 @@ while True:
                 "code": -32042, "message": os.environ.get("TEST_SECRET", "synthetic")}}), flush=True)
         else:
             if mode == "slow_call":
-                time.sleep(0.08)
+                time.sleep(0.3)
             secret = os.environ.get("TEST_SECRET", "synthetic")
             reply(request, {"content": [{"type": "text", "text": "Local result " + secret}],
                             "structuredContent": {"source": secret}, "isError": mode == "tool_error"})

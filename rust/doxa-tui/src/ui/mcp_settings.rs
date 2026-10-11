@@ -393,7 +393,7 @@ impl App {
             },
             Some(ProbeState::Complete(Err(reason)))=>((*reason).into(),None),
             state=>{
-                let status=if matches!(state,Some(ProbeState::Running(_))) {"Connecting/listing · no tool calls"} else {"Not probed · Ctrl+P connects/lists · no tool calls"};
+                let status=if matches!(state,Some(ProbeState::Running(_))) {"Connecting/listing · no tool calls"} else {"Config snapshot · not probed · Ctrl+P connects/lists"};
                 match view.map(|view|&view.state) {
                     Some(ConfigViewState::Complete(Ok(checks)))=>(status.into(),Some(checks)),
                     Some(ConfigViewState::Complete(Err(reason)))=>((*reason).into(),None),
@@ -406,7 +406,7 @@ impl App {
         if let Some(checks)=checks {
             if let Some(check)=checks.get(self.mcp_server_page.min(checks.len().saturating_sub(1))) {
                 let page=self.mcp_server_page.min(checks.len()-1)+1;
-                lines.push(format!("Server {page}/{} · PgUp/PgDn · {} · {} · {}",checks.len(),super::safe_label(&check.id),if check.enabled {"enabled"} else {"disabled"},check.status));
+                lines.push(format!("Server {page}/{} · PgUp/PgDn · {} · {} · {}",checks.len(),super::safe_label(&check.id),if check.enabled {"enabled"} else {"disabled"},super::safe_label(&check.status)));
                 let names=check.allow_tools.iter().take(3).map(|name|super::safe_label(name)).collect::<Vec<_>>().join(", ");
                 lines.push(format!("Allowlist ({}): {}{}",check.allow_tools.len(),if names.is_empty() {"none"} else {&names},if check.allow_tools.len()>3 {" … (remaining names in private config)"} else {""}));
             } else {lines.push("No configured servers".into());}

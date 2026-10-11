@@ -323,11 +323,35 @@ async fn changed_or_missing_credentials_refuse_calls_without_refresh_or_send() {
 async fn bounded_handshake_preserves_the_configured_call_deadline() {
     let _environment=isolated();
     let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
-    let mut config=stdio_config("slow_call",&path);config.limits.timeout_ms=500;
-    let mut client=Client::connect_bounded(&config,directory.path(),cancel(),50).await.unwrap();
+    let mut config=stdio_config("slow_call",&path);config.limits.timeout_ms=1500;
+    let mut client=Client::connect_bounded(&config,directory.path(),cancel(),200).await.unwrap();
     client.list_tools(cancel()).await.unwrap();
     assert!(client.call_tool("search",&json!({}),cancel()).await.is_ok());client.close().await;
     let path=directory.path().join("initialization-timeout");
-    let error=Client::connect_bounded(&stdio_config("init_timeout",&path),directory.path(),cancel(),50).await.err().unwrap();
+    let error=Client::connect_bounded(&stdio_config("init_timeout",&path),directory.path(),cancel(),200).await.err().unwrap();
     assert_eq!(error.kind,ErrorKind::Timeout);assert!(error.attempted);
+}
+
+#[tokio::test]
+async fn cancellation_after_send_notifies_and_closes_without_replay() {
+    let _environment=isolated();
+    let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
+    let mut client=Client::connect(&stdio_config("timeout",&path),directory.path(),cancel()).await.unwrap();
+    client.list_tools(cancel()).await.unwrap();
+    let stop=cancel();let signal=stop.clone();let observed=path.clone();
+    let watcher=tokio::spawn(async move {
+        let deadline=std::time::Instant::now()+Duration::from_secs(1);
+        loop {
+            if journal(&observed).iter().any(|value|value["method"]=="tools/call") {
+                signal.store(true,Ordering::SeqCst);break;
+            }
+            assert!(std::time::Instant::now()<deadline,"local call never reached fixture");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    let error=client.call_tool("search",&json!({}),stop).await.unwrap_err();watcher.await.unwrap();
+    assert_eq!(error.kind,ErrorKind::Cancelled);assert!(error.attempted);assert!(client.is_closed());
+    let records=journal(&path);
+    assert_eq!(records.iter().filter(|value|value["method"]=="tools/call").count(),1);
+    assert!(records.iter().any(|value|value["method"]=="notifications/cancelled"));
 }
