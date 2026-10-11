@@ -1673,6 +1673,7 @@ for line in sys.stdin:
         // All settings writes and environment changes belong to a private child.
         if std::env::var_os("DOXA_DOCKER_SETUP_TEST").is_none() {
             let home = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(home.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
             let mut child = std::process::Command::new(std::env::current_exe().unwrap());
             child.args(["--exact", "ui::tests::docker_setup_before_launch_settings_return_retains_draft"])
                 .env("DOXA_HOME", home.path()).env("DOXA_DOCKER_SETUP_TEST", "1");
