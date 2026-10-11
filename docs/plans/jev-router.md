@@ -87,6 +87,24 @@ supervisor receipt bind the router conversation plus exact summary target.
 Canonical DOXA storage/replay still use `router`. This is not authenticated
 paid review or summary quality evidence.
 
+Native CLI routing verification on 2026-10-11 used six credential-free Linux
+production-daemon fixture tests. All six passed across focused runs: the five
+remaining cases passed together and the corrected advertised-GLM-effort history
+case passed separately. They exercise Claude and protected Codex stdio hosts,
+command/peer-tool approval roundtrips, exact authenticated-catalog/resolved-model
+admission, fresh private identities, one outer registry, API switching/resume,
+optional executable refusal, missing/wrong/excess usage, source changes,
+interruption/process cleanup and no uncertain replay. Fake account metadata is
+controlled fixture data, not live authenticated-account evidence.
+
+Eight focused regressions passed: one core billing-policy/hash check, three
+Claude catalog/authentication checks, two daemon argument/config checks, one
+large private-worker history exclusion and one native permission-picker check.
+The production daemon built with `cargo build --locked --offline -p doxa-daemon`
+and frontend binaries passed `cargo check --locked --offline -p doxa-tui --bins`.
+No paid worker calls, real login changes or live installation were performed.
+CLI account billing/quota and real-task quality remain unmeasured.
+
 The [evaluation record](../router-evaluation.md) binds an authorized six-call
 `jev-1.13.0` synthetic smoke on 2026-10-10 to exact config/input hashes and
 recorded responses. Development agreement was 4/4 and separate synthetic
