@@ -12,7 +12,7 @@ fn append_paths_refuse_fifo_without_waiting_for_a_reader() {
     const CHILD_ROOT: &str = "DOXA_TRANSCRIPT_FIFO_TEST_ROOT";
     const CHILD_METHOD: &str = "DOXA_TRANSCRIPT_FIFO_TEST_METHOD";
     if let Some(root) = std::env::var_os(CHILD_ROOT) {
-        let store = TranscriptStore::new(root, "project", "session-1").unwrap();
+        let store = TranscriptStore::new(std::path::Path::new(&root), "project", "session-1").unwrap();
         let result = match std::env::var(CHILD_METHOD).unwrap().as_str() {
             "append" => store.append(json!({"type":"user"}), "claude", str::to_owned),
             "try_append" => store.try_append(json!({"type":"user"}), "codex",
