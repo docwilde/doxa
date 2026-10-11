@@ -13,13 +13,13 @@ DOXA keeps one engine per session. The model picker shows choices reported by or
 
 | Capability | Claude | Codex | DeepSeek | GLM | Router (opt-in) |
 | --- | --- | --- | --- | --- | --- |
-| Connection | Claude Code CLI | Protected private app server | Rust API client | Rust API client | Jev selection + configured DeepSeek/GLM API target |
-| Authentication | Claude CLI login | Codex CLI login | `DEEPSEEK_API_KEY` or `/setup` | `ZAI_API_KEY` or `/setup` | Worker credentials; `TYPESAFE_API_KEY` for Jev |
-| Session recovery | Verified native conversation | Same protected thread | Durable DOXA conversation | Durable DOXA conversation | Explicit same-config hash resume; canonical API messages |
+| Connection | Claude Code CLI | Protected private app server | Rust API client | Rust API client | Jev selection + configured API or authenticated native CLI target |
+| Authentication | Claude CLI login | Codex CLI login | `DEEPSEEK_API_KEY` or `/setup` | `ZAI_API_KEY` or `/setup` | API credentials / current CLI account; `TYPESAFE_API_KEY` for Jev |
+| Session recovery | Verified native conversation | Same protected thread | Durable DOXA conversation | Durable DOXA conversation | Explicit same-config hash resume; canonical router history + private native worker proof |
 | Model change | Idle session, verified against CLI settings | Next turn on same thread | Idle session, catalog choice | Idle session, catalog choice | Idle `/model auto` or exact configured target ID |
 | Reasoning effort | Reported choices | Reported choices | Model-dependent | Model-dependent | Fixed per configured target; effective effort in route status |
-| Tool permissions | Provider controls plus DOXA peer/LORE review | On-request, auto, or full-access; peer/LORE review stays active | DOXA peer/LORE review | DOXA peer/LORE review | DOXA peer/LORE review; no provider permission-mode control |
-| Compaction | LORE review before provider compaction | Trusted `PreCompact` review in private build | Reviewed summary checkpoint | Reviewed summary checkpoint | Reviewed managed summary; no Jev call, originals retained |
+| Tool permissions | Provider controls plus DOXA peer/LORE review | On-request, auto, or full-access; peer/LORE review stays active | DOXA peer/LORE review | DOXA peer/LORE review | Native manual/default or explicit idle Auto; DOXA reviews stay active |
+| Compaction | LORE review before provider compaction | Trusted `PreCompact` review in private build | Reviewed summary checkpoint | Reviewed summary checkpoint | Reviewed API summary; CLI summary target refused, originals retained |
 
 Provider tool features depend on the installed CLI, model, and account. `/model`, `/effort`, and `/mode` expose only supported choices. Changes wait for the current turn and queue to finish. The picker can show separately sourced context, thinking, and price facts for an exact model ID; unknown fields stay unknown and facts do not make a model selectable. [Model fact provenance](plans/model-registry.md).
 
@@ -28,7 +28,8 @@ Provider tool features depend on the installed CLI, model, and account. `/model`
 Codex `on-request` reviews protected commands, file changes, and permission profiles inline. `auto` retains its sandbox; `full-access` removes that sandbox. DOXA peer and LORE tools keep their own human review in every mode. DeepSeek and GLM have no provider permission mode; their peer and LORE calls are individually reviewed. Optional vendor workspace reads are off by default.
 
 Router Auto is a target-selection choice, separate from permission mode. It does
-not grant Bash or workspace writes. Each turn checks configured target
+not grant permissions. API workers keep their narrower tool surface; native
+Claude/Codex workers use existing protected command/file review controls. Each turn checks configured target
 eligibility, and the UI keeps effective worker identity separate from Auto or
 the pin. Router owns aggregate durable routing/worker reservations; an attempted
 Jev call with unknown usage withholds worker execution. Configured descriptions
@@ -37,7 +38,9 @@ are operator policy and token-based price bounds are estimates. See the
 
 Bare router `/compact` uses the pin, last ordinary worker or configured fallback
 without changing Auto/pin. Completed canonical-source LORE review precedes the
-bounded summary, with aggregate budget and unknown-usage limits still active.
+bounded API summary, with aggregate budget and unknown-usage limits still active.
+A CLI pin/last worker is refused for compaction; explicitly pin an eligible API
+summary target.
 The UI keeps summary-worker status separate from ordinary routing. The pinned
 LORE worker currently records derivation provenance under the selected API
 provider; DOXA source proof/storage/replay stay `router` and review receipts bind
@@ -60,7 +63,13 @@ Claude and Codex context and usage figures come from their reported telemetry. D
 
 Linux has bounded live verification for the four direct engines: Claude, Codex, DeepSeek and GLM. macOS builds and transport tests run in CI, but authenticated provider sessions need live checks. Protected Codex is Linux-only because its process ownership and compaction contract have no macOS equivalent. Windows is unsupported. See [platform verification](platform-verification.md) and the [provider verification record](live-provider-verification-2026-10-04.md).
 
-Router currently supports native API sessions only. An authenticated six-call
+Router supports native API and authenticated CLI worker sessions. Protected
+Codex workers retain the Linux-only private provider requirement. Explicit
+`cli_account` candidates exclude unknown CLI charges from the tracked Jev/API
+USD allowance; mixed-session telemetry keeps total charge unknown even after a
+later API turn or reattach. Complete observed native token usage is required,
+and uncertain attempted work is not replayed. Credential-free native fixtures
+are separate from authenticated worker/real-task verification. An authenticated six-call
 [synthetic Jev smoke](router-evaluation.md#observed-synthetic-smoke) verified
 typed transport and recorded-response replay. Worker success, real-task routing
 quality and macOS live behavior remain unmeasured. Docker, CLI handoffs and

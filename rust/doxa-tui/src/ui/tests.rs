@@ -275,6 +275,21 @@ use super::*;
     }
 
     #[test]
+    fn router_native_permission_picker_keeps_manual_and_auto_distinct_from_target_auto() {
+        let mut app=App::default();app.size=Rect::new(0,0,100,30);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"router-cli","engine":"router",
+            "model":"auto","permission_mode":"default","can_set_permission_mode":true,"running":false,"queued":0}));
+        app.groups[0].tabs=vec!["router-cli".into()];app.open_permission_picker();
+        assert_eq!(app.permission_picker.as_ref().unwrap().1,0);
+        assert_eq!(permission_choices(Some("router")).iter().map(|row|row.0).collect::<Vec<_>>(),["default","auto"]);
+        app.permission_picker_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));app.select_permission_mode();
+        assert_eq!(app.pending_permission_changes,[("router-cli".into(),"auto".into())]);
+        assert_eq!(app.session_identity["router-cli"].1.as_deref(),Some("auto"));
+        assert!(!permission_display_mode("full-access",Some("router")));
+        assert!(!permission_display_mode("dontAsk",Some("router")));
+    }
+
+    #[test]
     fn dependency_release_modal_requires_contiguous_read_arm_and_confirm() {
         let mut app = App::default();
         app.handle(Event::Resize(84, 28));

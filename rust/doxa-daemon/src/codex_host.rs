@@ -104,7 +104,7 @@ impl CodexHost {
     }
 
     pub fn new(
-        mut options: DriverOptions,
+        options: DriverOptions,
         session_id: &str,
         resume: bool,
     ) -> Result<Self, String> {

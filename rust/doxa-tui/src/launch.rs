@@ -539,10 +539,12 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             }
             command.args(["--engine","router","--router-config"]).arg(path);
             if config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Codex) {
-                command.arg("--codex-bin").arg(codex_executable(options)?);
+                let executable=if options.codex_bin.is_some(){Some(codex_executable(options)?)}else{codex_executable(options).ok()};
+                if let Some(path)=executable {command.arg("--codex-bin").arg(path);}
             } else if options.codex_bin.is_some() {return Err(invalid("--codex-bin requires a configured Codex router candidate"));}
             if config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Claude) {
-                command.arg("--claude-bin").arg(claude_executable(options)?);
+                let executable=if options.claude_bin.is_some(){Some(claude_executable(options)?)}else{claude_executable(options).ok()};
+                if let Some(path)=executable {command.arg("--claude-bin").arg(path);}
             } else if options.claude_bin.is_some() {return Err(invalid("--claude-bin requires a configured Claude router candidate"));}
             if let Some(model)=&model {command.arg("--model").arg(model);}
             if options.resume.is_some() {command.args(["--resume","true"]);}

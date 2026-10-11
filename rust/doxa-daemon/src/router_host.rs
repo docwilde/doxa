@@ -489,6 +489,7 @@ impl RouterHost {
                 .zip(data["output_tokens"].as_u64())
         } else { data["input_tokens"].as_u64().zip(data["output_tokens"].as_u64()) };
         let usage=tokens.filter(|(input,output)|*input>0 && *output<=candidate.max_output_tokens
+            && input.checked_add(candidate.max_output_tokens).is_some_and(|total|total<=candidate.context_tokens)
             && data["is_error"] == false && data["usage_complete"] == true
             && data["model_consistent"] == true && data["model"] == candidate.model && !overflow
             && !self.cancel.load(Ordering::Acquire) && !self.closing.load(Ordering::Acquire));
@@ -504,9 +505,10 @@ impl RouterHost {
             } else {state.worker.accounting_unknown=true;}
         } else {state.worker.accounting_unknown=true;}
         let complete=!state.unknown();
-        state.receipts.push(json!({"turn":state.turn,"selection":selection,"router":outcome,"worker":pending,
+        let receipt=json!({"turn":state.turn,"selection":selection,"router":outcome,"worker":pending,
             "worker_usage":usage.map(|(input,output)|json!({"input_tokens":input,"output_tokens":output})),
-            "worker_charge_usd":null,"complete":complete}));
+            "worker_charge_usd":null,"complete":complete});
+        state.receipts.push(receipt);
         let saved=self.save(&mut state).is_ok();
         if !complete || !saved { event["data"]["is_error"]=json!(true);
             event["data"]["error"]=json!("CLI worker usage, model, source or durable completion is unverified; further work withheld without replay"); }
@@ -515,6 +517,9 @@ impl RouterHost {
         event["data"]["prompt_tokens"]=json!(usage.map(|(input,_)|input));
         event["data"]["completion_tokens"]=json!(usage.map(|(_,output)|output));
         event["data"]["usage_complete"]=json!(usage.is_some());
+        // Each private CLI identity executes one turn; provider session usage
+        // is therefore the observed turn usage in the canonical conversation.
+        event["data"]["usage_scope"]=json!("turn");
         event["data"]["worker_charge_usd"]=Value::Null;
         event["data"]["total_cost_usd"]=Value::Null;
         event["data"]["cost_usd"]=json!(if state.unknown(){None}else{outcome.router_cost_usd_micros.map(|sum|sum as f64/1_000_000.0)});

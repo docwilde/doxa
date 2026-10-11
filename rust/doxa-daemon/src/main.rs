@@ -280,9 +280,9 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
         let config=doxa_router::Config::load(path).map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
         let needs_codex=config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Codex);
         let needs_claude=config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Claude);
-        if needs_codex { codex_bin=Some(executable(codex_bin.ok_or_else(||invalid("router Codex candidates need --codex-bin"))?)?); }
+        if needs_codex { codex_bin=codex_bin.map(executable).transpose()?; }
         else if codex_bin.is_some() {return Err(invalid("--codex-bin requires a configured Codex router candidate"));}
-        if needs_claude { claude_bin=Some(executable(claude_bin.ok_or_else(||invalid("router Claude candidates need --claude-bin"))?)?); }
+        if needs_claude { claude_bin=claude_bin.map(executable).transpose()?; }
         else if claude_bin.is_some() {return Err(invalid("--claude-bin requires a configured Claude router candidate"));}
         if model.as_deref().is_some_and(|id|id!="auto"&&config.candidate(id).is_none()) {
             return Err(invalid("router model must be auto or an exact configured target ID"));

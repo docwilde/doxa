@@ -131,6 +131,13 @@ fn read_offline(mut file: File, uid: u32) -> Option<String> {
     Some(render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: start > 0 }))
 }
 
+fn internal_router_worker(file: &mut File) -> bool {
+    if file.seek(SeekFrom::Start(0)).is_err() {return true;}
+    let mut head=Vec::new();if file.take(64*1024).read_to_end(&mut head).is_err(){return true;}
+    head.split(|byte|*byte==b'\n').take(128).filter_map(|line|serde_json::from_slice::<Value>(line).ok())
+        .any(|record|record["router_worker"] == true)
+}
+
 fn recorded_cwd(file: &mut File) -> Option<PathBuf> {
     file.seek(SeekFrom::Start(0)).ok()?;
     let mut head = Vec::new();
@@ -299,6 +306,7 @@ fn indexed_hits_in(root: &Path, hits: Vec<SessionSearchHit>) -> Vec<OfflineSessi
         let name = format!("{}.jsonl", hit.session_id);
         let Some(mut file) = open_at(&dir, OsStr::new(&name), libc::O_RDONLY | libc::O_NONBLOCK) else { continue; };
         if !file.metadata().is_ok_and(|meta| meta.is_file() && meta.uid() == uid && meta.nlink() == 1) { continue; }
+        if internal_router_worker(&mut file) {continue;}
         let cwd = recorded_cwd(&mut file);
         if let Some(markdown) = read_offline(file, uid) {
             let snippet = if hit.snippet.is_empty() { Vec::new() } else { vec![hit.snippet] };
@@ -336,7 +344,7 @@ fn discover_in(root: &Path, prefix: Option<&str>, query: Option<&str>) -> Vec<Of
             if prefix.is_some_and(|prefix| !id.starts_with(prefix)) { continue; }
             let Some(mut open_file) = open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK) else { continue; };
             let Ok(meta) = open_file.metadata() else { continue; };
-            if !meta.is_file() || meta.uid() != uid { continue; }
+            if !meta.is_file() || meta.uid() != uid || internal_router_worker(&mut open_file) { continue; }
             if query.is_some_and(|query| !id.to_lowercase().contains(&query.to_lowercase()) && !tail_matches(&mut open_file, query)) {
                 continue;
             }
@@ -1054,6 +1062,21 @@ for line in sys.stdin:
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].cwd.as_deref(), Some(Path::new("/tmp/original")));
         assert!(discover_in(&root, Some("different"), None).is_empty());
+    }
+
+    #[test]
+    fn private_router_worker_proofs_are_excluded_from_history_and_indexed_restore() {
+        let temp=tempfile::tempdir().unwrap();let root=temp.path().join("projects");
+        fs::create_dir_all(root.join("project")).unwrap();
+        for (id,worker) in [("worker-uuid",true),("outer-router",false)] {
+            fs::write(root.join(format!("project/{id}.jsonl")),serde_json::json!({"type":"user",
+                "router_worker":worker,"cwd":temp.path(),"message":{"content":"same searchable request"}}).to_string()).unwrap();
+        }
+        assert_eq!(discover_in(&root,None,None).iter().map(|entry|entry.id.as_str()).collect::<Vec<_>>(),["outer-router"]);
+        assert!(discover_in(&root,Some("worker-uuid"),None).is_empty());
+        assert!(discover_in(&root,None,Some("searchable")).iter().all(|entry|entry.id=="outer-router"));
+        let hits=["worker-uuid","outer-router"].map(|id|SessionSearchHit{session_id:id.into(),project:"project".into(),snippet:"same searchable request".into()});
+        assert_eq!(indexed_hits_in(&root,hits.into()).iter().map(|entry|entry.id.as_str()).collect::<Vec<_>>(),["outer-router"]);
     }
 
     #[test]

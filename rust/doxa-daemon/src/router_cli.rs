@@ -5,15 +5,20 @@ use doxa_engines::{codex_appserver::{AppServerDriver,AppServerOptions,CodexPermi
 use doxa_router::{Candidate,Provider};
 use doxa_runtime::Host;
 use serde_json::Value;
-use std::{io::Read,path::{Path,PathBuf},sync::Arc,time::Duration};
+use std::{io::Read,path::{Path,PathBuf},sync::{Arc,atomic::{AtomicBool,Ordering}},time::Duration};
 
 #[derive(Clone,Default)]
 pub struct CliOptions { pub claude: Option<PathBuf>, pub codex: Option<PathBuf> }
 
-pub(super) enum Worker { Claude(ClaudeHost), Codex(CodexHost) }
+enum WorkerKind { Claude(ClaudeHost), Codex(CodexHost) }
+pub(super) struct Worker { inner: WorkerKind, closed: AtomicBool }
 impl Worker {
-    pub(super) fn host(&self) -> &dyn Host { match self {Self::Claude(host)=>host,Self::Codex(host)=>host} }
-    pub(super) fn shutdown(&self) { match self {Self::Claude(host)=>{host.shutdown();},Self::Codex(host)=>{host.shutdown();}} }
+    fn new(inner:WorkerKind)->Self {Self{inner,closed:AtomicBool::new(false)}}
+    pub(super) fn host(&self) -> &dyn Host { match &self.inner {WorkerKind::Claude(host)=>host,WorkerKind::Codex(host)=>host} }
+    pub(super) fn shutdown(&self) {
+        if self.closed.swap(true,Ordering::AcqRel) {return;}
+        match &self.inner {WorkerKind::Claude(host)=>{host.shutdown();},WorkerKind::Codex(host)=>{host.shutdown();}}
+    }
 }
 impl Drop for Worker { fn drop(&mut self) { self.shutdown(); } }
 
@@ -53,16 +58,17 @@ impl CliOptions {
             return Err("Router CLI selected model or effort is no longer authenticated and advertised".into());
         }
         let worker = match candidate.provider {
-            Provider::Claude => Worker::Claude(ClaudeHost::new_routed(self.claude.as_deref().ok_or("Claude executable unavailable")?,
+            Provider::Claude => WorkerKind::Claude(ClaudeHost::new_routed(self.claude.as_deref().ok_or("Claude executable unavailable")?,
                 cwd,id,&candidate.model,&candidate.effort,agent)?),
             Provider::Codex => {
                 let mut options=DriverOptions::new(cwd.to_owned());
                 options.executable=self.codex.clone().ok_or("Codex executable unavailable")?;
                 options.model=Some(candidate.model.clone()); options.effort=Some(candidate.effort.clone());
-                Worker::Codex(CodexHost::new_routed(options,id,agent)?)
+                WorkerKind::Codex(CodexHost::new_routed(options,id,agent)?)
             }
             _=>return Err("Not a CLI worker".into()),
         };
+        let worker=Worker::new(worker);
         if permission == "auto" { worker.host().call("set_permission_mode",&serde_json::json!({"mode":"auto"}))?; }
         Ok(Arc::new(worker))
     }

@@ -7,6 +7,25 @@ fn input()->RoutingInput {RoutingInput {summary:"Format a synthetic mapping as J
 fn response()->Value {json!({"model":JEV_MODEL,"answers":{"target":{"type":"choice","choice":"fast","probabilities":{"fast":0.9,"deliberate":0.1},"confidence":0.8}},"usage":{"input_tokens":100,"output_tokens":20}})}
 
 #[test]
+fn cli_account_targets_require_explicit_unknown_charge_policy_not_zero_price() {
+    let mut cfg=config();let old_hash=cfg.hash().unwrap();
+    let mut explicit=serde_json::to_value(&cfg).unwrap();
+    explicit["candidates"][0]["billing"]=json!("api");
+    assert_eq!(serde_json::from_value::<Config>(explicit).unwrap().hash().unwrap(),old_hash);
+    let row=&mut cfg.candidates[0];row.provider=Provider::Claude;
+    assert!(cfg.validate().is_err());
+    let row=&mut cfg.candidates[0];row.billing=Billing::CliAccount;
+    assert!(cfg.validate().is_err(),"invented CLI dollar prices accepted");
+    let row=&mut cfg.candidates[0];row.input_usd_micros_per_million=0;row.output_usd_micros_per_million=0;
+    cfg.validate().unwrap();assert!(candidate_cost(&cfg.candidates[0],&input()).is_err());
+    assert_eq!(prepare(&cfg,&input()).unwrap().eligible_ids,["fast","deliberate"]);
+    let wire=serde_json::to_value(&cfg).unwrap();assert_eq!(wire["candidates"][0]["billing"],"cli_account");
+    assert!(wire["candidates"][0].get("input_usd_micros_per_million").is_none());
+    cfg.candidates[0].provider=Provider::Codex;cfg.validate().unwrap();
+    cfg.candidates[0].provider=Provider::Glm;assert!(cfg.validate().is_err());
+}
+
+#[test]
 fn deterministic_eligibility_cost_and_fallback_never_enlarge_candidate_set() {
     let cfg=config();let mut request=input();let prepared=prepare(&cfg,&request).unwrap();
     assert_eq!(prepared.eligible_ids,["fast","deliberate"]);

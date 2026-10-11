@@ -29,8 +29,11 @@ pub fn decode(value: &Value) -> Result<Value, Error> {
 }
 
 pub fn authenticated(value: &Value) -> bool {
-    ["email", "apiProvider", "subscriptionType"].iter().any(|key| value["account"][key].as_str()
-        .is_some_and(|text| !text.is_empty() && text.len() <= 256 && !text.chars().any(char::is_control)))
+    let present=|key|value["account"][key].as_str().is_some_and(|text|!text.is_empty()
+        && text.len()<=256 && !text.chars().any(char::is_control) && !matches!(text,"none"|"profile"));
+    // Installed CLI 2.1.296 supplies apiProvider:"firstParty" even when signed
+    // out. Backend identity alone, or an email alone, never authenticates.
+    present("tokenSource") || present("apiKeySource") || (present("subscriptionType") && present("email"))
 }
 
 /// Initialize the connected account without a user prompt. A catalog alone is
@@ -71,6 +74,18 @@ fn discover_inner(options: CliOptions<'_>, timeout: Duration, require_auth: bool
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn authenticated_catalog_requires_account_evidence_beyond_provider_identity() {
+        for account in [json!({}),json!({"apiProvider":"firstParty"}),json!({"email":"local@example.test"}),
+            json!({"apiKeySource":"none","tokenSource":"profile"}),json!({"tokenSource":"bad\nsource"})] {
+            assert!(!authenticated(&json!({"account":account})));
+        }
+        for account in [json!({"apiKeySource":"ANTHROPIC_API_KEY"}),json!({"tokenSource":"claude.ai"}),
+            json!({"email":"local@example.test","subscriptionType":"account-plan"})] {
+            assert!(authenticated(&json!({"account":account})));
+        }
+    }
 
     #[test]
     fn catalog_discovery_initializes_without_prompts_and_cleans_up_the_cli() {

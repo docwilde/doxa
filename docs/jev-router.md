@@ -1,9 +1,11 @@
 # Jev turn router
 
-The opt-in `router` engine selects a configured DeepSeek or GLM API target at
-the start of a turn. It keeps one durable DOXA conversation while recording the
-effective target, provider, model and effort for each turn. It does not launch
-Claude or Codex CLIs and does not provide Bash or workspace writes.
+The opt-in `router` engine selects a configured DeepSeek/GLM API target or an
+authenticated Claude/protected Codex CLI target at the start of a turn. It keeps
+one durable DOXA conversation and peer/LORE registry identity, recording the
+effective target, provider, model and effort for each turn. API targets retain
+their narrower tools; CLI targets retain their native command/file permissions
+and DOXA reviews. Automatic routing does not approve tools.
 
 Candidate descriptions express the operator's routing policy. They are not
 measured quality claims. Jev Choice confidence describes its returned choice
@@ -23,8 +25,9 @@ doxa doctor --engine router --router-config /home/you/.doxa/router-candidates.js
 
 `DOXA_ROUTER_CONFIG` or the `router_config` setting can explicitly supply the
 path. DOXA does not invent a default config, candidate list, or target. Selecting
-Router in the new-session form requires that setting; the form rotates through
-Auto and configured target IDs. Global `DOXA_MODEL` and `DOXA_EFFORT` do not
+Jev Router in `/settings` or the new-session form requires that setting and a
+read-only review of the private config and current authenticated catalogs. The
+form offers Auto and configured target IDs; no candidate list is invented. Global `DOXA_MODEL` and `DOXA_EFFORT` do not
 select router targets. A stored `[models].router` preference applies to new CLI
 launches and must name `auto` or an exact target ID.
 
@@ -32,9 +35,12 @@ launches and must name `auto` or an exact target ID.
 - `/model ds-chat` pins that exact configured target and skips Jev selection.
 - Changes require an idle session. Effort is configured per target; `/effort`
   is unavailable on router sessions.
-- `/mode auto` is a permission control for engines that support it. It does not
-  enable routing. Router has no provider permission-mode picker; DOXA peer and
-  LORE tool reviews remain active.
+- With configured CLI targets, `/mode default` keeps native manual reviews:
+  Claude manual and Codex on-request with workspace-write sandbox. Idle
+  `/mode auto` explicitly opts future native workers into their existing Auto
+  permission mode. It is separate from `/model auto`; DOXA peer/LORE reviews
+  remain active. Router offers neither `full-access` nor `dontAsk`. API-only
+  configs have no provider permission control.
 
 The model control continues to show Auto or the pinned target. A separate route
 status shows the effective provider/model/effort. Its detail view and transcript
@@ -100,10 +106,11 @@ cap can make every target ineligible. Unknown provider windows remain unknown.
 
 Config limits: 2–16 candidates; unique ASCII letters/digits/`-`/`_` IDs up to
 48 characters; descriptions up to 1200 bytes; positive context/output caps and
-price bounds; 1–10,000 routing calls; 1–1,000,000 USD micros of routing spend;
+API price bounds; 1–10,000 routing calls; 1–1,000,000 USD micros of routing spend;
 512–24,576 bytes of router input; 100–12,000 ms routing deadline. One dollar is
 1,000,000 USD micros, so `10000` is $0.01. The fallback must name a configured
-candidate. Unknown caps or prices cannot be entered as zero.
+candidate. Unknown caps or API prices cannot be entered as zero. Existing API
+configs keep their serialization/hash; omitted `billing` means `api`.
 
 Before each turn the host checks credentials, account catalog, model/effort,
 tools, retained history, context/output caps and aggregate allowance. Configured
@@ -112,14 +119,67 @@ The fallback also has to remain eligible. An ineligible pin or an empty eligible
 set refuses the turn; it does not switch to another engine. DeepSeek thinking
 targets can be ineligible for retained assistant/tool history.
 
+### Authenticated CLI candidates
+
+Add an exact connected-account model and effort as a configured target, with
+explicit `billing: "cli_account"`. Omit both USD price fields. The following
+schema fragment uses placeholders, which must be replaced with exact advertised
+or resolved model IDs from your authenticated catalog; it is not a launchable
+recommendation:
+
+```json
+{
+  "id": "claude-code",
+  "provider": "claude",
+  "billing": "cli_account",
+  "model": "EXACT_AUTHENTICATED_RESOLVED_MODEL_ID",
+  "effort": "high",
+  "description": "Operator policy for native coding tasks; not measured quality.",
+  "context_tokens": 131072,
+  "max_output_tokens": 4096,
+  "supports_tools": true
+}
+```
+
+Codex uses `provider: "codex"` with the same explicit account billing policy.
+Authentication does not establish a subscription type, available quota or price.
+API targets require positive checked price bounds; CLI account targets reject
+invented USD rates. Native output usage above the configured cap is refused at
+settlement; the cap is not a claim that the provider exposes a per-turn token
+limit. The canonical history packet and collected public output are bounded.
+
+DOXA initializes the installed native CLI without a user prompt to check
+current authentication and exact model/effort availability before Jev selection
+and again before worker launch. Claude needs actual token/API-key source or
+known account evidence; its default `apiProvider` metadata alone is insufficient.
+Codex uses read-only `account/read` without token refresh and the protected
+provider contract. Missing authentication, executable, model or effort makes
+that candidate ineligible. An eligible API fallback can still run when an
+optional CLI is unavailable. An unavailable exact pin refuses before Jev.
+Explicit bad `--claude-bin`/`--codex-bin` paths are errors; those overrides must
+correspond to configured provider families. Model aliases that return a different
+actual model cannot settle a verified turn: configure the exact resolved ID.
+
+Each CLI turn creates a fresh private worker UUID and uses the existing native
+host/tool bridge. A bounded canonical public-history packet supplies context;
+old tool calls and old requests are not replayed. Internal provider artifacts
+and protected source proof belong to that worker UUID and are excluded from
+public history/restore and registry pickers. The router journal binds the worker,
+request and canonical source hashes before submission. Native LORE/provider
+proof remains separate from router conversation proof; only verified public
+user/assistant text enters the canonical router history. Shared AgentTools and
+peer/LORE identity remain attached to the outer router across worker teardown.
+
 ## Credentials, failure and accounting
 
-Jev uses `TYPESAFE_API_KEY`. Workers use the existing DeepSeek/GLM credential
+Jev uses `TYPESAFE_API_KEY`. API workers use the existing DeepSeek/GLM credential
 paths (`DEEPSEEK_API_KEY` and `ZAI_API_KEY`, or the private DOXA `/setup` store).
+CLI workers use their existing authenticated account through the private native
+hosts; router discovery does not create login state or run a user turn.
 Do not put keys in the config, criteria, descriptions, command arguments or
 evaluation files. Auto sends a scrubbed, bounded routing view and candidate
 policy to Jev; normal worker calls still send the worker conversation to the
-selected API provider.
+selected worker provider.
 
 When no Jev HTTP call is attempted, a missing Jev credential, exhausted routing
 allowance or a single eligible target can use the eligible fallback. Pinning
@@ -129,12 +189,21 @@ unknown: worker execution and subsequent turns are withheld. Timeouts, invalid
 answers and outages must not be assumed to be free or safe to retry.
 
 The session journal records reservations before calls and retains them on
-failure or cancellation. A session budget combines routing and worker holds;
+failure or cancellation. The tracked USD session budget combines Jev and direct
+API worker holds;
 the fixed-price `BudgetHost` wrapper is not used for router sessions. Worker
 holds conservatively cover up to 25 bounded requests and the aggregate output
 allowance. Displayed aggregate cost combines reported Jev usage and worker
 estimates at the checked upper rates; retained reservations are shown separately.
 Token-based estimates and conservative reservations are not billed tier or invoice facts.
+
+A reviewed `cli_account` config explicitly excludes unknown CLI provider charges
+from that tracked allowance. Mixed-session telemetry labels the estimate
+`Jev/API · CLI ?` on CLI turns, later API turns and reattach: provider CLI charge
+and total charge stay unknown, never zero. Complete observed CLI token usage is
+tracked separately. Interrupted, missing or inconsistent usage/model/source
+proof retains the pending worker binding and blocks future work/resume replay.
+There is no all-in dollar ceiling or affordability claim for CLI account workers.
 An interrupted/incomplete journal pauses further work rather than replaying an
 uncertain turn.
 
@@ -143,7 +212,9 @@ uncertain turn.
 Use bare `/compact` in an idle router session. The summary target is the exact
 pin when pinned; in Auto it is the last ordinary effective worker, or the
 configured fallback if no ordinary worker has run. The target must still pass
-eligibility and aggregate budget checks. Compaction makes no Jev selection call
+API eligibility and aggregate budget checks. A CLI pin or last CLI worker is
+explicitly refused for `/compact` in this slice; pin an eligible API target for
+the reviewed managed summary. Compaction makes no Jev selection call
 and changes neither Auto/the pin nor the last ordinary routing status.
 
 The host requires completed LORE review of the canonical source before sending
@@ -199,8 +270,9 @@ original `session_budget_usd`/`DOXA_SESSION_BUDGET_USD` setting when resuming.
 The history picker explains that explicit config is required for resume.
 Existing live router sessions can be attached normally. Automatic launch from
 history, `/clear`, `/cd`, child spawning and fleet config inheritance are
-unavailable in this slice. Docker isolation, isolation migration and CLI handoffs
-are also unavailable. Start a separate explicit session
+unavailable in this slice. Docker isolation, isolation migration and external
+CLI handoffs are also unavailable. Internal authenticated CLI workers are
+supported within the canonical router session. Start a separate explicit session
 when those missing inheritance paths would otherwise be needed.
 
 ## Evaluation and evidence
@@ -239,7 +311,12 @@ before HTTP and the outcome afterward; an existing journal cannot be reused.
 SIGINT/SIGTERM cancels the bounded call while retaining admitted reservations.
 See [evaluation format and evidence](router-evaluation.md) for reproducible cases.
 
-Local fixtures cover launch/control and accounting boundaries. On 2026-10-10,
+Credential-free native process fixtures cover routed Claude and protected Codex
+authenticated catalog admission, native permission/peer-tool roundtrips, exact
+model/usage accounting, fresh worker identities, API switching and canonical
+resume. They do not prove real-account quota, billing or task quality.
+
+On 2026-10-10,
 an authorized six-call smoke against pinned `jev-1.13.0` returned six valid
 responses: 4/4 development and 2/2 separate synthetic holdout label agreement,
 with no fallback, schema or transport failures. All labels were machine-authored.
