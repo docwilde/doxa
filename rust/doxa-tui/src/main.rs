@@ -67,7 +67,7 @@ Commands:
   worktrees cleanup FULL_ID --confirm
                        Remove one verified clean Rust orphan
   doctor               Check provider, launcher, and configured Mermaid renderer
-  setup                Interactive authentication, LORE store, and defaults wizard
+  setup                Interactive authentication, LORE store, defaults and Docker setup
   settings             Show native settings and their effective sources
   settings set KEY VALUE | unset KEY
                        Persist supported settings or restore their defaults

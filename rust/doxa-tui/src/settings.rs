@@ -243,7 +243,7 @@ pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value
         Kind::Format => { crate::preferences::validate_clock_format(value).map_err(|_| invalid("invalid strftime format"))?; toml::Value::String(value.into()) },
         Kind::Key => { let chord = crate::keybindings::Chord::parse(value).map_err(|e| invalid(&e.to_string()))?; toml::Value::String(chord.map(|c| c.display()).unwrap_or_else(|| "none".into())) },
         Kind::Credential => unreachable!("credential edits never enter config.toml"),
-        Kind::Text => {if s.key=="mcp_config" {
+        Kind::Text => {if matches!(s.key,"docker_image"|"docker_host") {crate::docker_setup::validate_setting(s.key,value)?;}if s.key=="mcp_config" {
             if !Path::new(value).is_absolute(){return Err(invalid("requires an absolute path"));}
             doxa_mcp::Config::load(Path::new(value)).map_err(|_|invalid("requires a valid owner-private MCP JSON file"))?;
         }if s.key=="router_config" {

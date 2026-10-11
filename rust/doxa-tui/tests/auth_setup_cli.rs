@@ -86,7 +86,7 @@ fn terminal_setup_wizard_persists_private_store_and_new_session_defaults() {
     let mut input=unsafe{fs::File::from_raw_fd(master)};
     let terminal=unsafe{fs::File::from_raw_fd(slave)};
     let child=fixture.command(&["setup"]).stdin(Stdio::from(terminal)).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    input.write_all(b"d\nfixture-model\nhigh\n").unwrap();
+    input.write_all(b"d\nfixture-model\nhigh\n\n").unwrap();
     let output=wait_bounded(child);
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     let stdout=String::from_utf8_lossy(&output.stdout);
@@ -97,6 +97,34 @@ fn terminal_setup_wizard_persists_private_store_and_new_session_defaults() {
     for path in [&home,&store] { assert_eq!(fs::metadata(path).unwrap().mode()&0o077,0); }
     let calls=fs::read_to_string(fixture.root.path().join("calls")).unwrap();
     assert!(!calls.contains(r#"["auth", "login"]"#));assert!(!fixture.root.path().join("claude").exists());
+}
+
+#[test]
+fn terminal_setup_configures_reviewed_docker_fields_without_starting_an_engine() {
+    let fixture=Fixture::new();
+    let docker=fixture.bin.join("docker");
+    fs::write(&docker,"#!/bin/sh\ntouch \"$HOME/unexpected-docker-call\"\nexit 71\n").unwrap();
+    fs::set_permissions(&docker,fs::Permissions::from_mode(0o700)).unwrap();
+    let (mut master,mut slave)=(-1,-1);
+    assert_eq!(unsafe{libc::openpty(&mut master,&mut slave,std::ptr::null_mut(),std::ptr::null_mut(),std::ptr::null_mut())},0);
+    for fd in [master,slave] { assert_eq!(unsafe{libc::fcntl(fd,libc::F_SETFD,libc::FD_CLOEXEC)},0); }
+    let mut input=unsafe{fs::File::from_raw_fd(master)};
+    let terminal=unsafe{fs::File::from_raw_fd(slave)};
+    let child=fixture.command(&["setup"]).stdin(Stdio::from(terminal)).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let digest=format!("sha256:{}","a".repeat(64));
+    let endpoint=format!("unix://{}/docker.sock",fixture.root.path().display());
+    // Invalid tag and rootful socket must be rejected without leaving the wizard.
+    input.write_all(format!("\n\n\ny\nmutable:latest\n{digest}\nunix:///var/run/docker.sock\n{endpoint}\n").as_bytes()).unwrap();
+    let output=wait_bounded(child);
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    let stdout=String::from_utf8_lossy(&output.stdout);
+    for expected in ["Docker prerequisites","rootful Docker socket is forbidden","Docker image must be pinned","build-session-image.py","Rootless socket missing","setup complete"] { assert!(stdout.contains(expected),"missing {expected}"); }
+    let home=fixture.root.path().join("doxa");
+    let config:toml::Value=fs::read_to_string(home.join("config.toml")).unwrap().parse().unwrap();
+    assert_eq!(config["docker_image"].as_str(),Some(digest.as_str()));
+    assert_eq!(config["docker_host"].as_str(),Some(endpoint.as_str()));
+    assert_eq!(fs::metadata(home.join("config.toml")).unwrap().mode()&0o777,0o600);
+    assert!(!fixture.root.path().join("unexpected-docker-call").exists());
 }
 
 #[test]

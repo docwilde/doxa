@@ -134,7 +134,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
     CommandHelp { kind: LocalCommand::Login, name: "/login", form: "/login [claude|codex] [--device-auth]", summary: "Provider login", support: "local · selectable operations menu" },
     CommandHelp { kind: LocalCommand::Logout, name: "/logout", form: "/logout [claude|codex]", summary: "Provider logout", support: "local · selectable operations menu" },
     CommandHelp { kind: LocalCommand::Settings, name: "/settings", form: "/settings", summary: "Native settings", support: "local · preferences, provenance and defaults" },
-    CommandHelp { kind: LocalCommand::Setup, name: "/setup", form: "/setup", summary: "Setup checks", support: "local · auth checks, LORE store, defaults" },
+    CommandHelp { kind: LocalCommand::Setup, name: "/setup", form: "/setup", summary: "Setup checks", support: "local · auth checks, LORE store, defaults, Docker prerequisites and image/socket" },
     CommandHelp { kind: LocalCommand::Doctor, name: "/doctor", form: "/doctor", summary: "Health checks", support: "local · selected provider" },
     CommandHelp { kind: LocalCommand::Plugins, name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "local · selectable operations menu" },
     CommandHelp { kind: LocalCommand::NativePlugin, name: "/native-plugin", form: "/native-plugin preflight|run NAME", summary: "Review one executable package", support: "local · TUI run admission remains disabled; grantless CLI separate" },

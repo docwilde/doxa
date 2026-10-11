@@ -387,7 +387,7 @@ pub fn native_plugin_run_grantless(_name: &str) -> io::Result<i32> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "isolated plugin runner requires Linux"))
 }
 
-fn safe_report_value(value: &str) -> String {
+pub(crate) fn safe_report_value(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()
         && !matches!(*c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
         .take(200).collect()
@@ -419,9 +419,9 @@ pub fn setup_report() -> io::Result<String> {
         }
     };
     Ok(format!(
-        "auth state\n{}\n\nSign in with the provider CLI: claude auth login or codex login. Use the masked API-key rows in /setup to save or remove DeepSeek and z.ai credentials.\n\nLORE store\n{lore}\n\nmodel & effort defaults (stored preferences)\nmodel: {}\neffort: {}\n\nUse `doxa settings` or /settings for native preferences.",
+        "auth state\n{}\n\nSign in with the provider CLI: claude auth login or codex login. Use the masked API-key rows in /setup to save or remove DeepSeek and z.ai credentials.\n\nLORE store\n{lore}\n\nmodel & effort defaults (stored preferences)\nmodel: {}\neffort: {}\n\nUse `doxa settings` or /settings for native preferences.\n\n{}",
         auth_status(None)?, preference(&config, "model", "DOXA_MODEL"),
-        preference(&config, "effort", "DOXA_EFFORT"),
+        preference(&config, "effort", "DOXA_EFFORT"), setup_docker_report(),
     ))
 }
 
@@ -739,6 +739,20 @@ mod tests {
     }
 }
 
+
+/// Setup changes only the explicitly selected owner preference. The shared
+/// Settings validator preserves environment precedence and private atomic I/O.
+pub fn setup_docker_setting(key: &str, value: &str) -> io::Result<String> {
+    if !matches!(key, "docker_image" | "docker_host") {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Docker setup accepts image digest or local socket"));
+    }
+    if value.trim().is_empty() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "Enter a Docker value; Escape keeps the current setting")); }
+    crate::settings::save(&doxa_home()?.join("config.toml"), &[(key.into(), Some(value.into()))], "claude")?;
+    Ok(format!("{key} saved for new Docker sessions\n{}", setup_docker_report()))
+}
+pub fn setup_docker_report() -> String { crate::docker_setup::report() }
+pub fn setup_docker_guide() -> String { crate::docker_setup::guide() }
+
 pub fn setup_interactive() -> io::Result<()> {
     use std::io::{IsTerminal, Write};
     println!("{}", setup_report()?);
@@ -757,7 +771,21 @@ pub fn setup_interactive() -> io::Result<()> {
         let value = ask(&format!("{key} default (Enter keeps current):"))?;
         if !value.is_empty() { println!("{}", setup_default(key, Some(&value))?); }
     }
-    println!("setup complete\n{}", setup_report()?);
+    if ask("Configure Docker isolation? [y] yes, Enter skip:")?.eq_ignore_ascii_case("y") {
+        println!("{}", setup_docker_report());
+        for (key, label) in [("docker_image", "Reviewed worker image (sha256:CONTENT_ID or NAME@sha256:DIGEST)"),
+            ("docker_host", "Rootless local socket (unix:///run/user/UID/docker.sock)")] {
+            loop {
+                let value = ask(&format!("{label} (Enter keeps current):"))?;
+                if value.is_empty() { break; }
+                match setup_docker_setting(key, &value) {
+                    Ok(message) => { println!("{message}"); break; }
+                    Err(error) => println!("{error}"),
+                }
+            }
+        }
+    }
+    println!("setup complete · Docker readiness is reported below\n{}", setup_report()?);
     Ok(())
 }
 

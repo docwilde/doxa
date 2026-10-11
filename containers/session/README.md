@@ -59,6 +59,14 @@ claim a provider-only egress gateway or full credential secrecy.
 
 ## Configure and return to New Session
 
+**`/setup` → Docker setup** (after model/effort defaults) checks the local
+prerequisites, shows rootless Engine and reviewed-image build steps, and edits
+the pinned worker image and local socket. The terminal `doxa setup` wizard
+offers the same optional Docker configuration. Invalid mutable image tags and
+rootful/remote sockets are rejected before saving. These checks do not connect
+to the Engine; Start verifies rootless mode, cgroup controls and the actual
+local image. Setup reports missing prerequisites even after preferences save.
+
 Set the printed immutable image ID in **Settings → Session → Docker worker image
 digest**. Set a nondefault local Unix endpoint in **Settings → Paths → local
 rootless Docker socket**. Save with Ctrl+S. In New Session, the **Docker image
