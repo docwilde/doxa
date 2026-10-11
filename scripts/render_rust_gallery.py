@@ -66,8 +66,8 @@ def capture(binary: Path, scene: str, destination: Path, version: str, env: dict
         "context": ("21.0% in use", "42000 / 200000 tokens", "Conversation", "Available"),
         "routing-status": ("Route auto", "ds-fast", "$0.000004 est", "session cost includes worker calls"),
         "queued-prompts": ("Queued · q-next", "parser API stable"),
-        "peer-messages": ("🤖↓", "🤖↑", "Peer Parser reviewer", "q-peer", "12345678-1234-1234-1234-123456789abc"),
-        "peer-expanded": ("🤖↓", "🤖↑", "Reviewer handoff", "Please verify reconnect", "Received the handoff"),
+        "peer-messages": ("🤖 ↓", "🤖 ↑", "Peer Parser reviewer", "q-peer", "12345678-1234-1234-1234-123456789abc"),
+        "peer-expanded": ("🤖 ↓", "🤖 ↑", "Reviewer handoff", "Please verify reconnect", "Received the handoff"),
         "reasoning": ("🧠", "Thinking", "128"),
         "tool-entries": ("🛠", "src/parser.rs", "File read successfully"),
     }

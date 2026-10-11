@@ -11,7 +11,7 @@
 > [!WARNING]
 > Rust 2.0 is in beta. Agents can edit files and run commands with your privileges. Choose a [session isolation profile](docs/session-isolation.md) and review the [platform limits](#platform-and-scope) before using DOXA on important work.
 
-![DOXA Rust beta.46 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.46-hero.png)
+![DOXA Rust beta.47 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.47-hero.png)
 
 [How the gallery was captured](docs/rust-gallery.md)
 
@@ -94,32 +94,37 @@ monitor; cash balance and bundle remainder remain unknown.
 
 **← Scroll left/right →** with the gallery scrollbar or a horizontal trackpad gesture. Click a screenshot to open it at full size.
 
-These beta.46 frames render the production Ratatui app with deterministic example events. The [capture record](docs/rust-gallery.md) explains each scene and how to reproduce it. Browser and Android screenshots have their [own gallery](docs/remote-gallery.md).
+These beta.47 frames render the production Ratatui app with deterministic example events. The [capture record](docs/rust-gallery.md) explains each scene and how to reproduce it. Browser and Android screenshots have their [own gallery](docs/remote-gallery.md).
 
 <table>
 <tr>
-<td><strong>Workspace</strong><br><a href="assets/shots/rust-2.0.0-beta.46-hero.png"><img src="assets/shots/rust-2.0.0-beta.46-hero.png" width="960" alt="Workspace with three engine tabs and a Markdown turn"></a></td>
-<td><strong>Settings</strong><br><a href="assets/shots/rust-2.0.0-beta.46-settings.png"><img src="assets/shots/rust-2.0.0-beta.46-settings.png" width="960" alt="Settings categories on the submenu title bar"></a></td>
-<td><strong>Jev Router settings</strong><br><a href="assets/shots/rust-2.0.0-beta.46-settings-router.png"><img src="assets/shots/rust-2.0.0-beta.46-settings-router.png" width="960" alt="Staged Jev Router default and private config path awaiting review"></a></td>
-<td><strong>Routing status</strong><br><a href="assets/shots/rust-2.0.0-beta.46-routing-status.png"><img src="assets/shots/rust-2.0.0-beta.46-routing-status.png" width="960" alt="Auto selection with separate effective worker and routing cost"></a></td>
-<td><strong>Context usage</strong><br><a href="assets/shots/rust-2.0.0-beta.46-context.png"><img src="assets/shots/rust-2.0.0-beta.46-context.png" width="960" alt="Context bar with reported token totals and components"></a></td>
-<td><strong>Queued prompts</strong><br><a href="assets/shots/rust-2.0.0-beta.46-queued-prompts.png"><img src="assets/shots/rust-2.0.0-beta.46-queued-prompts.png" width="960" alt="Queued prompts with user Markdown and stripe formatting"></a></td>
-<td><strong>Peer messages</strong><br><a href="assets/shots/rust-2.0.0-beta.46-peer-messages.png"><img src="assets/shots/rust-2.0.0-beta.46-peer-messages.png" width="960" alt="Attributed peer messages with a blue stripe and robot marker"></a></td>
-<td><strong>Code graph</strong><br><a href="assets/shots/rust-2.0.0-beta.46-codegraph.png"><img src="assets/shots/rust-2.0.0-beta.46-codegraph.png" width="960" alt="Read-only code graph query with source freshness evidence"></a></td>
-<td><strong>Project triage</strong><br><a href="assets/shots/rust-2.0.0-beta.46-triage.png"><img src="assets/shots/rust-2.0.0-beta.46-triage.png" width="960" alt="Project rail showing a hidden tab that needs input"></a></td>
-<td><strong>Pane rail</strong><br><a href="assets/shots/rust-2.0.0-beta.46-pane-triage.png"><img src="assets/shots/rust-2.0.0-beta.46-pane-triage.png" width="960" alt="Grouped pane rail with hidden-tab urgency"></a></td>
-<td><strong>Project label</strong><br><a href="assets/shots/rust-2.0.0-beta.46-project-label.png"><img src="assets/shots/rust-2.0.0-beta.46-project-label.png" width="960" alt="Explicit label on a verified project heading"></a></td>
-<td><strong>Image preview</strong><br><a href="assets/shots/rust-2.0.0-beta.46-image-preview.png"><img src="assets/shots/rust-2.0.0-beta.46-image-preview.png" width="960" alt="Local Markdown image preview in the transcript"></a></td>
-<td><strong>Isolation</strong><br><a href="assets/shots/rust-2.0.0-beta.46-isolation.png"><img src="assets/shots/rust-2.0.0-beta.46-isolation.png" width="960" alt="Docker isolation details from a synthetic worker report"></a></td>
-<td><strong>Fleet review</strong><br><a href="assets/shots/rust-2.0.0-beta.46-fleet-review.png"><img src="assets/shots/rust-2.0.0-beta.46-fleet-review.png" width="960" alt="Fleet plan with reviewer and message judge"></a></td>
-<td><strong>Dependency plan</strong><br><a href="assets/shots/rust-2.0.0-beta.46-fleet-dependency.png"><img src="assets/shots/rust-2.0.0-beta.46-fleet-dependency.png" width="960" alt="Fleet dependency plan with explicit human release"></a></td>
-<td><strong>Dependency release</strong><br><a href="assets/shots/rust-2.0.0-beta.46-fleet-release-review.png"><img src="assets/shots/rust-2.0.0-beta.46-fleet-release-review.png" width="960" alt="Synthetic checkpoint and handoff evidence in the release modal"></a></td>
-<td><strong>Fleet status</strong><br><a href="assets/shots/rust-2.0.0-beta.46-fleet-view.png"><img src="assets/shots/rust-2.0.0-beta.46-fleet-view.png" width="960" alt="Worker waiting for a reviewed predecessor"></a></td>
-<td><strong>Beliefs</strong><br><a href="assets/shots/rust-2.0.0-beta.46-beliefs.png"><img src="assets/shots/rust-2.0.0-beta.46-beliefs.png" width="960" alt="Belief selection and review controls"></a></td>
-<td><strong>Tool details</strong><br><a href="assets/shots/rust-2.0.0-beta.46-tool-entries.png"><img src="assets/shots/rust-2.0.0-beta.46-tool-entries.png" width="960" alt="Expanded tool input and output"></a></td>
-<td><strong>Memory</strong><br><a href="assets/shots/rust-2.0.0-beta.46-memory-management.png"><img src="assets/shots/rust-2.0.0-beta.46-memory-management.png" width="960" alt="Curated project memory controls"></a></td>
-<td><strong>Commands</strong><br><a href="assets/shots/rust-2.0.0-beta.46-commands.png"><img src="assets/shots/rust-2.0.0-beta.46-commands.png" width="960" alt="Slash-command completion"></a></td>
-<td><strong>Help</strong><br><a href="assets/shots/rust-2.0.0-beta.46-help.png"><img src="assets/shots/rust-2.0.0-beta.46-help.png" width="960" alt="Built-in command help"></a></td>
+<td><strong>Workspace</strong><br><a href="assets/shots/rust-2.0.0-beta.47-hero.png"><img src="assets/shots/rust-2.0.0-beta.47-hero.png" width="960" alt="Workspace with three engine tabs and a Markdown turn"></a></td>
+<td><strong>Settings</strong><br><a href="assets/shots/rust-2.0.0-beta.47-settings.png"><img src="assets/shots/rust-2.0.0-beta.47-settings.png" width="960" alt="Settings categories on the submenu title bar"></a></td>
+<td><strong>Jev Router settings</strong><br><a href="assets/shots/rust-2.0.0-beta.47-settings-router.png"><img src="assets/shots/rust-2.0.0-beta.47-settings-router.png" width="960" alt="Staged Jev Router default and private config path awaiting review"></a></td>
+<td><strong>Routing status</strong><br><a href="assets/shots/rust-2.0.0-beta.47-routing-status.png"><img src="assets/shots/rust-2.0.0-beta.47-routing-status.png" width="960" alt="Auto selection with separate effective worker and routing cost"></a></td>
+<td><strong>Context usage</strong><br><a href="assets/shots/rust-2.0.0-beta.47-context.png"><img src="assets/shots/rust-2.0.0-beta.47-context.png" width="960" alt="Context bar with reported token totals and components"></a></td>
+<td><strong>Queued prompts</strong><br><a href="assets/shots/rust-2.0.0-beta.47-queued-prompts.png"><img src="assets/shots/rust-2.0.0-beta.47-queued-prompts.png" width="960" alt="Queued prompts with user Markdown and stripe formatting"></a></td>
+<td><strong>Peer messages</strong><br><a href="assets/shots/rust-2.0.0-beta.47-peer-messages.png"><img src="assets/shots/rust-2.0.0-beta.47-peer-messages.png" width="960" alt="Collapsed received, sent and queued peer messages with direction icons"></a></td>
+<td><strong>Peer details</strong><br><a href="assets/shots/rust-2.0.0-beta.47-peer-expanded.png"><img src="assets/shots/rust-2.0.0-beta.47-peer-expanded.png" width="960" alt="Expanded received and sent messages with full session addresses"></a></td>
+<td><strong>Thinking</strong><br><a href="assets/shots/rust-2.0.0-beta.47-reasoning.png"><img src="assets/shots/rust-2.0.0-beta.47-reasoning.png" width="960" alt="Collapsed thinking section with a brain icon"></a></td>
+<td><strong>MCP and search keys</strong><br><a href="assets/shots/rust-2.0.0-beta.47-settings-mcp.png"><img src="assets/shots/rust-2.0.0-beta.47-settings-mcp.png" width="960" alt="MCP controls and masked search provider key fields"></a></td>
+<td><strong>GLM reporting</strong><br><a href="assets/shots/rust-2.0.0-beta.47-glm-account.png"><img src="assets/shots/rust-2.0.0-beta.47-glm-account.png" width="960" alt="Owner-declared usage bundle with unknown balance and remaining allowance"></a></td>
+<td><strong>Docker setup</strong><br><a href="assets/shots/rust-2.0.0-beta.47-setup-docker.png"><img src="assets/shots/rust-2.0.0-beta.47-setup-docker.png" width="960" alt="Docker prerequisite, pinned image and rootless socket setup controls"></a></td>
+<td><strong>Code graph</strong><br><a href="assets/shots/rust-2.0.0-beta.47-codegraph.png"><img src="assets/shots/rust-2.0.0-beta.47-codegraph.png" width="960" alt="Read-only code graph query with source freshness evidence"></a></td>
+<td><strong>Project triage</strong><br><a href="assets/shots/rust-2.0.0-beta.47-triage.png"><img src="assets/shots/rust-2.0.0-beta.47-triage.png" width="960" alt="Project rail showing a hidden tab that needs input"></a></td>
+<td><strong>Pane rail</strong><br><a href="assets/shots/rust-2.0.0-beta.47-pane-triage.png"><img src="assets/shots/rust-2.0.0-beta.47-pane-triage.png" width="960" alt="Grouped pane rail with hidden-tab urgency"></a></td>
+<td><strong>Project label</strong><br><a href="assets/shots/rust-2.0.0-beta.47-project-label.png"><img src="assets/shots/rust-2.0.0-beta.47-project-label.png" width="960" alt="Explicit label on a verified project heading"></a></td>
+<td><strong>Image preview</strong><br><a href="assets/shots/rust-2.0.0-beta.47-image-preview.png"><img src="assets/shots/rust-2.0.0-beta.47-image-preview.png" width="960" alt="Local Markdown image preview in the transcript"></a></td>
+<td><strong>Isolation</strong><br><a href="assets/shots/rust-2.0.0-beta.47-isolation.png"><img src="assets/shots/rust-2.0.0-beta.47-isolation.png" width="960" alt="Docker isolation details from a synthetic worker report"></a></td>
+<td><strong>Fleet review</strong><br><a href="assets/shots/rust-2.0.0-beta.47-fleet-review.png"><img src="assets/shots/rust-2.0.0-beta.47-fleet-review.png" width="960" alt="Fleet plan with reviewer and message judge"></a></td>
+<td><strong>Dependency plan</strong><br><a href="assets/shots/rust-2.0.0-beta.47-fleet-dependency.png"><img src="assets/shots/rust-2.0.0-beta.47-fleet-dependency.png" width="960" alt="Fleet dependency plan with explicit human release"></a></td>
+<td><strong>Dependency release</strong><br><a href="assets/shots/rust-2.0.0-beta.47-fleet-release-review.png"><img src="assets/shots/rust-2.0.0-beta.47-fleet-release-review.png" width="960" alt="Synthetic checkpoint and handoff evidence in the release modal"></a></td>
+<td><strong>Fleet status</strong><br><a href="assets/shots/rust-2.0.0-beta.47-fleet-view.png"><img src="assets/shots/rust-2.0.0-beta.47-fleet-view.png" width="960" alt="Worker waiting for a reviewed predecessor"></a></td>
+<td><strong>Beliefs</strong><br><a href="assets/shots/rust-2.0.0-beta.47-beliefs.png"><img src="assets/shots/rust-2.0.0-beta.47-beliefs.png" width="960" alt="Belief selection and review controls"></a></td>
+<td><strong>Tool details</strong><br><a href="assets/shots/rust-2.0.0-beta.47-tool-entries.png"><img src="assets/shots/rust-2.0.0-beta.47-tool-entries.png" width="960" alt="Expanded tool input and output"></a></td>
+<td><strong>Memory</strong><br><a href="assets/shots/rust-2.0.0-beta.47-memory-management.png"><img src="assets/shots/rust-2.0.0-beta.47-memory-management.png" width="960" alt="Curated project memory controls"></a></td>
+<td><strong>Commands</strong><br><a href="assets/shots/rust-2.0.0-beta.47-commands.png"><img src="assets/shots/rust-2.0.0-beta.47-commands.png" width="960" alt="Slash-command completion"></a></td>
+<td><strong>Help</strong><br><a href="assets/shots/rust-2.0.0-beta.47-help.png"><img src="assets/shots/rust-2.0.0-beta.47-help.png" width="960" alt="Built-in command help"></a></td>
 </tr>
 </table>
 
