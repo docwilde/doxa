@@ -6,6 +6,7 @@ publish = false
 license = "AGPL-3.0-only"
 
 [dependencies]
+doxa-vendors = { path = "../doxa-vendors" }
 libc = "0.2"
 serde_json = "1"
 sha2 = "0.10"

@@ -60,16 +60,24 @@ impl Shared {
             })
     }
     fn clean(&self, value: &Value) -> Result<Value, String> {
+        let mut value = value.clone();
+        doxa_vendors::credentials::redact_json(&mut value).map_err(|_| {
+            self.failed.store(true, Ordering::Release);
+            "Claude structured credential scrub failed; data withheld".to_owned()
+        })?;
+        self.clean_scrubbed(&value)
+    }
+    fn clean_scrubbed(&self, value: &Value) -> Result<Value, String> {
         match value {
             Value::String(s) => Ok(json!(self.scrub(s)?)),
             Value::Array(a) => a
                 .iter()
-                .map(|v| self.clean(v))
+                .map(|v| self.clean_scrubbed(v))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Array),
             Value::Object(o) => o
                 .iter()
-                .map(|(k, v)| Ok((k.clone(), self.clean(v)?)))
+                .map(|(k, v)| Ok((k.clone(), self.clean_scrubbed(v)?)))
                 .collect::<Result<serde_json::Map<_, _>, String>>()
                 .map(Value::Object),
             v => Ok(v.clone()),
@@ -546,6 +554,15 @@ impl Host for ClaudeHost {
         true
     }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        let text = match doxa_vendors::credentials::redact(text) {
+            Ok(text) => text,
+            Err(_) => {
+                self.shared.failed.store(true, Ordering::Release);
+                emit(done("Claude credential scrub failed; prompt withheld"));
+                return;
+            }
+        };
+        let text = text.as_str();
         let (tx, rx) = mpsc::sync_channel(256);
         let (ack, answer) = mpsc::channel();
         {

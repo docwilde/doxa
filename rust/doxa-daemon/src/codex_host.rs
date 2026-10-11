@@ -549,6 +549,15 @@ impl Host for CodexHost {
         self.store.transcript_snapshot()
     }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        let text = match doxa_vendors::credentials::redact(text) {
+            Ok(text) => text,
+            Err(_) => {
+                self.scrub_failed.store(true, Ordering::Release);
+                emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex credential scrub failed; prompt withheld"}}));
+                return;
+            }
+        };
+        let text = text.as_str();
         if self.transport != "app-server" {
             // Refuse before public_prompt, persistence, snapshot or provider
             // execution. Saved thread/transcript bytes remain unchanged.

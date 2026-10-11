@@ -4240,3 +4240,147 @@ while True:
     assert_eq!(claude_receive_until(&mut reader,|frame|frame["type"]=="reply"&&frame["id"]==5)["ok"],true);
     wait_until(||process.exited());
 }
+
+mod engine_known_key_redaction {
+    use super::*;
+    const SAVED: &str = "inertbarevendorcredentialfixture";
+    const INHERITED: &str = "inertinheritedcredentialfixture";
+    const JEV: &str = "inertroutercredentialfixture";
+
+    fn private_keys(root: &Path) {
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(home.join("credentials.json"), json!({"glm":SAVED}).to_string()).unwrap();
+        fs::set_permissions(home.join("credentials.json"), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    fn start(root: &Path, engine: &str, cli: &Path) -> Process {
+        let id = if engine == "claude" { CLAUDE_SESSION } else { "codex-session" };
+        let mut command = daemon_command();
+        command.args(["--runtime-dir",root.to_str().unwrap(),"--cwd",root.to_str().unwrap(),
+            "--session-id",id,"--engine",engine,if engine=="claude" {"--claude-bin"} else {"--codex-bin"},
+            cli.to_str().unwrap(),"--linger","10"])
+            .env("DOXA_HOME",root.join("home")).env("DOXA_LORE","0")
+            .env("DOXA_WORKTREE","0").env("DEEPSEEK_API_KEY",INHERITED).env("TYPESAFE_API_KEY",JEV)
+            .stdout(Stdio::null()).stderr(Stdio::piped());
+        for key in ["ZAI_API_KEY","TAVILY_API_KEY","FIRECRAWL_API_KEY","EXA_API_KEY","BRAVE_API_KEY",
+            "DOXA_SESSION_BUDGET_USD","DOXA_CODEX_APPSERVER","DOXA_CODEX_MIGRATE_APPSERVER"] {
+            command.env_remove(key);
+        }
+        let mut child=command.spawn().unwrap();
+        let registry=root.join("registry").join(format!("{id}.json"));
+        wait_for_registry(&mut child,&registry);
+        let entry:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+        Process {child,registry,socket:entry["daemon_socket"].as_str().unwrap().into()}
+    }
+    fn assert_clean(text: &str) {
+        for key in [SAVED,INHERITED,JEV,"inertbarevendor"] { assert!(!text.contains(key),"known credential escaped boundary"); }
+    }
+    fn turn(reader: &mut BufReader<UnixStream>) -> (String,Value) {
+        let mut text=String::new();
+        loop {
+            let frame=receive(reader);assert_clean(&frame.to_string());
+            if frame["event"]["type"]=="text_delta" {text.push_str(frame["event"]["data"]["text"].as_str().unwrap());}
+            if frame["event"]["type"]=="turn_done" {return (text,frame);}
+        }
+    }
+    fn stop(process: &mut Process, reader: &mut BufReader<UnixStream>, socket: &mut UnixStream) {
+        send(socket,json!({"type":"call","id":99,"method":"stop","params":{}}));
+        claude_receive_until(reader,|frame|frame["id"]==99);wait_until(||process.exited());
+    }
+
+    #[test]
+    fn claude_fragmented_known_keys_are_withheld_live_durable_and_from_provider_prompts() {
+        let dir=tempfile::tempdir().unwrap();private_keys(dir.path());
+        let cli=dir.path().join("claude-known-key.py");
+        claude_fixture(&cli,&format!("saved={SAVED:?}\ninherited={INHERITED:?}\njev={JEV:?}"),r#"if frame['type']=='user':
+  assert all(key not in frame['message']['content'] for key in [saved,inherited,jev])
+  for index in range(1,len(saved)):
+   delta('safe '+saved[:index])
+   emit({'type':'stream_event','session_id':session,'event':{'type':'content_block_stop','index':0}})
+   delta(saved[index:]+' trailing ')
+  emit({'type':'assistant','session_id':session,'message':{'role':'assistant','content':[{'type':'text','text':'safe '+saved[:13]}]}})
+  emit({'type':'assistant','session_id':session,'message':{'role':'assistant','content':[{'type':'text','text':saved[13:]+' '+inherited+' '+jev}]}})
+  emit({'type':'assistant','session_id':session,'message':{'role':'assistant','content':[{'type':'tool_use','id':'tool-fixture','name':'Read','input':{'file_path':saved}}]}})
+  emit({'type':'user','session_id':session,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'tool-fixture','content':inherited}]}})
+  result()
+"#);
+        let mut process=start(dir.path(),"claude",&cli);
+        let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+        send(&mut socket,json!({"type":"prompt","id":1,"text":format!("Fixture {SAVED} {INHERITED} {JEV}")}));
+        let (text,done)=turn(&mut reader);assert_eq!(done["event"]["data"]["is_error"],false);assert!(text.contains("***"));
+        let transcript=fs::read_to_string(native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.jsonl"))).unwrap();assert_clean(&transcript);assert!(transcript.contains("***"));
+        stop(&mut process,&mut reader,&mut socket);
+    }
+
+    #[test]
+    #[cfg(target_os="linux")]
+    fn codex_fragmented_known_key_item_is_scrubbed_before_display_storage_and_prompt() {
+        let dir=tempfile::tempdir().unwrap();private_keys(dir.path());
+        let cli=dir.path().join("codex-known-key");
+        executable(&cli,&format!("#!/usr/bin/python3\nimport json,sys\ntext=sys.stdin.read()\nassert all(key not in text for key in [{SAVED:?},{INHERITED:?},{JEV:?}])\nprint(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'safe '+{SAVED:?}+' '+{INHERITED:?}+' '+{JEV:?}}}}}))\n"));
+        let server=codex_appserver_fixture(&cli);
+        let source=fs::read_to_string(&server).unwrap();
+        let old="                send({'method': 'item/completed', 'params': {'threadId': thread_id, 'turnId': turn_id,\n                      'item': {'type': 'agentMessage', 'id': 'answer-' + str(turn_number), 'text': event['item']['text']}}})";
+        let new="                for char in event['item']['text']:\n                    send({'method':'item/agentMessage/delta','params':{'threadId':thread_id,'turnId':turn_id,'itemId':'answer-'+str(turn_number),'delta':char}})\n                send({'method':'item/completed','params':{'threadId':thread_id,'turnId':turn_id,'item':{'type':'agentMessage','id':'answer-'+str(turn_number)}}})";
+        assert!(source.contains(old));executable(&server,&source.replace(old,new));
+        let mut process=start(dir.path(),"codex",&server);
+        let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+        send(&mut socket,json!({"type":"prompt","id":1,"text":format!("Fixture {SAVED} {INHERITED} {JEV}")}));
+        let (text,done)=turn(&mut reader);assert_eq!(done["event"]["data"]["is_error"],false);assert!(text.contains("***"));
+        assert_clean(&fs::read_to_string(native_transcript(dir.path(),"codex-session.jsonl")).unwrap());
+        stop(&mut process,&mut reader,&mut socket);
+    }
+
+    #[test]
+    fn claude_sensitive_structured_keys_are_refused_without_persistence() {
+        let dir=tempfile::tempdir().unwrap();private_keys(dir.path());
+        let cli=dir.path().join("claude-sensitive-key.py");
+        claude_fixture(&cli,&format!("saved={SAVED:?}"),r#"if frame['type']=='user':
+  emit({'type':'assistant','session_id':session,'message':{'role':'assistant','content':[{'type':'tool_use','id':'tool-fixture','name':'Read','input':{saved:'opaque'}}]}})
+  result()
+"#);
+        let mut process=start(dir.path(),"claude",&cli);
+        let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));send(&mut socket,json!({"type":"prompt","id":1,"text":"fixture"}));
+        let (_,done)=turn(&mut reader);assert_eq!(done["event"]["data"]["is_error"],true);
+        assert_clean(&fs::read_to_string(native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.jsonl"))).unwrap());
+        stop(&mut process,&mut reader,&mut socket);
+    }
+
+    #[test]
+    fn unsafe_credential_store_fails_closed_before_claude_starts() {
+        let dir=tempfile::tempdir().unwrap();private_keys(dir.path());
+        fs::set_permissions(dir.path().join("home/credentials.json"),fs::Permissions::from_mode(0o644)).unwrap();
+        let cli=dir.path().join("should-not-start");executable(&cli,"#!/bin/sh\ntouch provider-started\n");
+        let output=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),
+            "--session-id",CLAUDE_SESSION,"--engine","claude","--claude-bin",cli.to_str().unwrap()])
+            .env("DOXA_HOME",dir.path().join("home")).env("DOXA_LORE","0").output().unwrap();
+        assert!(!output.status.success());assert!(!dir.path().join("provider-started").exists());assert_clean(&String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
+    fn peers_discovery_delivery_and_ledger_redact_inactive_saved_keys() {
+        let dir=tempfile::tempdir().unwrap();private_keys(dir.path());
+        let peer="2874e9c6-34ac-42d9-8750-35fa439c3d01";
+        let (listener,_)=registry_peer(dir.path(),peer,dir.path().to_str().unwrap(),SAVED);
+        listener.set_nonblocking(true).unwrap();
+        let worker=thread::spawn(move || {
+            let deadline=Instant::now()+Duration::from_secs(10);
+            loop {match listener.accept() {
+                Ok((mut stream,_))=>{stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();let mut wire=String::new();stream.read_to_string(&mut wire).unwrap();if !wire.is_empty(){return wire;}}
+                Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(5));}
+                Err(_)=>panic!("private peer fixture accept failed"),
+            }}
+        });
+        let cli=dir.path().join("claude-idle.py");claude_fixture(&cli,"","if frame['type']=='user': result()");
+        let mut process=start(dir.path(),"claude",&cli);
+        let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+        send(&mut socket,json!({"type":"call","id":1,"method":"peers","params":{}}));
+        let peers=claude_receive_until(&mut reader,|frame|frame["id"]==1);assert_clean(&peers.to_string());assert_eq!(peers["peers"][0]["title"],"***");
+        send(&mut socket,json!({"type":"call","id":2,"method":"msg","params":{"target":peer,"text":format!("{SAVED} {INHERITED} {JEV}")}}));
+        let delivered=claude_receive_until(&mut reader,|frame|frame["id"]==2);assert_eq!(delivered["ok"],true);assert_clean(&delivered.to_string());
+        let wire=worker.join().unwrap();assert_clean(&wire);assert!(wire.contains("***"));
+        assert_clean(&fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap());
+        stop(&mut process,&mut reader,&mut socket);
+    }
+}
