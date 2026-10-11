@@ -55,6 +55,7 @@ impl Env {
             .env("DOXA_LORE_RS",std::env::var_os("DOXA_LORE_RS").unwrap()).env("LORE_DISABLE_SYNC","1").env("LORE_DISABLE_REVIEW","1").env("DOXA_LORE","0").env("DOXA_WORKTREE","0").env("DOXA_AGENT_PEER_SEND","1")
             .env("DEEPSEEK_API_KEY","local-worker-fixture-key").env("ZAI_API_KEY","local-worker-fixture-key").env("TYPESAFE_API_KEY","local-jev-fixture-key").env("DOXA_SESSION_BUDGET_USD","2")
             .env("FIXTURE_MODE_FILE",self.path().join("mode")).env("FIXTURE_LOG",self.path().join("calls.jsonl"))
+            .env("FIXTURE_CANONICAL_MESSAGES",self.project().join("routed.messages.json"))
             .env("TMPDIR",std::env::var_os("TMPDIR").unwrap()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
         let mut child=cmd.spawn().unwrap();let registry=run.join("registry/routed.json");wait(||{if child.try_wait().unwrap().is_some(){let mut error=String::new();child.stderr.take().unwrap().read_to_string(&mut error).unwrap();panic!("native startup: {error}");}registry.exists()});
         let entry:Value=serde_json::from_slice(&fs::read(registry).unwrap()).unwrap();let mut socket=UnixStream::connect(entry["daemon_socket"].as_str().unwrap()).unwrap();socket.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
@@ -111,11 +112,24 @@ fn missing_cli_executable_keeps_api_fallback_usable_and_pin_refuses_before_jev()
 
 #[test]
 fn native_cli_missing_usage_or_wrong_model_blocks_future_work_and_resume_replay() {
-    for (provider,mode) in [("claude","missing-usage"),("codex","missing-usage"),("claude","wrong-model"),("codex","wrong-model")] {
+    for (provider,mode) in [("claude","missing-usage"),("codex","missing-usage"),("claude","wrong-model"),("codex","wrong-model"),("claude","excess-usage"),("codex","excess-usage")] {
         let env=Env::new();env.mode(mode);let server=Server::new(||"ds".into());let mut daemon=env.daemon(&server,false,true);
         daemon.call("set_model",json!({"model":provider}));let originals=env.originals();let result=daemon.prompt("unverified worker task");assert_eq!(result["data"]["is_error"],true,"{provider}/{mode}: {result}");
         assert_eq!(env.originals(),originals);assert_eq!(env.state()["worker"]["accounting_unknown"],true);assert!(env.state()["pending_cli"].is_object());assert_eq!(daemon.prompt("blocked retry")["type"],"turn_refused");
         daemon.stop();let calls=env.capture().len();let mut resumed=env.daemon(&server,true,true);assert_eq!(resumed.prompt("do not replay")["type"],"turn_refused");assert_eq!(env.capture().len(),calls);resumed.stop();
+    }
+}
+
+#[test]
+fn native_worker_source_change_keeps_external_edit_and_blocks_later_paid_work() {
+    for provider in ["claude","codex"] {
+        let env=Env::new();env.mode("source-change");let server=Server::new(||"ds".into());let mut daemon=env.daemon(&server,false,true);
+        daemon.call("set_model",json!({"model":provider}));let terminal=daemon.prompt("canonical source must match");
+        assert_eq!(terminal["data"]["is_error"],true);assert_eq!(terminal["data"]["accounting_unknown"],true);
+        let edited=env.originals();let messages:Value=serde_json::from_slice(&edited).unwrap();
+        assert_eq!(messages["messages"].as_array().unwrap().len(),1);assert!(messages.to_string().contains("external canonical edit"));
+        let posts=server.posts().len();let calls=env.capture().len();assert_eq!(daemon.prompt("refuse source drift")["type"],"turn_refused");
+        assert_eq!(server.posts().len(),posts);assert_eq!(env.capture().len(),calls);assert_eq!(env.originals(),edited);daemon.stop();
     }
 }
 

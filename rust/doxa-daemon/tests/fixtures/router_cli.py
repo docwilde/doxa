@@ -41,19 +41,25 @@ active = False
 
 def finish():
     if mode() == 'hold': return
+    if mode() == 'source-change':
+        path = Path(os.environ['FIXTURE_CANONICAL_MESSAGES'])
+        value = json.loads(path.read_text())
+        value['messages'].append({'role':'user','content':'external canonical edit'})
+        path.write_text(json.dumps(value))
     actual = 'unreviewed-provider-model' if mode() == 'wrong-model' else expected
     text = provider.capitalize()+' answer'
+    inputs = 2000000 if mode() == 'excess-usage' else 7
     if codex:
         send({'method':'item/completed','params':{'threadId':session,'turnId':'turn-1','item':{'type':'agentMessage','id':'answer-1','text':text}}})
         if mode() != 'missing-usage':
             send({'method':'thread/tokenUsage/updated','params':{'threadId':session,'turnId':'turn-1','tokenUsage':{
-                'total':{'inputTokens':7,'outputTokens':5,'cachedInputTokens':0,'totalTokens':12},
-                'last':{'inputTokens':7,'outputTokens':5,'cachedInputTokens':0,'totalTokens':12},'modelContextWindow':131072}}})
+                'total':{'inputTokens':inputs,'outputTokens':5,'cachedInputTokens':0,'totalTokens':inputs+5},
+                'last':{'inputTokens':inputs,'outputTokens':5,'cachedInputTokens':0,'totalTokens':inputs+5},'modelContextWindow':131072}}})
         send({'method':'turn/completed','params':{'threadId':session,'turn':{'id':'turn-1','status':'completed','error':None}}})
     else:
         send({'type':'stream_event','session_id':session,'event':{'type':'content_block_delta','delta':{'type':'text_delta','text':text}}})
         send({'type':'assistant','session_id':session,'message':{'role':'assistant','model':actual,'content':[{'type':'text','text':text}]}})
-        usage = {} if mode() == 'missing-usage' else {'input_tokens':7,'output_tokens':5,'cache_read_input_tokens':0,'cache_creation_input_tokens':0}
+        usage = {} if mode() == 'missing-usage' else {'input_tokens':inputs,'output_tokens':5,'cache_read_input_tokens':0,'cache_creation_input_tokens':0}
         send({'type':'result','session_id':session,'is_error':False,'num_turns':1,'usage':usage})
 
 def peer():
