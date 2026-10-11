@@ -517,7 +517,10 @@ mod tests {
         let approved = dir.path().join("approved-assets");
         let unrelated = dir.path().join("approved-assets-other");
         let target = dir.path().join("isolated");
-        for path in [&source, &approved, &unrelated] { fs::create_dir(path).unwrap(); }
+        for path in [&source, &approved, &unrelated] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         fs::create_dir(source.join("skills")).unwrap();
         fs::write(approved.join("SKILL.md"), "explicitly approved external skill").unwrap();
         fs::write(unrelated.join("private.md"), "SYNTHETIC-PRIVATE-SENTINEL").unwrap();
@@ -537,6 +540,8 @@ mod tests {
         assert!(!target.join("private.md").exists());
         assert_eq!(fs::read_to_string(target.join("skills/external/SKILL.md")).unwrap(),
             "explicitly approved external skill", "a failed replacement preserves the old snapshot");
+        fs::set_permissions(&unrelated, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(ArtifactPolicy::new(&source, true, &[unrelated]).is_err());
     }
 
     #[test]
