@@ -10,7 +10,7 @@ installer. No release key, signature format, or trusted attestation was added.
 
 1. `verify` has only `contents: read`; it checks out the workflow SHA with
    `persist-credentials: false`, resolves public LORE metadata without a
-   GitHub token, and runs Cargo only in that job. A failed test suite can still
+   GitHub token, and builds/tests candidate code only in that job. A failed test suite can still
    produce the same intentionally red proposal.
 2. `publish` runs only for `refs/heads/main`, checks out the same base SHA on a
    fresh runner, and downloads the candidate's three-file artifact. Trusted
@@ -26,10 +26,11 @@ installer. No release key, signature format, or trusted attestation was added.
    that `main` has not advanced from the candidate base.
 
 The publisher does not check out or execute candidate code. Checkout
-credentials are not persisted. `GITHUB_TOKEN` is exposed to only the last
-fixed-command publication step; Git receives its in-memory auth header for one
-push, with no credential helper or remote URL write. The token permissions are
-limited to contents, pull requests, and artifact read.
+credentials are not persisted. Only the last fixed-command publication step
+receives `GH_TOKEN` in its environment; pinned checkout and artifact actions
+use GitHub's job authentication. Git receives its in-memory auth header for
+one push, with no credential helper or remote URL write. The publisher token
+permissions are limited to contents, pull requests, and artifact read.
 
 Both jobs use the same targeted `cargo update --package lore-core` command with
 stable Cargo. In the publisher, Cargo only resolves dependency metadata from
@@ -119,11 +120,14 @@ marks versions before 0.18.2 affected, and KaTeX's [0.18.2 changelog entry](http
 lists the prototype-pollution fix. The npm registry metadata is at
 [`katex@0.18.2`](https://registry.npmjs.org/katex/0.18.2).
 
-The archived npm audit also listed a low-severity path through
-`@mermaid-js/layout-tidy-tree`, whose suggested wrapper upgrade crosses the
-Mermaid CLI major. That wrapper was not changed here. The current lock was not
-reinstalled and no rendered diagram smoke test was run, so this note does not
-claim a post-change full npm audit is clear.
+The archived npm audit's wrapper entries, including the path through
+`@mermaid-js/layout-tidy-tree`, came from this same KaTeX advisory. The root
+verification lane installed the exact updated lock in a private directory
+with lifecycle scripts and browser download disabled. Mermaid CLI 12.0.0
+rendered a local flowchart containing a KaTeX math label with a private
+headless browser profile; the SVG contains rendered KaTeX. `npm audit
+--package-lock-only --ignore-scripts --json` reported zero findings. This is
+CLI compatibility evidence, not a DOXA terminal/sandbox rendering proof.
 
 ## Other captured dependency advisories
 

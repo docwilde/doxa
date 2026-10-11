@@ -332,7 +332,7 @@ use super::*;
         app.router_freshness_pending=Some((path.clone(),hash,checked,rx));
         tx.send(false).unwrap();
         assert!(app.poll_router_review());
-        assert!(app.router_review_lines(&path)[0].contains("expired or config/credential changed"));
+        assert!(app.router_review_lines(&path)[0].contains("expired or config/key availability changed"));
     }
 
     #[test]

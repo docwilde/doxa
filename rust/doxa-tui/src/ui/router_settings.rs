@@ -56,14 +56,14 @@ impl App {
             ReviewState::Complete(Err(reason))=>vec![(*reason).into()],
             ReviewState::Complete(Ok(result)) if result.checked.elapsed()>crate::router_setup::REVIEW_LIFETIME
                 || review.freshness.is_some_and(|(current,_)|!current)
-                =>vec!["Review expired or config/credential changed · Ctrl+P refreshes".into()],
+                =>vec!["Review expired or config/key availability changed · Ctrl+P refreshes".into()],
             ReviewState::Complete(Ok(result))=>match review.freshness {
                 Some((true, checked)) if checked.elapsed() <= FRESHNESS_RECHECK => {
                     let mut lines=vec![result.summary(),result.cost_scope().into()];
                     lines.extend(result.targets.iter().map(|target|target.label()));
                     lines
                 }
-                _=>vec!["Checking Router config and credential freshness… save/start recheck directly".into()],
+                _=>vec!["Checking Router config and key availability… save/start recheck directly".into()],
             }
         }
     }
