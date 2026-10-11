@@ -1065,7 +1065,7 @@ mod web_item_tests {
             "quota_windows":{"session":{"percent":67.2,"window_minutes":300,"resets_at":1_800_000_000},
                 "weekly":{"percent":91,"window_minutes":10080,"resets_at":1_900_000_000}}})));
         let invalid_reset = codex_billing(&json!({"rateLimits":{"limitId":"codex",
-            "primary":{"usedPercent":50,"windowDurationMins":300,"resetsAt":253_402_300_800}}})).unwrap();
+            "primary":{"usedPercent":50,"windowDurationMins":300,"resetsAt":253_402_300_800_u64}}})).unwrap();
         assert!(invalid_reset["quota_windows"]["session"].get("resets_at").is_none(),
             "an out-of-range timestamp must not be forwarded to the UI");
         assert_eq!(codex_billing(&json!({"rateLimits":{"limitId":"codex_other","primary":{"usedPercent":20,"windowDurationMins":300}}})), None);
