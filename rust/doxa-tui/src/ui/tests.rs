@@ -817,6 +817,9 @@ use super::*;
         assert!(!app.notice.contains("private transcript"));
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 25)).unwrap();
         terminal.draw(|frame| app.draw_settings_menu(frame, Rect::new(0, 0, 100, 25))).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 12)].fg, theme::ACCENT);
+        assert_eq!(buffer[(99, 12)].fg, theme::ACCENT);
         let rendered: String = terminal.backend().buffer().content().iter()
             .map(|cell| cell.symbol()).collect();
         assert!(rendered.contains("Preflight: Unavailable"));

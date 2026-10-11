@@ -1,5 +1,5 @@
 //! The terminal version of the established Textual palette in `doxa/theme.tcss`.
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
 
 pub const BASE: Color = Color::Rgb(0x17, 0x15, 0x12);
 pub const RAIL: Color = Color::Rgb(0x1D, 0x1B, 0x17);
@@ -14,3 +14,8 @@ pub const MUTED: Color = Color::Rgb(0x8A, 0x80, 0x73);
 pub const SUCCESS: Color = Color::Rgb(0x6F, 0xCF, 0x97);
 pub const WARNING: Color = Color::Rgb(0xF2, 0xC9, 0x4C);
 pub const ERROR: Color = Color::Rgb(0xD9, 0x53, 0x4F);
+
+/// Shared orange outline for active modal and submenu frames.
+pub fn modal_border_style() -> Style {
+    Style::default().fg(ACCENT)
+}
