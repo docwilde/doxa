@@ -759,6 +759,10 @@ fn run_loop_with_remote(
         }
     }
     // exec-based restart and handoff bypass Rust destructors for App.
+    app.clipboard_copy_job = None;
+    app.clipboard_job = None;
+    app.pending_clipboard_copy = None;
+    app.clipboard_secret_owner = None;
     app.cancel_native_package_run();
     drop(remote_connector);
     if let Some(router)=command_router.as_ref(){

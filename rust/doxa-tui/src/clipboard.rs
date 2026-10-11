@@ -21,13 +21,15 @@ pub struct CopyJob {
 impl CopyJob {
     pub fn start(text:String)->io::Result<Self> {
         if cfg!(test) { return Err(io::Error::other("clipboard writer requires an injected fixture in tests")); }
-        let mut command=writer_command()?;
+        Ok(Self::with_command(writer_command()?,text,Duration::from_secs(1)))
+    }
+    fn with_command(mut command:Command,text:String,timeout:Duration)->Self {
         let text=bounded_text(&text).to_owned();
         let input=text.clone();
         let(tx,rx)=mpsc::sync_channel(1);
         let cancel=Arc::new(AtomicBool::new(false));let cancelled=cancel.clone();
-        let thread=std::thread::spawn(move||{let _=tx.send(write_command(&mut command,&input,&cancelled,Duration::from_secs(1)));});
-        Ok(Self{text,rx,cancel,thread:Some(thread)})
+        let thread=std::thread::spawn(move||{let _=tx.send(write_command(&mut command,&input,&cancelled,timeout));});
+        Self{text,rx,cancel,thread:Some(thread)}
     }
     pub fn poll(&self)->Option<io::Result<()>> {self.rx.try_recv().ok()}
 }
@@ -131,6 +133,16 @@ mod tests {
         let mut command=Command::new("python3");command.args(["-c","import sys; sys.stdin.buffer.read(); sys.exit(1)"]);
         assert!(write_command(&mut command,"fixture",&AtomicBool::new(false),Duration::from_secs(1)).is_err());
         assert!(CopyJob::start("fixture".into()).is_err());
+    }
+    #[test]fn dropping_copy_job_cancels_and_reaps_its_private_helper(){
+        let fixture=tempfile::tempdir().unwrap();let pidfile=fixture.path().join("helper.pid");
+        let mut command=Command::new("python3");command.args(["-c","import os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(10)"]).arg(&pidfile);
+        let job=CopyJob::with_command(command,"fixture".into(),Duration::from_secs(10));
+        let deadline=Instant::now()+Duration::from_secs(2);
+        while !pidfile.exists()&&Instant::now()<deadline {std::thread::sleep(Duration::from_millis(5));}
+        let pid:libc::pid_t=std::fs::read_to_string(pidfile).unwrap().parse().unwrap();
+        let started=Instant::now();drop(job);assert!(started.elapsed()<Duration::from_secs(1));
+        assert_ne!(unsafe{libc::kill(pid,0)},0,"helper must be reaped before cancellation returns");
     }
     #[test]fn private_reader_accepts_text_and_rejects_overflow_without_system_clipboard(){
         let mut command=Command::new("python3");command.args(["-c","print('fixture', end='')"]);
