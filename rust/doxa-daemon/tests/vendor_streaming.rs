@@ -150,6 +150,7 @@ fn glm_account_startup_and_status_are_cached_and_monitor_is_explicit() {
         let record:Value=serde_json::from_slice(&fs::read(registry).unwrap()).unwrap();
         let mut socket=UnixStream::connect(record["daemon_socket"].as_str().unwrap()).unwrap();socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut reader=BufReader::new(socket.try_clone().unwrap());let hello=frame(&mut reader);
+        send(&mut socket,json!({"type":"attach","cursor":null}));
         let account=&hello["billing"]["glm_account"];
         assert_eq!(account["profile"],"api_resource_bundle");assert_eq!(account["profile_source"],"owner_declared");
         assert_eq!(account["cash_balance_status"],"unknown");assert_eq!(account["resource_bundle_remaining_status"],"unknown");
