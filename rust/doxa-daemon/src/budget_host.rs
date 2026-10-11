@@ -1,6 +1,5 @@
 //! A session-start spend ceiling for hosts that report actual USD costs.
-use doxa_runtime::Host;
-use crate::peer_host::PEER_TURN_MARKER;
+use doxa_runtime::{Host, PeerTurnOrigin};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 use std::fs;
@@ -15,6 +14,7 @@ pub struct BudgetHost {
     priced_model: Option<String>,
     state: Mutex<BudgetState>,
     journal: Option<Journal>,
+    peer_origin: Mutex<Option<PeerTurnOrigin>>,
 }
 
 /// Rates come from the exact-model registry. For tiered OpenAI models these
@@ -44,13 +44,15 @@ struct BudgetState {
 
 impl BudgetHost {
     pub fn new(inner: Arc<dyn Host>, ceiling: f64) -> Self {
-        Self { inner, ceiling, pricing: None, priced_model: None, state: Mutex::new(BudgetState::default()), journal: None }
+        Self { inner, ceiling, pricing: None, priced_model: None, state: Mutex::new(BudgetState::default()), journal: None,
+            peer_origin: Mutex::new(None) }
     }
 
     pub fn new_priced(inner: Arc<dyn Host>, ceiling: f64, engine: &str, model: &str) -> Result<Self, String> {
         let pricing = vendor_price(engine, model)
             .ok_or_else(|| format!("no complete native budget rate bound for {engine}:{model}"))?;
-        Ok(Self { inner, ceiling, pricing: Some(pricing), priced_model: Some(model.to_owned()), state: Mutex::new(BudgetState::default()), journal: None })
+        Ok(Self { inner, ceiling, pricing: Some(pricing), priced_model: Some(model.to_owned()), state: Mutex::new(BudgetState::default()), journal: None,
+            peer_origin: Mutex::new(None) })
     }
 }
 
@@ -116,15 +118,16 @@ impl Host for BudgetHost {
     fn set_session_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool { self.inner.set_session_tool_handler(handler) }
     fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool { self.inner.set_peer_tool_handler(handler) }
     fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }
+    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        *self.peer_origin.lock().unwrap_or_else(|poison|poison.into_inner()) = origin.cloned();
+        self.prompt(text, emit);
+    }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        let peer_origin = self.peer_origin.lock().unwrap_or_else(|poison|poison.into_inner()).take();
         // The runtime serializes prompt execution, but this mutex also keeps
         // observation and the next admission on one state boundary.
         let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
         if state.unknown || state.spent >= self.ceiling {
-            let peer_started = text.starts_with(PEER_TURN_MARKER);
-            let peer_origin = if peer_started {
-                text.lines().find(|line| line.starts_with("--- peer message "))
-            } else { None };
             let message = if state.unknown {
                 "Session spend is unknown; further turns are withheld until cost accounting is available"
             } else {
@@ -132,7 +135,9 @@ impl Host for BudgetHost {
             };
             emit(json!({"type":"turn_refused","data":{
                 "reason":"budget","message":message,"spent_usd":if state.unknown { None } else { Some(state.spent) },
-                "ceiling_usd":self.ceiling,"peer_started":peer_started,"peer_origin":peer_origin,"prompt":null
+                "ceiling_usd":self.ceiling,"peer_started":peer_origin.is_some(),
+                "peer_origin":peer_origin.as_ref().map(PeerTurnOrigin::display_label),
+                "peer_origin_data":peer_origin.as_ref().map(PeerTurnOrigin::to_value),"prompt":null
             }}));
             return;
         }
@@ -154,7 +159,7 @@ impl Host for BudgetHost {
         // panics, and a caught panic must not reopen the allowance in process.
         state.unknown = true;
         let mut terminal_seen = false;
-        self.inner.prompt(text, &mut |mut event| {
+        self.inner.prompt_with_peer_origin(text, peer_origin.as_ref(), &mut |mut event| {
             if event["type"] == "turn_done" {
                 terminal_seen = true;
                 let cost = match self.pricing {

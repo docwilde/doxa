@@ -1,7 +1,7 @@
 //! Isolation is enforced below provider hosts; this wrapper exposes its actual
 //! policy and permits only explicit idle user changes through host RPC.
 use doxa_isolation::{Profile, Runtime};
-use doxa_runtime::{Host, PeerToolHandler};
+use doxa_runtime::{Host, PeerToolHandler, PeerTurnOrigin};
 use serde_json::{json, Value};
 use std::{io, path::PathBuf, sync::{Arc, Mutex}};
 
@@ -48,17 +48,9 @@ mod tests{
     }
 }
 impl Host for IsolationHost {
-    fn prompt(&self,text:&str,emit:&mut dyn FnMut(Value)) {
-        if self.runtime.lock().unwrap().profile().docker() {
-            // Gate each turn even when a provider transport stays connected;
-            // the transport launch independently checks the actual container.
-            if let Err(error) = doxa_isolation::active().and_then(|manifest|
-                manifest.ok_or_else(||doxa_isolation::error("Docker session manifest unavailable"))
-                    .and_then(|manifest|doxa_isolation::check_disk_budget(&manifest).map(|_|()))) {
-                emit(json!({"type":"turn_refused","data":{"message":error.to_string()}})); return;
-            }
-        }
-        self.inner.prompt(text,emit)
+    fn prompt(&self,text:&str,emit:&mut dyn FnMut(Value)) { self.prompt_with_origin(text,None,emit); }
+    fn prompt_with_peer_origin(&self,text:&str,origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)) {
+        self.prompt_with_origin(text,origin,emit);
     }
     fn call(&self,method:&str,params:&Value)->Result<Value,String> {
         if method=="isolation_migration_plan"{return self.migration_plan();}
@@ -100,4 +92,19 @@ impl Host for IsolationHost {
     fn lore_scrub_status(&self)->Option<&'static str>{self.inner.lore_scrub_status()}
     fn public_prompt(&self,text:&str)->Result<String,String>{self.inner.public_prompt(text)}
     fn transcript_snapshot(&self)->io::Result<Option<(PathBuf,u64)>>{self.inner.transcript_snapshot()}
+}
+
+impl IsolationHost {
+    fn prompt_with_origin(&self,text:&str,origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)) {
+        if self.runtime.lock().unwrap().profile().docker() {
+            // Gate each turn even when a provider transport stays connected;
+            // the transport launch independently checks the actual container.
+            if let Err(error) = doxa_isolation::active().and_then(|manifest|
+                manifest.ok_or_else(||doxa_isolation::error("Docker session manifest unavailable"))
+                    .and_then(|manifest|doxa_isolation::check_disk_budget(&manifest).map(|_|()))) {
+                emit(json!({"type":"turn_refused","data":{"message":error.to_string()}})); return;
+            }
+        }
+        self.inner.prompt_with_peer_origin(text,origin,emit)
+    }
 }

@@ -1,7 +1,7 @@
 use doxa_engines::codex_driver::{CodexCliDriver, DriverError, DriverOptions};
 use doxa_engines::codex_appserver::{AppServerDriver, AppServerOptions, AppServerError, CodexPermission, LiveAutoRequest};
 use doxa_lore::{LoreClient, LoreError};
-use doxa_runtime::Host;
+use doxa_runtime::{Host, PeerTurnOrigin};
 use doxa_transcript::TranscriptStore;
 use serde_json::Map;
 use serde_json::{json, Value};
@@ -73,6 +73,7 @@ pub struct CodexHost {
     transport: &'static str,
     closing: AtomicBool,
     routed: bool,
+    peer_origin: Mutex<Option<PeerTurnOrigin>>,
 }
 
 enum CodexTransport {
@@ -327,6 +328,7 @@ impl CodexHost {
             rollout_path: Mutex::new(rollout_path),
             transport,
             closing: AtomicBool::new(false), routed,
+            peer_origin: Mutex::new(None),
         };
         let effort = host.initial_effort();
         if transport == "app-server" {
@@ -365,12 +367,16 @@ impl CodexHost {
     fn persist(&self, mut record: Value) -> io::Result<()> {
         if self.routed {record["router_worker"]=json!(true);}
         let _guard = self.thread_record_lock.lock().unwrap();
-        let result = self.store.try_append(record, "codex", |text| {
+        let peer_origin = record.get("doxa_peer_origin").cloned();
+        let mut scrub = |text: &str| {
             self.lore.lock().unwrap().scrub(text).map_err(|_| {
                 self.scrub_failed.store(true, Ordering::Release);
                 io::Error::other("LORE scrub failed")
             })
-        });
+        };
+        let result = if let Some(origin) = peer_origin.as_ref() {
+            self.store.try_append_with_peer_origin(record, "codex", origin, &mut scrub)
+        } else { self.store.try_append(record, "codex", &mut scrub) };
         if let Err(error) = &result {
             eprintln!("doxa-daemon: transcript append failed: {error}");
             self.persistence_failed.store(true, Ordering::Release);
@@ -549,7 +555,12 @@ impl Host for CodexHost {
     fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
         self.store.transcript_snapshot()
     }
+    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        *self.peer_origin.lock().unwrap_or_else(|poison|poison.into_inner()) = origin.cloned();
+        self.prompt(text, emit);
+    }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        let peer_origin = self.peer_origin.lock().unwrap_or_else(|poison|poison.into_inner()).take();
         let text = match doxa_vendors::credentials::redact(text) {
             Ok(text) => text,
             Err(_) => {
@@ -608,8 +619,12 @@ impl Host for CodexHost {
         emit(json!({"type":"turn_started","data":{"prompt":display_prompt}}));
         let user_record = if compaction {
             json!({"type":"doxa_command","command":"compact","cwd":self.cwd,"sessionId":self.session_id,"timestamp":crate::iso_now()})
-        } else { json!({"type":"user", "message":{"role":"user","content":text},
-            "cwd":self.cwd, "sessionId":self.session_id, "timestamp":crate::iso_now()}) };
+        } else {
+            let mut record = json!({"type":"user", "message":{"role":"user","content":text},
+                "cwd":self.cwd, "sessionId":self.session_id, "timestamp":crate::iso_now()});
+            if let Some(origin) = peer_origin { record["doxa_peer_origin"] = origin.to_value(); }
+            record
+        };
         if self.persist(user_record).is_err() {
             *self.active.lock().unwrap() = None;
             let reason = if self.scrub_failed.load(Ordering::Acquire) {

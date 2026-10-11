@@ -1,6 +1,6 @@
 //! DeepSeek/GLM host with an explicitly enabled, read-only workspace tool.
 use doxa_lore::{stream::StreamScrubber, LoreClient};
-use doxa_runtime::Host;
+use doxa_runtime::{Host, PeerTurnOrigin};
 use doxa_transcript::TranscriptStore;
 use doxa_vendors::{Delta, Error, Vendor, MAX_TURN_DURATION};
 use crate::vendor_tools::{NativeVendorGate, PeerDesk};
@@ -110,6 +110,7 @@ pub struct VendorHost {
     turns: AtomicU64,
     estimated_cost: Mutex<CostEstimate>,
     closing: AtomicBool,
+    peer_origin: Mutex<Option<PeerTurnOrigin>>,
     balance: Arc<Mutex<Option<String>>>,
     balance_generation: Arc<AtomicU64>,
     balance_refreshing: Arc<AtomicBool>,
@@ -274,6 +275,7 @@ impl VendorHost {
             turns: AtomicU64::new(restored_turns),
             estimated_cost: Mutex::new(CostEstimate { spent: 0.0, complete: !resume }),
             closing: AtomicBool::new(false),
+            peer_origin: Mutex::new(None),
             balance: Arc::new(Mutex::new(None)),
             balance_generation: Arc::new(AtomicU64::new(0)),
             balance_refreshing: Arc::new(AtomicBool::new(false)),
@@ -337,7 +339,8 @@ impl VendorHost {
         Ok((packet,source_hash))
     }
 
-    pub(super) fn commit_cli_turn(&self, text: &str, output: &str, expected_hash: &str, route: &Value) -> Result<(),String> {
+    pub(super) fn commit_cli_turn(&self, text: &str, output: &str, expected_hash: &str, route: &Value,
+        peer_origin: Option<&PeerTurnOrigin>) -> Result<(),String> {
         self.router_source_preflight()?;
         let mut history = self.history.lock().unwrap();
         if doxa_router::hash(&*history).map_err(|_|"Router source identity unavailable")? != expected_hash {
@@ -348,8 +351,13 @@ impl VendorHost {
         let mut next = history.clone();
         next.push(json!({"role":"user","content":prompt}));
         next.push(json!({"role":"assistant","content":output}));
-        if self.store.try_append_router_turn(&self.cwd,&prompt,&output,&crate::iso_now(),route,
-            |value|self.scrub(value).map_err(|_|std::io::Error::other("LORE scrub failed"))).is_err()
+        let timestamp = crate::iso_now();
+        let append = if let Some(origin) = peer_origin {
+            self.store.try_append_router_turn_with_peer_origin(&self.cwd,&prompt,&output,&timestamp,route,&origin.to_value(),
+                |value|self.scrub(value).map_err(|_|std::io::Error::other("LORE scrub failed")))
+        } else { self.store.try_append_router_turn(&self.cwd,&prompt,&output,&timestamp,route,
+            |value|self.scrub(value).map_err(|_|std::io::Error::other("LORE scrub failed"))) };
+        if append.is_err()
             || self.store.try_write_vendor_messages("router","router-conversation-v1",&next,
                 |value|self.scrub(value).map_err(|_|std::io::Error::other("LORE scrub failed"))).is_err() {
             self.storage_uncertain.store(true,Ordering::Release);
@@ -817,7 +825,13 @@ impl Host for VendorHost {
             .map_err(|_| "LORE scrub failed; prompt withheld".into())
     }
 
+    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        *self.peer_origin.lock().unwrap_or_else(|poison| poison.into_inner()) = origin.cloned();
+        self.prompt(text, emit);
+    }
+
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        let peer_origin = self.peer_origin.lock().unwrap_or_else(|poison| poison.into_inner()).take();
         let mut decorated = |mut event| { self.decorate_mcp(&mut event); emit(event); };
         let emit: &mut dyn FnMut(Value) = &mut decorated;
         if text.split_whitespace().next() == Some("/compact") {
@@ -1047,8 +1061,16 @@ impl Host for VendorHost {
                     history.push(assistant);
                     let timestamp = crate::iso_now();
                     let append = if self.routed {
-                        self.store.try_append_router_turn(&self.cwd, &prompt, &text, &timestamp,
-                            self.route.lock().unwrap().as_ref().expect("router selected before turn"),
+                        let selection = self.route.lock().unwrap().as_ref().expect("router selected before turn").clone();
+                        if let Some(origin) = &peer_origin {
+                            self.store.try_append_router_turn_with_peer_origin(&self.cwd, &prompt, &text, &timestamp,
+                                &selection, &origin.to_value(),
+                                |value| self.scrub(value).map_err(|_| std::io::Error::other("LORE scrub failed")))
+                        } else { self.store.try_append_router_turn(&self.cwd, &prompt, &text, &timestamp,
+                            &selection, |value| self.scrub(value).map_err(|_| std::io::Error::other("LORE scrub failed"))) }
+                    } else if let Some(origin) = &peer_origin {
+                        self.store.try_append_vendor_turn_with_peer_origin(
+                            self.storage_engine(), &self.cwd, &prompt, &text, &timestamp, &origin.to_value(),
                             |value| self.scrub(value).map_err(|_| std::io::Error::other("LORE scrub failed")))
                     } else { self.store.try_append_vendor_turn(
                             self.storage_engine(),

@@ -30,9 +30,64 @@ const MAX_CONNECTIONS: usize = 64;
 /// return an object containing the selected `model`, `effort`, or `mode`.
 pub type PeerToolHandler = Arc<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
 
+/// Host-authenticated provenance for a prompt admitted from the canonical peer
+/// message path. It contains bounded display identifiers only; peer body text
+/// remains in the provider prompt and is never used to infer this metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerTurnOrigin {
+    pub sender_session_id: String,
+    pub sender_title: String,
+    pub message_id: Option<String>,
+    pub sent_at: Option<String>,
+    pub from_repo: Option<String>,
+    pub remote_origin: Option<String>,
+    pub source: String,
+}
+
+impl PeerTurnOrigin {
+    pub fn new(sender_session_id: String, sender_title: String, message_id: Option<String>,
+        sent_at: Option<String>, from_repo: Option<String>, remote_origin: Option<String>, source: String)
+        -> Result<Self, String> {
+        let valid = |value: &str, max: usize| !value.is_empty() && value.len() <= max
+            && !value.chars().any(char::is_control);
+        if !valid_peer_session_id(&sender_session_id)
+            || !valid(&sender_title, 128)
+            || message_id.as_deref().is_some_and(|value| !valid(value, 128))
+            || sent_at.as_deref().is_some_and(|value| !valid(value, 64))
+            || from_repo.as_deref().is_some_and(|value| !valid(value, 512))
+            || remote_origin.as_deref().is_some_and(|value| !valid(value, 128))
+            || !matches!(source.as_str(), "peer_message" | "child_task") {
+            return Err("invalid peer turn origin".into());
+        }
+        Ok(Self { sender_session_id, sender_title, message_id, sent_at, from_repo, remote_origin, source })
+    }
+
+    pub fn display_label(&self) -> String {
+        if self.sender_title.is_empty() { self.sender_session_id.clone() }
+        else { format!("{} ({})", self.sender_title, self.sender_session_id) }
+    }
+
+    pub fn to_value(&self) -> Value {
+        json!({"sender_session_id":self.sender_session_id,"sender_title":self.sender_title,
+            "message_id":self.message_id,"sent_at":self.sent_at,"from_repo":self.from_repo,
+            "remote_origin":self.remote_origin,"source":self.source})
+    }
+}
+
+fn valid_peer_session_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value.bytes().skip(1).all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
 pub trait Host: Send + Sync + 'static {
     fn isolation_status(&self) -> Option<Value> { None }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value));
+    /// Prompt admitted with host-authenticated peer provenance. The default
+    /// preserves existing hosts; transcript-owning hosts override it to persist
+    /// the typed origin alongside the exact user record.
+    fn prompt_with_peer_origin(&self, text: &str, _origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt(text, emit)
+    }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String>;
     fn initial_model(&self) -> Option<String> { None }
     /// Initial effort asserted for this session; None is unknown.
@@ -71,6 +126,10 @@ pub trait Host: Send + Sync + 'static {
     fn public_prompt(&self, text: &str) -> Result<String, String> { Ok(text.to_owned()) }
     /// Owner-checked JSONL boundary for durable client restore.
     fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> { Ok(None) }
+    /// Owner-private peer event journal for restored sent/received cards.
+    /// Scope and session binding are repeated in each journal row and checked
+    /// by the client before display.
+    fn peer_history_snapshot(&self) -> io::Result<Option<(PathBuf, u64, String)>> { Ok(None) }
 }
 
 #[derive(Clone)]
@@ -82,7 +141,7 @@ pub struct Session {
     pub doxa_version: String,
 }
 
-struct Prompt { text: String, public_text: String, queue_id: String, peer_origin: Option<String> }
+struct Prompt { text: String, public_text: String, queue_id: String, peer_origin: Option<PeerTurnOrigin> }
 
 fn queue_preview(text: &str) -> String { text.chars().take(QUEUE_PREVIEW_CHARS).collect() }
 
@@ -247,7 +306,15 @@ impl DaemonHandle {
 
     /// Admit a validated peer prompt through the same bounded FIFO as typed
     /// prompts. The caller retains the original frame on `Full` or error.
-    pub fn enqueue_peer_prompt(&self, text: String, origin: &str) -> Result<ExternalPrompt, String> {
+    /// Compatibility entry point for hosts that know only a peer ID. New
+    /// daemon admission paths should pass the complete validated origin.
+    pub fn enqueue_peer_prompt(&self, text: String, sender_session_id: &str) -> Result<ExternalPrompt, String> {
+        let origin = PeerTurnOrigin::new(sender_session_id.to_owned(), sender_session_id.to_owned(),
+            None, None, None, None, "peer_message".to_owned())?;
+        self.enqueue_peer_prompt_with_origin(text, origin)
+    }
+
+    pub fn enqueue_peer_prompt_with_origin(&self, text: String, origin: PeerTurnOrigin) -> Result<ExternalPrompt, String> {
         if text.trim().is_empty() { return Err("empty peer prompt".into()); }
         let display = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
             self.inner.host.public_prompt(&text)
@@ -261,18 +328,18 @@ impl DaemonHandle {
             let queue_id = format!("q{}", state.next_queue_id);
             state.next_queue_id += 1;
             let position = state.prompts.len() + 1;
-            state.prompts.push_back(Prompt { text, public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: Some(origin.to_owned()) });
+            state.prompts.push_back(Prompt { text, public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: Some(origin.clone()) });
             drop(state);
             self.inner.publish(None, json!({"type":"prompt_queued","data":{
                 "id":queue_id,"text":display,"position":position,
-                "peer_started":true,"peer_origin":origin}}));
+                "peer_started":true,"peer_origin":origin.display_label()}}));
             Ok(ExternalPrompt::Queued)
         } else {
             let turn = format!("peer-r{:011}", state.next_turn_id);
             state.busy = true;
             state.next_turn_id += 1;
             drop(state);
-            self.inner.start_turn(text, turn, Some(origin.to_owned()));
+            self.inner.start_turn(text, turn, Some(origin));
             Ok(ExternalPrompt::Started)
         }
     }
@@ -341,7 +408,7 @@ impl Inner {
         state.clients.retain(|_, tx| tx.try_send(bytes.clone()).is_ok());
     }
 
-    fn start_turn(self: &Arc<Self>, text: String, turn: String, peer_origin: Option<String>) {
+    fn start_turn(self: &Arc<Self>, text: String, turn: String, peer_origin: Option<PeerTurnOrigin>) {
         let inner = self.clone();
         thread::spawn(move || {
             // The terminal event is an idle/readiness boundary for clients.
@@ -351,17 +418,22 @@ impl Inner {
             let mut terminal: Option<Value> = None;
             let mut emit = |mut event: Value| {
                 if terminal.is_some() { return; }
-                if event["type"] == "turn_started" {
-                    if !event["data"].is_object() { event["data"] = json!({}); }
-                    if let Some(data) = event.get_mut("data").and_then(Value::as_object_mut) {
-                        // Admission, rather than role-looking prompt text or
-                        // host parsing, owns peer provenance for UI/replay.
+                let is_turn_boundary = matches!(event["type"].as_str(), Some("turn_started" | "turn_refused"));
+                if !event["data"].is_object() { event["data"] = json!({}); }
+                if let Some(data) = event.get_mut("data").and_then(Value::as_object_mut) {
+                    // These fields are reserved for host admission. Clear any
+                    // provider or middleware values on every frame, then add
+                    // them only to the turn boundary events that display them.
+                    data.remove("peer_started");
+                    data.remove("peer_origin");
+                    data.remove("peer_origin_data");
+                    if is_turn_boundary {
                         if let Some(origin) = &peer_origin {
                             data.insert("peer_started".into(), json!(true));
-                            data.insert("peer_origin".into(), json!(origin));
+                            data.insert("peer_origin".into(), json!(origin.display_label()));
+                            data.insert("peer_origin_data".into(), origin.to_value());
                         } else {
                             data.insert("peer_started".into(), json!(false));
-                            data.remove("peer_origin");
                         }
                     }
                 }
@@ -371,7 +443,8 @@ impl Inner {
                     inner.publish(Some(&turn), event);
                 }
             };
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.host.prompt(&text, &mut emit)));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                inner.host.prompt_with_peer_origin(&text, peer_origin.as_ref(), &mut emit)));
             let terminal = terminal.unwrap_or_else(|| if result.is_err() {
                 json!({"type":"turn_done", "data":{"is_error":true,"error":"host panicked"}})
             } else { json!({"type":"turn_done", "data":{}}) });
@@ -397,7 +470,8 @@ impl Inner {
                 )).ok().and_then(Result::ok)
                     .unwrap_or_else(|| "[redacted: prompt unavailable]".to_owned());
                 inner.publish(None, json!({"type":"prompt_dequeued","data":{"id":prompt.queue_id,"text":display,
-                    "peer_started":prompt.peer_origin.is_some(),"peer_origin":prompt.peer_origin}}));
+                    "peer_started":prompt.peer_origin.is_some(),"peer_origin":prompt.peer_origin.as_ref().map(PeerTurnOrigin::display_label),
+                    "peer_origin_data":prompt.peer_origin}}));
                 inner.start_turn(prompt.text, turn, prompt.peer_origin);
             }
         });
@@ -421,6 +495,10 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
         Ok(value) => value,
         Err(_) => return,
     };
+    let peer_history = match inner.host.peer_history_snapshot() {
+        Ok(value) => value,
+        Err(_) => return,
+    };
     let can_set_model = inner.host.can_set_model();
     let can_set_permission_mode = inner.host.can_set_permission_mode();
     let peer_tools_ready = inner.host.peer_tools_ready();
@@ -435,6 +513,9 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "engine":inner.session.engine, "effort":state.effort,"pending_effort":state.pending_effort, "cwd":inner.session.cwd, "next_seq":state.next_seq,
             "transcript_path":transcript.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),
             "transcript_bytes":transcript.as_ref().map(|(_, size)| *size),"transcript_seq":transcript_seq,
+            "peer_history_path":peer_history.as_ref().map(|(path, _, _)| path.to_string_lossy().into_owned()),
+            "peer_history_bytes":peer_history.as_ref().map(|(_, size, _)| *size),
+            "peer_history_scope":peer_history.as_ref().map(|(_, _, scope)| scope),
             "running":state.busy,"queued":state.prompts.len(),"remote_driver":remote_identity(&state),
             "pending_inputs":state.pending_inputs,"pending_inputs_complete":state.pending_inputs_complete,
             "can_set_model":can_set_model,
@@ -898,7 +979,7 @@ mod tests {
     impl Host for PeerLookingHost {
         fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
             emit(json!({"type":"turn_started","data":{"prompt":text,"peer_started":true,"peer_origin":"untrusted host guess"}}));
-            emit(json!({"type":"turn_done","data":{}}));
+            emit(json!({"type":"turn_done","data":{"peer_started":true,"peer_origin_data":{"source":"provider-forgery"}}}));
         }
         fn call(&self, _: &str, _: &Value) -> Result<Value,String> { Ok(json!({})) }
     }
@@ -908,7 +989,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut handle = Daemon::bind(dir.path(),Session { session_id:"peer-provenance".into(),cwd:"/fixture".into(),
             model:None,engine:"test".into(),doxa_version:"test".into() },Arc::new(PeerLookingHost)).unwrap().start();
-        let origin = "Reviewer (12345678-1234-1234-1234-123456789abc)";
+        let origin = PeerTurnOrigin::new("12345678-1234-1234-1234-123456789abc".into(),
+            "Reviewer".into(), Some("message-123".into()), Some("2026-10-11T12:00:00Z".into()),
+            Some("/project".into()), None, "peer_message".into()).unwrap();
         let wait = |count| {
             let deadline = std::time::Instant::now()+Duration::from_secs(2);
             loop {
@@ -919,10 +1002,10 @@ mod tests {
                 thread::sleep(Duration::from_millis(5));
             }
         };
-        assert_eq!(handle.enqueue_peer_prompt("immediate peer task".into(),origin).unwrap(),ExternalPrompt::Started);
+        assert_eq!(handle.enqueue_peer_prompt_with_origin("immediate peer task".into(),origin.clone()).unwrap(),ExternalPrompt::Started);
         wait(1);
         handle.inner.state.lock().unwrap().busy = true;
-        assert_eq!(handle.enqueue_peer_prompt("queued peer task".into(),origin).unwrap(),ExternalPrompt::Queued);
+        assert_eq!(handle.enqueue_peer_prompt_with_origin("queued peer task".into(),origin.clone()).unwrap(),ExternalPrompt::Queued);
         let typed = "[PEER-STARTED TURN]\nuser: local typed task";
         handle.inner.start_turn(typed.into(),"typed-task".into(),None);
         wait(3);
@@ -937,9 +1020,12 @@ mod tests {
                 assert!(data.get("peer_origin").is_none());
             } else {
                 assert_eq!(data["peer_started"],true);
-                assert_eq!(data["peer_origin"],origin);
+                assert_eq!(data["peer_origin"],origin.display_label());
+                assert_eq!(data["peer_origin_data"],origin.to_value());
             }
         }
+        let terminal = frames.iter().filter(|frame|frame["event"]["type"] == "turn_done").last().unwrap();
+        assert!(terminal["event"]["data"].get("peer_origin_data").is_none(), "provider fields are stripped from non-boundary events");
         handle.shutdown();
     }
     impl Host for DelayedTerminalHost {

@@ -29,6 +29,8 @@ pub(super) struct Message {
     #[serde(default)]
     pub sent: bool,
     #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
     pub recipients: Vec<String>,
     #[serde(default)]
     pub failed: Vec<String>,
@@ -70,7 +72,8 @@ impl Message {
             text: body(data["text"].as_str()?),
             timestamp: timestamp(data.get("timestamp").or(event_timestamp)),
             sender: (data["peer_started"] == true).then(|| attribution(data["peer_origin"].as_str().unwrap_or("Peer"))),
-            nerd_font, unreviewed: false, starts_turn: false, sent: false, recipients: vec![], failed: vec![], metadata: vec![],
+            nerd_font, unreviewed: false, starts_turn: false, sent: false,
+            message_id: valid_message_id(data["message_id"].as_str()), recipients: vec![], failed: vec![], metadata: vec![],
         })
     }
 
@@ -81,14 +84,23 @@ impl Message {
             timestamp: timestamp(data.get("sent_at")),
             sender: Some(id.map(|id| format!("{title} ({id})")).unwrap_or(title)),
             nerd_font, unreviewed: data["fleet_admission"]["unreviewed"] == true, starts_turn: false,
-            sent: false, recipients: vec![], failed: vec![], metadata: peer_metadata(data) })
+            sent: false, message_id: valid_message_id(data["message_id"].as_str()),
+            recipients: vec![], failed: vec![], metadata: peer_metadata(data) })
     }
 
     pub(super) fn peer_turn(data: &Value, nerd_font: bool) -> Option<Self> {
-        (data["peer_started"] == true).then(|| Self { queue_id: None, state: None,
+        if data["peer_started"] != true { return None; }
+        let (sender, message_id) = if let Some(origin) = data.get("peer_origin_data") {
+            let (label, message_id) = parse_peer_origin(origin)?;
+            if data["peer_origin"].as_str() != Some(label.as_str()) { return None; }
+            (attribution(&label), message_id)
+        } else {
+            (attribution(data["peer_origin"].as_str().filter(|value| !value.is_empty())?), None)
+        };
+        Some(Self { queue_id: None, state: None,
             text: body(data["prompt"].as_str().unwrap_or("")), timestamp: timestamp(data.get("timestamp")),
-            sender: Some(attribution(data["peer_origin"].as_str().unwrap_or("Peer"))),
-            nerd_font, unreviewed: false, starts_turn: true, sent: false, recipients: vec![], failed: vec![], metadata: vec![] })
+            message_id, sender: Some(sender), nerd_font, unreviewed: false, starts_turn: true,
+            sent: false, recipients: vec![], failed: vec![], metadata: vec![] })
     }
 
     pub(super) fn sent(data: &Value, owner: &str, nerd_font: bool) -> Option<Self> {
@@ -102,7 +114,8 @@ impl Message {
         Some(Self { queue_id: None, state: None, text: data["body"].as_str().map(body).unwrap_or_default(),
             timestamp: timestamp(data.get("sent_at").or(data.get("timestamp"))),
             sender: Some(attribution(owner)), nerd_font, unreviewed: false, starts_turn: false,
-            sent: true, recipients, failed, metadata: peer_metadata(data) })
+            sent: true, message_id: valid_message_id(data["message_id"].as_str()),
+            recipients, failed, metadata: peer_metadata(data) })
     }
 
     pub(super) fn parse(paragraph: &str) -> Option<Self> {
@@ -115,6 +128,7 @@ impl Message {
                 || message.state.is_none() || message.starts_turn || message.sent { return None; }
         } else if message.state.is_some() || message.sender.is_none() { return None; }
         if message.text.len() > MAX_INPUT_BYTES + 3 || message.recipients.len() > 256
+            || message.message_id.as_deref().is_some_and(|id| valid_message_id(Some(id)).is_none())
             || message.recipients.iter().any(|id| peer_id(id).is_none())
             || message.failed.len() > 256 || message.failed.iter().any(|id| peer_id(id).is_none())
             || (message.sent && message.recipients.is_empty())
@@ -147,12 +161,54 @@ impl Message {
             if self.failed.is_empty() { String::new() } else { format!(" · failed recipients: {}", self.failed.join(", ")) })
     }
 
-    fn encoded(&self) -> String { format!("{PREFIX}{}", serde_json::to_string(self).unwrap()) }
+    pub(super) fn encoded(&self) -> String { format!("{PREFIX}{}", serde_json::to_string(self).unwrap()) }
 }
 
 fn peer_id(text: &str) -> Option<&str> {
     (!text.is_empty() && text.len() <= 128
         && text.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'~' | b':' | b'@'))).then_some(text)
+}
+
+fn valid_message_id(value: Option<&str>) -> Option<String> {
+    value.filter(|value| !value.is_empty() && value.len() <= 128
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+        .map(str::to_owned)
+}
+
+fn valid_session_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value.bytes().skip(1).all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn valid_display_field(value: &str, max: usize) -> bool {
+    !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+}
+
+fn valid_peer_source(value: &str) -> bool { matches!(value, "peer_message" | "child_task") }
+
+fn parse_peer_origin(value: &Value) -> Option<(String, Option<String>)> {
+    let fields = value.as_object()?;
+    if fields.len() != 7 || fields.keys().any(|key| !matches!(key.as_str(),
+        "sender_session_id" | "sender_title" | "message_id" | "sent_at" | "from_repo" | "remote_origin" | "source")) {
+        return None;
+    }
+    let id = fields.get("sender_session_id")?.as_str()?;
+    let title = fields.get("sender_title")?.as_str()?;
+    if !valid_session_id(id) || !valid_display_field(title, 128)
+        || !valid_peer_source(fields.get("source")?.as_str()?) { return None; }
+    for (key, max) in [("sent_at", 64), ("from_repo", 512), ("remote_origin", 128)] {
+        match fields.get(key)? {
+            Value::Null => {},
+            Value::String(text) if valid_display_field(text, max) => {},
+            _ => return None,
+        }
+    }
+    let message_id = match fields.get("message_id")? {
+        Value::Null => None,
+        Value::String(value) => Some(valid_message_id(Some(value))?),
+        _ => return None,
+    };
+    Some((format!("{title} ({id})"), message_id))
 }
 
 fn peer_metadata(data: &Value) -> Vec<String> {
@@ -165,6 +221,12 @@ fn attribution(text: &str) -> String {
 }
 
 pub(super) fn append(session: &mut Session, message: &Message) -> bool {
+    if let Some(message_id) = message.message_id.as_deref() {
+        let duplicate = session.transcript.split("\n\n").filter_map(|paragraph| Message::parse(paragraph.trim_matches('\n')))
+            .any(|previous| previous.message_id.as_deref() == Some(message_id)
+                && previous.sent == message.sent && previous.starts_turn == message.starts_turn);
+        if duplicate { return false; }
+    }
     append_transcript(session, &format!("\n\n{}\n\n", message.encoded()))
 }
 
@@ -213,6 +275,7 @@ pub(super) fn settle(session: &mut Session, data: &Value, state: QueueState) -> 
         return (true, replace(session, range, &message));
     }
     let message = Message { queue_id: Some(id), state: Some(state), text: String::new(),
-        timestamp: timestamp(data.get("timestamp")), sender: None, nerd_font: false, unreviewed: false, starts_turn: false, sent: false, recipients: vec![], failed: vec![], metadata: vec![] };
+        timestamp: timestamp(data.get("timestamp")), sender: None, nerd_font: false, unreviewed: false,
+        starts_turn: false, sent: false, message_id: None, recipients: vec![], failed: vec![], metadata: vec![] };
     (true, append_transcript(session, &format!("\n\n{}\n\n", message.encoded())))
 }

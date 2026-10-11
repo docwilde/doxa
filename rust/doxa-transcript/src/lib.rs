@@ -255,7 +255,18 @@ impl TranscriptStore {
         timestamp: &str,
         mut scrub: impl FnMut(&str) -> io::Result<String>,
     ) -> io::Result<()> {
-        self.append_vendor_turn_metadata(engine, cwd, prompt, answer, timestamp, None, &mut scrub)
+        self.append_vendor_turn_metadata(engine, cwd, prompt, answer, timestamp, None, None, &mut scrub)
+    }
+
+    /// Append a provider turn with a host-issued typed peer origin. The origin
+    /// is scrubbed with the full row and must remain byte-for-byte intact, so
+    /// restore can validate it against the attached session identity.
+    pub fn try_append_vendor_turn_with_peer_origin(
+        &self, engine: &str, cwd: &str, prompt: &str, answer: &str, timestamp: &str,
+        peer_origin: &Value, mut scrub: impl FnMut(&str) -> io::Result<String>,
+    ) -> io::Result<()> {
+        self.append_vendor_turn_metadata(engine, cwd, prompt, answer, timestamp, None,
+            Some(peer_origin), &mut scrub)
     }
 
     /// One canonical router conversation with an exact public worker selection
@@ -264,16 +275,24 @@ impl TranscriptStore {
         timestamp: &str, selection: &Value,
         mut scrub: impl FnMut(&str) -> io::Result<String>) -> io::Result<()> {
         self.append_vendor_turn_metadata("router", cwd, prompt, answer, timestamp,
-            Some(selection), &mut scrub)
+            Some(selection), None, &mut scrub)
+    }
+
+    pub fn try_append_router_turn_with_peer_origin(&self, cwd: &str, prompt: &str, answer: &str,
+        timestamp: &str, selection: &Value, peer_origin: &Value,
+        mut scrub: impl FnMut(&str) -> io::Result<String>) -> io::Result<()> {
+        self.append_vendor_turn_metadata("router", cwd, prompt, answer, timestamp,
+            Some(selection), Some(peer_origin), &mut scrub)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn append_vendor_turn_metadata(&self, engine: &str, cwd: &str, prompt: &str,
-        answer: &str, timestamp: &str, selection: Option<&Value>,
+        answer: &str, timestamp: &str, selection: Option<&Value>, peer_origin: Option<&Value>,
         scrub: &mut impl FnMut(&str) -> io::Result<String>) -> io::Result<()> {
         owned_dir(&self.dir)?;
-        let user = serde_json::json!({"type":"user", "message":{"role":"user","content":prompt},
+        let mut user = serde_json::json!({"type":"user", "message":{"role":"user","content":prompt},
             "cwd":cwd,"sessionId":self.session_id,"timestamp":timestamp});
+        if let Some(origin) = peer_origin { user["doxa_peer_origin"] = origin.clone(); }
         let assistant = serde_json::json!({"type":"assistant",
             "message":{"role":"assistant","content":[{"type":"text","text":answer}]},
             "sessionId":self.session_id,"timestamp":timestamp});
@@ -286,6 +305,10 @@ impl TranscriptStore {
                 return Err(bad_data());
             }
             if selection.is_some_and(|selection| record["routing"] != *selection) { return Err(bad_data()); }
+            if record["type"] == "user"
+                && peer_origin.is_some_and(|origin| record["doxa_peer_origin"] != *origin) {
+                return Err(bad_data());
+            }
             let line = serde_json::to_vec(&record)?;
             if line.len() > MAX_TRANSCRIPT_BYTES {
                 return Err(bad_data());
@@ -564,14 +587,38 @@ impl TranscriptStore {
     /// string cannot be scrubbed, including nested provider output.
     pub fn try_append(
         &self,
+        record: Value,
+        engine: &str,
+        scrub: impl FnMut(&str) -> io::Result<String>,
+    ) -> io::Result<()> {
+        self.try_append_metadata(record, engine, None, scrub)
+    }
+
+    /// Append one record whose peer origin was issued by the host admission
+    /// path. Scrubbing must preserve the typed identity exactly so history
+    /// restore cannot silently relabel or detach it.
+    pub fn try_append_with_peer_origin(
+        &self, record: Value, engine: &str, peer_origin: &Value,
+        scrub: impl FnMut(&str) -> io::Result<String>,
+    ) -> io::Result<()> {
+        if record.get("doxa_peer_origin") != Some(peer_origin) { return Err(bad_data()); }
+        self.try_append_metadata(record, engine, Some(peer_origin), scrub)
+    }
+
+    fn try_append_metadata(
+        &self,
         mut record: Value,
         engine: &str,
+        peer_origin: Option<&Value>,
         mut scrub: impl FnMut(&str) -> io::Result<String>,
     ) -> io::Result<()> {
         owned_dir(&self.dir)?;
         let fields = record.as_object_mut().ok_or_else(bad_data)?;
         fields.insert("engine".into(), Value::String(engine.to_owned()));
         try_scrub_value(&mut record, &mut scrub)?;
+        if peer_origin.is_some_and(|origin| record.get("doxa_peer_origin") != Some(origin)) {
+            return Err(bad_data());
+        }
         let mut bytes = serde_json::to_vec(&record)?;
         if bytes.len() > MAX_TRANSCRIPT_BYTES {
             return Err(bad_data());
@@ -746,6 +793,23 @@ impl TranscriptStore {
 mod checkpoint_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn peer_origin_survives_only_an_identity_preserving_transcript_scrub() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::new(root.path(), "project", "session-1").unwrap();
+        let origin = json!({"sender_session_id":"sender-123","sender_title":"Worker",
+            "message_id":"message-123","sent_at":"2026-10-11T12:00:00Z","from_repo":"/project",
+            "remote_origin":null,"source":"peer_message"});
+        let record = || json!({"type":"user","sessionId":"session-1","doxa_peer_origin":origin,
+            "message":{"role":"user","content":"peer prompt"}});
+        store.try_append_with_peer_origin(record(), "claude", &origin, |text| Ok(text.to_owned())).unwrap();
+        let records = store.read_records().unwrap();
+        assert_eq!(records[0]["doxa_peer_origin"], origin);
+        assert!(store.try_append_with_peer_origin(record(), "claude", &origin,
+            |text| Ok(if text == "sender-123" { "scrubbed-id".into() } else { text.into() })).is_err());
+        assert_eq!(store.read_records().unwrap().len(), 1, "rejected metadata must append no partial row");
+    }
 
     fn fixture() -> (tempfile::TempDir, TranscriptStore) {
         let root = tempfile::tempdir().unwrap();

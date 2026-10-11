@@ -1,7 +1,7 @@
 //! Native Claude Code host: one CLI owner, immediate stream events, exact control replies.
 use doxa_claude::{Cli, CliOptions, Error};
 use doxa_lore::{stream::StreamScrubber, LoreClient};
-use doxa_runtime::{Host, PeerToolHandler};
+use doxa_runtime::{Host, PeerToolHandler, PeerTurnOrigin};
 use doxa_transcript::TranscriptStore;
 use serde_json::{json, Value};
 use std::{
@@ -20,7 +20,7 @@ const POLL: Duration = Duration::from_millis(20);
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 type Reply = Sender<Result<Value, String>>;
 enum Command {
-    Prompt(String, SyncSender<Value>, Reply),
+    Prompt(String, Option<PeerTurnOrigin>, SyncSender<Value>, Reply),
     Rpc(String, Value, Reply),
     Close,
 }
@@ -85,11 +85,12 @@ impl Shared {
     }
     fn persist(&self, mut record: Value) -> Result<(), String> {
         if self.routed {record["router_worker"]=json!(true);}
-        self.store
-            .try_append(record, "claude", |s| {
-                self.scrub(s).map_err(io::Error::other)
-            })
-            .map_err(|_| {
+        let peer_origin = record.get("doxa_peer_origin").cloned();
+        let mut scrub = |text: &str| self.scrub(text).map_err(io::Error::other);
+        let result = if let Some(origin) = peer_origin.as_ref() {
+            self.store.try_append_with_peer_origin(record, "claude", origin, &mut scrub)
+        } else { self.store.try_append(record, "claude", &mut scrub) };
+        result.map_err(|_| {
                 self.failed.store(true, Ordering::Release);
                 "Claude transcript write failed".into()
             })
@@ -169,6 +170,7 @@ pub struct ClaudeHost {
     worker: Mutex<Option<JoinHandle<()>>>,
     shared: Arc<Shared>,
     admission: Mutex<()>,
+    peer_origin: Mutex<Option<PeerTurnOrigin>>,
 }
 fn init_request() -> Value {
     json!({"subtype":"initialize","sdkMcpServers":["doxa"],"hooks":{"PreCompact":[{"hookCallbackIds":["doxa_pre_compact"],"timeout":200}],"UserPromptSubmit":[{"hookCallbackIds":["doxa_prompt_context"],"timeout":10}]}})
@@ -461,6 +463,7 @@ impl ClaudeHost {
             worker: Mutex::new(Some(worker)),
             shared,
             admission: Mutex::new(()),
+            peer_origin: Mutex::new(None),
         })
     }
     fn rpc(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -538,6 +541,10 @@ impl Host for ClaudeHost {
     fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
         self.shared.store.transcript_snapshot()
     }
+    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        *self.peer_origin.lock().unwrap_or_else(|poison|poison.into_inner()) = origin.cloned();
+        self.prompt(text, emit);
+    }
     fn peer_tools_ready(&self) -> bool {
         self.shared.peer_allowed && self.shared.peer.lock().unwrap().is_some()
     }
@@ -565,6 +572,7 @@ impl Host for ClaudeHost {
         true
     }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        let peer_origin = self.peer_origin.lock().unwrap_or_else(|poison|poison.into_inner()).take();
         let text = match doxa_vendors::credentials::redact(text) {
             Ok(text) => text,
             Err(_) => {
@@ -610,7 +618,7 @@ impl Host for ClaudeHost {
             }
             if self
                 .commands
-                .send(Command::Prompt(text.into(), tx, ack))
+                .send(Command::Prompt(text.into(), peer_origin, tx, ack))
                 .is_err()
             {
                 self.shared.active.store(false, Ordering::Release);
@@ -1172,7 +1180,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         return;
                     }
                 }
-                Command::Prompt(text, sink, reply) => {
+                Command::Prompt(text, peer_origin, sink, reply) => {
                     streams.clear();
                     reasoning_progress = ReasoningProgress::default();
                     durable = DurableTurn::default();
@@ -1187,7 +1195,9 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         if !ready {
                             return Err("Claude prompt cancelled before admission".into());
                         }
-                        shared.persist(json!({"type":"user","message":{"role":"user","content":text},"cwd":shared.cwd,"sessionId":shared.session,"timestamp":crate::iso_now()}))?;
+                        let mut record = json!({"type":"user","message":{"role":"user","content":text},"cwd":shared.cwd,"sessionId":shared.session,"timestamp":crate::iso_now()});
+                        if let Some(origin) = &peer_origin { record["doxa_peer_origin"] = origin.to_value(); }
+                        shared.persist(record)?;
                         shared.checkpoint(true)?;
                         let public_prompt = shared.scrub(&text)?;
                         cli.prompt(&text, &shared.session)

@@ -89,7 +89,9 @@ fn parse_frame(bytes: &[u8]) -> io::Result<PeerFrame> {
     if bytes.is_empty() { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty peer probe")); }
     if bytes.last() != Some(&b'\n') || bytes[..bytes.len()-1].contains(&b'\n') { return Err(invalid("peer frame must be one complete line")); }
     let frame: PeerFrame = serde_json::from_slice(&bytes[..bytes.len()-1]).map_err(|_| invalid("invalid peer JSON"))?;
-    if frame.from_id.is_empty() || frame.body.chars().count() > MAX_BODY_CHARS { return Err(invalid("invalid peer identity or body")); }
+    if frame.from_id.is_empty() || frame.body.chars().count() > MAX_BODY_CHARS {
+        return Err(invalid("invalid peer identity or body"));
+    }
     Ok(frame)
 }
 
@@ -446,9 +448,13 @@ impl RateLimiter {
     }
 }
 
-pub struct DeliveryResult { pub delivered: Vec<String>, pub failed: Vec<String>, pub record: Option<Message>, pub ledger_error: Option<String> }
+pub struct DeliveryResult { pub delivered: Vec<String>, pub failed: Vec<String>, pub message_id: Option<String>, pub record: Option<Message>, pub ledger_error: Option<String> }
 pub fn valid_reply_reference(id: &str) -> bool { Uuid::parse_str(id).is_ok() }
 pub fn new_message_id() -> String { Uuid::new_v4().simple().to_string() }
+pub fn valid_message_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128
+        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
 /// The single local outbound path: scoped discovery, charge, send, then append only successful recipients.
 pub fn deliver(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
     turn_id: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {
@@ -468,16 +474,17 @@ pub fn deliver_with_reply(registry: &Registry, sender: &PeerRecord, recipients: 
     }
     limiter.lock().map_err(|_| io::Error::other("peer rate limiter poisoned"))?
         .charge(turn_id, targets.len())?;
+    let message_id = new_message_id();
     let frame = PeerFrame { authenticated_pid: None, from_id: sender.session_id.clone(), from_title: sender.title.clone(), sent_at: now(), body: body.to_owned(),
         from_repo: Some(sender.scope_key().to_owned()), kind: (kind != "direct").then(|| kind.to_owned()) }.scrub(scrubber);
-    let mut result = DeliveryResult { delivered: Vec::new(), failed: Vec::new(), record: None, ledger_error: None };
+    let mut result = DeliveryResult { delivered: Vec::new(), failed: Vec::new(), message_id: Some(message_id.clone()), record: None, ledger_error: None };
     for peer in targets {
         let path = Path::new(&peer.socket_path);
         if path.parent() == Some(registry.runtime()) && send(path, &frame).is_ok() { result.delivered.push(peer.session_id.clone()); }
         else { result.failed.push(peer.session_id.clone()); }
     }
     if result.delivered.is_empty() { return Err(io::Error::new(io::ErrorKind::NotConnected, "nothing was delivered")); }
-    let message = Message { v: 1, id: Uuid::new_v4().simple().to_string(), ts: now(),
+    let message = Message { v: 1, id: message_id, ts: now(),
         sender: Sender { session: sender.session_id.clone(), title: Some(sender.title.clone()), repo: Some(sender.scope_key().to_owned()), model: sender.model.clone(), engine: sender.engine.clone() },
         to: result.delivered.clone(), kind: kind.to_owned(), in_reply_to: in_reply_to.map(str::to_owned), body: body.to_owned(), body_sha256: String::new(), latency_ms: None,
         turn: TurnRef { id: turn_id.map(str::to_owned), state: if turn_id.is_some() { "running" } else { "idle" }.to_owned() } };
