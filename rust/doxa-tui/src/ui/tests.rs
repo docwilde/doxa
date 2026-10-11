@@ -1701,7 +1701,7 @@ for line in sys.stdin:
         app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(!app.launching && app.pending_launches.is_empty());
         assert!(app.new_session.as_ref().unwrap().launch_error.as_ref().unwrap().starts_with("Docker setup:"));
-        assert!(!painted_at(&app, 160, 36).contains("/setup checks authentication"));
+        assert!(!painted_at(&app, 160, 36).contains("Esc close · /setup checks authentication · Enter retry"));
         // Click the actual action row, then return by Escape without losing input.
         let menu = app.active_chooser_rect().unwrap();
         app.handle(Event::Mouse(MouseEvent { kind:MouseEventKind::Down(MouseButton::Left),
