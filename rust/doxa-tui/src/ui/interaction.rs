@@ -2443,6 +2443,20 @@ impl App {
             self.link_hover = link;
             return changed || moved || tool_hover_changed || rail_hover_changed;
         }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.active_request_index().is_none()
+        {
+            if let (Some(menu), Some(area)) = (&self.settings_menu, self.active_chooser_rect()) {
+                let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+                if let Some(category) = super::choice_dropdown::settings_tabs(area, menu.category)
+                    .into_iter().find(|(_, rect, _)| rect.contains(point))
+                    .map(|(index, _, _)| index)
+                {
+                    self.select_settings_category(category);
+                    return true;
+                }
+            }
+        }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.lore_picker.is_some() {
             if let Some(area) = self.active_chooser_rect() {
                 if mouse.row == area.y && mouse.column > area.x {
@@ -2546,12 +2560,6 @@ impl App {
                 if let Some(area) = menu.filter(|area| {
                     area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
                 }) {
-                    if let Some(category) = super::choice_dropdown::settings_tabs(area, self.settings_menu.as_ref().unwrap().category)
-                        .into_iter().find(|(_, rect, _)| rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)))
-                        .map(|(index, _, _)| index) {
-                        self.select_settings_category(category);
-                        return true;
-                    }
                     let offset = usize::from(mouse.row.saturating_sub(area.y.saturating_add(3)));
                     let index = self
                         .settings_menu

@@ -235,7 +235,7 @@ fn choice_label(value: &str) -> String {
     if value.is_empty() { "(default)".into() } else { safe_label(value) }
 }
 
-/// Render and hit testing consume the same visible numbered tabs, including overflow.
+/// Render and hit testing consume the same title-bar tabs, including overflow.
 pub(super) fn settings_tabs(area: Rect, selected: usize) -> Vec<(usize, Rect, String)> {
     let labels = settings::CATEGORIES.iter().enumerate().map(|(index, label)| format!(" {} {label} ", index + 1)).collect::<Vec<_>>();
     let capacity = usize::from(area.width.saturating_sub(4));
@@ -243,7 +243,7 @@ pub(super) fn settings_tabs(area: Rect, selected: usize) -> Vec<(usize, Rect, St
     while start < selected && labels[start..=selected].iter().map(|s| s.width()).sum::<usize>() > capacity { start += 1; }
     let mut x = area.x + 1;
     let mut result = Vec::new();
-    if start > 0 { result.push((start - 1, Rect::new(x, area.y + 2, 1, 1), "‹".into())); }
+    if start > 0 { result.push((start - 1, Rect::new(x, area.y, 1, 1), "‹".into())); }
     x += 1;
     let right = area.right().saturating_sub(2);
     for (index, label) in labels.iter().enumerate().skip(start) {
@@ -251,12 +251,12 @@ pub(super) fn settings_tabs(area: Rect, selected: usize) -> Vec<(usize, Rect, St
         if x + width > right {
             if index == start {
                 let shown = label.chars().take(usize::from(right.saturating_sub(x))).collect::<String>();
-                result.push((index, Rect::new(x, area.y + 2, shown.width() as u16, 1), shown));
+                result.push((index, Rect::new(x, area.y, shown.width() as u16, 1), shown));
             }
-            if index > selected || index == start { result.push(((if index == start { index + 1 } else { index }).min(labels.len()-1), Rect::new(right, area.y + 2, 1, 1), "›".into())); }
+            if index > selected || index == start { result.push(((if index == start { index + 1 } else { index }).min(labels.len()-1), Rect::new(right, area.y, 1, 1), "›".into())); }
             break;
         }
-        result.push((index, Rect::new(x, area.y + 2, width, 1), label.clone()));
+        result.push((index, Rect::new(x, area.y, width, 1), label.clone()));
         x += width;
     }
     result
@@ -349,9 +349,16 @@ mod tests {
             assert_eq!(app.settings_menu.as_ref().unwrap().category, category);
             let area = app.active_chooser_rect().unwrap();
             let tab = settings_tabs(area, category).into_iter().find(|(index, _, label)| *index == category && label.contains(settings::CATEGORIES[category])).unwrap();
-            assert!(paint(&app).contains(settings::CATEGORIES[category]));
+            let mut terminal = Terminal::new(TestBackend::new(app.size.width, app.size.height)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let row = |y| (area.x..area.right()).map(|x|
+                terminal.backend().buffer()[(x, y)].symbol()).collect::<String>();
+            assert_eq!(tab.1.y, area.y);
+            assert!(row(area.y).contains(settings::CATEGORIES[category]));
+            assert!(!row(area.y + 2).contains(settings::CATEGORIES[category]));
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), tab.1.x + 1, tab.1.y);
             assert_eq!(app.settings_menu.as_ref().unwrap().category, category);
+            assert_eq!(app.drag, None, "title tab click must not resize the menu");
         }
         key(&mut app, KeyCode::Char('1'));
         let menu = app.settings_menu.as_mut().unwrap();

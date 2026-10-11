@@ -606,7 +606,7 @@ impl App {
         };
         let mut lines = vec![
             Line::from(format!(" env > config.toml > default · {} unsaved", menu.edits.len() + usize::from(menu.draft.is_some()))),
-            super::choice_dropdown::settings_tab_line(area, menu.category),
+            Line::from(""),
         ];
         let (indices, start, visible) = menu.visible_window(area.height);
         for &index in indices.iter().skip(start).take(visible) {
@@ -741,7 +741,7 @@ impl App {
             Paragraph::new(chooser_list_lines(lines, usize::from(area.width.saturating_sub(3))))
                 .block(
                     Block::default()
-                        .title(" Settings ")
+                        .title(super::choice_dropdown::settings_tab_line(area, menu.category))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(theme::ACCENT)),
                 )
