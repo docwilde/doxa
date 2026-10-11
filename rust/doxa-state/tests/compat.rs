@@ -29,23 +29,31 @@ fn busy_config_lock_refuses_without_editing_then_allows_explicit_retry() {
 }
 
 #[test]
-fn overlapping_config_edits_serialize_without_losing_the_first_write() {
+fn overlapping_config_edits_refuse_contention_then_retry_without_losing_the_first_write() {
     use std::{sync::mpsc, time::Duration};
     let dir = tempfile::tempdir().unwrap();
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let path = dir.path().join("config.toml"); fs::write(&path, "counter = 0\n").unwrap();
     let worker_path = path.clone(); let (entered, ready) = mpsc::channel();
+    let (release, held) = mpsc::channel();
     let worker = std::thread::spawn(move || update_config(&worker_path, |table| {
         let before = table["counter"].as_integer().unwrap();
-        entered.send(()).unwrap(); std::thread::sleep(Duration::from_millis(30));
+        entered.send(()).unwrap();
+        held.recv_timeout(Duration::from_secs(5)).unwrap();
         table.insert("counter".into(), toml::Value::Integer(before + 1)); Ok(())
     }));
-    ready.recv_timeout(Duration::from_secs(1)).unwrap();
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut edited = false;
+    assert_eq!(update_config(&path, |_| { edited = true; Ok(()) }).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock);
+    assert!(!edited);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "counter = 0\n");
+    release.send(()).unwrap();
+    worker.join().unwrap().unwrap();
     update_config(&path, |table| {
         assert_eq!(table["counter"].as_integer(), Some(1));
         table.insert("counter".into(), toml::Value::Integer(2)); Ok(())
     }).unwrap();
-    worker.join().unwrap().unwrap();
     assert_eq!(load_config_checked(&path).unwrap()["counter"].as_integer(), Some(2));
 }
 
