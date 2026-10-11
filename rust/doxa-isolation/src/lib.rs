@@ -69,6 +69,11 @@ impl Policy {
             Err(e) if e.kind() == io::ErrorKind::NotFound => toml::Value::Table(Default::default()),
             Err(e) => return Err(e),
         };
+        Self::from_config(&cfg)
+    }
+    /// Resolve and validate an already parsed owner configuration. Callers that
+    /// enforce their own bounded/private read must not reread the file here.
+    pub fn from_config(cfg: &toml::Value) -> io::Result<Self> {
         let string = |key: &str, env: &str| std::env::var(env).ok().or_else(|| cfg.get(key).and_then(toml::Value::as_str).map(str::to_owned));
         let integer = |key: &str, env: &str, default: u64| -> io::Result<u64> {
             match string(key, env) { Some(value) => value.parse().map_err(|_| error(format!("invalid {key}"))),

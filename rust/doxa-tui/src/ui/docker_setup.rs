@@ -20,11 +20,14 @@ impl Prerequisites {
             Ok(config) => config,
             Err(_) => return Self { issues: vec!["Owner configuration unreadable or invalid".into()] },
         };
-        let socket = std::env::var("DOXA_DOCKER_HOST").ok()
+        let config = toml::Value::Table(config);
+        let policy = Policy::from_config(&config);
+        let socket = policy.as_ref().ok().map(|policy| policy.docker_host.clone())
+            .or_else(|| std::env::var("DOXA_DOCKER_HOST").ok())
             .or_else(|| config.get("docker_host").and_then(toml::Value::as_str).map(str::to_owned))
             .or_else(|| std::env::var("DOCKER_HOST").ok())
             .unwrap_or_else(|| format!("unix:///run/user/{}/docker.sock", unsafe { libc::geteuid() }));
-        Self::check(Policy::configured(&home), &socket)
+        Self::check(policy, &socket)
     }
 
     fn check(policy: std::io::Result<Policy>, endpoint: &str) -> Self {
