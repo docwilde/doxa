@@ -177,9 +177,13 @@ tails and representative larger repositories still need measurement before
 any automatic turn path or multi-query index is justified.
 
 For the explicit repeated-query path, the warmed-answer-cache DOXA target is
-p95 below 100 ms. The [alternating-query measurement](../codegraph-query-cache-benchmark-2026-10-10.md)
-compares fresh scans, an initially empty answer cache, and a primed answer
-cache against the same normalized answers and complete source inventory.
+p95 below 100 ms. The [paired measurement](../codegraph-query-cache-benchmark-2026-10-11.md)
+compares baseline and optimized release binaries against the same frozen
+source inventory and normalized answers over five alternating-order pairs.
+Aggregate warmed p95 is 116.954 → 91.929 ms on this checkout; one optimized
+pair reaches 101.120 ms. Linux uses a symlink-refusing `openat2` beneath the
+worktree descriptor with portable-walk fallback; bounded Git polling is 1 ms.
+All three source-read passes and their limits remain in force.
 An empty answer cache is not a cold filesystem cache. Filesystem cache state
 and other desktop load are uncontrolled; cold-filesystem tails, representative
 larger repositories, and automatic query frequency remain open.
