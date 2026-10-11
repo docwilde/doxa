@@ -106,7 +106,7 @@ async fn initialization_rejects_wrong_protocol_ids_caps_noise_duplicates_and_ove
 #[tokio::test]
 async fn catalog_failures_disable_tools_and_bound_pages_and_notifications() {
     let _environment=isolated();
-    for mode in ["cursor_cycle","duplicate_tool","bad_schema","flood","good"] {
+    for mode in ["cursor_cycle","duplicate_tool","bad_schema","flood","list_changed","good"] {
         let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
         let mut config=stdio_config(mode,&path);
         if mode=="flood" {config.limits.max_notifications=2;}

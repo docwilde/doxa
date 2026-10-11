@@ -107,6 +107,7 @@ pub struct Client {
     next_id: u64,
     closed: bool,
     changed: bool,
+    catalog_generation: u64,
     catalog: BTreeMap<String,Tool>,
     secrets: Vec<String>,
 }
@@ -126,7 +127,7 @@ impl Client {
                 (Transport::Http(transport),secrets)
             }
         };
-        let mut client = Self { transport, config:config.clone(), info:None, next_id:1, closed:false, changed:false, catalog:BTreeMap::new(), secrets };
+        let mut client = Self { transport, config:config.clone(), info:None, next_id:1, closed:false, changed:false, catalog_generation:0, catalog:BTreeMap::new(), secrets };
         let initialized = client.initialize(cancel).await;
         if let Err(error) = initialized { client.close().await; return Err(error); }
         Ok(client)
@@ -179,10 +180,12 @@ impl Client {
         let request = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
         let attempted = Arc::new(AtomicBool::new(false));
         let limits = self.config.limits.clone();
+        let mut changed=false;
         let result = match &mut self.transport {
-            Transport::Stdio(transport) => bounded(transport.exchange(&request,id,&limits,attempted.clone(),&mut self.changed),timeout_ms,cancel).await,
-            Transport::Http(transport) => bounded(transport.exchange(&request,id,&limits,attempted.clone(),&mut self.changed),timeout_ms,cancel).await,
+            Transport::Stdio(transport) => bounded(transport.exchange(&request,id,&limits,attempted.clone(),&mut changed),timeout_ms,cancel).await,
+            Transport::Http(transport) => bounded(transport.exchange(&request,id,&limits,attempted.clone(),&mut changed),timeout_ms,cancel).await,
         };
+        if changed {self.changed=true;self.catalog_generation=self.catalog_generation.saturating_add(1);}
         self.finish_request(result,method,id,attempted.load(Ordering::SeqCst)).await
     }
     async fn finish_request(&mut self, result: Result<Value>, method: &str, id: u64, attempted: bool) -> Result<Value> {
@@ -211,6 +214,7 @@ impl Client {
     pub async fn list_tools(&mut self, cancel: Arc<AtomicBool>) -> Result<Vec<Tool>> {
         self.catalog.clear();
         self.changed = true;
+        let generation=self.catalog_generation;
         let deadline = std::time::Instant::now() + Duration::from_millis(self.config.limits.timeout_ms);
         let mut catalog = BTreeMap::new();
         let mut seen = BTreeSet::new();
@@ -233,6 +237,7 @@ impl Client {
             }
             match result.get("nextCursor") {
                 None => {
+                    if self.catalog_generation!=generation {return Err(Error::new(ErrorKind::CatalogChanged,true));}
                     self.catalog = catalog;
                     self.changed = false;
                     return Ok(self.catalog.values().cloned().collect());

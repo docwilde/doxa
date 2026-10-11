@@ -57,6 +57,8 @@ page = 0
 while True:
     request = receive()
     if request["method"] == "tools/list":
+        if mode == "list_changed" and page == 0:
+            print(json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}), flush=True)
         if mode == "messages":
             print(json.dumps({"jsonrpc": "2.0", "id": "server-ping", "method": "ping"}), flush=True)
             assert receive()["result"] == {}
