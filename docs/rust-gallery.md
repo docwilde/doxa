@@ -30,6 +30,8 @@ The current terminal images show the **DOXA 2.0.0-beta.46** production Ratatui `
 | Commands | [commands](../assets/shots/rust-2.0.0-beta.46-commands.png) | Slash-command completion |
 | Help | [help](../assets/shots/rust-2.0.0-beta.46-help.png) | Built-in command help |
 | Settings | [settings](../assets/shots/rust-2.0.0-beta.46-settings.png) | Actual click on the Appearance category in the submenu title bar; changes remain unsaved |
+| Jev Router settings | [settings-router](../assets/shots/rust-2.0.0-beta.46-settings-router.png) | Actual dropdown and text-editor staging of the Router default and private config path; readiness stays Not checked |
+| Routing status | [routing-status](../assets/shots/rust-2.0.0-beta.46-routing-status.png) | Synthetic Auto decision with separate effective API worker, latency and Jev-only routing estimate |
 | Context | [context](../assets/shots/rust-2.0.0-beta.46-context.png) | Reported 42,000 of 200,000 tokens, with exact synthetic system, tool and conversation components |
 | Queued prompts | [queued-prompts](../assets/shots/rust-2.0.0-beta.46-queued-prompts.png) | Markdown and user stripe on a queued prompt while a turn is running |
 | Peer messages | [peer-messages](../assets/shots/rust-2.0.0-beta.46-peer-messages.png) | Trusted sender attribution, blue stripe and robot marker on received and queued peer work |
@@ -46,7 +48,7 @@ cargo build --locked -j 2 -p doxa-tui --example gallery
 python3 scripts/render_rust_gallery.py --binary target/debug/examples/gallery
 ```
 
-The script requires `TMPDIR` on real disk, checks each scene's binary version against `rust/doxa-tui/Cargo.toml` and the visible hero version, writes `rust-2.0.0-beta.46-*.png` under `assets/shots`, and verifies every image is 3068 × 1734. It also checks visible feature content in the new Settings, context and message scenes. Pass scene names after the options to render a subset. The Rust example uses the production `App` reducer and widgets; the Python step only paints Ratatui cells. The captures are deterministic fixture views, not screenshots of a terminal emulator or authenticated account.
+The script requires `TMPDIR` on real disk, checks each scene's binary version against `rust/doxa-tui/Cargo.toml` and the visible hero version, writes all **22** default `rust-2.0.0-beta.46-*.png` images under `assets/shots`, and verifies every image is 3068 × 1734. It also checks visible feature content in the new Settings, context, routing and message scenes. Pass scene names after the options to render a subset. The Rust example uses the production `App` reducer and widgets; the Python step only paints Ratatui cells. The captures are deterministic fixture views, not screenshots of a terminal emulator or authenticated account.
 
 ## Earlier live terminal captures
 
