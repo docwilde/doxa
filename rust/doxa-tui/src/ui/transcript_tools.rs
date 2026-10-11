@@ -443,9 +443,10 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                         let style = if selected.as_ref() == Some(&key) {
                             Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
                         } else { Style::default().fg(theme::SECONDARY) };
-                        lines.push(Line::styled(format!("  {} {}{} · {status} · Enter",
+                        let label = format!("  {} {}{} · {status} · Enter",
                             if glyphs { if call_open { "▾" } else { "▸" } } else if call_open { "v" } else { ">" },
-                            if glyphs { "🛠 " } else { "" }, display_tool_name(name)), style));
+                            if glyphs { "🛠 " } else { "" }, display_tool_name(name));
+                        lines.push(Line::styled(clip_header(&label, width), style));
                         if !call_open { continue; }
                         if let Some(card) = card {
                             if let Some(input) = &card.input { plain_detail(lines, "Input", input, width); }
@@ -492,7 +493,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 let style = if selected.as_ref() == Some(&index) {
                     Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
                 } else { Style::default().fg(theme::SECONDARY) };
-                lines.push(Line::styled(label, style));
+                lines.push(Line::styled(clip_header(&label, width), style));
                 if open {
                     if text.is_empty() {
                         lines.push(Line::styled(if streaming {

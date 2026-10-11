@@ -2514,6 +2514,7 @@ for line in sys.stdin:
     fn repository_chip_tracks_each_panes_actual_session_and_invalidates_stale_work() {
         use doxa_worktrees::RepoStatus;
         let mut app = App::default();
+        app.preferences.set_for_test("nerd_font", "0");
         app.rail_visible = false;
         app.handle(Event::Resize(220, 32));
         app.groups[0].tabs = vec!["a".into(), "b".into()];
@@ -2538,6 +2539,10 @@ for line in sys.stdin:
         assert!(rendered.contains("project ⎇ main @1234567"));
         assert!(rendered.contains("u ? · scope ?"));
         assert!(app.chips(1).contains(&("repo", "other ⎇ feature @abcdef0".into())));
+        app.preferences.set_for_test("nerd_font", "1");
+        assert!(app.chips(0).contains(&("repo", "project \u{e0a0} main @1234567".into())));
+        assert!(app.chips(1).contains(&("repo", "other \u{e0a0} feature @abcdef0".into())));
+        app.preferences.set_for_test("nerd_font", "0");
         app.groups[0].active = 1;
         assert!(app.chips(0).contains(&("directory", "dir scratch".into())));
         assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "repo"));
