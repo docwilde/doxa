@@ -3,7 +3,7 @@
 """Decide whether DOXA's pinned `lore-core` should move to a newer LORE tag.
 
 This is the brain of `.github/workflows/lore-bump.yml`; the workflow is the
-hands (git, cargo, gh pr). Keeping the decision here rather than in a YAML block
+hands (git, cargo, and `gh pr`). Keeping the decision here rather than in a YAML block
 scalar buys two things: it runs locally against the real GitHub API without a
 runner, and the rules below are ordinary functions with ordinary tests
 (scripts/tests/test_lore_bump.py) instead of shell that is only ever exercised in
@@ -17,9 +17,9 @@ Why this exists at all: `lore-core` is pinned to an immutable git ref
 (rust/doxa-lore/Cargo.toml), so installs and CI are frozen at that ref until a
 human approves an upgrade.
 
-Network access is `gh api` only -- gh is preinstalled and already
-authenticated both on a runner (GH_TOKEN) and on a maintainer's machine, so
-there is no token handling here and no third-party action in the workflow.
+Network access uses Python's standard-library HTTP client against the public
+GitHub API. It does not need or accept a GitHub token, including on the
+candidate-verification runner.
 
 Stdlib only, on purpose: the cheap `no upgrade available` path should not
 cost a dependency sync.
@@ -29,12 +29,15 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
+import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 import tomllib
+import urllib.error
+import urllib.request
 from urllib.parse import quote
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,6 +82,14 @@ class Decision:
     pinned_version: str = ""
 
 
+@dataclass(frozen=True)
+class CandidateArtifact:
+    tag: str
+    commit: str
+    native_manifest: bytes
+    cargo_lock: bytes
+
+
 # --------------------------------------------------------------------------
 # pure logic -- no network, no filesystem
 # --------------------------------------------------------------------------
@@ -105,6 +116,107 @@ def rewrite_native_pin(manifest: str, commit: str) -> str:
     if count != 1:
         raise SystemExit("native lore-core inline dependency shape changed; refusing partial pin update")
     return rewritten
+
+
+def require_candidate_lock_matches(candidate_raw: bytes, trusted_raw: bytes) -> None:
+    """Require the artifact's lock bytes to match Cargo's fresh publisher resolution.
+
+    Never infer authority or an allowed package closure from an artifact lock:
+    its dependency edges are themselves candidate-controlled input.
+    """
+    if candidate_raw != trusted_raw:
+        raise SystemExit("candidate Cargo.lock differs from the trusted publisher resolution")
+
+
+def _artifact_file(directory: Path, name: str, maximum: int) -> bytes:
+    path = directory / name
+    try:
+        import stat
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise SystemExit(f"candidate artifact has unsafe file {name}") from error
+        raise SystemExit(f"candidate artifact is missing {name}") from error
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
+            raise SystemExit(f"candidate artifact has unsafe file {name}")
+        data = stream.read(maximum + 1)
+        after = os.fstat(stream.fileno())
+        identity = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        if (len(data) > maximum or len(data) != before.st_size
+                or identity(before) != identity(after)):
+            raise SystemExit(f"candidate artifact changed while reading {name}")
+        return data
+
+
+def validate_candidate_artifact(directory: Path, *, expected_base: str,
+                                native_manifest_path: Path) -> CandidateArtifact:
+    """Validate an untrusted CI artifact without executing any candidate code."""
+    try:
+        import stat
+        directory_stat = directory.lstat()
+    except OSError as error:
+        raise SystemExit("candidate artifact directory is unavailable") from error
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        raise SystemExit("candidate artifact root is not a real directory")
+    try:
+        entries = {entry.name for entry in directory.iterdir()}
+    except OSError as error:
+        raise SystemExit("candidate artifact directory is unavailable") from error
+    if entries != {"candidate.json", "native-Cargo.toml", "Cargo.lock"}:
+        raise SystemExit("candidate artifact contains an unexpected file set")
+    metadata_raw = _artifact_file(directory, "candidate.json", 4096)
+    native_manifest = _artifact_file(directory, "native-Cargo.toml", 32768)
+    cargo_lock = _artifact_file(directory, "Cargo.lock", 2 * 1024 * 1024)
+    try:
+        metadata = json.loads(metadata_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SystemExit("candidate artifact metadata is invalid JSON") from error
+    fields = {"schema", "base_sha", "tag", "commit", "native_manifest_sha256", "cargo_lock_sha256"}
+    if not isinstance(metadata, dict) or set(metadata) != fields or metadata.get("schema") != 1:
+        raise SystemExit("candidate artifact metadata has an unexpected schema")
+    if (not re.fullmatch(r"[0-9a-f]{40}", expected_base)
+            or metadata.get("base_sha") != expected_base):
+        raise SystemExit("candidate artifact was prepared from a different base commit")
+    tag, commit = metadata.get("tag"), metadata.get("commit")
+    if not isinstance(tag, str) or version_of(tag) is None:
+        raise SystemExit("candidate artifact tag is not a stable version tag")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise SystemExit("candidate artifact commit is not an immutable SHA")
+    digests = {
+        "native_manifest_sha256": hashlib.sha256(native_manifest).hexdigest(),
+        "cargo_lock_sha256": hashlib.sha256(cargo_lock).hexdigest(),
+    }
+    if any(metadata.get(name) != digest for name, digest in digests.items()):
+        raise SystemExit("candidate artifact digest mismatch")
+
+    baseline_manifest = native_manifest_path.read_text(encoding="utf-8")
+    baseline_pin = parse_native_pin(baseline_manifest)
+    if baseline_pin.slug != "docwilde/LORE":
+        raise SystemExit("publisher baseline points at an unexpected native LORE repository")
+    expected_manifest = rewrite_native_pin(baseline_manifest, commit).encode("utf-8")
+    if native_manifest != expected_manifest:
+        raise SystemExit("candidate manifest changes more than the immutable LORE pin")
+    resolved = fetch_commit(baseline_pin.slug, tag)
+    if resolved != commit:
+        raise SystemExit("candidate tag no longer resolves to the claimed immutable commit")
+    state = fetch_native_state(baseline_pin.slug, commit)
+    if not state.packaged or (state.version and version_of("v" + state.version) != version_of(tag)):
+        raise SystemExit("candidate commit does not contain matching native LORE packaging")
+    tags = fetch_tags(baseline_pin.slug)
+    if newest_tag(tags) != tag:
+        raise SystemExit("candidate tag is no longer the newest stable LORE release")
+    decision = decide(
+        pinned_ref=baseline_pin.ref,
+        pinned=fetch_native_state(baseline_pin.slug, baseline_pin.ref),
+        tags=tags,
+        candidate=state,
+        slug=baseline_pin.slug,
+    )
+    if decision.action != "propose":
+        raise SystemExit("candidate tag is not a valid upgrade from the trusted baseline")
+    return CandidateArtifact(tag, commit, native_manifest, cargo_lock)
 
 
 def version_of(tag: str) -> tuple[int, int, int] | None:
@@ -232,21 +344,35 @@ def decide(
 
 
 def gh_api(path: str, *, paginate: bool = False) -> object | None:
-    """One `gh api` call. None on 404, which is a fact here, not a failure."""
-    cmd = ["gh", "api"]
-    if paginate:
-        # Plain --paginate, not --slurp: gh merges top-level arrays across
-        # pages into one array on its own, and --slurp does not exist before
-        # gh 2.51 (Ubuntu ships 2.46), which would break the local run this
-        # script is meant to be verifiable by.
-        cmd.append("--paginate")
-    cmd.append(path)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        if "404" in proc.stderr or "Not Found" in proc.stderr:
-            return None
-        raise SystemExit(f"gh api {path} failed:\n{proc.stderr.strip()}")
-    return json.loads(proc.stdout or "null")
+    """Read GitHub's public API without exposing a token to candidate code."""
+    values: list[object] = []
+    page = 1
+    while True:
+        url = f"https://api.github.com/{path}&page={page}" if "?" in path else f"https://api.github.com/{path}?page={page}"
+        request = urllib.request.Request(url, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "doxa-lore-bump/1",
+            "X-GitHub-Api-Version": "2022-11-28",
+        })
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                value = json.load(response)
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return None
+            raise SystemExit(f"GitHub API request failed with HTTP {error.code}") from error
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+            raise SystemExit(f"GitHub API request failed: {error}") from error
+        if not paginate:
+            return value
+        if not isinstance(value, list):
+            raise SystemExit("GitHub API returned a non-list page")
+        values.extend(value)
+        if len(value) < 100:
+            return values
+        page += 1
+        if page > 100:
+            raise SystemExit("GitHub API pagination exceeded the release-tag bound")
 
 
 def fetch_tags(slug: str) -> list[str]:
@@ -305,7 +431,44 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--repo", help="override the dependency repo, for what-if runs")
     parser.add_argument("--pin", help="override the current pin, for what-if runs")
+    parser.add_argument("--validate-candidate-artifact", type=Path,
+                        help="validate an untrusted CI artifact without executing it")
+    parser.add_argument("--compare-candidate-lock", nargs=2, type=Path, metavar=("ARTIFACT", "TRUSTED"),
+                        help="compare bounded artifact lock bytes with the publisher's Cargo lock")
+    parser.add_argument("--expected-base", help="required base commit for artifact validation")
+    parser.add_argument("--native-manifest-baseline", type=Path,
+                        help="trusted baseline manifest used to validate an artifact")
     args = parser.parse_args(argv)
+
+    if args.compare_candidate_lock:
+        artifact_path, trusted_path = args.compare_candidate_lock
+        candidate_lock = _artifact_file(artifact_path.parent, artifact_path.name, 2 * 1024 * 1024)
+        try:
+            trusted_lock = trusted_path.read_bytes()
+        except OSError as error:
+            raise SystemExit("trusted publisher Cargo.lock is unavailable") from error
+        if len(trusted_lock) > 2 * 1024 * 1024:
+            raise SystemExit("trusted publisher Cargo.lock exceeds the size bound")
+        require_candidate_lock_matches(candidate_lock, trusted_lock)
+        print("Candidate Cargo.lock matches the trusted publisher resolution")
+        return 0
+
+    if args.validate_candidate_artifact:
+        if not (args.expected_base and args.native_manifest_baseline):
+            parser.error("artifact validation requires --expected-base and --native-manifest-baseline")
+        candidate = validate_candidate_artifact(
+            args.validate_candidate_artifact,
+            expected_base=args.expected_base,
+            native_manifest_path=args.native_manifest_baseline,
+        )
+        pinned_ref = parse_native_pin(args.native_manifest_baseline.read_text(encoding="utf-8")).ref
+        print(f"Validated candidate {candidate.tag} at {candidate.commit}")
+        output = os.environ.get("GITHUB_OUTPUT")
+        if output:
+            with open(output, "a", encoding="utf-8") as handle:
+                handle.write(f"tag={candidate.tag}\n")
+                handle.write(f"pinned_ref={pinned_ref}\n")
+        return 0
 
     manifest = args.native_manifest.read_text(encoding="utf-8")
     pin = parse_native_pin(manifest)

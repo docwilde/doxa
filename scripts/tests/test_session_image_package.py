@@ -20,9 +20,8 @@ ACTUAL_PATCH_SHA256 = hashlib.sha256(installer.PATCH.read_bytes()).hexdigest()
 
 class PackageTests(unittest.TestCase):
     def setUp(self):
-        directory = SCRIPT.parents[1] / "target/script-tests"
-        directory.mkdir(parents=True, exist_ok=True)
-        self.temporary = tempfile.TemporaryDirectory(dir=directory)
+        self.temporary = tempfile.TemporaryDirectory(prefix="session-image-package-",
+                                                     dir=os.environ.get("TMPDIR"))
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.worker = self.root / "worker-source"
@@ -55,6 +54,42 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(image.PATCH, installer.PATCH_SHA256)
         self.assertEqual(image.SOURCE, installer.SOURCE)
         self.assertEqual(image.CONTRACT, installer.CONTRACT)
+
+    def test_apt_inputs_are_snapshot_and_version_pinned(self):
+        context = self.context()
+        manifest = image.copy_apt_inputs(context, "debian-bookworm")
+        ubuntu_context = self.root / "ubuntu-context"
+        ubuntu_context.mkdir(mode=0o700)
+        ubuntu_manifest = image.copy_apt_inputs(ubuntu_context, "ubuntu-noble")
+        self.assertEqual(manifest["apt_snapshot"], "20260901T000000Z")
+        self.assertEqual(manifest["apt_family"], "debian-bookworm")
+        self.assertEqual(manifest["apt_supported_architectures"], ["amd64", "arm64"])
+        self.assertEqual(ubuntu_manifest["apt_family"], "ubuntu-noble")
+        self.assertEqual(ubuntu_manifest["apt_supported_architectures"], ["amd64", "arm64"])
+        exact_pins = {
+            "debian-bookworm": {
+                "bash": "5.2.15-2+b13", "ca-certificates": "20230311+deb12u1",
+                "git": "1:2.39.5-0+deb12u3", "python3": "3.11.2-1+b1",
+            },
+            "ubuntu-noble": {
+                "bash": "5.2.21-2ubuntu4", "ca-certificates": "20260601~24.04.1",
+                "git": "1:2.43.0-1ubuntu7.3", "python3": "3.12.3-0ubuntu2.1",
+            },
+        }
+        for family, root in (("debian-bookworm", context), ("ubuntu-noble", ubuntu_context)):
+            sources = root / "apt" / f"{family}.sources"
+            packages_path = root / "apt" / f"{family}.packages"
+            self.assertTrue(sources.is_file())
+            packages = packages_path.read_text().splitlines()
+            self.assertEqual(set(row.split("=", 1)[0] for row in packages), image.APT_PACKAGES)
+            self.assertEqual(dict(row.split("=", 1) for row in packages), exact_pins[family])
+        dockerfile = (SCRIPT.parents[1] / "containers/session/Dockerfile").read_text()
+        self.assertIn('debian:bookworm:debian-bookworm', dockerfile)
+        self.assertIn('ubuntu:noble:ubuntu-noble', dockerfile)
+        self.assertIn("apt-get update", dockerfile)
+        self.assertIn("apt-get install -y --no-install-recommends", dockerfile)
+        self.assertIn("COPY apt/ /opt/doxa-apt/", dockerfile)
+        self.assertIn("case \"$arch\" in amd64|arm64)", dockerfile)
 
     def test_rejects_legacy_protected_patch_receipt(self):
         self.receipt["patch_sha256"] = installer.LEGACY_PATCH_SHA256
@@ -113,7 +148,13 @@ class PackageTests(unittest.TestCase):
         evidence = image.populate_context(context, self.worker, None, None)
         self.assertEqual(list((context / "providers").iterdir()), [])
         self.assertEqual(list((context / "codex-provider").iterdir()), [])
-        self.assertEqual(evidence, {"worker_sha256": hashlib.sha256(self.worker.read_bytes()).hexdigest()})
+        self.assertEqual(evidence["worker_sha256"], hashlib.sha256(self.worker.read_bytes()).hexdigest())
+        self.assertEqual(evidence["apt_snapshot"], image.APT_SNAPSHOT)
+        self.assertEqual(evidence["apt_family"], "debian-bookworm")
+        self.assertEqual(evidence["apt_supported_architectures"], ["amd64", "arm64"])
+        self.assertEqual(evidence["apt_sources_sha256"], hashlib.sha256((context / "apt/debian-bookworm.sources").read_bytes()).hexdigest())
+        self.assertEqual(evidence["apt_packages_sha256"], hashlib.sha256((context / "apt/debian-bookworm.packages").read_bytes()).hexdigest())
+        self.assertEqual(evidence["dockerfile_sha256"], hashlib.sha256((context / "Dockerfile").read_bytes()).hexdigest())
 
 
 if __name__ == "__main__":

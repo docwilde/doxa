@@ -1,0 +1,4 @@
+# Review and advance the snapshot date together with debian-bookworm.packages.
+deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260901T000000Z bookworm main
+deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260901T000000Z bookworm-updates main
+deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260901T000000Z bookworm-security main

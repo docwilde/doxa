@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Build the reviewed session image from an explicit, credential-free context.
 
-The base is pinned by registry digest; the resulting local content ID is the
-runtime pin. Provider packages keep their existing verified payload receipts.
-No host home, repository Dockerfile, login file or configuration is copied.
+The Debian/Ubuntu base is pinned by registry digest; apt inputs are fixed to a
+reviewed dated snapshot and direct package manifest. The resulting local
+content ID is the runtime pin. Provider packages keep their verified receipts.
+No host home, login file or host configuration is copied.
 """
 from __future__ import annotations
 
@@ -28,6 +29,10 @@ CONTRACT = "doxa-precompact-fail-closed-v1"
 SOURCE = "b412ff32c417f855c2b2d1581b77058eed87c84b"
 PATCH = "23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d"
 MAX_BINARY = 1024 * 1024 * 1024
+APT_SNAPSHOT = "20260901T000000Z"
+APT_PACKAGES = {"bash", "ca-certificates", "git", "python3"}
+APT_FAMILIES = {"debian-bookworm", "ubuntu-noble"}
+APT_ARCHITECTURES = ("amd64", "arm64")
 
 
 def owned_file(path: Path, maximum: int, *, private: bool = False,
@@ -84,8 +89,43 @@ def copy_codex_package(source: Path, destination: Path) -> dict:
     return {"source_commit": SOURCE, "receipt_sha256": hashlib.sha256(raw).hexdigest()}
 
 
+def copy_apt_inputs(context: Path, base_family: str = "debian-bookworm") -> dict:
+    if base_family not in APT_FAMILIES:
+        raise ValueError("unsupported apt base family")
+    source_path = REPO / f"containers/session/apt/{base_family}.sources"
+    packages_path = REPO / f"containers/session/apt/{base_family}.packages"
+    sources = source_path.read_bytes()
+    packages = packages_path.read_bytes()
+    source_text = sources.decode("ascii")
+    if base_family == "debian-bookworm":
+        snapshot_pattern = r"snapshot\.debian\.org/archive/(?:debian|debian-security)/(\d{8}T\d{6}Z)"
+    else:
+        snapshot_pattern = r"snapshot\.ubuntu\.com/ubuntu/(\d{8}T\d{6}Z)"
+    snapshots = re.findall(snapshot_pattern, source_text)
+    if len(snapshots) != 3 or set(snapshots) != {APT_SNAPSHOT}:
+        raise ValueError(f"{base_family} apt sources do not match the reviewed snapshot")
+    package_rows = packages.decode("ascii").splitlines()
+    parsed = []
+    for row in package_rows:
+        match = re.fullmatch(r"([a-z0-9][a-z0-9+.-]*)=([A-Za-z0-9:~.+-]+)", row)
+        if not match:
+            raise ValueError(f"{base_family} apt lock contains a malformed package pin")
+        parsed.append(match.group(1))
+    if len(parsed) != len(set(parsed)) or set(parsed) != APT_PACKAGES:
+        raise ValueError(f"{base_family} apt lock must pin the reviewed direct package set exactly")
+    shutil.copytree(REPO / "containers/session/apt", context / "apt")
+    return {
+        "apt_family": base_family,
+        "apt_snapshot": APT_SNAPSHOT,
+        "apt_supported_architectures": list(APT_ARCHITECTURES),
+        "apt_sources_sha256": hashlib.sha256(sources).hexdigest(),
+        "apt_packages_sha256": hashlib.sha256(packages).hexdigest(),
+        "dockerfile_sha256": hashlib.sha256((REPO / "containers/session/Dockerfile").read_bytes()).hexdigest(),
+    }
+
+
 def populate_context(context: Path, worker: Path, claude: Path | None,
-                     codex: Path | None) -> dict:
+                     codex: Path | None, base_family: str = "debian-bookworm") -> dict:
     providers = context / "providers"
     providers.mkdir(mode=0o700)
     package = context / "codex-provider"
@@ -96,6 +136,7 @@ def populate_context(context: Path, worker: Path, claude: Path | None,
     if codex is not None:
         manifest["codex"] = copy_codex_package(codex, package)
     shutil.copyfile(REPO / "containers/session/Dockerfile", context / "Dockerfile")
+    manifest.update(copy_apt_inputs(context, base_family))
     (context / "build-manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
     return manifest
 
@@ -107,6 +148,8 @@ def run(command: list[str]) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-image", required=True, help="reviewed Debian/Ubuntu image NAME@sha256:DIGEST")
+    parser.add_argument("--base-family", required=True, choices=sorted(APT_FAMILIES),
+                        help="must match the digest-pinned image's Debian/Ubuntu release")
     parser.add_argument("--worker", required=True, type=Path)
     parser.add_argument("--claude-bin", type=Path)
     parser.add_argument("--codex-provider", type=Path, help="installed protected provider directory; credentials are never copied")
@@ -129,8 +172,9 @@ def main() -> None:
     args.cache.chmod(0o700)
     with tempfile.TemporaryDirectory(prefix="context-", dir=args.cache) as directory:
         context = Path(directory)
-        manifest = populate_context(context, args.worker, args.claude_bin, args.codex_provider)
+        manifest = populate_context(context, args.worker, args.claude_bin, args.codex_provider, args.base_family)
         subprocess.run(docker + ["build", "--build-arg", f"BASE_IMAGE={args.base_image}",
+                                "--build-arg", f"BASE_FAMILY={args.base_family}",
                                 "--tag", args.tag, str(context)], check=True)
         image = run(docker + ["image", "inspect", args.tag, "--format", "{{.Id}}"])
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):

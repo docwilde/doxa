@@ -4,7 +4,7 @@ from pathlib import Path
 TREE=Path(__file__).resolve().parents[2]
 
 class InstallTransactionTests(unittest.TestCase):
-    def exercise(self, failure):
+    def exercise(self, failure, expected_sha=None):
         directory=tempfile.TemporaryDirectory(prefix='install-transaction-')
         self.addCleanup(directory.cleanup)
         root=Path(directory.name)
@@ -33,6 +33,7 @@ class InstallTransactionTests(unittest.TestCase):
         #!/usr/bin/python3
         import os
         from pathlib import Path
+        Path(os.environ['AUDIT_CARGO_MARKER']).write_text('cargo ran')
         out=Path(os.environ['CARGO_TARGET_DIR'])/'audit-fixture/release';out.mkdir(parents=True,exist_ok=True)
         for name in ['doxa-rs','doxa-plugin-worker','doxa-daemon-rs','doxa-remote','doxa-isolation-worker','lore-rs','doxa-router-eval','doxa-codex-protected']:
          p=out/name;p.write_text('#!/bin/sh\\nexit 0\\n');p.chmod(0o700)
@@ -54,7 +55,9 @@ class InstallTransactionTests(unittest.TestCase):
         case "$AUDIT_FAILURE:$*" in stage:*.doxa-install.*/doxa-rs) echo 'injected ENOSPC staging failure' >&2; exit 1;; esac
         exec /usr/bin/cp "$@"
         ''')
-        env=dict(os.environ,TMPDIR=str(root),PATH=f'{tools}:/usr/bin:/bin',AUDIT_ROOT=str(root),AUDIT_TREE=str(TREE),DOXA_HOME=str(home),DOXA_RUST_BIN_DIR=str(bins),DOXA_INSTALL_CACHE_DIR=str(root/'cache'),DOXA_INSTALL_CODEX_PROTECTED='1',DOXA_NO_LAUNCHER='1')
+        cargo_marker=root/'cargo-called'
+        env=dict(os.environ,TMPDIR=str(root),PATH=f'{tools}:/usr/bin:/bin',AUDIT_ROOT=str(root),AUDIT_TREE=str(TREE),AUDIT_CARGO_MARKER=str(cargo_marker),DOXA_HOME=str(home),DOXA_RUST_BIN_DIR=str(bins),DOXA_INSTALL_CACHE_DIR=str(root/'cache'),DOXA_INSTALL_CODEX_PROTECTED='1',DOXA_NO_LAUNCHER='1')
+        if expected_sha is not None: env['DOXA_RUST_EXPECTED_SHA']=expected_sha
         tool('mv','''\
         #!/bin/sh
         case "$AUDIT_FAILURE:$*" in handoff:*.doxa-install.*/doxa-plugin-worker*) echo 'injected handoff failure' >&2; exit 1;; esac
@@ -64,7 +67,11 @@ class InstallTransactionTests(unittest.TestCase):
         before=os.readlink(provider/'codex-current') if (provider/'codex-current').is_symlink() else None
         run=subprocess.run(['/bin/sh',str(TREE/'scripts/install.sh'),'HEAD'],env=env,capture_output=True,text=True,timeout=15)
         self.assertNotEqual(run.returncode,0,run.stdout+run.stderr)
-        self.assertIn('injected',run.stderr)
+        if expected_sha is None:
+            self.assertIn('injected',run.stderr)
+        else:
+            self.assertIn('does not match DOXA_RUST_EXPECTED_SHA',run.stderr)
+            self.assertFalse(cargo_marker.exists(),run.stdout+run.stderr)
         self.assertEqual((bins/'doxa-rs').read_bytes(),b'old frontend untouched')
         after=os.readlink(provider/'codex-current') if (provider/'codex-current').is_symlink() else None
         self.assertEqual(before,after,run.stdout+run.stderr)
@@ -72,5 +79,6 @@ class InstallTransactionTests(unittest.TestCase):
         self.assertFalse((bins/'doxa-plugin-worker').exists())
     def test_provider_rolls_back_after_staging_failure(self): self.exercise('stage')
     def test_provider_and_frontend_roll_back_after_handoff_failure(self): self.exercise('handoff')
+    def test_caller_sha_mismatch_stops_before_cargo(self): self.exercise('none',expected_sha='0'*40)
 
 if __name__=='__main__': unittest.main()
