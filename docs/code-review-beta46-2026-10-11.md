@@ -38,11 +38,13 @@ The focused integration results below belong to the beta.47 candidate.
 | Medium: transcript append | Write-open of an owned FIFO blocked before regular-file validation. | Nonblocking open; all four public append APIs tested both with and without a reader. |
 | Medium: Git discovery | Startup scope lookup had no process, pipe or output bound. | Shared bounded observer preserves main/linked-worktree identity; stalled, descendant-held and oversized output fixtures passed. |
 | Medium: terminal shutdown | A full command target could strand CommandRouter shutdown at join. | Typed nonblocking admission/refusal and receiver lifetime ordering; bounded mixed-router tests passed. The original proof used the exact methods with inert transport stubs. |
+| Medium: peer discovery | Blocking socket probes could stall discovery and native peer-tool dispatch behind a full listener backlog. | Shared nonblocking probes with 100 ms per peer and one two-second roster allowance; actual daemon and multi-backlog focused verification pending. Live records are retained on timeout. |
 | Medium: fleet accounting | Failed reserved calls could display a zero complete token estimate. | Sticky unknown accounting and pause; preserve reservations/known subtotal, label total unknown. Journal-only regression and debrief checks passed. |
 | Medium: remote HTTP | JSON collection from a configured hub had no byte cap. | Count streamed bytes before parsing, bound total time and preserve eight-command envelope; local oversized/streamed/stalled-body fixtures passed. |
 | Medium: Android alerts | The 24-hour registration expired without foreground renewal. | Monotonic lease proof, foreground/timer renewal, stale-callback rejection; pure protocol fixtures passed. No live push delivery claim. |
 | Medium: installation | Protected Codex publication survived a later failed frontend install. | Exact-publication rollback receipt joins the outer transaction; two actual-shell failure injections and 17 installer checks passed. Power-loss/concurrent frontend atomicity remains unproved. |
 | Low: stored Python graph | Public LORE snapshot lookup rejected Python despite parser/viewer support. | Admit exact rs/py extensions and exercise public native store plus CLI lookup; focused verification pending. |
+| Medium: isolation command runner | The helper's 45-second child deadline did not bound joins when a descendant retained output pipes. | Confirmed with exact frozen helper code and a private local child; correction and focused verification pending. A live Docker trigger was not tested. |
 | Low: Settings draw | Completed Router review reopens private config/key storage during paint. | **Open:** move freshness checks to a bounded controller worker while preserving save/start admission checks. No measured latency or security-bypass claim. |
 
 The native key and FIFO reproductions used controlled fake provider processes.
@@ -95,8 +97,8 @@ freshness require measurement before making performance claims.
   inspection covers egress/quota/runner/migration and broker boundaries.
   No live container/kernel enforcement or provider entitlement was verified.
 
-Unresolved candidates include inherited pipe ownership after child exit and
-whether event authentication should bind a restarted session incarnation.
+Unresolved candidates include whether event authentication should bind a restarted session incarnation,
+gateway dial/shutdown bounds and aggregate client queue memory.
 These are recorded as uncertainties, not confirmed exploits. Live Docker
 quotas/egress, authenticated search services, physical Android/FCM, tailnet,
 semantic codegraph/fleet quality, crash durability and dependency advisory

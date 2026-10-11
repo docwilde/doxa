@@ -18,14 +18,20 @@ DOXA keeps one engine per session. The model picker shows choices reported by or
 | Session recovery | Verified native conversation | Same protected thread | Durable DOXA conversation | Durable DOXA conversation | Explicit same-config hash resume; canonical router history + private native worker proof |
 | Model change | Idle session, verified against CLI settings | Next turn on same thread | Idle session, catalog choice | Idle session, catalog choice | Idle `/model auto` or exact configured target ID |
 | Reasoning effort | Reported choices | Reported choices | Model-dependent | Model-dependent | Fixed per configured target; effective effort in route status |
-| Tool permissions | Provider controls plus DOXA peer/LORE review | On-request, auto, or full-access; peer/LORE review stays active | DOXA peer/LORE review | DOXA peer/LORE review | Native manual/default or explicit idle Auto; DOXA reviews stay active |
+| Tool permissions | Provider controls plus DOXA peer/LORE review | On-request, auto, or full-access; full-access admits built-in peer tools | DOXA peer/LORE review | DOXA peer/LORE review | Native manual/default or explicit idle Auto; target-specific DOXA reviews |
 | Compaction | LORE review before provider compaction | Trusted `PreCompact` review in private build | Reviewed summary checkpoint | Reviewed summary checkpoint | Reviewed API summary; CLI summary target refused, originals retained |
 
 Provider tool features depend on the installed CLI, model, and account. `/model`, `/effort`, and `/mode` expose only supported choices. Changes wait for the current turn and queue to finish. The picker can show separately sourced context, thinking, and price facts for an exact model ID; unknown fields stay unknown and facts do not make a model selectable. [Model fact provenance](plans/model-registry.md).
 
 ## Review and accounting
 
-Codex `on-request` reviews protected commands, file changes, and permission profiles inline. `auto` retains its sandbox; `full-access` removes that sandbox. DOXA peer and LORE tools keep their own human review in every mode. DeepSeek and GLM have no provider permission mode; their peer and LORE calls are individually reviewed. Optional vendor workspace reads are off by default. Explicit external MCP tools are available to API workers, with mandatory one-call review, server-qualified names and scrubbed bounded results; native CLI workers retain their own MCP ownership. See [external API MCP tools](vendor-mcp.md). External MCP charges are unknown and outside the model allowance.
+Codex `on-request` reviews protected commands, file changes, and permission profiles inline. `auto` retains its sandbox; `full-access` removes that sandbox. In beta.47, authoritative Codex `full-access` also admits the exact registered built-in peer list, send and history tools without a second DOXA approval. Exact session IDs, scope, credential scrubbing, rate and fleet checks still apply. `on-request` and `auto` retain peer review; changing to Auto during a turn leaves a pending peer review actionable. LORE, child-session and external MCP review gates remain active. DeepSeek and GLM have no provider permission mode; their peer and LORE calls are individually reviewed. Optional vendor workspace reads are off by default. Explicit external MCP tools are available to API workers, with mandatory one-call review, server-qualified names and scrubbed bounded results; native CLI workers retain their own MCP ownership. See [external API MCP tools](vendor-mcp.md). External MCP charges are unknown and outside the model allowance.
+
+Incoming direct peer messages can start a model turn when Settings → Session →
+**Wake on peer messages** is enabled. A busy receiver queues the message after
+its current turn. The saved setting is checked when the message arrives;
+an explicit process/fleet environment override takes precedence. Wake remains
+off by default, and broadcasts do not start turns.
 
 Router Auto is a target-selection choice, separate from permission mode. It does
 not grant permissions. API workers keep their narrower tool surface; native
