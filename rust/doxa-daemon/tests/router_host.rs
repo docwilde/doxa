@@ -3,6 +3,7 @@
 #[path = "../src/budget_host.rs"] mod budget_host;
 #[path = "../src/vendor_host.rs"] mod vendor_host;
 #[path = "../src/vendor_tools.rs"] mod vendor_tools;
+#[path = "../src/vendor_mcp.rs"] mod vendor_mcp;
 #[path = "../src/claude_host.rs"] mod claude_host;
 #[path = "../src/codex_host.rs"] mod codex_host;
 #[path = "../src/router_cli.rs"] mod router_cli;
