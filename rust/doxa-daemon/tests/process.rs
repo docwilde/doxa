@@ -4249,8 +4249,11 @@ assert not sys.stdin.readline()
 fn memory_off_codex_scrubs_and_records_without_snapshot_index_or_compact_review() {
     for (configured, override_env, enabled) in [("0", None, false), ("1", Some("off"), false)] {
         let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir(dir.path().join("home")).unwrap();
+        fs::set_permissions(dir.path().join("home"), fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(dir.path().join("home/config.toml"), format!("lore = '{configured}'\n")).unwrap();
+        fs::set_permissions(dir.path().join("home/config.toml"), fs::Permissions::from_mode(0o600)).unwrap();
         let codex = dir.path().join("codex-fixture");
         let captured = dir.path().join("stdin.txt");
         native_memory_fixture(dir.path(),"- durable memory\n");
