@@ -6,6 +6,7 @@ use doxa_runtime::Host;
 use doxa_vendors::{TurnLimits, Vendor};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::time::Duration;
 use std::{fs, io::{self, Read, Write}, path::{Path, PathBuf},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}};
@@ -216,6 +217,13 @@ impl RouterHost {
     pub fn shutdown(&self) {
         self.closing.store(true, Ordering::Release); self.cancel.store(true, Ordering::Release);
         if let Some(worker)=self.active_worker.lock().unwrap().clone() { let _=worker.host().call("interrupt",&json!({})); }
+        // Catalog and protected startup own provisional children before an
+        // active worker exists. Cancellation wakes those owners; keep the
+        // daemon alive until their bounded teardown has completed.
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        while self.active.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         self.inner.shutdown();
     }
     fn save(&self, state: &mut State) -> Result<(), String> {
@@ -256,7 +264,7 @@ impl RouterHost {
             if !self.config.candidates.iter().any(|candidate|candidate.provider == provider
                 && pinned.is_none_or(|id|candidate.id == id)) { continue; }
             if self.cancel.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) { break; }
-            if let Ok(rows)=self.cli.catalog(provider,&self.cwd) { cli_catalogs.push((provider,rows)); }
+            if let Ok(rows)=self.cli.catalog(provider,&self.cwd,&self.cancel) { cli_catalogs.push((provider,rows)); }
         } }
         self.config.candidates.iter().filter(|candidate| {
             if pinned.is_some_and(|id| candidate.id != id) { return false; }
@@ -431,7 +439,7 @@ impl RouterHost {
                 "input_cap_bytes":cap,"output_cap_tokens":candidate.max_output_tokens,"permission":state.permission}));
             self.save(&mut state)?;state.permission.clone()
         };
-        let worker=match self.cli.start(candidate,&self.cwd,&worker_id,&permission,self.inner.router_agent()) {
+        let worker=match self.cli.start(candidate,&self.cwd,&worker_id,&permission,self.inner.router_agent(),&self.cancel) {
             Ok(worker)=>worker,
             Err(_)=>{let mut state=self.state.lock().unwrap();state.pending_cli=None;state.incomplete=false;self.save(&mut state)?;
                 return Err("Selected CLI worker authentication, catalog or protected startup unavailable; no user prompt submitted".into());}

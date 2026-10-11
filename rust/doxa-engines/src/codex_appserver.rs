@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -119,6 +120,10 @@ async fn next_live_auto(control: &mut Option<&mut tokio::sync::mpsc::Receiver<Li
         Some(receiver) => receiver.recv().await,
         None => std::future::pending().await,
     }
+}
+
+async fn wait_cancelled(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Acquire) { tokio::time::sleep(Duration::from_millis(10)).await; }
 }
 
 fn provider_approval(method: &Value) -> bool {
@@ -254,6 +259,13 @@ impl AppServerDriver {
 
     async fn initialize_with_gate(options: AppServerOptions, scrub: impl Fn(&str) -> String + Send + Sync + 'static,
         compact_gate: Option<crate::codex_compact::CompactGate>) -> Result<Self, AppServerError> {
+        Self::initialize_with_gate_cancel(options, scrub, compact_gate, None).await
+    }
+
+    async fn initialize_with_gate_cancel(options: AppServerOptions,
+        scrub: impl Fn(&str) -> String + Send + Sync + 'static,
+        compact_gate: Option<crate::codex_compact::CompactGate>, cancel: Option<&AtomicBool>) -> Result<Self, AppServerError> {
+        if cancel.is_some_and(|cancel|cancel.load(Ordering::Acquire)) { return Err(AppServerError::Cancelled); }
         if options.resume_thread.as_deref().is_some_and(|id| !valid_thread_id(id)) {
             return Err(AppServerError::Protocol("invalid resume thread ID"));
         }
@@ -296,36 +308,48 @@ impl AppServerDriver {
             pending_bytes: 0,
             tool_normalizer: CodexJsonlNormalizer::new(move |text| tool_scrub(text)),
         };
-        if let Some(control) = driver.owner_control.as_mut() {
-            crate::provider_owner::acknowledge(control).await?;
-            // No await separates sending G from selecting owner-only teardown.
-            driver.supervised = true;
-        }
-        let initialized = driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
-        driver.live_auto_supported = initialized["userAgent"].as_str().is_some_and(|agent|
-            agent.starts_with(crate::codex_compact::PROTECTED_AGENT_PREFIX) && agent.contains("; doxa-midturn-auto-v1; "));
-        driver.send(json!({"method":"initialized"})).await?;
-        if driver.compact_gate.is_some() {
-            // The server's build version is authoritative. The client version
-            // in its suffix never becomes proof of the provider hook contract.
-            let version = initialized["userAgent"].as_str().and_then(provider_version);
-            if version != Some(crate::codex_compact::SUPPORTED_VERSION) {
-                return Err(AppServerError::Protocol("Codex build has no verified DOXA compaction hook contract"));
-            }
-            if !initialized["userAgent"].as_str().is_some_and(|agent| agent.starts_with(
-                crate::codex_compact::PROTECTED_AGENT_PREFIX)) {
-                return Err(AppServerError::Protocol("Protected Codex requires DOXA's installed fail-closed app server; run scripts/install_codex_protected.py or select its launcher with --codex-bin"));
-            }
-            // Token-budget context resets bypass PreCompact in this provider.
-            // Confirm the process-local override is supported and effective.
-            let config = driver.request("config/read", json!({"cwd":driver.options.cwd,"includeLayers":false})).await?;
-            if config["config"]["features"]["token_budget"] != false {
-                return Err(AppServerError::Protocol("Codex unhooked token-budget reset path is not disabled"));
-            }
-            let hooks = driver.request("hooks/list", json!({"cwds":[driver.options.cwd]})).await?;
-            driver.compact_gate.as_mut().unwrap().verify_hooks(&hooks)
-                .map_err(|_| AppServerError::Protocol("DOXA Codex compaction hook is not active with verified trust"))?;
-        }
+        let result = {
+            let setup = async {
+                if let Some(control) = driver.owner_control.as_mut() {
+                    crate::provider_owner::acknowledge(control).await?;
+                    // No await separates sending G from selecting owner-only teardown.
+                    driver.supervised = true;
+                }
+                let initialized = driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
+                driver.live_auto_supported = initialized["userAgent"].as_str().is_some_and(|agent|
+                    agent.starts_with(crate::codex_compact::PROTECTED_AGENT_PREFIX) && agent.contains("; doxa-midturn-auto-v1; "));
+                driver.send(json!({"method":"initialized"})).await?;
+                if driver.compact_gate.is_some() {
+                    // The server's build version is authoritative. The client version
+                    // in its suffix never becomes proof of the provider hook contract.
+                    let version = initialized["userAgent"].as_str().and_then(provider_version);
+                    if version != Some(crate::codex_compact::SUPPORTED_VERSION) {
+                        return Err(AppServerError::Protocol("Codex build has no verified DOXA compaction hook contract"));
+                    }
+                    if !initialized["userAgent"].as_str().is_some_and(|agent| agent.starts_with(
+                        crate::codex_compact::PROTECTED_AGENT_PREFIX)) {
+                        return Err(AppServerError::Protocol("Protected Codex requires DOXA's installed fail-closed app server; run scripts/install_codex_protected.py or select its launcher with --codex-bin"));
+                    }
+                    // Token-budget context resets bypass PreCompact in this provider.
+                    // Confirm the process-local override is supported and effective.
+                    let config = driver.request("config/read", json!({"cwd":driver.options.cwd,"includeLayers":false})).await?;
+                    if config["config"]["features"]["token_budget"] != false {
+                        return Err(AppServerError::Protocol("Codex unhooked token-budget reset path is not disabled"));
+                    }
+                    let hooks = driver.request("hooks/list", json!({"cwds":[driver.options.cwd]})).await?;
+                    driver.compact_gate.as_mut().unwrap().verify_hooks(&hooks)
+                        .map_err(|_| AppServerError::Protocol("DOXA Codex compaction hook is not active with verified trust"))?;
+                }
+                Ok::<_, AppServerError>(())
+            };
+            if let Some(cancel) = cancel {
+                tokio::select! { biased;
+                    _ = wait_cancelled(cancel) => Err(AppServerError::Cancelled),
+                    result = setup => result,
+                }
+            } else { setup.await }
+        };
+        if let Err(error) = result { driver.shutdown().await; return Err(error); }
         Ok(driver)
     }
 
@@ -397,11 +421,30 @@ impl AppServerDriver {
     /// Current account and model inventory only: never creates a provider thread
     /// or submits a turn. Authentication does not establish a dollar price.
     pub async fn discover_authenticated_models(options: AppServerOptions) -> Result<Vec<Value>, AppServerError> {
-        let mut driver = Self::initialize(options, str::to_owned).await?;
-        let result = async {
-            driver.verify_authenticated().await?;
-            driver.list_models().await
-        }.await;
+        Self::discover_authenticated_models_inner(options, None).await
+    }
+
+    /// Cancellation includes initialization and waits for the owned discovery
+    /// process group to be killed and reaped; no provider thread is created.
+    pub async fn discover_authenticated_models_cancellable(options: AppServerOptions,
+        cancel: &AtomicBool) -> Result<Vec<Value>, AppServerError> {
+        Self::discover_authenticated_models_inner(options, Some(cancel)).await
+    }
+    async fn discover_authenticated_models_inner(options: AppServerOptions,
+        cancel: Option<&AtomicBool>) -> Result<Vec<Value>, AppServerError> {
+        let mut driver = Self::initialize_with_gate_cancel(options, str::to_owned, None, cancel).await?;
+        let result = {
+            let discovery = async {
+                driver.verify_authenticated().await?;
+                driver.list_models().await
+            };
+            if let Some(cancel) = cancel {
+                tokio::select! { biased;
+                    _ = wait_cancelled(cancel) => Err(AppServerError::Cancelled),
+                    result = discovery => result,
+                }
+            } else { discovery.await }
+        };
         driver.shutdown().await;
         result
     }

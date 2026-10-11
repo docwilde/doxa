@@ -190,16 +190,19 @@ fn startup_control(
     request: Value,
     shared: &Shared,
     deadline: Instant,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Value, String> {
+    if cancel.is_some_and(|cancel|cancel.load(Ordering::Acquire)) { return Err("Claude startup cancelled".into()); }
     let id = cli
         .control(request)
         .map_err(|_| "Claude control write failed")?;
     loop {
+        if cancel.is_some_and(|cancel|cancel.load(Ordering::Acquire)) { return Err("Claude startup cancelled".into()); }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err("Claude initialization timed out".into());
         }
-        match cli.recv(remaining.min(Duration::from_secs(1))) {
+        match cli.recv(remaining.min(if cancel.is_some() {Duration::from_millis(10)} else {Duration::from_secs(1)})) {
             Ok(frame)
                 if frame["type"] == "control_response" && frame["response"]["request_id"] == id =>
             {
@@ -264,18 +267,24 @@ impl ClaudeHost {
         depth: u32,
         parent: Option<&str>,
     ) -> Result<Self, String> {
-        Self::new_identity(executable, cwd, session_id, resume, model, effort, depth, parent, None, false)
+        Self::new_identity(executable, cwd, session_id, resume, model, effort, depth, parent, None, false, None)
     }
 
     pub(super) fn new_routed(executable: &Path, cwd: &Path, worker_id: &str,
         model: &str, effort: &str, agent: Option<Arc<crate::agent_tools::AgentTools>>) -> Result<Self,String> {
-        Self::new_identity(executable,cwd,worker_id,false,Some(model),Some(effort),0,None,Some(agent),true)
+        Self::new_identity(executable,cwd,worker_id,false,Some(model),Some(effort),0,None,Some(agent),true,None)
+    }
+
+    pub(super) fn new_routed_cancellable(executable: &Path, cwd: &Path, worker_id: &str,
+        model: &str, effort: &str, agent: Option<Arc<crate::agent_tools::AgentTools>>,
+        cancel: &AtomicBool) -> Result<Self,String> {
+        Self::new_identity(executable,cwd,worker_id,false,Some(model),Some(effort),0,None,Some(agent),true,Some(cancel))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn new_identity(executable: &Path, cwd: &Path, session_id: &str, resume: bool,
         model: Option<&str>, effort: Option<&str>, depth: u32, parent: Option<&str>,
-        routed_agent: Option<Option<Arc<crate::agent_tools::AgentTools>>>, require_auth: bool) -> Result<Self,String> {
+        routed_agent: Option<Option<Arc<crate::agent_tools::AgentTools>>>, require_auth: bool, startup_cancel: Option<&AtomicBool>) -> Result<Self,String> {
         if !doxa_claude::cli::canonical_session_id(session_id) {
             return Err("Claude sessions require a canonical hyphenated UUID".into());
         }
@@ -398,6 +407,7 @@ impl ClaudeHost {
             depth,
             parent: parent.map(str::to_owned), routed: require_auth,
         });
+        if startup_cancel.is_some_and(|cancel|cancel.load(Ordering::Acquire)) { return Err("Claude startup cancelled".into()); }
         let mut cli = Cli::spawn(CliOptions {
             executable,
             cwd: &workspace,
@@ -411,12 +421,13 @@ impl ClaudeHost {
         })
         .map_err(|_| "Claude CLI could not start")?;
         let deadline = Instant::now() + RPC_TIMEOUT;
-        let initial = startup_control(&mut cli, init_request(), &shared, deadline)?;
+        let initial = startup_control(&mut cli, init_request(), &shared, deadline, startup_cancel)?;
         let effective = settings(&startup_control(
             &mut cli,
             json!({"subtype":"get_settings"}),
             &shared,
             deadline,
+            startup_cancel,
         )?)?;
         if requested_effort.is_some() && effective.1 != requested_effort {
             return Err("Claude did not apply requested startup effort".into());
@@ -2059,6 +2070,7 @@ for line in sys.stdin:
             init_request(),
             &shared,
             Instant::now() + Duration::from_secs(3),
+            None,
         )
         .unwrap();
         *shared.catalog.lock().unwrap() = initial;

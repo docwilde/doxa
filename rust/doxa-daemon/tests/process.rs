@@ -4384,3 +4384,81 @@ mod engine_known_key_redaction {
         stop(&mut process,&mut reader,&mut socket);
     }
 }
+
+#[test]
+#[cfg(target_os="linux")]
+fn router_stop_and_interrupt_reap_stalled_discovery_and_protected_setup_groups() {
+    for (provider,phase) in [("claude","catalog"),("codex","catalog"),("claude","setup")] {
+        for control in ["interrupt","stop"] {
+            let dir=tempfile::tempdir().unwrap();
+            let home=dir.path().join("home");fs::create_dir(&home).unwrap();fs::set_permissions(&home,fs::Permissions::from_mode(0o700)).unwrap();
+            let cli=dir.path().join("stalled-cli.py");
+            executable(&cli,&format!(r#"#!/usr/bin/python3
+import json,os,pathlib,subprocess,sys,time
+root=pathlib.Path(__file__).parent
+provider={provider:?}
+phase={phase:?}
+def send(value):print(json.dumps(value),flush=True)
+for line in sys.stdin:
+ r=json.loads(line)
+ if provider=='claude':
+  if r['type']!='control_request':
+   if r['type']=='user':root.joinpath('unexpected-prompt').touch()
+   continue
+  sub=r['request']['subtype']
+ else:sub=r.get('method')
+ if sub=='initialize':
+  count=int(root.joinpath('catalog-count').read_text())+1 if root.joinpath('catalog-count').exists() else 1
+  root.joinpath('catalog-count').write_text(str(count))
+  if count==(3 if phase=='setup' else 1):
+   descendant=subprocess.Popen(['/usr/bin/sleep','60'])
+   root.joinpath('stalled-pids').write_text(json.dumps([os.getpid(),descendant.pid]))
+   time.sleep(30)
+ if provider=='claude':
+  model='fixture-model'
+  value={{'account':{{'tokenSource':'fixture-auth'}},'models':[{{'value':model,'resolvedModel':model,'supportedEffortLevels':['high']}}]}} if sub=='initialize' else {{'applied':{{'model':model,'effort':'high'}}}}
+  send({{'type':'control_response','response':{{'subtype':'success','request_id':r['request_id'],'response':value}}}})
+ elif sub=='initialize':send({{'id':r['id'],'result':{{'userAgent':'fixture'}}}})
+ elif sub=='account/read':send({{'id':r['id'],'result':{{'account':{{'type':'chatgpt'}}}}}})
+ elif sub=='model/list':send({{'id':r['id'],'result':{{'data':[{{'model':'fixture-model','supportedReasoningEfforts':[{{'reasoningEffort':'high'}}],'defaultReasoningEffort':'high'}}],'nextCursor':None}}}})
+"#));
+            let candidate=|id|json!({"id":id,"provider":provider,"billing":"cli_account","model":"fixture-model","effort":"high",
+                "description":"Private process fixture only","context_tokens":131072,"max_output_tokens":512,"supports_tools":true});
+            let config=dir.path().join("router.json");fs::write(&config,json!({"version":1,"jev_model":doxa_router::JEV_MODEL,
+                "criteria_version":"cleanup-fixture-v1","candidates":[candidate("one"),candidate("two")],"fallback_id":"one",
+                "confidence_threshold":0.8,"max_calls":4,"max_spend_usd_micros":10000,"max_input_bytes":8192,"deadline_ms":1000}).to_string()).unwrap();
+            fs::set_permissions(&config,fs::Permissions::from_mode(0o600)).unwrap();
+            let mut command=daemon_command();command.args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),
+                "--session-id","router-cleanup","--engine","router","--router-config",config.to_str().unwrap(),
+                if provider=="claude"{"--claude-bin"}else{"--codex-bin"},cli.to_str().unwrap(),"--linger","10"])
+                .env("DOXA_HOME",&home).env("DOXA_LORE","0").env("DOXA_WORKTREE","0").stdout(Stdio::null()).stderr(Stdio::piped());
+            for key in ["DEEPSEEK_API_KEY","ZAI_API_KEY","TYPESAFE_API_KEY","TAVILY_API_KEY","FIRECRAWL_API_KEY","EXA_API_KEY","BRAVE_API_KEY","DOXA_SESSION_BUDGET_USD"] {command.env_remove(key);}
+            let mut child=command.spawn().unwrap();let registry=dir.path().join("registry/router-cleanup.json");wait_for_registry(&mut child,&registry);
+            let entry:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();let mut process=Process{child,registry,socket:entry["daemon_socket"].as_str().unwrap().into()};
+            let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+            send(&mut socket,json!({"type":"prompt","id":1,"text":"Private stalled initialization fixture"}));
+            wait_until(||dir.path().join("stalled-pids").exists());
+            let pids:Vec<i32>=serde_json::from_slice(&fs::read(dir.path().join("stalled-pids")).unwrap()).unwrap();
+            // Always clean the synthetic group if a regression leaves it alive.
+            struct Cleanup(i32);impl Drop for Cleanup{fn drop(&mut self){unsafe{libc::kill(-self.0,libc::SIGKILL);}}}
+            let _cleanup=Cleanup(pids[0]);let started=Instant::now();
+            send(&mut socket,json!({"type":"call","id":2,"method":control,"params":{}}));
+            if control=="stop" {wait_until_with_timeout(Duration::from_secs(7),||process.exited());}
+            else {
+                loop{let frame=receive(&mut reader);if matches!(frame["event"]["type"].as_str(),Some("turn_done"|"turn_refused")){break;}}
+            }
+            assert!(started.elapsed()<Duration::from_secs(7));
+            wait_until(||unsafe{libc::kill(pids[0],0)}==-1);
+            for pid in pids.iter().skip(1) {
+                let stat=fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+                assert!(stat.is_none_or(|text|text.rsplit_once(") ").is_some_and(|(_,tail)|matches!(tail.chars().next(),Some('Z'|'X')))),"owned descendant survived cancellation");
+            }
+            assert!(!dir.path().join("unexpected-prompt").exists());
+            let state:Value=serde_json::from_slice(&fs::read(home.join("router/router-cleanup.router.json")).unwrap()).unwrap();
+            assert_eq!(state["incomplete"],false);assert!(state["pending_cli"].is_null());assert_eq!(state["worker"]["cli_turns"],0);
+            if control=="interrupt" {
+                send(&mut socket,json!({"type":"call","id":3,"method":"stop","params":{}}));wait_until(||process.exited());
+            }
+        }
+    }
+}
