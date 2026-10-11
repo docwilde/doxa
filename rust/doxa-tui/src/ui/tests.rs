@@ -134,18 +134,64 @@ use super::*;
 
     #[test]
     fn router_target_dropdown_selects_only_configured_ids_and_refuses_docker() {
+        // Keep credentials/config environment scoped to this child test process.
+        if std::env::var_os("DOXA_ROUTER_SETTINGS_TEST").is_none() {
+            let home=tempfile::tempdir().unwrap();
+            std::fs::set_permissions(home.path(),std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","ui::tests::router_target_dropdown_selects_only_configured_ids_and_refuses_docker"])
+                .env("DOXA_HOME",home.path()).env("DOXA_ROUTER_SETTINGS_TEST","1")
+                .env("TYPESAFE_API_KEY","router-settings-test-key")
+                .env_remove("DOXA_ENGINE").env_remove("DOXA_ROUTER_CONFIG")
+                .env_remove("DOXA_MODEL").env_remove("DOXA_EFFORT").output().unwrap();
+            assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
+            return;
+        }
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("router.json");
+        let config=crate::router_setup::tests::config();
+        std::fs::write(&path,serde_json::to_vec(&config).unwrap()).unwrap();
+        std::fs::set_permissions(&path,std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         let mut app=App::default();
-        app.new_session=Some(NewSession{engine:launch::Engine::Router,router_config:Some(PathBuf::from("/private/router.json")),
-            isolation:doxa_isolation::Profile::Native,model:"auto".into(),models:vec!["auto".into(),"ds-fixture".into()],
-            model_efforts:HashMap::new(),catalog_note:"Configured targets".into(),catalog_pending:false,effort:None,
-            prompt:String::new(),field:0,launch_error:None,retry_allowed:true});
+        app.handle(Event::Resize(140,36));
+        app.open_settings_menu();
+        assert_eq!(app.settings_menu.as_ref().unwrap().rows[0].setting.key,"engine");
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::End,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert_eq!(app.settings_menu.as_ref().unwrap().edits["engine"].as_deref(),Some("router"));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        for character in path.to_str().unwrap().chars() {
+            app.settings_menu_key(KeyEvent::new(KeyCode::Char(character),KeyModifiers::NONE));
+        }
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('s'),KeyModifiers::CONTROL));
+        assert!(!crate::settings::config_path().unwrap().exists(),"unreviewed routing must not be saved");
+        let review=crate::router_setup::review_with(&path,&config,true,|provider|Ok(json!({"capabilities":[
+            {"model":if provider=="deepseek" {"deepseek-flash"} else {"glm-5.3-flash"},
+             "efforts":if provider=="deepseek" {vec!["none"]} else {vec!["high"]}}]}))).unwrap();
+        let (tx,rx)=mpsc::sync_channel(1);
+        app.router_review=Some(router_settings::RouterReview{path:path.clone(),state:router_settings::ReviewState::Running(rx)});
+        tx.send(Ok(review)).unwrap();assert!(app.poll_router_review());
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('s'),KeyModifiers::CONTROL));
+        let stored=doxa_state::load_config_checked(&crate::settings::config_path().unwrap()).unwrap();
+        assert_eq!(stored["engine"].as_str(),Some("router"));
+        assert_eq!(stored["router_config"].as_str(),path.to_str());
+        assert!(app.settings_menu.as_ref().unwrap().edits.is_empty());
+        app.settings_menu_key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE));
+        app.open_engine_picker();
+        assert_eq!(ENGINE_CHOICES[app.engine_selected],"router");
+        app.select_new_engine();
+        assert_eq!(app.new_session.as_ref().unwrap().engine,launch::Engine::Router);
+        assert_eq!(app.new_session.as_ref().unwrap().models,["auto","ds","glm"]);
+        assert_eq!(app.new_session.as_ref().unwrap().model,"auto");
         app.new_session_key(KeyEvent::new(KeyCode::Char('x'),KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().model,"auto");
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().model,"auto");
         app.new_session_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
-        assert_eq!(app.new_session.as_ref().unwrap().model,"ds-fixture");
+        assert_eq!(app.new_session.as_ref().unwrap().model,"ds");
         app.new_session.as_mut().unwrap().field=1;
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         app.new_session_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
@@ -155,9 +201,53 @@ use super::*;
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         let (options,_,_)=app.pending_launches.pop().unwrap();
         assert_eq!(options.engine,launch::Engine::Router);
-        assert_eq!(options.model.as_deref(),Some("ds-fixture"));
-        assert_eq!(options.router_config.as_deref(),Some(Path::new("/private/router.json")));
+        assert_eq!(options.model.as_deref(),Some("ds"));
+        assert_eq!(options.router_config.as_deref(),Some(path.as_path()));
         assert!(options.effort.is_none());
+        // A file changed after review cannot start using stale account evidence.
+        let mut changed=config.clone();changed.max_calls+=1;
+        std::fs::write(&path,serde_json::to_vec(&changed).unwrap()).unwrap();
+        app.launching=false;
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert!(app.pending_launches.is_empty());
+        assert!(app.notice.contains("unverified or expired"));
+        // Selecting a fixed default engine turns routing off without erasing its
+        // reviewed target file or requiring it to be available.
+        app.new_session=None;
+        app.open_settings_menu();
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Home,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('s'),KeyModifiers::CONTROL));
+        assert_eq!(launch::configured_engine(),launch::Engine::Claude);
+        assert_eq!(doxa_state::load_config_checked(&crate::settings::config_path().unwrap()).unwrap()["router_config"].as_str(),path.to_str());
+    }
+
+    #[test]
+    fn router_review_results_populate_exact_available_targets_and_retain_unavailable_pin() {
+        let mut app=App::default();
+        let path=PathBuf::from("/private/fixture-router.json");
+        app.new_session=Some(NewSession{engine:launch::Engine::Router,router_config:Some(path.clone()),
+            isolation:doxa_isolation::Profile::Native,model:"glm".into(),models:vec!["auto".into()],
+            model_efforts:HashMap::new(),catalog_note:"Loading".into(),catalog_pending:true,effort:None,
+            prompt:String::new(),field:2,launch_error:None,retry_allowed:true});
+        let config=crate::router_setup::tests::config();
+        let review=crate::router_setup::review_with(&path,&config,true,|provider| {
+            if provider=="glm" {Err(crate::router_setup::Availability::Unknown("catalog unavailable"))}
+            else {Ok(json!({"capabilities":[{"model":"deepseek-flash","efforts":["none"]}]}))}
+        }).unwrap();
+        let (tx,rx)=mpsc::sync_channel(1);
+        app.router_review=Some(router_settings::RouterReview{path,state:router_settings::ReviewState::Running(rx)});
+        tx.send(Ok(review)).unwrap();
+        assert!(app.poll_router_review());
+        let form=app.new_session.as_ref().unwrap();
+        assert_eq!(form.models,["auto","ds"]);
+        assert_eq!(form.model,"glm");
+        assert!(form.catalog_note.contains("1 unknown"));
+        assert!(!form.catalog_pending);
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert!(app.pending_launches.is_empty());
+        assert!(app.notice.contains("catalog changed"));
     }
 
     #[test]

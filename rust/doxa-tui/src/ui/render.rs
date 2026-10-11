@@ -369,7 +369,7 @@ impl App {
                         } else {
                             ' '
                         },
-                        engine
+                        crate::settings::engine_label(engine)
                     ),
                     chooser_row_style(index == self.engine_selected),
                 ));
@@ -381,7 +381,7 @@ impl App {
                 launch::Engine::Claude => "claude",
                 launch::Engine::DeepSeek => "deepseek",
                 launch::Engine::Glm => "glm",
-                launch::Engine::Router => "router",
+                launch::Engine::Router => "Jev Router",
                 launch::Engine::Fixture => "fixture",
             };
             if height < 8 && form.launch_error.is_some() {
@@ -452,7 +452,7 @@ impl App {
             }
             lines.push(Line::styled(
                 format!(" {} Isolation: [{} ▾]{}",if form.field==prompt_field-1{'›'}else{' '},form.isolation.label(),
-                    if form.engine==launch::Engine::Router {" · API chat; no shell or workspace writes"} else {" · Click/Enter choose"}),
+                    if form.engine==launch::Engine::Router {" · native · worker command permissions reviewed separately"} else {" · Click/Enter choose"}),
                 chooser_row_style(form.field==prompt_field-1),
             ));
             lines.push(Line::styled(
@@ -632,7 +632,8 @@ impl App {
                     if menu.selected == index { '›' } else { ' ' },
                     row.setting.label,
                     if row.setting.kind == crate::settings::Kind::Choice && !row.shadowed && !row.setting.read_only {
-                        format!("[{} ▾]", if shown.is_empty() { "(default)".into() } else { safe_label(shown) })
+                        format!("[{} ▾]", if row.setting.key=="engine" {safe_label(crate::settings::engine_label(shown))}
+                            else if shown.is_empty() { "(default)".into() } else { safe_label(shown) })
                     } else { safe_label(shown) },
                     row.source,
                     if row.shadowed {
@@ -674,7 +675,7 @@ impl App {
                         .choices
                         .iter()
                         .filter(|s| !s.is_empty())
-                        .copied()
+                        .map(|choice|if row.setting.key=="engine" {crate::settings::engine_label(choice)} else {choice})
                         .collect::<Vec<_>>()
                         .join(" | ")
                 )));
@@ -682,7 +683,7 @@ impl App {
             if ["derive_secs", "consult_floor", "graph_context"].contains(&row.setting.key) {
                 lines.push(Line::from(" Claude session memory control; Codex/vendor use their engine's snapshot policy."));
             }
-            if row.setting.key == "session_budget_usd" && menu.engine != "claude" {
+            if row.setting.key == "session_budget_usd" && !matches!(menu.engine.as_str(),"claude"|"router"|"deepseek"|"glm") {
                 lines.push(Line::from(
                     " This engine reports no session dollar cost; ceiling cannot be enforced.",
                 ));
@@ -718,7 +719,16 @@ impl App {
         }
         let mermaid_selected = menu.rows.get(menu.selected).is_some_and(|row|
             matches!(row.setting.key, "mermaid_renderer" | "mermaid_renderer_root"));
-        let preflight_lines = if mermaid_selected {
+        let router_selected=menu.rows.get(menu.selected).is_some_and(|row|matches!(row.setting.key,"engine"|"router_config"));
+        let preflight_lines = if router_selected {
+            let path=std::path::PathBuf::from(menu.effective_value("router_config"));
+            let mut footer=vec![Line::styled(" Ctrl+P: review Jev Router config/accounts/catalogs · no inference",
+                Style::default().fg(theme::ACCENT))];
+            let width=usize::from(area.width.saturating_sub(3)).max(1);
+            footer.extend(self.router_review_lines(&path).into_iter().flat_map(|line|
+                crate::memory_menu::wrap_review(&format!(" {line}"),width)).take(4).map(Line::from));
+            footer
+        } else if mermaid_selected {
             let status = self.mermaid_preflight.as_ref()
                 .map(|preflight| preflight.message(&menu.mermaid_paths()))
                 .unwrap_or_else(|| "Not checked".into());

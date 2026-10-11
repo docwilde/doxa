@@ -720,7 +720,9 @@ impl App {
                         }
                         let Some(routing) = super::session_telemetry::RoutingStatus::from_value(data) else { return false; };
                         let summary = super::transcript_events::event_field(&routing.summary());
-                        self.session_telemetry.entry(id.clone()).or_default().routing = Some(routing);
+                        let telemetry=self.session_telemetry.entry(id.clone()).or_default();
+                        telemetry.routing = Some(routing);
+                        telemetry.update_cost_scope(data);
                         let clipped = self.sessions.iter_mut().find(|s| s.id == id)
                             .is_some_and(|session| append_transcript(session, &format!("\n\n*{summary}*\n")));
                         self.transcript_evicted(&id, clipped);

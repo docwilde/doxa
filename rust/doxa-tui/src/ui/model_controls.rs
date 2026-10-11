@@ -440,16 +440,29 @@ impl App {
         if engine==launch::Engine::Router {
             let (path,config)=match launch::router_config(None) {
                 Ok(value)=>value,
-                Err(_)=>{self.notice="Router needs an explicit owner-private router_config in Settings or DOXA_ROUTER_CONFIG".into();return;}
+                Err(_)=>{self.notice="Jev Router: /settings → Session → Jev Router config; enter a private JSON path, Ctrl+P review, Ctrl+S save".into();return;}
             };
+            let config_defaults=crate::settings::config_path().map(|path|doxa_state::load_config(&path)).unwrap_or_default();
+            let (model,_)=new_session_preferences(engine,&config_defaults,None,None);
+            let current_review=self.router_review_result(&path).filter(|review|review.current(&path)).cloned();
             let mut models=vec!["auto".to_owned()];
-            models.extend(config.candidates.iter().map(|candidate|candidate.id.clone()));
+            if let Some(review)=&current_review {
+                models.extend(review.targets.iter().filter(|target|target.availability==crate::router_setup::Availability::Available)
+                    .map(|target|target.id.clone()));
+            }
+            let pending=if current_review.is_some() {false} else {self.start_router_review(path.clone())};
             self.vendor_catalog_pending=None;
             self.new_session=Some(NewSession {
-                isolation:doxa_isolation::Profile::Native,engine,router_config:Some(path),model:"auto".into(),models,
-                model_efforts:HashMap::new(),catalog_note:"Configured API targets; account eligibility checked before each turn".into(),
-                catalog_pending:false,launch_error:None,retry_allowed:true,effort:None,prompt:String::new(),field:0,
+                isolation:doxa_isolation::Profile::Native,engine,router_config:Some(path),model,models,
+                model_efforts:HashMap::new(),catalog_note:current_review.as_ref()
+                    .map(|review|format!("{} · {}",review.summary(),review.cost_scope()))
+                    .unwrap_or_else(||if pending {"Checking current account/catalog targets… no inference"} else {"Account/catalog unverified · R reviews; /settings config"}.into()),
+                catalog_pending:pending,launch_error:None,retry_allowed:true,effort:None,prompt:String::new(),field:0,
             });
+            // A saved target pin is never silently replaced by the fallback or Auto.
+            if self.new_session.as_ref().is_some_and(|form|form.model!="auto" && config.candidate(&form.model).is_none()) {
+                self.notice="Saved Router target is absent from the current config; choose Auto or an available exact target".into();
+            }
             return;
         }
         let models = vendor_models(engine);
@@ -529,7 +542,17 @@ impl App {
         let Some(engine) = self.new_session.as_ref().filter(|form| !form.catalog_pending).map(|form| form.engine) else { return; };
         let pending = if matches!(engine, launch::Engine::Codex | launch::Engine::Claude) {
             self.request_new_session_catalog(engine)
-        } else if engine == launch::Engine::Router { return; }
+        } else if engine == launch::Engine::Router {
+            let Some(path)=self.new_session.as_ref().and_then(|form|form.router_config.clone()) else {return;};
+            let pending=self.start_router_review(path);
+            if let Some(form)=self.new_session.as_mut() {
+                form.catalog_pending=pending;
+                form.models=vec!["auto".into()];
+                form.catalog_note=if pending {"Refreshing current account/catalog targets… no inference"} else {"Account/catalog unverified · R retries"}.into();
+            }
+            self.refresh_choice_dropdown();
+            return;
+        }
         else { self.request_vendor_catalog(engine) };
         if let Some(form) = self.new_session.as_mut() {
             form.catalog_pending = pending;
@@ -759,6 +782,10 @@ impl App {
                 if router && (!form.models.contains(&form.model) || form.isolation!=doxa_isolation::Profile::Native || form.router_config.is_none()) {
                     self.notice="Router target or native isolation changed; session was not started".into();return true;
                 }
+                if router && !form.router_config.as_deref().is_some_and(|path|self.router_review_result(path)
+                    .is_some_and(|review|review.ready() && review.current(path))) {
+                    self.notice="Jev Router config/account/catalog unverified or expired; R reviews before Start".into();return true;
+                }
                 if vendor {
                     let allowed = form
                         .model_efforts
@@ -777,7 +804,7 @@ impl App {
                     }
                     options.effort = form.effort;
                 }
-                if form.engine == launch::Engine::Claude {
+                if matches!(form.engine,launch::Engine::Claude | launch::Engine::Router) {
                     options.claude_bin =
                         std::env::var_os("DOXA_CLAUDE_BIN").map(PathBuf::from);
                 }

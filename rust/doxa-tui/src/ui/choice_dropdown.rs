@@ -32,6 +32,13 @@ impl Dropdown {
 }
 
 impl App {
+    fn dropdown_choice_label(&self,owner:&Owner,value:&str)->String {
+        match owner {
+            Owner::Setting(key) if key=="engine"=>safe_label(settings::engine_label(value)),
+            Owner::NewSession{engine:launch::Engine::Router,field:0,..}=>safe_label(&self.router_target_label(value)),
+            _=>choice_label(value),
+        }
+    }
     fn choice_values(&self, owner: &Owner) -> Option<(String, Vec<String>, String)> {
         match owner {
             Owner::Setting(key) => {
@@ -166,7 +173,7 @@ impl App {
             Owner::NewSession { field, .. } => parent.y + if parent.height >= 8 { 4 } else { 2 } + *field as u16,
         };
         let height = (dropdown.choices.len() as u16 + 2).min(parent.height.saturating_sub(2)).max(3);
-        let width = dropdown.choices.iter().map(|value| choice_label(value).width() as u16 + 4).max().unwrap_or(10)
+        let width = dropdown.choices.iter().map(|value| self.dropdown_choice_label(&dropdown.owner,value).width() as u16 + 4).max().unwrap_or(10)
             .max(safe_label(&dropdown.title).width() as u16 + 4).max(26).min(parent.width.saturating_sub(2));
         let max_y = parent.bottom().saturating_sub(height + 1);
         let y = if row + 1 + height < parent.bottom() { row + 1 }
@@ -205,7 +212,7 @@ impl App {
         let count = usize::from(area.height - 2);
         let start = dropdown.visible_start(count);
         let mut lines = dropdown.choices.iter().enumerate().skip(start).take(count).map(|(index, value)|
-            Line::styled(format!(" {} {}", if index == dropdown.selected { '›' } else { ' ' }, choice_label(value)),
+            Line::styled(format!(" {} {}", if index == dropdown.selected { '›' } else { ' ' }, self.dropdown_choice_label(&dropdown.owner,value)),
                 super::chooser_row_style(index == dropdown.selected))).collect::<Vec<_>>();
         let model = matches!(dropdown.owner, Owner::NewSession { field: 0, .. });
         if lines.is_empty() {

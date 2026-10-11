@@ -9,11 +9,21 @@ use std::{path::Path, time::Duration};
 const DEADLINE: Duration = Duration::from_secs(20);
 
 pub(crate) fn load(engine: Engine, cwd: &Path) -> Result<Value, &'static str> {
+    load_with_auth(engine, cwd, false)
+}
+
+/// Router setup requires account evidence from the connected CLI protocol,
+/// rather than treating a model list or a successful executable lookup as auth.
+pub(crate) fn load_authenticated(engine: Engine, cwd: &Path) -> Result<Value, &'static str> {
+    load_with_auth(engine, cwd, true)
+}
+
+fn load_with_auth(engine: Engine, cwd: &Path, authenticated: bool) -> Result<Value, &'static str> {
     match engine {
         Engine::Codex => {
             let executable = launch::codex_executable(&LaunchOptions::default())
                 .map_err(|_| "Codex executable unavailable")?;
-            codex_at(&executable, cwd)
+            codex_catalog_at(&executable, cwd, authenticated)
         }
         Engine::Claude => {
             let options = LaunchOptions { claude_bin: std::env::var_os("DOXA_CLAUDE_BIN").map(Into::into), ..Default::default() };
@@ -21,24 +31,34 @@ pub(crate) fn load(engine: Engine, cwd: &Path) -> Result<Value, &'static str> {
             doxa_claude::isolation::sync_credentials(false).map_err(|_| "Claude account unavailable")?;
             let config_dir = doxa_claude::isolation::config_dir();
             let session = uuid::Uuid::new_v4().to_string();
-            doxa_claude::catalog::discover(doxa_claude::CliOptions {
+            let options = doxa_claude::CliOptions {
                 executable: &executable, cwd, session_id: &session, resume: false,
                 model: None, effort: None, permission_mode: "manual", config_dir: &config_dir, plugins: &[],
-            }, DEADLINE).map_err(|_| "Claude model catalog unavailable")
+            };
+            let result = if authenticated { doxa_claude::catalog::discover_authenticated(options, DEADLINE) }
+                else { doxa_claude::catalog::discover(options, DEADLINE) };
+            result.map_err(|_| "Claude account/catalog unavailable or unverified")
         }
         _ => Err("This engine uses its own model catalog"),
     }
 }
 
 fn codex_at(executable: &Path, cwd: &Path) -> Result<Value, &'static str> {
+    codex_catalog_at(executable, cwd, false)
+}
+
+fn codex_catalog_at(executable: &Path, cwd: &Path, authenticated: bool) -> Result<Value, &'static str> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
         .map_err(|_| "Codex model catalog unavailable")?;
-    let rows = runtime.block_on(async { tokio::time::timeout(DEADLINE,
-        AppServerDriver::discover_models(AppServerOptions {
+    let rows = runtime.block_on(async { tokio::time::timeout(DEADLINE, async {
+        let options = AppServerOptions {
             executable: executable.into(), cwd: cwd.into(), model: None, sandbox: SandboxMode::ReadOnly,
             permission: CodexPermission::OnRequest, resume_thread: None, turn_timeout: DEADLINE,
-        })).await }).map_err(|_| "Codex model catalog timed out")?
-        .map_err(|_| "Codex model catalog unavailable")?;
+        };
+        if authenticated { AppServerDriver::discover_authenticated_models(options).await }
+        else { AppServerDriver::discover_models(options).await }
+    }).await }).map_err(|_| "Codex account/catalog timed out")?
+        .map_err(|_| "Codex account/catalog unavailable or unverified")?;
     Ok(json!({"models":rows.iter().map(|row| row["model"].clone()).collect::<Vec<_>>(),
         "capabilities":rows,"note":"Live account model catalog from Codex"}))
 }

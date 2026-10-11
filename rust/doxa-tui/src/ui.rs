@@ -16,6 +16,7 @@ mod model_controls;
 mod native_package_viewer;
 mod native_package_run;
 mod operations_controller;
+mod router_settings;
 mod operations_menu;
 mod credential_editor;
 pub(crate) mod panes;
@@ -1586,6 +1587,7 @@ pub struct App {
     engine_selected: usize,
     new_session: Option<NewSession>,
     new_session_catalog_pending: Option<(launch::Engine, Receiver<Result<serde_json::Value, &'static str>>)>,
+    router_review: Option<router_settings::RouterReview>,
     vendor_catalog_pending: Option<(
         launch::Engine,
         Receiver<Option<Vec<doxa_vendors::ModelCapability>>>,
@@ -1875,6 +1877,7 @@ impl Default for App {
             engine_selected: 0,
             new_session: None,
             new_session_catalog_pending: None,
+            router_review: None,
             vendor_catalog_pending: None,
             pending_launches: Vec::new(),
             pending_attaches: Vec::new(),
