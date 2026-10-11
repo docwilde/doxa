@@ -22,11 +22,13 @@ build lane.
 ## Router review freshness
 
 Painting Router status reads only the most recent background freshness
-observation. At most one local freshness check is pending; completed observations
-are refreshed every two seconds and expire with the review's existing 60-second
-lifetime. A failed or unavailable observation displays as stale. Save and Start
-continue to call `Review::current` synchronously at the point of action, so the
-cached paint status never authorizes a write or session launch.
+observation. At most one local check is pending; completed observations are
+refreshed every two seconds and expire with the review's existing 60-second
+lifetime. The check revalidates config bytes and Jev key availability
+(present/missing); it does not identify a replacement key when both old and new
+values are valid. A failed or unavailable observation displays as stale. Save
+and Start continue to call `Review::current` synchronously at the point of
+action, so cached paint status never authorizes a write or session launch.
 
 ## New-session catalog ownership
 
@@ -46,15 +48,17 @@ remains enabled. The pinned LORE revision is
 at review time. Its `rust/lore-core/src/codegraph_snapshot.rs::query` rejects
 every requested path not ending in `.rs`, and the read protocol documentation
 describes Rust source paths. DOXA's `LoreClient::codegraph_snapshot` applies the
-same restriction before sending the request.
+same restriction before sending the request. A source-only LORE patch is ready
+on branch `feature/codegraph-python-snapshots` at
+`57e26c7e76b34c924b8045ec6fcfaf89d0b3598c` in a separate local worktree. It
+accepts bounded `.py` paths through the same validator and adds Python
+round-trip, stale-source, and invalid-path tests; it is not released or pinned.
 
-The upstream prerequisite is a released LORE revision that deliberately accepts
-bounded `.py` paths in both its snapshot request validator and documented
-read/store protocol, with Python store/read and stale-source regression cases.
-Only after DOXA pins that capability should DOXA relax its client guard and
-cover Python snapshot response parsing. Changing the DOXA side alone would
-still be rejected by LORE and would leave the stored-snapshot contract
-unverified.
+The upstream prerequisite is for the prepared capability to be reviewed,
+tested, and released. Only after DOXA updates its dependency pin to that
+released revision should it relax its client guard and cover Python snapshot
+response parsing. Changing the DOXA side alone would still be rejected by the
+pinned LORE service and would leave the stored-snapshot contract unverified.
 
 ## Retiring a fleet with unknown review spend
 
