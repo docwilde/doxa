@@ -901,9 +901,7 @@ impl LoreClient {
         -> Result<CodegraphSnapshot, LoreError> {
         if !Path::new(cwd).is_absolute() || cwd.len() > 4096 || cwd.chars().any(char::is_control)
             || !matches!(query, "file" | "imports" | "calls" | "modules")
-            || path.is_empty() || path.len() > 4096
-            || !matches!(Path::new(path).extension().and_then(|extension| extension.to_str()),
-                Some("rs" | "py"))
+            || path.is_empty() || path.len() > 4096 || !path.ends_with(".rs")
             || path.chars().any(char::is_control)
             || !Path::new(path).components().all(|part|
                 matches!(part, std::path::Component::Normal(_))) {
