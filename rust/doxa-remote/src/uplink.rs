@@ -459,6 +459,7 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
     fn cli_receipt_reader_refuses_unsafe_files_and_bounds_json() {
         use std::os::unix::fs::{PermissionsExt,symlink};
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("review.json");
+        std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(&path,b"{\"version\":1}").unwrap();
         std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(read_review(path.to_str().unwrap()).unwrap()["version"],1);
