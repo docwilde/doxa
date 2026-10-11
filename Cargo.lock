@@ -726,6 +726,7 @@ dependencies = [
  "doxa-remote-wire",
  "doxa-router",
  "doxa-state",
+ "doxa-transcript",
  "doxa-vendors",
  "doxa-worktrees",
  "futures-util",

@@ -42,7 +42,7 @@ pub(super) struct Message {
 
 /// A bounded per-session dedup index. It is seeded once when a transcript is
 /// restored and updated in O(1) as live peer events arrive.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct MessageIdIndex {
     seen: HashSet<(String, bool)>,
     order: VecDeque<(String, bool)>,
