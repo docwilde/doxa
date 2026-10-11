@@ -123,15 +123,23 @@ pub(super) struct SessionTelemetry {
     pub(super) session_cost: Option<String>,
     pub(super) cost: Option<String>,
     pub(super) tracked_cost_only: bool,
+    pub(super) external_mcp_cost_unknown: bool,
     pub(super) billing_mode: Option<String>,
     pub(super) subscription_type: Option<String>,
     pub(super) quota: Option<String>,
     pub(super) balance: Option<String>,
+    pub(super) glm_account: Option<super::glm_account::GlmAccount>,
     pub(super) lore: Option<String>,
 }
 
 impl SessionTelemetry {
     pub(super) fn update_cost_scope(&mut self, data: &serde_json::Value) {
+        let external = &data["external_mcp"];
+        self.external_mcp_cost_unknown |= external["enabled"] == true
+            && external["cost_scope"] == "outside_model_allowance"
+            && external.get("charge_usd").is_some_and(serde_json::Value::is_null)
+            && external["calls_attempted"].as_u64().is_some()
+            && external["outcome_unknown"].is_boolean();
         // Once a session can use CLI account workers, later API-only turns or
         // incomplete status replies cannot turn the partial amount into a total.
         self.tracked_cost_only |= data["cost_scope"] == "jev_and_direct_api_only"
@@ -227,6 +235,7 @@ impl SessionTelemetry {
     }
 
     pub(super) fn update_billing(&mut self, billing: &serde_json::Value) {
+        if let Some(account)=billing.get("glm_account") {self.glm_account=super::glm_account::GlmAccount::from_value(account);}
         if let Some(compaction) = billing.get("compaction") { self.compaction = CompactionStatus::from_value(compaction); }
         if let Some(routing) = billing.get("routing") { self.routing = RoutingStatus::from_value(routing); }
         self.update_cost_scope(billing);
@@ -292,7 +301,7 @@ impl SessionTelemetry {
             self.cache_read_tokens = usage["cache_read_input_tokens"].as_u64();
             self.cache_write_tokens = usage["cache_creation_input_tokens"].as_u64();
         }
-        if !self.tracked_cost_only { if let Some(cost) = status["total_cost_usd"]
+        if !self.tracked_cost_only && !self.external_mcp_cost_unknown { if let Some(cost) = status["total_cost_usd"]
             .as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0)
         {
@@ -326,7 +335,7 @@ impl SessionTelemetry {
     }
 
     pub(super) fn billing_label(&self, engine: Option<&str>) -> Option<String> {
-        match engine {
+        let label = match engine {
             Some("router") if self.tracked_cost_only=>Some(format!("{} Jev/API · CLI ?",self.cost.clone().unwrap_or_else(||"$?".into()))),
             Some("deepseek" | "glm" | "router") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
             Some("codex" | "claude") => match self.billing_mode.as_deref() {
@@ -349,7 +358,8 @@ impl SessionTelemetry {
                 _ => None,
             },
             _ => None,
-        }
+        };
+        label.map(|label| if self.external_mcp_cost_unknown { format!("{label} · MCP ?") } else { label })
     }
 }
 
@@ -357,6 +367,24 @@ impl SessionTelemetry {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn external_mcp_charge_scope_is_sticky_and_restores_without_erasing_model_cost() {
+        let external = json!({"enabled":true,"cost_scope":"outside_model_allowance","charge_usd":null,
+            "calls_attempted":1,"outcome_unknown":false});
+        let mut value=SessionTelemetry::default();
+        value.update_turn(&json!({"session_cost_usd":0.01,"cost_usd":0.01,"cost_is_estimate":true,"external_mcp":external}));
+        assert_eq!(value.billing_label(Some("glm")).as_deref(),Some("$0.0100 est · MCP ?"));
+        value.update_turn(&json!({"session_cost_usd":0.02,"cost_usd":0.01,"cost_is_estimate":true}));
+        assert_eq!(value.billing_label(Some("glm")).as_deref(),Some("$0.0200 est · MCP ?"));
+        let mut restored=SessionTelemetry::default();
+        restored.update_status(&json!({"billing":{"mode":"api","session_cost_usd":0.02,"cost_usd":0.02,
+            "cost_is_estimate":true,"external_mcp":external},"total_cost_usd":null}));
+        assert_eq!(restored.billing_label(Some("glm")),value.billing_label(Some("glm")));
+        let mut malformed=SessionTelemetry::default();
+        malformed.update_turn(&json!({"external_mcp":{"enabled":true,"charge_usd":0}}));
+        assert!(!malformed.external_mcp_cost_unknown);
+    }
 
     #[test]
     fn mixed_router_cost_scope_survives_api_turns_and_reattach_without_becoming_total() {

@@ -18,6 +18,12 @@ object AndroidWriteId {
 
 /** A transcript must identify the session actually read, including its incarnation. */
 object AndroidReview {
+    /** Exact request text: no title fallback or preview truncation hides arguments. */
+    fun displayRequest(request: JSONObject): String = request.toString(2)
+
+    fun sameDisplayedRequest(displayed: JSONObject, current: JSONObject?): Boolean =
+        current != null && Wire.id(displayed.optString("id")) && displayed.toString() == current.toString()
+
     fun matchesIncarnation(history: JSONObject, incarnation: String): Boolean =
         incarnation.isNotBlank() && history.opt("incarnation") == incarnation
 

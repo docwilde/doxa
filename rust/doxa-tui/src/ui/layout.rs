@@ -507,7 +507,7 @@ impl App {
         } else if self.delete_confirmation.is_some() {
             6
         } else if let Some(menu) = &self.settings_menu {
-            if menu.has_preflight() { 12 } else { 8 }
+            menu.desired_height()
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
@@ -752,6 +752,9 @@ impl App {
             .unwrap_or("Beliefs");
         chips.push(("beliefs", beliefs.to_owned()));
         let engine = identity.and_then(|pair| pair.0.as_deref());
+        if engine == Some("glm") {
+            if let Some(account)=telemetry.and_then(|value|value.glm_account.as_ref()) {chips.push(("glm_account",account.label()));}
+        }
         if let Some(label) = telemetry
             .and_then(|value| value.billing_label(engine))
             .or_else(|| match engine {
@@ -1137,9 +1140,9 @@ impl App {
     pub(super) fn open_chip_info(&mut self, kind: &'static str, group: usize) {
         self.memory_manager = None;
         self.retire_operations();
-        if matches!(kind, "context" | "cost") {
+        if matches!(kind, "context" | "cost" | "glm_account") {
             self.active_group = group;
-            self.open_diagnostic(if kind == "cost" { "usage" } else { "context" });
+            self.open_diagnostic(if kind == "context" { "context" } else { "usage" });
             return;
         }
         let mut label = self

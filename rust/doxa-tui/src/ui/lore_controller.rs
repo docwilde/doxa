@@ -216,6 +216,7 @@ impl App {
     pub(super) fn switch_lore_view(&mut self, mode: usize) -> bool {
         let Some(picker) = self.lore_picker.as_mut() else { return false; };
         if picker.resolving || picker.belief_acting { return true; }
+        self.title_tab_hover = None;
         picker.proposal_mode = mode != 0; picker.cluster_mode = mode == 2;
         picker.pending = None; picker.query.clear(); picker.offset = 0; picker.selected = 0;
         picker.filter_focused = false;
@@ -230,6 +231,7 @@ impl App {
     }
 
     pub(super) fn open_lore_picker_mode(&mut self, proposal_mode: bool) {
+        self.title_tab_hover = None;
         if self.active_remote() { self.notice = "LORE memory is managed on the session host".into(); return; }
         self.belief_browser_fixture = false;
         self.belief_filter_due = None;
@@ -286,6 +288,7 @@ impl App {
     /// Render-only gallery fixture: all LORE reads and writes are disabled.
     pub fn show_belief_browser_fixture(&mut self, group: usize, rows: &[(u64, &str, &str)]) {
         self.active_group = group.min(self.groups.len().saturating_sub(1));
+        self.title_tab_hover = None;
         self.belief_browser_fixture = true;
         self.lore_picker = Some(LorePicker {
             session_id: None,

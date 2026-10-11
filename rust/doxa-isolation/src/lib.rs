@@ -9,8 +9,7 @@ use std::{
     io::{self, Read, Write},
     os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
-    time::{Duration, Instant},
+    process::Command,
 };
 pub mod broker;
 #[cfg(target_os = "linux")]
@@ -26,6 +25,7 @@ pub mod workspace;
 pub mod test_runner;
 pub mod migration;
 pub mod cgroup;
+mod command_runner;
 mod disk;
 mod source_git;
 pub use source_git::staged_diff;
@@ -230,24 +230,7 @@ fn nonce() -> io::Result<String> {
     let mut bytes = [0; 24]; File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
-fn run(mut command: Command) -> io::Result<Vec<u8>> {
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    let stdout = child.stdout.take().unwrap(); let stderr = child.stderr.take().unwrap();
-    let out = std::thread::spawn(move || { let mut bytes = Vec::new(); let result = stdout.take(1024 * 1024 + 1).read_to_end(&mut bytes); (result, bytes) });
-    let err = std::thread::spawn(move || { let mut bytes = Vec::new(); let result = stderr.take(8193).read_to_end(&mut bytes); (result, bytes) });
-    let deadline = Instant::now() + Duration::from_secs(45);
-    let status = loop {
-        if let Some(status) = child.try_wait()? { break status; }
-        if Instant::now() >= deadline { let _ = child.kill(); let _ = child.wait(); return Err(error("isolation operation timed out; native fallback refused")); }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    let (result, bytes) = out.join().map_err(|_| error("isolation output reader failed"))?; result?;
-    let (_, stderr) = err.join().map_err(|_| error("isolation error reader failed"))?;
-    if !status.success() { return Err(error(format!("isolation operation failed: {}", String::from_utf8_lossy(&stderr).chars().take(1000).collect::<String>()))); }
-    if bytes.len() > 1024 * 1024 { return Err(error("isolation operation output exceeds limit")); }
-    Ok(bytes)
-}
+fn run(command: Command) -> io::Result<Vec<u8>> { command_runner::run(command) }
 fn docker(policy: &Policy) -> Command {
     let mut command = Command::new("docker");
     command.arg("--host").arg(&policy.docker_host).env_remove("DOCKER_CONTEXT").env_remove("DOCKER_TLS_VERIFY").env_remove("DOCKER_CERT_PATH");

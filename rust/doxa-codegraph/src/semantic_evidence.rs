@@ -91,6 +91,7 @@ fn declaration_at(content: &str, name: &str, line: usize, column: usize) -> Resu
             _ => false,
         })
     }
+    crate::rust_bounds::preflight(content)?;
     let syntax = syn::parse_file(content).map_err(|e| format!("Rust parse error: {e}"))?;
     Ok(items_match(&syntax.items, name, line, column))
 }

@@ -6,6 +6,59 @@ use super::*;
     use serde_json::json;
 
     #[test]
+    fn glm_account_usage_refresh_is_explicit_and_restores_unknown_and_reported_state() {
+        use doxa_vendors::glm_billing::{account_report,Profile,QuotaSnapshot};
+        let mut app=App::default();app.handle(Event::Resize(190,48));
+        let report=account_report(Some(Profile::ApiResourceBundle),true,false,&QuotaSnapshot::not_checked());
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"glm-report","engine":"glm","model":"glm-5.3-flash","billing":report}));
+        assert!(app.chips(0).contains(&("glm_account","GLM bundle · remainder ?".into())));
+        assert!(app.pending_prompts.is_empty());assert!(app.pending_queue_commands.is_empty());
+        app.open_chip_info("glm_account",0);
+        assert_eq!(app.chip_info.as_ref().unwrap().kind,"usage");
+        assert!(app.chip_info.as_ref().unwrap().lines.join("\n").contains("owner-declared"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'),KeyModifiers::NONE)));
+        assert!(app.pending_queue_commands.is_empty());assert!(app.notice.contains("monitor is off"));
+
+        let mut report=account_report(Some(Profile::ApiResourceBundle),true,true,&QuotaSnapshot::not_checked());
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::Telemetry {session_id:"glm-report".into(),reply:json!({"status":{"billing":report}})});
+        assert!(app.chip_info.as_ref().unwrap().lines.join("\n").contains("not checked"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'),KeyModifiers::NONE)));
+        assert!(matches!(app.pending_queue_commands.as_slice(),[crate::bridge::WorkerCommand::RefreshBilling(id)] if id=="glm-report"));
+        assert!(app.pending_prompts.is_empty());
+        app.pending_queue_commands.clear();
+        let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        report["glm_account"]["plan_monitor"]["quota"]=json!({"status":"verified","observed_at":now,"limits":[{"kind":"provider_quota","used_percent":82}]});
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::Telemetry {session_id:"glm-report".into(),reply:json!({"status":{"billing":report,"total_cost_usd":0.125,"usage":{"cost_basis":"list_price"}}})});
+        let lines=app.chip_info.as_ref().unwrap().lines.join("\n");
+        assert!(lines.contains("82.0% used"));assert!(lines.contains("bundle remainder: unknown"));
+        assert!(lines.contains("$0.1250 est"));assert!(lines.contains("Actual provider charge: unknown"));
+        assert_eq!(app.session_telemetry["glm-report"].billing_mode.as_deref(),Some("api"));
+        assert!(app.session_telemetry["glm-report"].subscription_type.is_none());
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::TelemetryUnavailable {session_id:"glm-report".into()});
+        assert!(!app.chip_info.as_ref().unwrap().lines.join("\n").contains("82.0%"));
+        assert!(app.chip_info.as_ref().unwrap().lines.join("\n").contains("quota monitor: unavailable"));
+    }
+
+    #[test]
+    fn glm_profile_settings_choice_and_monitor_are_independent_production_controls() {
+        let mut app=App::default();app.handle(Event::Resize(180,40));
+        let rows=crate::settings::SETTINGS.iter().map(|setting|crate::settings::Row {setting,value:setting.default.into(),stored:setting.default.into(),source:"default".into(),shadowed:false}).collect::<Vec<_>>();
+        let selected=rows.iter().position(|row|row.setting.key=="glm_account_profile").unwrap();
+        app.settings_menu=Some(SettingsMenu {rows,selected,category:0,draft:None,edits:HashMap::new(),engine:"glm".into()});
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        let menu=app.settings_menu.as_ref().unwrap();
+        assert_eq!(menu.edits["glm_account_profile"].as_deref(),Some("api_resource_bundle"));
+        assert!(!menu.edits.contains_key("glm_plan_monitor"));
+        let selected=app.settings_menu.as_ref().unwrap().rows.iter().position(|row|row.setting.key=="glm_plan_monitor").unwrap();
+        app.settings_menu.as_mut().unwrap().selected=selected;
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert_eq!(app.settings_menu.as_ref().unwrap().edits["glm_plan_monitor"].as_deref(),Some("on"));
+        assert!(app.pending_prompts.is_empty());assert!(app.pending_queue_commands.is_empty());
+    }
+
+    #[test]
     fn router_events_preserve_auto_and_display_effective_identity_without_private_fields() {
         let mut app=App::default();
         app.handle(Event::Resize(160,36));
@@ -495,7 +548,8 @@ use super::*;
         }).collect::<Vec<_>>();
         app.settings_menu = Some(SettingsMenu { rows, selected: 0, category: 0,
             draft: None, edits: HashMap::new(), engine: "claude".into() });
-        for key in ["engine", "router_config", "mermaid_renderer", "mermaid_renderer_root"] {
+        for key in ["engine", "router_config", "mermaid_renderer", "mermaid_renderer_root",
+            "mcp_enabled", "mcp_config", "tavily_api_key", "firecrawl_api_key", "exa_api_key", "brave_api_key"] {
             let menu = app.settings_menu.as_mut().unwrap();
             menu.selected = menu.rows.iter().position(|row| row.setting.key == key).unwrap();
             let setting = menu.rows[menu.selected].setting;
@@ -509,6 +563,79 @@ use super::*;
                 assert!(text.contains(&format!("› {}:", setting.label)), "{key}, height={height}: {text}");
                 let menu = app.settings_menu.as_ref().unwrap();
                 assert!(menu.visible_indices(height).contains(&menu.selected));
+            }
+        }
+    }
+
+    #[test]
+    fn settings_mcp_standard_pane_shows_all_search_key_fields_and_bounded_footer() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(126, 31));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"settings-fixture","engine":"glm","model":"fixture"}));
+        let rows = crate::settings::SETTINGS.iter().map(|setting| crate::settings::Row {
+            setting, value: if setting.kind == crate::settings::Kind::Credential { "missing".into() } else { setting.default.into() },
+            stored: String::new(), source: "fixture".into(), shadowed: false,
+        }).collect::<Vec<_>>();
+        let selected = rows.iter().position(|row| row.setting.key == "mcp_enabled").unwrap();
+        let category = crate::settings::CATEGORIES.iter().position(|category| *category == "MCP").unwrap();
+        app.settings_menu = Some(SettingsMenu { rows, selected, category,
+            draft: None, edits: HashMap::new(), engine: "glm".into() });
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(menu.height > 12, "MCP needs category fields plus footer, got {menu:?}");
+        let text = painted_at(&app, 126, 31);
+        for key in ["mcp_enabled", "mcp_config", "tavily_api_key", "firecrawl_api_key", "exa_api_key", "brave_api_key"] {
+            let label = crate::settings::find(key).unwrap().label;
+            assert!(text.contains(&format!("{label}:")), "missing {key}: {text}");
+        }
+        assert!(text.contains("Ctrl+P probe"), "{text}");
+        assert!(text.contains("no tools"), "{text}");
+        assert!(text.contains("Config snapshot"), "{text}");
+        let menu = app.settings_menu.as_ref().unwrap();
+        assert_eq!(menu.visible_indices(app.active_chooser_rect().unwrap().height).len(), 6);
+        assert!(app.pending_prompts.is_empty() && app.pending_queue_commands.is_empty());
+    }
+
+    #[test]
+    fn settings_category_sizing_stays_within_short_narrow_panes_and_keeps_selected_rows() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"settings-fixture"}));
+        let rows = crate::settings::SETTINGS.iter().map(|setting| crate::settings::Row {
+            setting, value: setting.default.into(), stored: String::new(),
+            source: "fixture".into(), shadowed: false,
+        }).collect::<Vec<_>>();
+        app.settings_menu = Some(SettingsMenu { rows, selected: 0, category: 0,
+            draft: None, edits: HashMap::new(), engine: "claude".into() });
+        for category in 0..crate::settings::CATEGORIES.len() {
+            let indices = {
+                let menu = app.settings_menu.as_mut().unwrap();
+                menu.category = category;
+                menu.indices()
+            };
+            let mut edges = indices.first().copied().into_iter().chain(indices.last().copied()).collect::<Vec<_>>();
+            edges.dedup();
+            for selected in edges {
+                app.settings_menu.as_mut().unwrap().selected = selected;
+                for (width, height) in [(30, 20), (58, 18), (126, 31)] {
+                    app.handle(Event::Resize(width, height));
+                    let area = app.active_chooser_rect().expect("fixture pane fits Settings");
+                    let layout = app.layout(app.size);
+                    let pane = layout.panes.map_or(layout.body, |panes| panes[app.active_group]);
+                    assert!(area.x >= pane.x && area.right() <= pane.right());
+                    assert!(area.y >= pane.y && area.bottom() <= pane.bottom());
+                    let menu = app.settings_menu.as_ref().unwrap();
+                    assert!(menu.visible_indices(area.height).contains(&selected));
+                    if area.height >= 7 {
+                        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                        terminal.draw(|frame| app.draw(frame)).unwrap();
+                        let buffer = terminal.backend().buffer();
+                        let selected_row = (area.y + 1..area.bottom() - 1).find(|y|
+                            (area.x + 1..area.right() - 1).any(|x| buffer[(x, *y)].symbol() == "›"
+                                && buffer[(x, *y)].bg == theme::HIGHLIGHT));
+                        assert!(selected_row.is_some(), "category {category}, field {selected}, {width}x{height}");
+                    }
+                }
             }
         }
     }
@@ -1415,15 +1542,27 @@ for line in sys.stdin:
     #[test]
     fn fleet_admission_notices_and_unreviewed_status_are_visible_in_the_transcript() {
         let mut app=App::default();
+        app.rail_visible=false;
+        app.handle(Event::Resize(120,32));
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","cwd":"/demo"}));
         app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"fleet_guard","data":{"delivered":false,"reason":"outside approved assignment"}}}));
-        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"peer_message","data":{"from_title":"Worker","body":"status only","fleet_admission":{"delivered":true,"unreviewed":true}}}}));
-        let transcript=&app.sessions[0].transcript;
-        assert!(transcript.contains("Fleet message quarantined: outside approved assignment"));
-        let (lines, _) = super::transcript_tools::render(transcript, 100, None, None);
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"peer_message","data":{"from_title":"Worker","from_id":"worker-1","kind":"status","message_id":"receipt-1","body":"status only","fleet_admission":{"delivered":true,"unreviewed":true}}}}));
+        assert!(app.sessions[0].transcript.contains("Fleet message quarantined: outside approved assignment"));
+        let (lines, sections) = super::transcript_tools::render(&app.sessions[0].transcript, 120, None, None);
         let visible = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
-        assert!(visible.contains("Peer Worker [unreviewed fleet message]"));
-        assert!(visible.contains("│ status only"));
+        assert_eq!(sections.len(),1);
+        assert!(visible.contains("Peer Worker (worker-1)"));
+        assert!(visible.contains("[unreviewed fleet message]"));
+        assert!(visible.contains("kind: status") && visible.contains("message_id: receipt-1"));
+        assert!(!visible.contains("status only"), "peer bodies start collapsed");
+        assert!(!painted_at(&app,120,32).contains("status only"));
+        app.focus=Focus::Transcript;
+        assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE))));
+        let expanded=painted_at(&app,120,32);
+        assert!(expanded.contains("│ status only"), "{expanded}");
+        assert!(expanded.contains("[unreviewed fleet message]"));
+        assert!(expanded.contains("Fleet message quarantined"));
+        assert!(app.pending_prompts.is_empty() && app.pending_answers.is_empty());
         let row=super::transcript_events::structured_event("fleet_guard",&json!({"delivered":false,"reason":"hold\nfor human\u{1b}"})).unwrap();
         assert!(!row.contains('\u{1b}'));
     }
@@ -2460,6 +2599,7 @@ for line in sys.stdin:
     fn repository_chip_tracks_each_panes_actual_session_and_invalidates_stale_work() {
         use doxa_worktrees::RepoStatus;
         let mut app = App::default();
+        app.preferences.set_for_test("nerd_font", "0");
         app.rail_visible = false;
         app.handle(Event::Resize(220, 32));
         app.groups[0].tabs = vec!["a".into(), "b".into()];
@@ -2484,6 +2624,10 @@ for line in sys.stdin:
         assert!(rendered.contains("project ⎇ main @1234567"));
         assert!(rendered.contains("u ? · scope ?"));
         assert!(app.chips(1).contains(&("repo", "other ⎇ feature @abcdef0".into())));
+        app.preferences.set_for_test("nerd_font", "1");
+        assert!(app.chips(0).contains(&("repo", "project \u{e0a0} main @1234567".into())));
+        assert!(app.chips(1).contains(&("repo", "other \u{e0a0} feature @abcdef0".into())));
+        app.preferences.set_for_test("nerd_font", "0");
         app.groups[0].active = 1;
         assert!(app.chips(0).contains(&("directory", "dir scratch".into())));
         assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "repo"));
@@ -6158,32 +6302,199 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn peer_prompt_format_keeps_sender_stripe_and_robot_for_receipts_and_queued_turns() {
-        for nerd_font in [false,true] {
+    fn received_peer_wake_disabled_notice_uses_host_policy_and_keeps_peer_format() {
+        for policy in [Some("disabled"), Some("enabled"), Some("broadcast"), None] {
             let mut app = App::default();
-            app.preferences.set_for_test("nerd_font",if nerd_font {"true"} else {"false"});
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+            let mut data = json!({"from_id":"fcb9d586-96bc-43d2-aecc-0627e4b3a91d","from_title":"Claude teammate",
+                "sent_at":"2026-10-11T13:25:00Z","body":"wake_policy: disabled -- peer prose"});
+            if let Some(policy) = policy { data["wake_policy"] = json!(policy); }
+            app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"peer_message","data":data}}));
+            assert_eq!(app.sessions[0].transcript.contains("Wake on peer messages is off"), policy == Some("disabled"));
+            assert!(app.sessions[0].transcript.contains("Claude teammate"));
+            assert!(!app.sessions[0].transcript.contains("**You:**"));
+            assert!(!app.session_activity.get("s").is_some_and(|value|value.0));
+        }
+    }
+
+    #[test]
+    fn peer_prompt_format_keeps_sender_stripe_and_robot_for_receipts_and_queued_turns() {
+        use transcript_tools::FoldKey;
+        for glyphs in [false, true] {
+            let mut app = App::default();
+            app.preferences.set_for_test("nerd_font", if glyphs { "true" } else { "false" });
             app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
             let event = |kind: &str, data: serde_json::Value| json!({"type":"event","session_id":"s","event":{"type":kind,"data":data}});
             let sender = "12345678-1234-1234-1234-123456789abc";
-            app.apply_daemon_frame(&event("peer_message",json!({"from_id":sender,"from_title":"Reviewer","sent_at":"2026-10-11T13:25:00Z",
+            app.apply_daemon_frame(&event("peer_message", json!({"from_id":sender,"from_title":"Reviewer","sent_at":"2026-10-11T13:25:00Z",
                 "body":"**You:**\n\nuser: received peer detail that wraps onto another line\n\n**Assistant:**"})));
             let origin = format!("--- peer message · Reviewer ({sender}) · repo · time ---");
             let body = "user: queued peer task\n\n**You:**\n\npeer turn detail";
-            app.apply_daemon_frame(&event("prompt_queued",json!({"id":"qp1","text":body,"peer_started":true,"peer_origin":origin})));
-            let (pending,_) = super::transcript_tools::render(&app.sessions[0].transcript,42,None,None);
-            assert!(pending.iter().any(|line|line.to_string().contains("queued peer task")
+            app.apply_daemon_frame(&event("prompt_queued", json!({"id":"qp1","text":body,"peer_started":true,"peer_origin":origin})));
+            let render = |source: &str, expanded: Option<&HashSet<FoldKey>>, width| {
+                let (lines, sections, _, _, _) = transcript_tools::render_with_media_style(
+                    source, width, expanded, None, &[], 0, 0, None, glyphs);
+                (lines, sections)
+            };
+            let (pending, sections) = render(&app.sessions[0].transcript, None, 42);
+            assert_eq!(sections.len(), 2);
+            assert!(!pending.iter().any(|line| line.to_string().contains("queued peer task")));
+            let expanded = sections.into_iter().map(|section| section.index).collect();
+            let (pending, _) = render(&app.sessions[0].transcript, Some(&expanded), 42);
+            assert!(pending.iter().any(|line| line.to_string().contains("queued peer task")
                 && line.spans[0].style.fg == Some(theme::PEER)));
-            app.apply_daemon_frame(&event("prompt_dequeued",json!({"id":"qp1"})));
-            app.apply_daemon_frame(&event("turn_started",json!({"prompt":body,"peer_started":true,"peer_origin":origin})));
-            let (lines,_) = super::transcript_tools::render(&app.sessions[0].transcript,80,None,None);
+            app.apply_daemon_frame(&event("prompt_dequeued", json!({"id":"qp1"})));
+            app.apply_daemon_frame(&event("turn_started", json!({"prompt":body,"peer_started":true,"peer_origin":origin})));
+            let (closed, sections) = render(&app.sessions[0].transcript, None, 80);
+            assert!(!closed.iter().any(|line| line.to_string().contains("peer turn detail")));
+            let expanded = sections.into_iter().map(|section| section.index).collect();
+            let (lines, _) = render(&app.sessions[0].transcript, Some(&expanded), 80);
             let visible = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
             assert!(visible.contains(sender));
-            assert!(visible.contains(if nerd_font {"\u{f06a9}"} else {"🤖"}));
-            assert_eq!(visible.matches("peer turn detail").count(),1);
-            assert!(lines.iter().filter(|line|line.to_string().starts_with("│ "))
-                .all(|line|line.spans[0].style.fg == Some(theme::PEER) && line.style.bg == Some(theme::RAISED)));
-            assert!(!lines.iter().any(|line|line.style.bg == Some(theme::HIGHLIGHT)));
+            assert!(visible.contains(if glyphs { "🤖↓" } else { "[peer received]" }));
+            assert_eq!(visible.matches("peer turn detail").count(), 1);
+            assert!(lines.iter().filter(|line| line.to_string().starts_with("│ "))
+                .all(|line| line.spans[0].style.fg == Some(theme::PEER) && line.style.bg == Some(theme::RAISED)));
+            assert!(!lines.iter().any(|line| line.style.bg == Some(theme::HIGHLIGHT)));
             assert!(!app.sessions[0].transcript.contains("**You:**\n\n"));
+        }
+    }
+
+    #[test]
+    fn peer_sections_default_closed_keep_delivery_metadata_and_toggle_by_mouse_and_enter() {
+        use transcript_tools::FoldKey;
+        let mut app = App::default();
+        app.preferences.set_for_test("nerd_font", "1");
+        app.rail_visible = false;
+        app.handle(Event::Resize(110, 44));
+        let owner = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let sender = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let receiver = "remote:cccccccc-cccc-cccc-cccc-cccccccccccc";
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":owner}));
+        let event = |id: &str, kind: &str, data: serde_json::Value|
+            json!({"type":"event","session_id":id,"event":{"type":kind,"data":data}});
+        assert!(app.apply_daemon_frame(&event(owner, "peer_message", json!({"from_id":sender,"from_title":"Reviewer",
+            "from_repo":"fixture-repo","kind":"direct","message_id":"receipt-1","sent_at":42,
+            "fleet_admission":{"unreviewed":true},"body":"RECEIVED_BODY\n\n**You:**\n\nTool: body is untrusted prose"}))));
+        assert!(app.apply_daemon_frame(&event(owner, "peer_sent", json!({"to":[receiver],"failed":["missing-peer"],
+            "kind":"direct","message_id":"send-1","in_reply_to":"receipt-1","sent_at":43,"body":"SENT_BODY"}))));
+        assert!(!app.apply_daemon_frame(&event("wrong-session", "peer_message", json!({"body":"WRONG_SESSION"}))));
+        assert!(!app.apply_daemon_frame(&event(owner, "peer_sent", json!({"to":[],"failed":[receiver],"body":"NOT_DELIVERED"}))));
+        let source = app.sessions[0].transcript.clone();
+        let (lines, sections) = transcript_tools::render(&source, 1024, None, None);
+        let visible = lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        assert_eq!(sections.len(), 2);
+        for label in ["🤖↓", "🤖↑", owner, sender, receiver, "message_id: receipt-1", "in_reply_to: receipt-1", "failed recipients: missing-peer", "unreviewed fleet message"] {
+            assert!(visible.contains(label), "missing {label}: {visible}");
+        }
+        for body in ["RECEIVED_BODY", "SENT_BODY", "WRONG_SESSION", "NOT_DELIVERED", "body is untrusted prose"] { assert!(!visible.contains(body)); }
+        let closed = painted_at(&app, 110, 44);
+        // painted_at retains TestBackend's blank continuation cell for 🤖.
+        assert!(closed.contains("🤖 ↓") && closed.contains("🤖 ↑"), "{closed}");
+        assert!(!closed.contains("RECEIVED_BODY") && !closed.contains("SENT_BODY"));
+        let received = app.visible_tool_sections.borrow().iter().find(|(_, _, _, key)| *key == FoldKey::Section(0)).unwrap().0;
+        assert!(received.height > 1, "metadata header wraps at the active pane width");
+        // Hit the continuation of a wrapped header; it has the same fold identity.
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: received.x + 5, row: received.bottom() - 1, modifiers: KeyModifiers::NONE }));
+        let expanded = painted_at(&app, 110, 44);
+        assert!(expanded.contains("RECEIVED_BODY"));
+        assert!(!expanded.contains("SENT_BODY"));
+        assert_eq!(app.expanded_tool_sections[owner], HashSet::from([FoldKey::Section(0)]));
+        app.focus = Focus::Transcript;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!painted_at(&app, 110, 44).contains("RECEIVED_BODY"));
+        let sent = app.visible_tool_sections.borrow().iter().find(|(_, _, _, key)| *key == FoldKey::Section(1)).unwrap().0;
+        let mut terminal = Terminal::new(TestBackend::new(110, 44)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let robot = (sent.x..sent.right()).find(|x| terminal.backend().buffer()[(*x, sent.y)].symbol().contains('🤖')).unwrap();
+        assert!(robot + 1 < sent.right());
+        // Locate the actual two-cell robot glyph in the production paint, then
+        // hit both cells. The second cell is a continuation in TestBackend.
+        assert_eq!(terminal.backend().buffer()[(robot + 1, sent.y)].symbol(), " ");
+        for column in [robot, robot + 1] {
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+                column, row: sent.y, modifiers: KeyModifiers::NONE }));
+            assert!(painted_at(&app, 110, 44).contains("SENT_BODY"));
+            app.focus = Focus::Transcript;
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+            assert!(!painted_at(&app, 110, 44).contains("SENT_BODY"));
+        }
+        // Display records replay with bodies still folded and no synthesized tool sections.
+        let mut replay = App::default();
+        replay.preferences.set_for_test("nerd_font", "1");
+        replay.apply_daemon_frame(&json!({"type":"hello","session_id":owner}));
+        replay.apply_update(DaemonUpdate::Transcript { id: owner.into(), markdown: source });
+        let (lines, folds) = transcript_tools::render(&replay.sessions[0].transcript, 1024, None, None);
+        assert_eq!(folds.len(), 2);
+        assert_eq!(lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"), visible);
+        assert!(!replay.expanded_tool_sections.get(owner).is_some_and(|set| !set.is_empty()));
+    }
+
+    #[test]
+    fn peer_sent_history_without_body_is_explicit_and_legacy_receipts_still_fold() {
+        use transcript_tools::FoldKey;
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"peer_sent","data":{"to":["receiver"],"kind":"direct"}}}));
+        let expanded = HashSet::from([FoldKey::Section(0)]);
+        let (lines, _) = transcript_tools::render(&app.sessions[0].transcript, 90, Some(&expanded), None);
+        assert!(lines.iter().any(|line| line.to_string().contains("Message body not recorded")));
+        let old = format!("{}{}", transcript_messages::PREFIX, json!({"queue_id":null,"state":null,"text":"legacy received body","timestamp":null,"sender":"Legacy peer"}));
+        let (lines, folds) = transcript_tools::render(&old, 90, None, None);
+        assert_eq!(folds.len(), 1);
+        assert!(!lines.iter().any(|line| line.to_string().contains("legacy received body")));
+        let (lines, _) = transcript_tools::render(&old, 90, Some(&expanded), None);
+        assert!(lines.iter().any(|line| line.to_string().contains("legacy received body")));
+    }
+
+    #[test]
+    fn peer_tool_and_reasoning_icons_follow_font_preference_and_resize_cache() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.preferences.set_for_test("nerd_font", "1");
+        app.preferences.set_for_test("show_reasoning", "1");
+        app.handle(Event::Resize(90, 36));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event","session_id":"s","event":{"type":kind,"data":data}});
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"fixture"})));
+        app.apply_daemon_frame(&event("reasoning_delta", json!({"text":"HIDDEN_THINKING","approx_tokens":7})));
+        app.apply_daemon_frame(&event("tool_call", json!({"id":"read-1","name":"Read","input":"HIDDEN_INPUT"})));
+        app.apply_daemon_frame(&event("peer_message", json!({"from_id":"other-peer","from_title":"Reviewer","body":"HIDDEN_PEER"})));
+        let glyphs = painted_at(&app, 90, 36);
+        for icon in ["🧠", "🛠", "🤖 ↓"] { assert!(glyphs.contains(icon), "missing {icon}: {glyphs}"); }
+        for body in ["HIDDEN_THINKING", "HIDDEN_INPUT", "HIDDEN_PEER"] { assert!(!glyphs.contains(body)); }
+        app.preferences.set_for_test("nerd_font", "0");
+        let plain = painted_at(&app, 90, 36);
+        for icon in ["🧠", "🛠", "🤖"] { assert!(!plain.contains(icon)); }
+        assert!(plain.contains("[peer received]"));
+        assert!(plain.contains("Reasoning/Thinking"));
+        assert!(plain.contains("tool call"));
+        for width in [64, 118] {
+            app.handle(Event::Resize(width, 36));
+            painted_at(&app, width, 36);
+            let cache = app.rendered_transcripts.borrow();
+            let cached = cache.iter().find(|entry| entry.id == "s").unwrap();
+            let (lines, folds, _, _, _) = transcript_tools::render_with_media_style(&app.sessions[0].transcript,
+                cached.width, None, None, app.tool_cards.for_session("s"), cached.image_rows, 0, None, false);
+            assert_eq!(cached.lines, lines);
+            assert_eq!(cached.sections, folds);
+        }
+        // Expanded per-call headers and the thinking header keep one paint/hit
+        // row even when the icons add a second terminal cell at small widths.
+        let (_, folds) = transcript_tools::render(&app.sessions[0].transcript, 90, None, None);
+        let mut expanded = folds.into_iter().map(|fold| fold.index).collect::<HashSet<_>>();
+        expanded.insert(transcript_tools::FoldKey::Tool("read-1".into()));
+        for glyphs in [false, true] {
+            for width in [12, 24, 42] {
+                let (lines, folds, _, _, _) = transcript_tools::render_with_media_style(&app.sessions[0].transcript,
+                    width, Some(&expanded), None, app.tool_cards.for_session("s"), 0, 0, None, glyphs);
+                for fold in folds.iter().filter(|fold| fold.index == transcript_tools::FoldKey::Section(0)
+                    || fold.index == transcript_tools::FoldKey::Tool("read-1".into())) {
+                    assert_eq!(fold.height, 1);
+                    assert!(lines[fold.line].width() <= usize::from(width));
+                }
+            }
         }
     }
 
@@ -6204,7 +6515,7 @@ for line in sys.stdin:
             assert_eq!(cached.lines,lines);
             assert_eq!(cached.sections,sections);
         }
-        assert_eq!(cached.sections.len(),2);
+        assert_eq!(cached.sections.len(),3);
     }
 
     #[test]
@@ -7564,7 +7875,7 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
         assert_eq!(app.groups[0].tabs, ["host~one"]);
         assert_eq!(app.chips(0)[0], ("remote", "Remote · host".into()));
         app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteSnapshot {
-            session_id: "host~one".into(),
+            session_id: "host~one".into(), incarnation:"first".into(),
             markdown: "**You:**\n\nQuestion\n\n**Assistant:**\n\nAnswer\n\n".into(),
             pending_inputs: json!([{"id":"review-1","kind":"permission","title":"Approve?"}]),
             pending_inputs_complete: true,
@@ -7609,7 +7920,7 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
         let id="host~session";
         app.apply_worker_frame(crate::worker_frames::WorkerFrame::Daemon {session_id:id.into(),
             frame:json!({"type":"hello","session_id":id,"title":"Remote","remote":true})});
-        app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteSnapshot {session_id:id.into(),
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteSnapshot {session_id:id.into(),incarnation:"first".into(),
             markdown:"recent turn".into(),pending_inputs:json!([]),pending_inputs_complete:true,
             before:Some(100),has_more:true});
         app.open_history();
@@ -7621,4 +7932,25 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
             markdown:"older turn".into(),before:None,has_more:false,error:None});
         assert_eq!(app.chip_info.as_ref().unwrap().lines[0],"older turn");
         assert!(!app.remote_history_before.contains_key(id));
+    }
+
+    #[test]
+    fn remote_answers_capture_displayed_request_and_expire_on_reconnect() {
+        let mut app=App::default(); let id="host~session";
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::Daemon{session_id:id.into(),
+            frame:json!({"type":"hello","session_id":id,"remote":true})});
+        let reviewed=json!({"id":"review-1","kind":"permission","title":"Original","input_summary":"echo original"});
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteSnapshot{session_id:id.into(),incarnation:"first".into(),
+            markdown:String::new(),pending_inputs:json!([reviewed]),pending_inputs_complete:true,before:None,has_more:false});
+        app.pending_answers.push((id.into(),"review-1".into(),json!({"decision":"allow"})));
+        let answers=app.take_answers();
+        assert_eq!(answers[0].2["remote_review"]["reviewed_request"],reviewed);
+        assert_eq!(answers[0].2["remote_review"]["incarnation"],"first");
+        // A full writer queue retains the exact original receipt, not a new one.
+        app.pending_answers=answers.clone();
+        assert_eq!(app.take_answers(),answers);
+        app.pending_answers=answers;
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteConnectivity{session_id:id.into(),status:"Remote reconnecting".into()});
+        assert!(app.input_requests.is_empty()); assert!(app.take_answers().is_empty());
+        assert!(!app.remote_review_incarnations.contains_key(id));
     }

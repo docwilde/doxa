@@ -867,6 +867,10 @@ impl LoreClient {
     }
 
     pub fn scrub(&mut self, text: &str) -> Result<String, LoreError> {
+        // LORE's generic matchers cannot identify arbitrary account keys. Strip
+        // DOXA's exact known keys locally, including inactive provider keys,
+        // before passing any public text to either LORE backend.
+        let text = doxa_vendors::credentials::redact(text).map_err(LoreError::Io)?;
         self.request_text(json!({"op":"scrub","text":text}))
     }
 
@@ -1463,6 +1467,7 @@ impl LoreClient {
         if !self.alive {
             return Err(LoreError::Closed);
         }
+        doxa_vendors::credentials::redact_json(&mut frame).map_err(LoreError::Io)?;
         let id = self.next_id;
         self.next_id = id.checked_add(1).ok_or(LoreError::InvalidFrame)?;
         frame["id"] = json!(id);
@@ -1471,9 +1476,10 @@ impl LoreClient {
             if *agent && bytes.len() > 64 * 1024 { return Err(LoreError::FrameTooLarge); }
             let result = if *agent { core.agent_execute(&frame) } else { core.execute(&frame) }
                 .map_err(|error| native_error(frame["op"].as_str().unwrap_or(""), error))?;
-            let reply = if matches!(frame["op"].as_str(), Some("scrub" | "snapshot")) {
+            let mut reply = if matches!(frame["op"].as_str(), Some("scrub" | "snapshot")) {
                 json!({"type":"reply", "id":id, "ok":true, "text":result})
             } else { json!({"type":"reply", "id":id, "ok":true, "value":result}) };
+            doxa_vendors::credentials::redact_json(&mut reply).map_err(LoreError::Io)?;
             // The native path crosses the same finite frame boundary before
             // typed result validators consume it, with no trusted fast path.
             let response = encode(&reply)?;
@@ -1511,13 +1517,14 @@ impl LoreClient {
             self.disable();
             return Err(LoreError::Timeout);
         }
-        let reply = self.receive(remaining)?;
+        let mut reply = self.receive(remaining)?;
         if reply["type"] != "reply" || reply["id"].as_u64() != Some(id) || !reply["ok"].is_boolean()
         {
             self.disable();
             return Err(LoreError::InvalidFrame);
         }
         if reply["ok"] == true {
+            doxa_vendors::credentials::redact_json(&mut reply).map_err(LoreError::Io)?;
             Ok(reply)
         } else {
             let code = match reply["error"].as_str() {

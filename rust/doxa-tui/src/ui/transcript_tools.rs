@@ -25,6 +25,7 @@ pub(super) enum FoldKey { Section(usize), Tool(String) }
 pub(super) struct Section {
     pub index: FoldKey,
     pub line: usize,
+    pub height: usize,
 }
 
 pub(super) const IMAGE_ROWS: u16 = 4;
@@ -267,6 +268,14 @@ fn plain_detail(lines: &mut Vec<Line<'static>>, label: &str, value: &str, width:
     }
 }
 
+fn clip_header(text: &str, width: u16) -> String {
+    let mut cells = 0;
+    text.chars().take_while(|ch| {
+        cells += ch.width().unwrap_or(0);
+        cells <= usize::from(width)
+    }).collect()
+}
+
 fn append_markdown(lines: &mut Vec<Line<'static>>, links: &mut Vec<markdown::LinkRegion>,
                    mut rendered: markdown::RenderedMarkdown) {
     for link in &mut rendered.links { link.row += lines.len(); }
@@ -278,7 +287,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                sections: &mut Vec<Section>, links: &mut Vec<markdown::LinkRegion>,
                images: &mut Vec<ImagePlacement>, mermaids: &mut Vec<MermaidPlacement>,
                ready_mermaids: Option<&HashSet<String>>, image_rows: u16, width: u16,
-               expanded: Option<&HashSet<FoldKey>>, selected: Option<FoldKey>, cards: &[ToolCard], section_offset: usize) {
+               expanded: Option<&HashSet<FoldKey>>, selected: Option<FoldKey>, cards: &[ToolCard], section_offset: usize, glyphs: bool) {
     let mut prose = String::new();
     let mut speaker = None;
     let flush_prose = |prose: &mut String, lines: &mut Vec<Line<'static>>, links: &mut Vec<markdown::LinkRegion>, speaker| {
@@ -294,7 +303,8 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
     let mut ordered = Vec::with_capacity(blocks.len());
     let mut tools = Vec::new();
     for block in blocks.drain(..) {
-        let index = if matches!(block, Block::Tools(_) | Block::Reasoning { .. } | Block::Shell(_)) {
+        let index = if matches!(block, Block::Tools(_) | Block::Reasoning { .. } | Block::Shell(_))
+            || matches!(&block, Block::Message(message) if message.sender.is_some()) {
             let index = next_index;
             next_index += 1;
             Some(index)
@@ -327,11 +337,32 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 if !lines.is_empty() && !lines.last().is_some_and(|line| line.spans.is_empty()) {
                     lines.push(Line::default());
                 }
-                let label = markdown::render(&super::transcript_events::event_field_with_limit(&message.label(), 1024), width);
-                lines.extend(label.into_iter().map(|line| line.style(Style::default().fg(if message.sender.is_some() { theme::PEER } else { theme::MUTED }))));
-                if !message.text.is_empty() {
+                let peer = message.sender.is_some();
+                let fold = section_index.map(FoldKey::Section);
+                let open = fold.as_ref().is_none_or(|key| expanded.is_some_and(|set| set.contains(key)));
+                let label = if peer {
+                    format!("{} {} · Enter {}", if glyphs { if open { "▾" } else { "▸" } } else if open { "v" } else { ">" },
+                        message.label_with_style(glyphs), if open { "collapse" } else { "expand" })
+                } else { message.label_with_style(glyphs) };
+                let header = super::transcript_events::event_field_with_limit(&label, super::MAX_INPUT_BYTES * 2);
+                let mut rendered = transcript_roles::render_with_links(&header, width, peer.then_some(Speaker::Peer));
+                if let Some(index) = fold {
+                    sections.push(Section { index: index.clone(), line: lines.len(), height: rendered.lines.len().max(1) });
+                    let style = Style::default().fg(theme::PEER).add_modifier(
+                        if selected.as_ref() == Some(&index) { Modifier::BOLD } else { Modifier::empty() });
+                    for line in &mut rendered.lines {
+                        line.style = line.style.patch(style);
+                        for span in &mut line.spans { span.style = span.style.patch(style); }
+                    }
+                } else {
+                    for line in &mut rendered.lines { line.style = line.style.patch(Style::default().fg(theme::MUTED)); }
+                }
+                append_markdown(lines, links, rendered);
+                if open && !message.text.is_empty() {
                     append_markdown(lines, links, transcript_roles::render_with_links(&message.text, width,
-                        Some(if message.sender.is_some() { Speaker::Peer } else { Speaker::User })));
+                        Some(if peer { Speaker::Peer } else { Speaker::User })));
+                } else if open && message.sent {
+                    append_markdown(lines, links, transcript_roles::render_with_links("Message body not recorded", width, Some(Speaker::Peer)));
                 }
                 lines.push(Line::default());
             }
@@ -361,17 +392,17 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 speaker = Some(Speaker::Assistant);
                 let index = section_index.expect("foldable blocks have an identity");
                 let index = FoldKey::Section(index);
-                sections.push(Section { index: index.clone(), line: lines.len() });
+                sections.push(Section { index: index.clone(), line: lines.len(), height: 1 });
                 let calls = tools.iter().filter(|row| {
                     let display = row.split_once(RESTORED_TOOL_PREFIX).map_or(**row, |(display, _)| display);
                     display.contains(" started") || display.starts_with("[Tool: ")
                 }).count();
                 let count = if calls == 0 { tools.len() } else { calls };
                 let open = expanded.is_some_and(|set| set.contains(&index));
-                let marker = if open { "▾" } else { "▸" };
-                let summary = format!("{marker} {count} tool call{} · {} · Enter",
-                    if count == 1 { "" } else { "s" }, display_tool_name(tool_name(tools[0])));
-                let summary: String = summary.chars().take(usize::from(width.saturating_sub(2))).collect();
+                let marker = if glyphs { if open { "▾" } else { "▸" } } else if open { "v" } else { ">" };
+                let summary = format!("{marker} {}{count} tool call{} · {} · Enter",
+                    if glyphs { "🛠 " } else { "" }, if count == 1 { "" } else { "s" }, display_tool_name(tool_name(tools[0])));
+                let summary = clip_header(&summary, width.saturating_sub(2));
                 let style = if selected.as_ref() == Some(&index) {
                     Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
                 } else {
@@ -400,7 +431,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                     for (id, rows) in calls {
                         let key = FoldKey::Tool(id.clone());
                         let call_open = expanded.is_some_and(|set| set.contains(&key));
-                        sections.push(Section { index: key.clone(), line: lines.len() });
+                        sections.push(Section { index: key.clone(), line: lines.len(), height: 1 });
                         let card = cards.iter().find(|card| card.id == id);
                         let name = card.map_or_else(|| tool_name(rows[0]), |card| card.name.as_str());
                         let status = card.map_or_else(|| {
@@ -412,8 +443,10 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                         let style = if selected.as_ref() == Some(&key) {
                             Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
                         } else { Style::default().fg(theme::SECONDARY) };
-                        lines.push(Line::styled(format!("  {} {} · {status} · Enter",
-                            if call_open { "▾" } else { "▸" }, display_tool_name(name)), style));
+                        let label = format!("  {} {}{} · {status} · Enter",
+                            if glyphs { if call_open { "▾" } else { "▸" } } else if call_open { "v" } else { ">" },
+                            if glyphs { "🛠 " } else { "" }, display_tool_name(name));
+                        lines.push(Line::styled(clip_header(&label, width), style));
                         if !call_open { continue; }
                         if let Some(card) = card {
                             if let Some(input) = &card.input { plain_detail(lines, "Input", input, width); }
@@ -435,13 +468,13 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 flush_prose(&mut prose, lines, links, speaker);
                 let index = section_index.expect("shell blocks have an identity");
                 let index = FoldKey::Section(index);
-                sections.push(Section { index: index.clone(), line: lines.len() });
+                sections.push(Section { index: index.clone(), line: lines.len(), height: 1 });
                 let open = expanded.is_some_and(|set| set.contains(&index));
-                let marker = if open { "▾" } else { "▸" };
+                let marker = if glyphs { if open { "▾" } else { "▸" } } else if open { "v" } else { ">" };
                 let style = if selected.as_ref() == Some(&index) { Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::SECONDARY) };
                 let command = markdown::sanitize(&result.command).replace('\n', " ");
                 let label = format!(" {marker} !{command} · {}", result.status);
-                let label: String = label.chars().take(usize::from(width.saturating_sub(1))).collect();
+                let label = clip_header(&label, width.saturating_sub(1));
                 lines.push(Line::styled(label, style));
                 if open { plain_detail(lines, "Local output", &result.output, width); }
                 if result.dropped_bytes > 0 { lines.push(Line::styled(format!("  {} output bytes omitted", result.dropped_bytes), Style::default().fg(theme::SECONDARY))); }
@@ -451,16 +484,16 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 speaker = Some(Speaker::Assistant);
                 let index = section_index.expect("foldable blocks have an identity");
                 let index = FoldKey::Section(index);
-                sections.push(Section { index: index.clone(), line: lines.len() });
+                sections.push(Section { index: index.clone(), line: lines.len(), height: 1 });
                 let open = expanded.is_some_and(|set| set.contains(&index));
-                let marker = if open { "▾" } else { "▸" };
+                let marker = if glyphs { if open { "▾" } else { "▸" } } else if open { "v" } else { ">" };
                 let estimate = if exact { "" } else { "~" };
-                let label = format!(" {marker} Reasoning/Thinking · {estimate}{tokens} tokens{}",
-                    if streaming { " · receiving" } else { "" });
+                let label = format!(" {marker} {}Reasoning/Thinking · {estimate}{tokens} tokens{}",
+                    if glyphs { "🧠 " } else { "" }, if streaming { " · receiving" } else { "" });
                 let style = if selected.as_ref() == Some(&index) {
                     Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
                 } else { Style::default().fg(theme::SECONDARY) };
-                lines.push(Line::styled(label, style));
+                lines.push(Line::styled(clip_header(&label, width), style));
                 if open {
                     if text.is_empty() {
                         lines.push(Line::styled(if streaming {
@@ -519,6 +552,14 @@ pub(super) fn render_with_media(
     selected: Option<FoldKey>, cards: &[ToolCard], image_rows: u16, section_offset: usize,
     ready_mermaids: Option<&HashSet<String>>,
 ) -> (Vec<Line<'static>>, Vec<Section>, Vec<markdown::LinkRegion>, Vec<ImagePlacement>, Vec<MermaidPlacement>) {
+    render_with_media_style(source, width, expanded, selected, cards, image_rows, section_offset, ready_mermaids, true)
+}
+
+pub(super) fn render_with_media_style(
+    source: &str, width: u16, expanded: Option<&HashSet<FoldKey>>,
+    selected: Option<FoldKey>, cards: &[ToolCard], image_rows: u16, section_offset: usize,
+    ready_mermaids: Option<&HashSet<String>>, glyphs: bool,
+) -> (Vec<Line<'static>>, Vec<Section>, Vec<markdown::LinkRegion>, Vec<ImagePlacement>, Vec<MermaidPlacement>) {
     let mut lines = Vec::new();
     let mut sections = Vec::new();
     let mut links = Vec::new();
@@ -547,13 +588,13 @@ pub(super) fn render_with_media(
         if fence.is_none() && matches!(paragraph, "**You:**" | "**Assistant:**") {
             if paragraph == "**You:**" {
                 render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, &mut mermaids,
-                    ready_mermaids, image_rows, width, expanded, selected.clone(), cards, section_offset);
+                    ready_mermaids, image_rows, width, expanded, selected.clone(), cards, section_offset, glyphs);
                 tool_index = None;
             }
             blocks.push(Block::Heading(paragraph));
         } else if fence.is_none() && paragraph.starts_with(SHELL_PREFIX) {
             render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, &mut mermaids,
-                ready_mermaids, image_rows, width, expanded, selected.clone(), cards, section_offset);
+                ready_mermaids, image_rows, width, expanded, selected.clone(), cards, section_offset, glyphs);
             tool_index = None;
             if let Ok(result) = serde_json::from_str(paragraph.strip_prefix(SHELL_PREFIX).unwrap()) { blocks.push(Block::Shell(result)); }
             else { blocks.push(Block::Prose("Local shell output unavailable")); }
@@ -563,7 +604,7 @@ pub(super) fn render_with_media(
             if let Some(message) = super::transcript_messages::Message::parse(paragraph) {
                 if message.starts_turn {
                     render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, &mut mermaids,
-                        ready_mermaids, image_rows, width, expanded, selected.clone(), cards, section_offset);
+                        ready_mermaids, image_rows, width, expanded, selected.clone(), cards, section_offset, glyphs);
                     tool_index = None;
                 }
                 blocks.push(Block::Message(message));
@@ -609,7 +650,7 @@ pub(super) fn render_with_media(
         }
     }
     render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, &mut mermaids,
-        ready_mermaids, image_rows, width, expanded, selected.clone(), cards, section_offset);
+        ready_mermaids, image_rows, width, expanded, selected.clone(), cards, section_offset, glyphs);
     (lines, sections, links, images, mermaids)
 }
 

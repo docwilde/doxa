@@ -135,8 +135,9 @@ account permission to send messages for the configured project. The Android
 app project and service account must belong to the same Firebase project. The
 hub starts with Android push disabled when the file is absent; no registration
 can succeed until it is provisioned. Server registrations are volatile,
-owner-scoped, capped, and expire after 24 hours. Reopening the app refreshes
-the lease; token rotation also attempts registration. An offline disable still
+owner-scoped, capped, and expire after 24 hours. The app uses the returned lease expiry to renew before expiry while visible;
+returning to an existing foreground Activity renews an unknown or expired lease.
+A failed renewal shows alerts as pending. Token rotation also attempts registration. An offline disable still
 stops local display immediately, while the server may retain the old token
 until its lease expires.
 
@@ -170,3 +171,12 @@ The build versions follow the [Android Compose setup guide](https://developer.an
 and [Gradle wrapper guidance](https://docs.gradle.org/current/userguide/gradle_wrapper.html).
 The push boundary follows [Firebase's Android registration guidance](https://firebase.google.com/docs/cloud-messaging/android/get-started)
 and [FCM server authorization requirements](https://firebase.google.com/docs/cloud-messaging/send/v1-api).
+
+Pure protocol tests exercise a two-second lease, foreground expiry, invalid expiry
+and failed-renewal state without Firebase or a provisioned device. Actual FCM
+delivery remains a separate device acceptance gate.
+
+Approval cards show the complete selectable request JSON in their scrollable
+review area before Allow/Deny. A title cannot hide tool arguments. The submitted
+answer remains bound to that captured request and incarnation. Pure display tests
+retain long argument tails; this does not replace provisioned-device UI acceptance.

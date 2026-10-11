@@ -149,24 +149,15 @@ enum CheckpointBarrier {
     ThreadEntry,
 }
 
-fn scrub_value(value: &mut Value, scrub: &impl Fn(&str) -> String) {
-    match value {
-        Value::String(s) => *s = scrub(s),
-        Value::Array(items) => {
-            for item in items {
-                scrub_value(item, scrub);
-            }
-        }
-        Value::Object(fields) => {
-            for item in fields.values_mut() {
-                scrub_value(item, scrub);
-            }
-        }
-        _ => {}
-    }
+fn try_scrub_value(
+    value: &mut Value,
+    scrub: &mut impl FnMut(&str) -> io::Result<String>,
+) -> io::Result<()> {
+    doxa_vendors::credentials::redact_json(value)?;
+    try_scrub_strings(value, scrub)
 }
 
-fn try_scrub_value(
+fn try_scrub_strings(
     value: &mut Value,
     scrub: &mut impl FnMut(&str) -> io::Result<String>,
 ) -> io::Result<()> {
@@ -174,12 +165,12 @@ fn try_scrub_value(
         Value::String(s) => *s = scrub(s)?,
         Value::Array(items) => {
             for item in items {
-                try_scrub_value(item, scrub)?;
+                try_scrub_strings(item, scrub)?;
             }
         }
         Value::Object(fields) => {
             for item in fields.values_mut() {
-                try_scrub_value(item, scrub)?;
+                try_scrub_strings(item, scrub)?;
             }
         }
         _ => {}
@@ -306,7 +297,7 @@ impl TranscriptStore {
             .create(true)
             .append(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(self.transcript_path())?;
         checked_file(&file)?;
         if file.metadata()?.len().saturating_add(bytes.len() as u64) > MAX_VENDOR_TRANSCRIPT_BYTES {
@@ -537,7 +528,7 @@ impl TranscriptStore {
         Ok(clean)
     }
 
-    /// Append one original record with the Python engine override, after scrubbing every string value.
+    /// Append one original record after scrubbing string values and object keys.
     pub fn append(
         &self,
         mut record: Value,
@@ -547,7 +538,7 @@ impl TranscriptStore {
         owned_dir(&self.dir)?;
         let fields = record.as_object_mut().ok_or_else(bad_data)?;
         fields.insert("engine".into(), Value::String(engine.to_owned()));
-        scrub_value(&mut record, &scrub);
+        try_scrub_value(&mut record, &mut |text| Ok(scrub(text)))?;
         let mut bytes = serde_json::to_vec(&record)?;
         if bytes.len() > MAX_TRANSCRIPT_BYTES {
             return Err(bad_data());
@@ -558,7 +549,7 @@ impl TranscriptStore {
             .create(true)
             .append(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(self.transcript_path())?;
         checked_file(&file)?;
         // Python 1.x may have created this file under a permissive umask.
@@ -590,7 +581,7 @@ impl TranscriptStore {
             .create(true)
             .append(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(self.transcript_path())?;
         checked_file(&file)?;
         if file.metadata()?.permissions().mode() & 0o077 != 0 {

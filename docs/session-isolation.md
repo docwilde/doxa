@@ -163,6 +163,22 @@ idle expiration. Explicit stop ends the container. Closing a provider's host
 transport causes the image-owned worker to end its provider process, avoiding
 an orphan provider writer when the supervisor crashes.
 
+Host Git and Docker controller commands have one 45-second elapsed deadline
+covering the direct child and EOF on both output pipes. A descendant retaining
+either pipe cannot extend that limit. Timeout, read failure or excessive stdout
+signals the command's process group before closing the read ends, with at most
+one extra second to confirm direct-child reaping. Unconfirmed cleanup is an
+explicit failure alongside the original operation error; a signal refusal is
+not treated as verified cleanup. The helper does not retry the command or select native fallback.
+This stops local client processes, not an Engine operation already submitted:
+retained manifests and containers still need the normal reconciliation checks.
+
+The defect was reproduced with the released helper and a local fake subprocess
+whose direct child exited while a descendant retained its pipes. Local regression
+fixtures cover inherited stdout/stderr, live children, closed pipes before child
+exit, normal completion and output overflow. No real Docker/Engine hang or
+rootless container cleanup was exercised by these fixtures.
+
 Implementation limits: this is a Linux rootless Docker boundary, not a VM.
 The restricted-egress gateway has an exact hostname/443 `CONNECT` allowlist and
 checks TLS SNI before dialing the pinned DNS answer. It rejects ECH, TLS early

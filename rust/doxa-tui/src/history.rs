@@ -988,20 +988,34 @@ for line in sys.stdin:
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "history::tests::missing_managed_checkout_recovery_child", "--nocapture"])
             .env("DOXA_RECOVERY_TEST_CHILD", "1").output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        let bounded = |bytes: &[u8]| String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).into_owned();
+        assert!(output.status.success(), "recovery child {}\nstdout:\n{}\nstderr:\n{}",
+            output.status, bounded(&output.stdout), bounded(&output.stderr));
     }
 
     #[test]
     fn missing_managed_checkout_recovery_child() {
         if std::env::var("DOXA_RECOVERY_TEST_CHILD").as_deref() != Ok("1") { return; }
         let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let main = temp.path().join("repo");
         let home = temp.path().join("home");
         let root = temp.path().join("projects");
+        fs::create_dir(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir(&main).unwrap();
+        fs::set_permissions(&main, fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir_all(root.join("project")).unwrap();
+        for path in [&root, &root.join("project")] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let git = |args: &[&str]| {
-            let output = Command::new("git").args(args).current_dir(&main).output().unwrap();
+            let output = Command::new("git").env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+                .env("HOME", &home).env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(args).current_dir(&main).output().unwrap();
             assert!(output.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&output.stderr));
             String::from_utf8(output.stdout).unwrap().trim().to_owned()
         };

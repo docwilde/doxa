@@ -8,7 +8,7 @@ impl Preferences {
     pub fn load() -> Self {
         let config = crate::settings::config_path().map(|p| doxa_state::load_config(&p)).unwrap_or_default();
         let values = crate::settings::SETTINGS.iter().map(|s| {
-            let value = crate::settings::raw_from(&config,s,std::env::var(s.env).ok().as_deref(),"claude");
+            let value = crate::settings::raw_from(&config,s,crate::settings::environment_override(s).as_ref().map(|(value,_)|value.as_str()),"claude");
             (s.key,if value.is_empty() { s.default.into() } else { value })
         }).collect(); Self { values }
     }
@@ -99,6 +99,62 @@ mod tests {
         let mut result=Preferences { values:crate::settings::SETTINGS.iter().map(|s|(s.key,s.default.into())).collect() };
         for (k,v) in values {result.values.insert(k,(*v).into());}result
     }
+    #[test]
+    fn nerd_font_defaults_on_preserves_saved_off_and_environment_precedence() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("DOXA_TEST_NERD_FONT_CHILD").is_none() {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let runtime = home.path().join("runtime");
+            std::fs::create_dir(&runtime).unwrap();
+            std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "preferences::tests::nerd_font_defaults_on_preserves_saved_off_and_environment_precedence", "--nocapture"])
+                .env_clear().env("PATH", "/usr/bin:/bin")
+                .env("HOME", home.path()).env("DOXA_HOME", home.path())
+                .env("XDG_RUNTIME_DIR", &runtime).env("DOXA_RUNTIME_DIR", &runtime)
+                .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_else(|| "/home/docwilde/.dt".into()))
+                .env("DOXA_TEST_NERD_FONT_CHILD", "1")
+                .stdin(Stdio::null()).spawn().unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() { assert!(status.success()); break; }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill(); let _ = child.wait();
+                    panic!("private Nerd Font fixture exceeded its deadline");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return;
+        }
+        let path = crate::settings::config_path().unwrap();
+        let row = || crate::settings::rows("claude", None).unwrap().into_iter()
+            .find(|row| row.setting.key == "nerd_font").unwrap();
+        assert!(Preferences::load().on("nerd_font"));
+        assert!(crate::settings::enabled("nerd_font"));
+        assert_eq!(row().value, "on");
+        crate::settings::save(&path, &[("nerd_font".into(), Some("off".into()))], "claude").unwrap();
+        assert!(!Preferences::load().on("nerd_font"));
+        assert!(!crate::settings::enabled("nerd_font"));
+        assert_eq!(row().value, "off");
+        // Environment mutations are confined to this single-test private child.
+        std::env::set_var("DOXA_NERD_FONTS", "off");
+        std::env::set_var("DOXA_NERD_FONT", "on");
+        assert!(Preferences::load().on("nerd_font"));
+        assert!(row().source.contains("DOXA_NERD_FONT —"));
+        std::env::remove_var("DOXA_NERD_FONT");
+        assert!(!Preferences::load().on("nerd_font"));
+        assert!(row().shadowed);
+        assert!(row().source.contains("DOXA_NERD_FONTS —"));
+        let error = crate::settings::save(&path, &[("nerd_font".into(), None)], "claude").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("DOXA_NERD_FONTS"));
+        std::env::remove_var("DOXA_NERD_FONTS");
+        assert!(!Preferences::load().on("nerd_font"));
+        crate::settings::save(&path, &[("nerd_font".into(), None)], "claude").unwrap();
+        assert!(Preferences::load().on("nerd_font"));
+    }
+
     #[test]
     fn clock_has_only_the_selected_display_boundary_and_off_has_none() {
         let now=UNIX_EPOCH+Duration::new(123,500_000_000);

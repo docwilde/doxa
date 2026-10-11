@@ -180,22 +180,27 @@ impl App {
             WorkerFrame::Telemetry { session_id, reply } => {
                 if let Some(status) = reply.get("status") {
                     self.session_telemetry
-                        .entry(session_id)
+                        .entry(session_id.clone())
                         .or_default()
                         .update_status(status);
+                    self.refresh_usage_info(&session_id);
                     true
                 } else {
                     false
                 }
             }
             WorkerFrame::TelemetryUnavailable { session_id } => {
-                self.session_telemetry.entry(session_id).or_default().lore = None;
+                let telemetry=self.session_telemetry.entry(session_id.clone()).or_default();
+                telemetry.lore = None;
+                if let Some(account)=telemetry.glm_account.as_mut().filter(|account|account.monitor) {account.unavailable();}
+                self.refresh_usage_info(&session_id);
                 true
             }
-            WorkerFrame::RemoteSnapshot { session_id, markdown, pending_inputs, pending_inputs_complete,before,has_more } => {
+            WorkerFrame::RemoteSnapshot { session_id, incarnation, markdown, pending_inputs, pending_inputs_complete,before,has_more } => {
                 if !self.sessions.iter().any(|session| session.id == session_id) {
                     false
                 } else {
+                    self.remote_review_incarnations.insert(session_id.clone(), incarnation);
                     if has_more {if let Some(before)=before{self.remote_history_before.insert(session_id.clone(),before);}}
                     else{self.remote_history_before.remove(&session_id);}
                     self.apply_update(DaemonUpdate::Transcript { id: session_id.clone(), markdown });
@@ -230,6 +235,11 @@ impl App {
                 }
             }
             WorkerFrame::RemoteConnectivity { session_id, status } => {
+                if status != "Remote connected" {
+                    self.remote_review_incarnations.remove(&session_id);
+                    self.input_requests.retain(|request| request.session_id != session_id);
+                    self.pending_answers.retain(|(owner,_,_)| owner != &session_id);
+                }
                 self.apply_update(DaemonUpdate::Status { id: session_id, text: status });
                 true
             }
@@ -707,7 +717,19 @@ impl App {
                 }
                 match event_type {
                     "peer_message" => {
-                        let Some(message) = super::transcript_messages::Message::peer(data, self.preferences.on("nerd_font")) else { return false; };
+                        let Some(mut message) = super::transcript_messages::Message::peer(data, self.preferences.on("nerd_font")) else { return false; };
+                        let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else { return false; };
+                        message.recipients.push(id.clone());
+                        let mut clipped = super::transcript_messages::append(session, &message);
+                        if data["wake_policy"] == "disabled" {
+                            clipped |= append_transcript(session,
+                                "\n\n*Peer message stored for your next turn. Wake on peer messages is off; enable it in /settings → Session to allow incoming direct messages to start or queue turns.*\n");
+                        }
+                        self.transcript_evicted(&id, clipped);
+                        true
+                    }
+                    "peer_sent" => {
+                        let Some(message) = super::transcript_messages::Message::sent(data, &id, self.preferences.on("nerd_font")) else { return false; };
                         let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else { return false; };
                         let clipped = super::transcript_messages::append(session, &message);
                         self.transcript_evicted(&id, clipped);
@@ -733,9 +755,10 @@ impl App {
                             return false;
                         }
                         self.session_telemetry
-                            .entry(id)
+                            .entry(id.clone())
                             .or_default()
                             .update_billing(data);
+                        self.refresh_usage_info(&id);
                         true
                     }
                     "tool_result_detail" => tool_updated,
@@ -1420,6 +1443,7 @@ impl App {
                     .entry(id.to_owned())
                     .or_default()
                     .update_status(status);
+                self.refresh_usage_info(id);
                 true
             }
             "reply" => {
@@ -1435,6 +1459,7 @@ impl App {
                             .entry(id.to_owned())
                             .or_default()
                             .update_status(status);
+                        self.refresh_usage_info(id);
                         let identity = self.session_identity.entry(id.to_owned()).or_default();
                         if status.get("engine").is_some() {
                             identity.0 = status

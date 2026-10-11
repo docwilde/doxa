@@ -3,6 +3,7 @@
 #[path = "../src/budget_host.rs"] mod budget_host;
 #[path = "../src/vendor_host.rs"] mod vendor_host;
 #[path = "../src/vendor_tools.rs"] mod vendor_tools;
+#[path = "../src/vendor_mcp.rs"] mod vendor_mcp;
 #[path = "../src/claude_host.rs"] mod claude_host;
 #[path = "../src/codex_host.rs"] mod codex_host;
 #[path = "../src/router_cli.rs"] mod router_cli;
@@ -25,12 +26,15 @@ mod tests {
             static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
             let lock = LOCK.get_or_init(||Mutex::new(())).lock().unwrap_or_else(|p|p.into_inner());
             let root = tempfile::tempdir().unwrap();
-            let values = [("DOXA_HOME",root.path().join("home").into_os_string()),
+            let values = [("HOME",root.path().join("home").into_os_string()),
+                ("DOXA_HOME",root.path().join("home").into_os_string()),
                 ("LORE_ROOT",root.path().join("lore").into_os_string()),
                 ("LORE_PROJECTS_DIR",root.path().join("projects").into_os_string()),
                 ("DEEPSEEK_API_KEY","worker-fixture-key-1234".into()),("ZAI_API_KEY","worker-fixture-key-1234".into()),
                 ("TYPESAFE_API_KEY","jev-fixture-key-1234".into()),("DOXA_LORE","0".into()),
-                ("DOXA_VENDOR_TOOLS","workspace-read".into())];
+                ("DOXA_VENDOR_TOOLS","workspace-read".into()),
+                ("DOXA_MCP_ENABLED","0".into()),
+                ("DOXA_MCP_CONFIG",root.path().join("disabled-mcp.json").into_os_string())];
             let previous = values.iter().map(|(key,_)|(*key,std::env::var_os(key))).collect();
             for (key,value) in values { std::env::set_var(key,value); }
             fs::create_dir(root.path().join("workspace")).unwrap();
@@ -310,6 +314,59 @@ mod tests {
             let resumed=make_host(&env,cfg,&server,true,Some(2.0));
             let count=server.bodies().len();assert_eq!(prompt(&resumed,"do not replay")[0]["type"],"turn_refused");
             assert_eq!(server.bodies().len(),count);resumed.shutdown();
+        }
+    }
+
+    #[test]
+    fn zero_worker_usage_retains_allowance_and_blocks_tools_continuations_and_resume_replay() {
+        use std::sync::atomic::AtomicUsize;
+        for tool in [false,true] {
+            let env=Env::new();let mut workers=0;
+            let server=Server::new(move|method,body| {
+                if method=="GET" {return ("application/json".into(),
+                    json!({"data":[{"id":"deepseek-flash"}]}).to_string(),Duration::ZERO);}
+                assert_ne!(body["model"],doxa_router::JEV_MODEL,"single eligible worker needs no Jev call");
+                workers+=1;
+                if workers>1 {return worker(body,false);}
+                let delta=if tool {json!({"tool_calls":[{"index":0,"id":"peer-zero-usage",
+                    "function":{"name":doxa_engines::peer_tools::LIST,"arguments":"{}"}}]})}
+                    else {json!({"content":"generated zero-usage answer"})};
+                ("text/event-stream".into(),format!("data: {}\n\ndata: [DONE]\n\n",json!({"model":body["model"],
+                    "choices":[{"finish_reason":if tool {"tool_calls"} else {"stop"},"delta":delta}],
+                    "usage":{"prompt_tokens":0,"completion_tokens":0}})),Duration::ZERO)
+            });
+            // Config still requires two targets; the account catalog makes
+            // only the non-thinking DeepSeek target eligible for this turn.
+            let mut cfg=config();cfg.candidates.retain(|candidate|candidate.id!="thinking");
+            cfg.validate().unwrap();
+            let host=make_host(&env,cfg.clone(),&server,false,Some(2.0));
+            let calls=Arc::new(AtomicUsize::new(0));let executed=calls.clone();
+            assert!(host.set_peer_tool_handler(Arc::new(move|_,_|{executed.fetch_add(1,Ordering::SeqCst);Ok(json!({"peers":[]}))})));
+            let mut events=Vec::new();
+            host.prompt("nonempty request",&mut|event| {
+                // A buggy pre-validation tool admission would really execute
+                // this callback instead of merely stalling at its approval.
+                if event["type"]=="needs_input" {
+                    host.call("answer_needs_input",&json!({"id":event["data"]["id"],"answer":{"decision":"allow"}})).unwrap();
+                }
+                events.push(event);
+            });
+            assert_eq!(events.last().unwrap()["data"]["is_error"],true);
+            assert!(!events.iter().any(|event|matches!(event["type"].as_str(),Some("needs_input"|"tool_call"|"tool_result"))));
+            assert_eq!(calls.load(Ordering::SeqCst),0);assert_eq!(server.bodies().len(),1);
+            let state=env.state();assert_eq!(state["worker"]["accounting_unknown"],true);
+            assert_eq!(state["incomplete"],true);assert_eq!(state["worker"]["estimated_actual_usd_micros"],0);
+            assert!(state["worker"]["retained_reservation_usd_micros"].as_u64().unwrap()>0);
+            assert!(host.billing_snapshot().unwrap()["session_cost_usd"].is_null());
+            let projects=env.root.path().join("projects");
+            let project=fs::read_dir(projects).unwrap().next().unwrap().unwrap().path();
+            let messages:Value=serde_json::from_slice(&fs::read(project.join("routed.messages.json")).unwrap()).unwrap();
+            assert_eq!(messages["messages"],json!([]));assert!(!project.join("routed.jsonl").exists());
+            host.shutdown();drop(host);
+            let resumed=make_host(&env,cfg,&server,true,Some(2.0));
+            assert_eq!(prompt(&resumed,"do not replay")[0]["type"],"turn_refused");
+            assert_eq!(server.bodies().len(),1);assert_eq!(env.state()["worker"],state["worker"]);
+            resumed.shutdown();
         }
     }
 }

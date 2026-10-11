@@ -227,6 +227,9 @@ impl PeerHost {
         if clean_body.chars().count() > delivery::MAX_BODY_CHARS {
             return Err("message too long after scrubbing".into());
         }
+        // This bounded display text has passed the same required scrub as
+        // delivery. Keep prose separate from any host-issued fleet envelope.
+        let display_body = clean_body.clone();
         // Fleet identities and envelopes are host-owned. Ordinary peer prose
         // cannot be forwarded into a supervised fleet or over a remote bridge.
         let fleet_context = self.fleet.lock().map_err(|_| "Fleet guard unavailable")?.clone();
@@ -276,7 +279,9 @@ impl PeerHost {
             let kind=if broadcast{"broadcast"}else{"direct"};
             let result=self.send_remote(&remote_matches,&clean_body,&clean_title,&clean_scope,kind,in_reply_to)?;
             if result.delivered.is_empty(){return Err("remote peer delivery failed".into());}
-            let _=self.events.try_send(json!({"type":"peer_sent","data":{"to":result.delivered,"kind":kind,"remote":true,"message_id":result.record.as_ref().map(|row|row.id.as_str())}}));
+            let _=self.events.try_send(json!({"type":"peer_sent","data":{"to":result.delivered,"failed":result.failed,
+                "body":display_body,"sent_at":now(),"kind":kind,"remote":true,"in_reply_to":in_reply_to,
+                "message_id":result.record.as_ref().map(|row|row.id.as_str())}}));
             return Ok(json!({"peer":if broadcast{None}else{remote_matches.first().map(|(_,peer)|peer)},"peer_count":remote_matches.len(),"kind":kind,"in_reply_to":in_reply_to,"trust":PEER_UNTRUSTED_INTRO,"untrusted_peer_data":true,"delivered_to":result.delivered,"failed":result.failed,"message_id":result.record.as_ref().map(|row|row.id.as_str()),"ledger_error":result.ledger_error}));
         }
         if matches.is_empty() { return Err(if broadcast { "no live same-scope peers to broadcast to" } else if exact {
@@ -383,7 +388,8 @@ impl PeerHost {
             }
         }
         let _ = self.events.try_send(json!({"type":"peer_sent","data":{
-            "to":result.delivered,"kind":kind,"in_reply_to":in_reply_to,
+            "to":result.delivered,"failed":result.failed,"kind":kind,"in_reply_to":in_reply_to,
+            "body":if result.delivered.is_empty() { None } else { Some(display_body) },"sent_at":now(),
             "message_id":fleet_message_id.as_deref().or_else(||result.record.as_ref().map(|r|r.id.as_str()))}}));
         Ok(json!({"peer":if broadcast { None } else { peer_infos.first() },"peer_count":recipients.len(),"kind":kind,"in_reply_to":in_reply_to,"trust":PEER_UNTRUSTED_INTRO,"untrusted_peer_data":true,
             "delivered_to":result.delivered,"failed":result.failed,

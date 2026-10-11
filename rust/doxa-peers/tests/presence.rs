@@ -178,3 +178,47 @@ fn scoped_registry_overflow_is_explicit_and_read_only() {
     assert!(start.elapsed() < std::time::Duration::from_secs(2));
     assert!(registry.directory().join("noise-0").exists());
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn full_backlogs_share_a_roster_deadline_without_reaping_live_records() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap(); let runtime = dir.path().join("runtime");
+    let registry = Registry::open(&runtime).unwrap();
+    let mut listeners = Vec::new(); let mut queued = Vec::new();
+    for index in 0..25 {
+        let id = format!("blocked-{index:02}"); let path = runtime.join(format!("{id}.sock"));
+        let listener = listening(&runtime, &format!("{id}.sock"));
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        let bytes = path.as_os_str().as_bytes(); assert!(bytes.len() < address.sun_path.len());
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (slot,byte) in address.sun_path.iter_mut().zip(bytes) { *slot = *byte as libc::c_char; }
+        let size = (std::mem::offset_of!(libc::sockaddr_un,sun_path)+bytes.len()+1) as libc::socklen_t;
+        let mut full = false;
+        for _ in 0..32 {
+            let fd = doxa_peers::credentials::nonblocking_unix_socket().unwrap();
+            if unsafe { libc::connect(fd.as_raw_fd(), (&address as *const libc::sockaddr_un).cast(), size) } == 0 {
+                queued.push(fd);
+            } else {
+                assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EAGAIN));full = true;break;
+            }
+        }
+        assert!(full,"fixture backlog was not full");
+        registry.write(&record(&id,&path,"/scope","blocked fixture")).unwrap();listeners.push(listener);
+    }
+    let saved = fs::read(registry.directory().join("blocked-00.json")).unwrap();
+    let started = Instant::now();
+    let error = list_scoped_readonly(&runtime,"/scope","self",|text|Ok(text.to_owned())).unwrap_err();
+    assert_eq!(error.kind(),io::ErrorKind::TimedOut);
+    assert!(started.elapsed()<Duration::from_secs(4),"roster used a separate full deadline for each peer");
+    assert_eq!(fs::read(registry.directory().join("blocked-00.json")).unwrap(),saved);
+    let started = Instant::now();
+    let error = registry.read(&|text:&str|text.to_owned(),true,true).unwrap_err();
+    assert_eq!(error.kind(),io::ErrorKind::TimedOut);
+    assert!(started.elapsed()<Duration::from_secs(4));
+    assert_eq!(fs::read(registry.directory().join("blocked-00.json")).unwrap(),saved);
+    drop(queued);drop(listeners);
+}

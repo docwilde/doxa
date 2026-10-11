@@ -28,6 +28,7 @@ impl App {
                 .to_owned(),
         );
         let selection_view = (self.size, self.groups[self.active_group].scroll);
+        let title_hover_before = self.title_tab_hover;
         let mut changed = match event {
             Event::Resize(w, h) => {
                 if let Some(manager) = &mut self.memory_manager {
@@ -39,6 +40,7 @@ impl App {
                     request.scroll = 0;
                 }
                 self.size = Rect::new(0, 0, w, h);
+                self.title_tab_hover = None;
                 self.drag = None;
                 self.belief_preview.clear();
                 self.memory_preview.clear();
@@ -124,6 +126,7 @@ impl App {
             Event::Key(key)
                 if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat =>
             {
+                self.title_tab_hover = None;
                 self.key(key)
             }
             Event::FocusGained => {
@@ -132,10 +135,16 @@ impl App {
             }
             Event::FocusLost => {
                 self.window_focused = false;
-                false
+                self.title_tab_hover = None;
+                title_hover_before.is_some()
             }
             Event::Paste(text) => self.paste(&text),
-            Event::Mouse(mouse) => self.mouse(mouse),
+            Event::Mouse(mouse) => {
+                if mouse.kind == MouseEventKind::Moved {
+                    self.title_tab_hover = self.title_tab_at(ratatui::layout::Position::new(mouse.column, mouse.row));
+                }
+                self.mouse(mouse)
+            },
             _ => false,
         };
         let after = (
@@ -159,6 +168,7 @@ impl App {
         {
             self.transcript_selection.borrow_mut().clear();
         }
+        self.retire_mcp_if_changed();
         self.refresh_vendor_credentials();
         if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential())
             && (self.should_quit || !self.chip_info.as_ref().is_some_and(|info| info.kind == "operations")
@@ -198,6 +208,11 @@ impl App {
             }
         }
         self.sync_chooser_state();
+        if self.title_tab_hover.is_some_and(|hit|
+            self.title_tab_at(ratatui::layout::Position::new(hit.rect.x, hit.rect.y)) != Some(hit)) {
+            self.title_tab_hover = None;
+        }
+        changed |= title_hover_before != self.title_tab_hover;
         changed |= self.reconcile_native_package_run();
         self.tick_chip_hover(Instant::now());
         changed |= self.tick_belief_preview(Instant::now());
@@ -235,6 +250,8 @@ impl App {
             self.retire_operations(); self.chip_info = None;
         }
         if before != after {
+            self.mcp_secret=None;
+            self.retire_mcp_if_changed();
             self.branch_picker = None;
             let moved_active_tab = std::mem::take(&mut self.moved_active_tab)
                 && !before.1.is_empty()
@@ -319,6 +336,9 @@ impl App {
         if let Some(token) = self.clipboard_secret_owner.take() {
             let active = self.active_group == target.pane
                 && self.groups[self.active_group].active_id().unwrap_or("") == target.session;
+            if active && self.mcp_secret.as_ref().is_some_and(|secret|secret.token==token) {
+                return self.mcp_secret_paste(&text);
+            }
             if active && self.chip_info.as_ref().is_some_and(|info| info.kind == "operations") {
                 if let Some(menu) = self.operations_menu.as_mut().filter(|menu| menu.credential_token() == Some(token)) {
                     menu.paste(&text);
@@ -401,6 +421,7 @@ impl App {
     }
 
     pub(super) fn paste(&mut self, text: &str) -> bool {
+        if self.mcp_secret.is_some() {return self.mcp_secret_paste(text);}
         if let Some(menu) = &mut self.operations_menu {
             let handled = menu.paste(text);
             if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
@@ -646,7 +667,8 @@ impl App {
             return true;
         }
         if ctrl && matches!(key.code, KeyCode::Char('v' | 'V')) {
-            if let Some(token) = self.operations_menu.as_ref().and_then(|menu| menu.credential_token()) {
+            if let Some(token) = self.mcp_secret.as_ref().map(|secret|secret.token)
+                .or_else(||self.operations_menu.as_ref().and_then(|menu|menu.credential_token())) {
                 self.clipboard_job = None;
                 self.clipboard_secret_owner = Some(token);
                 let mut target = self.clipboard_target(); target.draft.clear(); target.cursor = 0;
@@ -741,6 +763,7 @@ impl App {
             self.detach_active_tab();
             return true;
         }
+        if self.mcp_secret_key(key) {return true;}
         // A credential owns all typing while its editor exists. Provider input
         // requests must never capture a key intended for this transient field.
         if let Some(menu) = self.operations_menu.as_mut().filter(|menu| menu.editing_credential()) {
@@ -855,6 +878,18 @@ impl App {
                         if list.selected >= info.scroll + page { info.scroll = list.selected + 1 - page; }
                     }
                     return true;
+                }
+            }
+            if matches!(key.code,KeyCode::Char('r'|'R')) && self.chip_info.as_ref().is_some_and(|info|info.kind=="usage") {
+                if let Some((id,_))=self.chip_info.as_ref().and_then(|info|info.owner.clone()) {
+                    if self.groups[self.active_group].active_id()==Some(id.as_str())
+                        && self.session_identity.get(&id).and_then(|identity|identity.0.as_deref())==Some("glm") {
+                        if self.session_telemetry.get(&id).and_then(|value|value.glm_account.as_ref()).is_some_and(|account|account.monitor) {
+                            self.pending_queue_commands.push(crate::bridge::WorkerCommand::RefreshBilling(id));
+                            self.notice="Refreshing external Coding Plan monitor…".into();
+                        } else {self.notice="External Coding Plan monitor is off; enable it in /settings → Session".into();}
+                        return true;
+                    }
                 }
             }
             let codegraph_area = self.active_chooser_rect();
@@ -1663,7 +1698,7 @@ impl App {
     pub(super) fn active_request_index(&self) -> Option<usize> {
         // Keep both input and rendering with the secret editor until the user
         // explicitly saves or cancels. Requests remain queued in their store.
-        if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential()) {
+        if self.mcp_secret.is_some() || self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential()) {
             return None;
         }
         let id = self.groups[self.active_group].active_id()?;
@@ -2456,26 +2491,13 @@ impl App {
             self.link_hover = link;
             return changed || moved || tool_hover_changed || rail_hover_changed;
         }
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && self.active_request_index().is_none()
-        {
-            if let (Some(menu), Some(area)) = (&self.settings_menu, self.active_chooser_rect()) {
-                let point = ratatui::layout::Position::new(mouse.column, mouse.row);
-                if let Some(category) = super::choice_dropdown::settings_tabs(area, menu.category)
-                    .into_iter().find(|(_, rect, _)| rect.contains(point))
-                    .map(|(index, _, _)| index)
-                {
-                    self.select_settings_category(category);
-                    return true;
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(hit) = self.title_tab_at(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                match hit.owner {
+                    super::choice_dropdown::TitleTabOwner::Settings => self.select_settings_category(hit.index),
+                    super::choice_dropdown::TitleTabOwner::Lore => { self.switch_lore_view(hit.index); },
                 }
-            }
-        }
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.lore_picker.is_some() {
-            if let Some(area) = self.active_chooser_rect() {
-                if mouse.row == area.y && mouse.column > area.x {
-                    let x = mouse.column - area.x - 1;
-                    if x < 34 && mouse.column < area.right()-1 { return self.switch_lore_view(if x < 10 { 0 } else if x < 21 { 1 } else { 2 }); }
-                }
+                return true;
             }
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)

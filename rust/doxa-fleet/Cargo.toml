@@ -1,11 +1,12 @@
 [package]
 name = "doxa-fleet"
-version = "2.0.0-beta.46"
+version = "2.0.0-beta.47"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
 
 [dependencies]
+doxa-state = { path = "../doxa-state" }
 doxa-isolation = { path = "../doxa-isolation" }
 doxa-vendors = { path = "../doxa-vendors" }
 serde = { version = "1", features = ["derive"] }

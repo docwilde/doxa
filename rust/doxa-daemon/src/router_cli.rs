@@ -29,25 +29,26 @@ impl Worker {
 impl Drop for Worker { fn drop(&mut self) { self.shutdown(); } }
 
 impl CliOptions {
-    pub(super) fn catalog(&self, provider: Provider, cwd: &Path) -> Result<Vec<Value>,String> {
+    pub(super) fn catalog(&self, provider: Provider, cwd: &Path, cancel: &AtomicBool) -> Result<Vec<Value>,String> {
+        if cancel.load(Ordering::Acquire) { return Err("Router discovery cancelled".into()); }
         match provider {
             Provider::Claude => {
                 let path = self.claude.as_deref().ok_or("Router Claude executable unavailable")?;
                 let home = doxa_claude::isolation::prepare().map_err(|_|"Router Claude private account unavailable")?;
                 let plugins = doxa_claude::isolation::adopted_plugins().map_err(|_|"Router Claude plugin snapshot unavailable")?;
                 let id = worker_id().map_err(|_|"Router discovery identity unavailable")?;
-                let catalog = doxa_claude::catalog::discover_authenticated(doxa_claude::CliOptions {
+                let catalog = doxa_claude::catalog::discover_authenticated_cancellable(doxa_claude::CliOptions {
                     executable:path,cwd,config_dir:&home,session_id:&id,resume:false,model:None,effort:None,
-                    permission_mode:"manual",plugins:&plugins },Duration::from_secs(15))
+                    permission_mode:"manual",plugins:&plugins },Duration::from_secs(15),cancel)
                     .map_err(|_|"Router Claude current authentication or model catalog unavailable")?;
                 Ok(catalog["capabilities"].as_array().ok_or("Router Claude capabilities unavailable")?.clone())
             }
             Provider::Codex => {
                 let path = self.codex.clone().ok_or("Router Codex executable unavailable")?;
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_|"Router catalog runtime unavailable")?;
-                runtime.block_on(async { tokio::time::timeout(Duration::from_secs(20),AppServerDriver::discover_authenticated_models(AppServerOptions {
+                runtime.block_on(async { tokio::time::timeout(Duration::from_secs(20),AppServerDriver::discover_authenticated_models_cancellable(AppServerOptions {
                     executable:path,cwd:cwd.to_owned(),model:None,sandbox:SandboxMode::WorkspaceWrite,
-                    permission:CodexPermission::OnRequest,resume_thread:None,turn_timeout:Duration::from_secs(3600) })).await })
+                    permission:CodexPermission::OnRequest,resume_thread:None,turn_timeout:Duration::from_secs(3600) },cancel)).await })
                     .map_err(|_|"Router Codex catalog timed out")?.map_err(|_|"Router Codex current authentication or model catalog unavailable".into())
             }
             _ => Err("Router CLI discovery requires a CLI provider".into()),
@@ -55,16 +56,17 @@ impl CliOptions {
     }
 
     pub(super) fn start(&self,candidate:&Candidate,cwd:&Path,id:&str,permission:&str,
-        agent:Option<Arc<crate::agent_tools::AgentTools>>) -> Result<Arc<Worker>,String> {
+        agent:Option<Arc<crate::agent_tools::AgentTools>>, cancel:&AtomicBool) -> Result<Arc<Worker>,String> {
         // Fresh current account/catalog check immediately before native worker
         // admission. Jev's earlier shortlist cannot bypass a changed account.
-        let rows = self.catalog(candidate.provider,cwd)?;
+        let rows = self.catalog(candidate.provider,cwd,cancel)?;
         if !rows.iter().any(|row|advertised(candidate,row)) {
             return Err("Router CLI selected model or effort is no longer authenticated and advertised".into());
         }
+        if cancel.load(Ordering::Acquire) { return Err("Router worker startup cancelled".into()); }
         let worker = match candidate.provider {
-            Provider::Claude => WorkerKind::Claude(ClaudeHost::new_routed(self.claude.as_deref().ok_or("Claude executable unavailable")?,
-                cwd,id,&candidate.model,&candidate.effort,agent)?),
+            Provider::Claude => WorkerKind::Claude(ClaudeHost::new_routed_cancellable(self.claude.as_deref().ok_or("Claude executable unavailable")?,
+                cwd,id,&candidate.model,&candidate.effort,agent,cancel)?),
             Provider::Codex => {
                 let mut options=DriverOptions::new(cwd.to_owned());
                 options.executable=self.codex.clone().ok_or("Codex executable unavailable")?;

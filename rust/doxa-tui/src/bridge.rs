@@ -41,6 +41,7 @@ pub enum WorkerCommand {
     RemoteHistory(String, u64),
     QueueCancel(String, String),
     Status(String),
+    RefreshBilling(String),
     Stop(String),
     FinalizeForClear(String),
 }
@@ -254,7 +255,7 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _) | WorkerCommand::SetEffort(id, _)
                 | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::SetIsolation(id, _) | WorkerCommand::QueueList(id) | WorkerCommand::ContextDetail(id) | WorkerCommand::Status(id)
-                | WorkerCommand::Branch(id, _)
+                | WorkerCommand::Branch(id, _) | WorkerCommand::RefreshBilling(id)
                 | WorkerCommand::QueueCancel(id, _) | WorkerCommand::RemoteHistory(id,_) => id,
                 WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id)
                 | WorkerCommand::FinalizeForClear(id) => id,
@@ -313,7 +314,7 @@ pub(crate) fn rejection_frame(command: WorkerCommand, message: &str) -> WorkerFr
         WorkerCommand::SetIsolation(id, _) => command_frame(id, CommandResult::SetIsolation { status, isolation: None }),
         WorkerCommand::Branch(id, _) => command_frame(id, CommandResult::Branch { status, base: None, branches: None, message: None }),
         WorkerCommand::QueueList(id) => command_frame(id, CommandResult::QueueList { status, rows: Vec::new() }),
-        WorkerCommand::Status(session_id) => WorkerFrame::TelemetryUnavailable { session_id },
+        WorkerCommand::Status(session_id) | WorkerCommand::RefreshBilling(session_id) => WorkerFrame::TelemetryUnavailable { session_id },
         WorkerCommand::QueueCancel(id, queue_id) => command_frame(id, CommandResult::QueueCancel { status, queue_id }),
         WorkerCommand::Stop(id) => command_frame(id, CommandResult::Stop { status, for_clear: false }),
         WorkerCommand::FinalizeForClear(id) => command_frame(id, CommandResult::Stop { status, for_clear: true }),
@@ -419,9 +420,9 @@ fn worker_loop(
             return;
         }
     }
-    let deepseek = client.hello["engine"] == "deepseek";
+    let vendor_billing = matches!(client.hello["engine"].as_str(),Some("deepseek"|"glm"));
     let mut balance_checked = Instant::now();
-    if deepseek && !forward_status(&mut client, frames, &session_id) { return; }
+    if vendor_billing && !forward_status(&mut client, frames, &session_id) { return; }
     loop {
         // Bound prompt work so a burst cannot starve incoming daemon events.
         for _ in 0..32 {
@@ -458,6 +459,17 @@ fn worker_loop(
                     if id == session_id && !forward_status(&mut client, frames, &session_id) { return; }
                     cursor.store(client.cursor, Ordering::Relaxed);
                 }
+                Ok(WorkerCommand::RefreshBilling(id)) => {
+                    let result = if id == session_id {client.call("refresh_billing",Map::new())}
+                        else {Err(TransportError::Malformed("billing target is not attached"))};
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    let closed=matches!(result,Err(TransportError::Closed));
+                    let frame=match result {
+                        Ok(reply) if reply["ok"] == true && reply.get("status").is_some()=>WorkerFrame::Telemetry {session_id:id,reply},
+                        _=>WorkerFrame::TelemetryUnavailable {session_id:id},
+                    };
+                    if frames.send(frame).is_err() || closed {return;}
+                }
                 Ok(WorkerCommand::RemoteHistory(id,_)) => {
                     if frames.send(rejection_frame(WorkerCommand::RemoteHistory(id,0),"History paging is remote-only")).is_err(){return;}
                 }
@@ -479,7 +491,7 @@ fn worker_loop(
                             models: None, note: None, loading: None, capabilities: None },
                     };
                     if frames.send(command_frame(id, reply)).is_err() { return; }
-                    if deepseek && !forward_status(&mut client, frames, &session_id) { return; }
+                    if vendor_billing && !forward_status(&mut client, frames, &session_id) { return; }
                 }
                 Ok(WorkerCommand::SetModel(id, model)) => {
                     let result = if id == session_id {
@@ -769,9 +781,9 @@ fn worker_loop(
                 return;
             }
         }
-        // The vendor host reads balance in a bounded background task. Poll
-        // only its cached status so an idle session gains the chip too.
-        if deepseek && balance_checked.elapsed() >= Duration::from_secs(5) {
+        // Poll cached reports only. GLM monitor HTTP requires explicit refresh;
+        // neither this idle status poll nor admission queries its provider.
+        if vendor_billing && balance_checked.elapsed() >= Duration::from_secs(5) {
             balance_checked = Instant::now();
             if !forward_status(&mut client, frames, &session_id) { return; }
         }
@@ -798,6 +810,31 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn glm_billing_bridge_polls_cache_and_only_explicit_refresh_requests_quota() {
+        let path=std::env::temp_dir().join(format!("doxa-glm-report-{}-{}.sock",std::process::id(),NEXT_SOCKET.fetch_add(1,Ordering::Relaxed)));
+        let listener=UnixListener::bind(&path).unwrap();
+        let server=thread::spawn(move || {
+            let (mut socket,_)=listener.accept().unwrap();socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            writeln!(socket,"{}",json!({"type":"hello","proto":1,"session_id":"glm-report","engine":"glm","cwd":"/private/fixture","next_seq":1})).unwrap();
+            let mut reader=BufReader::new(socket.try_clone().unwrap());let mut line=String::new();reader.read_line(&mut line).unwrap();
+            for method in ["status","refresh_billing","stop"] {
+                line.clear();reader.read_line(&mut line).unwrap();let call:Value=serde_json::from_str(&line).unwrap();
+                assert_eq!(call["method"],method);assert_eq!(call["params"],json!({}));
+                writeln!(socket,"{}",json!({"type":"reply","id":call["id"],"ok":true,"status":{"session_id":"glm-report","billing":{"mode":"api","fixture":method}}})).unwrap();
+            }
+        });
+        let client=DaemonClient::connect(&path,None).unwrap();let (frames,prompts,worker)=spawn_worker(client);
+        let _=frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(frames.recv_timeout(Duration::from_secs(2)).unwrap(),WorkerFrame::Telemetry {reply,..} if reply["status"]["billing"]["fixture"]=="status"));
+        prompts.send(WorkerCommand::RefreshBilling("wrong-owner".into())).unwrap();
+        assert!(matches!(frames.recv_timeout(Duration::from_secs(2)).unwrap(),WorkerFrame::TelemetryUnavailable {session_id} if session_id=="wrong-owner"));
+        prompts.send(WorkerCommand::RefreshBilling("glm-report".into())).unwrap();
+        assert!(matches!(frames.recv_timeout(Duration::from_secs(2)).unwrap(),WorkerFrame::Telemetry {reply,..} if reply["status"]["billing"]["fixture"]=="refresh_billing"));
+        prompts.send(WorkerCommand::Stop("glm-report".into())).unwrap();let _=frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(prompts);worker.join().unwrap();server.join().unwrap();std::fs::remove_file(path).unwrap();
+    }
 
 
     #[test]

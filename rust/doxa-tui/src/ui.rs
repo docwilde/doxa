@@ -17,6 +17,7 @@ mod native_package_viewer;
 mod native_package_run;
 mod operations_controller;
 mod router_settings;
+mod mcp_settings;
 mod operations_menu;
 mod credential_editor;
 pub(crate) mod panes;
@@ -40,6 +41,7 @@ pub use terminal_loop::{
 pub(crate) use terminal_loop::run_remote_with_worker_channels_layout;
 mod session_events;
 mod session_telemetry;
+mod glm_account;
 mod transcript_events;
 
 use session_telemetry::SessionTelemetry;
@@ -448,12 +450,23 @@ impl SettingsMenu {
         indices.into_iter().skip(start).take(count).collect()
     }
     fn has_preflight(&self) -> bool {
+        crate::settings::CATEGORIES.get(self.category) == Some(&"MCP") ||
         self.rows.get(self.selected).is_some_and(|row| matches!(row.setting.key,
             "engine" | "router_config" | "mermaid_renderer" | "mermaid_renderer_root"))
     }
+    const MAX_PREFLIGHT_ROWS: usize = 5;
+    fn desired_height(&self) -> u16 {
+        // Nine rows cover the borders, heading, action hint and help/note.
+        // Preflight status is wrapped before rendering and capped at five
+        // physical rows. Account for that same cap before pane-height clipping,
+        // so a footer does not consume the category's configured field rows.
+        let footer = if self.has_preflight() { Self::MAX_PREFLIGHT_ROWS } else { 0 };
+        self.indices().len().saturating_add(9).saturating_add(footer)
+            .max(8).min(usize::from(u16::MAX)) as u16
+    }
     fn preflight_rows(&self, height: u16) -> usize {
         // Reserve the header, selected row, action hint and borders first.
-        if self.has_preflight() { usize::from(height.saturating_sub(6)).min(5) } else { 0 }
+        if self.has_preflight() { usize::from(height.saturating_sub(6)).min(Self::MAX_PREFLIGHT_ROWS) } else { 0 }
     }
     fn visible_window(&self, height: u16) -> (Vec<usize>, usize, usize) {
         let indices = self.indices();
@@ -535,6 +548,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
         "cost" => "Provider billing and quota information",
+        "glm_account" => "GLM declared API profile, unknown cash/bundle remainder and external quota monitor",
         "balance" => "Current DeepSeek API account balance",
         "native_status" => "Owner-approved native status · click for refresh cost and failure ledger",
         "more" => "More chips · click to reveal hidden chips",
@@ -1186,6 +1200,7 @@ struct RenderedTranscript {
     id: String,
     source: String,
     width: u16,
+    glyphs: bool,
     expanded: Option<HashSet<transcript_tools::FoldKey>>,
     selected: Option<transcript_tools::FoldKey>,
     cards_revision: u64,
@@ -1249,6 +1264,7 @@ impl RenderedTranscript {
         Self::render_media(pane, id, source, width, expanded, selected, cards_revision, cards, 0, 0, None)
     }
 
+    #[cfg(test)]
     fn render_media(
         pane: usize,
         id: &str,
@@ -1262,12 +1278,22 @@ impl RenderedTranscript {
         mermaid_revision: u64,
         ready_mermaids: Option<&HashSet<String>>,
     ) -> Self {
-        let (lines, sections, links, images, mermaids) = transcript_tools::render_with_media(
-            source, width, expanded, selected.clone(), cards, image_rows, 0, ready_mermaids);
+        Self::render_media_style(pane, id, source, width, expanded, selected, cards_revision, cards,
+            image_rows, mermaid_revision, ready_mermaids, true)
+    }
+
+    fn render_media_style(
+        pane: usize, id: &str, source: &str, width: u16,
+        expanded: Option<&HashSet<transcript_tools::FoldKey>>, selected: Option<transcript_tools::FoldKey>,
+        cards_revision: u64, cards: &[tool_cards::ToolCard], image_rows: u16,
+        mermaid_revision: u64, ready_mermaids: Option<&HashSet<String>>, glyphs: bool,
+    ) -> Self {
+        let (lines, sections, links, images, mermaids) = transcript_tools::render_with_media_style(
+            source, width, expanded, selected.clone(), cards, image_rows, 0, ready_mermaids, glyphs);
         let turn_start = streamed_turn_start(source);
         let (prefix_lines, prefix_sections) = turn_start.map(|start| {
-            let (prefix, folds, _, _, _) = transcript_tools::render_with_media(
-                &source[..start], width, expanded, selected.clone(), cards, image_rows, 0, ready_mermaids);
+            let (prefix, folds, _, _, _) = transcript_tools::render_with_media_style(
+                &source[..start], width, expanded, selected.clone(), cards, image_rows, 0, ready_mermaids, glyphs);
             (prefix.len(), folds.iter().filter(|fold| matches!(fold.index, transcript_tools::FoldKey::Section(_))).count())
         }).unwrap_or((0, 0));
         Self {
@@ -1275,6 +1301,7 @@ impl RenderedTranscript {
             id: id.to_owned(),
             source: source.to_owned(),
             width,
+            glyphs,
             expanded: expanded.cloned(),
             selected,
             cards_revision,
@@ -1301,6 +1328,7 @@ impl RenderedTranscript {
         self.update_media(source, width, expanded, selected, cards_revision, cards, 0, 0, None);
     }
 
+    #[cfg(test)]
     fn update_media(
         &mut self,
         source: &str,
@@ -1313,7 +1341,17 @@ impl RenderedTranscript {
         mermaid_revision: u64,
         ready_mermaids: Option<&HashSet<String>>,
     ) {
-        if self.width == width
+        self.update_media_style(source, width, expanded, selected, cards_revision, cards,
+            image_rows, mermaid_revision, ready_mermaids, self.glyphs);
+    }
+
+    fn update_media_style(
+        &mut self, source: &str, width: u16,
+        expanded: Option<&HashSet<transcript_tools::FoldKey>>, selected: Option<transcript_tools::FoldKey>,
+        cards_revision: u64, cards: &[tool_cards::ToolCard], image_rows: u16,
+        mermaid_revision: u64, ready_mermaids: Option<&HashSet<String>>, glyphs: bool,
+    ) {
+        if self.width == width && self.glyphs == glyphs
             && self.image_rows == image_rows
             && self.mermaid_revision == mermaid_revision
             && self.expanded.as_ref() == expanded
@@ -1326,9 +1364,9 @@ impl RenderedTranscript {
             if let Some(start) = self.turn_start.filter(|_| source.starts_with(&self.source)) {
                 if streamed_turn_start(source) == Some(start) {
                     let (tail_lines, mut tail_sections, mut tail_links, mut tail_images, mut tail_mermaids) =
-                        transcript_tools::render_with_media(
+                        transcript_tools::render_with_media_style(
                             &source[start..], width, expanded, selected.clone(), cards,
-                            image_rows, self.prefix_sections, ready_mermaids);
+                            image_rows, self.prefix_sections, ready_mermaids, glyphs);
                     self.links.retain(|link| link.row < self.prefix_lines);
                     self.images.retain(|image| image.row < self.prefix_lines);
                     self.mermaids.retain(|diagram| diagram.row < self.prefix_lines);
@@ -1355,7 +1393,7 @@ impl RenderedTranscript {
                 }
             }
         }
-        *self = Self::render_media(
+        *self = Self::render_media_style(
             self.pane,
             &self.id,
             source,
@@ -1367,6 +1405,7 @@ impl RenderedTranscript {
             image_rows,
             mermaid_revision,
             ready_mermaids,
+            glyphs,
         );
     }
 }
@@ -1417,6 +1456,7 @@ pub struct App {
     remote_connect_request: Option<(String, String)>,
     remote_disconnect_requested: bool,
     remote_handoff: Option<RemoteHandoff>,
+    remote_review_incarnations: HashMap<String, String>,
     remote_history_before: HashMap<String, u64>,
     remote_history_loading: HashSet<String>,
     pending_remote_history: Vec<(String, u64)>,
@@ -1533,6 +1573,7 @@ pub struct App {
     chip_offsets: Vec<usize>,
     belief_browser_fixture: bool,
     belief_button_hover: Option<Rect>,
+    title_tab_hover: Option<choice_dropdown::TitleTabHit>,
     belief_preview: crate::belief_preview::Preview,
     memory_preview: crate::belief_preview::Preview,
     belief_pointer: Option<(u16, u16)>,
@@ -1666,6 +1707,10 @@ pub struct App {
     offline_ids: HashSet<String>,
     queue_picker: Option<QueuePicker>,
     settings_menu: Option<SettingsMenu>,
+    mcp_secret: Option<mcp_settings::SecretEdit>,
+    mcp_probe: Option<mcp_settings::Probe>,
+    mcp_config_view: Option<mcp_settings::ConfigView>,
+    mcp_server_page: usize,
     choice_dropdown: Option<choice_dropdown::Dropdown>,
     mermaid_preflight: Option<MermaidPreflight>,
     pending_queue_commands: Vec<crate::bridge::WorkerCommand>,
@@ -1720,6 +1765,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             remote_mode: false,
+            remote_review_incarnations: HashMap::new(),
             remote_history_before: HashMap::new(),
             remote_history_loading: HashSet::new(),
             pending_remote_history: Vec::new(),
@@ -1827,6 +1873,7 @@ impl Default for App {
             chip_offsets: vec![0; panes::MAX_PANES],
             belief_browser_fixture: false,
             belief_button_hover: None,
+            title_tab_hover: None,
             belief_preview: crate::belief_preview::Preview::default(),
             memory_preview: crate::belief_preview::Preview::default(),
             belief_pointer: None,
@@ -1951,6 +1998,10 @@ impl Default for App {
             offline_ids: HashSet::new(),
             queue_picker: None,
             settings_menu: None,
+            mcp_secret: None,
+            mcp_probe: None,
+            mcp_config_view: None,
+            mcp_server_page: 0,
             choice_dropdown: None,
             mermaid_preflight: None,
             pending_queue_commands: Vec::new(),

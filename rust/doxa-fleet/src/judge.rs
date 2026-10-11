@@ -58,7 +58,8 @@ fn reserve(context:&Context,model:&Model,request:&Value)->io::Result<(f64,f64,f6
     let (input_rate,output_rate)=if model.provider=="jev"&&(model.model=="jev-1.13.0"){(0.042,0.0)}else{(context.review.input_usd_per_million,context.review.output_usd_per_million)};
     let cost=(input_bound*input_rate+OUTPUT_TOKENS as f64*output_rate)/1_000_000.0;
     transaction(context,|state|{
-        if state.accounting_unknown||state.calls>=context.review.max_calls||state.reserved_usd+cost>context.review.budget_usd{state.paused=true;state.reason="independent review budget or call ceiling reached".into();return Err(invalid("independent review budget or call ceiling reached"));}
+        if state.accounting_unknown{state.paused=true;return Err(invalid("independent review spend is unknown; reconcile before retry"));}
+        if state.calls>=context.review.max_calls||state.reserved_usd+cost>context.review.budget_usd{state.paused=true;state.reason="independent review budget or call ceiling reached".into();return Err(invalid("independent review budget or call ceiling reached"));}
         state.calls+=1;state.reserved_usd+=cost;
         state.observations.push(json!({"event":"review_reserved","model":model.display(),"input_sha256":hash(request)?,"reserved_usd":cost,"call":state.calls,"at":crate::unix_now()}));
         if state.observations.len()>256{state.observations.remove(0);}Ok(())
@@ -78,12 +79,34 @@ pub fn evaluate(context:&Context,model:&Model,instructions:&str,input:&Value)->i
     let (endpoint,_)=model.service();let key=credential(model)?;
     let (reserved,input_rate,output_rate)=reserve(context,model,&body)?;
     let response=call_at(model,endpoint,&key,&body);
-    match &response {
-        Ok(response)=>{let actual=(response.input_tokens as f64*input_rate+response.output_tokens as f64*output_rate)/1_000_000.0;transaction(context,|state|{state.actual_estimated_usd+=actual;if actual>reserved+0.0000001{state.accounting_unknown=true;state.paused=true;state.reason="review usage exceeded conservative reservation".into();}state.observations.push(json!({"event":"review_usage","model":response.model,"latency_ms":response.latency_ms,"input_tokens":response.input_tokens,"output_tokens":response.output_tokens,"estimated_usd":actual,"output_sha256":hash(&response.result)?,"at":crate::unix_now()}));if state.observations.len()>256{state.observations.remove(0);}Ok(())})?;},
-        Err(_)=>{transaction(context,|state|{state.observations.push(json!({"event":"review_failed","model":model.display(),"reservation_retained":true,"at":crate::unix_now()}));if state.observations.len()>256{state.observations.remove(0);}Ok(())})?;},
-    }
+    settle(context,model,reserved,input_rate,output_rate,&response)?;
     response
 }
+/// Persist verified usage as a subtotal. A reserved failure leaves a sticky
+/// uncertainty marker: neither retries nor human resume can declare it free.
+fn settle(context:&Context,model:&Model,reserved:f64,input_rate:f64,output_rate:f64,response:&io::Result<Response>)->io::Result<()> {
+    transaction(context,|state| {
+        match response {
+            Ok(response)=>{
+                let actual=(response.input_tokens as f64*input_rate+response.output_tokens as f64*output_rate)/1_000_000.0;
+                state.actual_estimated_usd+=actual;
+                if actual>reserved+0.0000001 {
+                    state.accounting_unknown=true;state.paused=true;
+                    state.reason="review usage exceeded conservative reservation".into();
+                }
+                state.observations.push(json!({"event":"review_usage","model":response.model,"latency_ms":response.latency_ms,"input_tokens":response.input_tokens,"output_tokens":response.output_tokens,"estimated_usd":actual,"output_sha256":hash(&response.result)?,"at":crate::unix_now()}));
+            },
+            Err(_)=>{
+                state.accounting_unknown=true;state.paused=true;
+                state.reason="reserved review failed without verified usage; reconcile spend before resume".into();
+                state.observations.push(json!({"event":"review_failed","model":model.display(),"reservation_retained":true,"at":crate::unix_now()}));
+            },
+        }
+        if state.observations.len()>256{state.observations.remove(0);}
+        Ok(())
+    })
+}
+
 fn call_at(model:&Model,endpoint:&str,key:&str,body:&Value)->io::Result<Response>{
     let started=Instant::now();
     let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -132,6 +155,39 @@ pub fn supervise(context:&Context,input:&Value)->Result<SupervisorVerdict,String
 mod tests {
     use super::*;
     use std::{io::{Read,Write},net::TcpListener};
+    #[test]
+    fn failed_reserved_review_keeps_known_subtotal_reservations_and_sticky_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir=tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
+        let charter=crate::Charter {version:1,fleet_id:"fixture".into(),task:"Bounded fixture".into(),repo:"/fixture".into(),allowed_paths:vec!["src".into()],required_evidence:vec![],worker_limit:1,run_budget_usd:None,deadline:0,human_actions:vec![],test_recipe:None};
+        let model=Model::parse("deepseek:fixture").unwrap();
+        let context=Context {charter_sha256:hash(&charter).unwrap(),charter,
+            assignments:vec![crate::Assignment {id:"assignment".into(),session_id:"worker".into(),pid:1,role:"worker".into(),task:"Bounded fixture".into(),cwd:"/fixture".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}],
+            review:crate::ReviewConfig {message_mode:crate::Mode::Enforce,message_judge:Some(model.clone()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("state.json")};
+        context.validate().unwrap();
+        let body=request(&model,SEMANTIC_INSTRUCTIONS,&json!({"message":"synthetic"})).unwrap();
+        let (first,input,output)=reserve(&context,&model,&body).unwrap();
+        let good=Ok(Response {result:json!({"synthetic":true}),model:model.model.clone(),input_tokens:100,output_tokens:10,latency_ms:1});
+        settle(&context,&model,first,input,output,&good).unwrap();
+        let before=crate::read_private::<crate::State>(&context.state_path,crate::MAX_STATE).unwrap();
+        assert!(before.actual_estimated_usd>0.0);assert!(!before.accounting_unknown);
+        let (second,input,output)=reserve(&context,&model,&body).unwrap();
+        settle(&context,&model,second,input,output,&Err(invalid("fixture response has no verified usage"))).unwrap();
+        let failed=crate::read_private::<crate::State>(&context.state_path,crate::MAX_STATE).unwrap();
+        assert_eq!(failed.calls,2);assert_eq!(failed.reserved_usd,first+second);
+        assert_eq!(failed.actual_estimated_usd,before.actual_estimated_usd);
+        assert!(failed.accounting_unknown && failed.paused);
+        // Loss of the bounded event ring must not erase accounting uncertainty.
+        transaction(&context,|state|{state.observations.clear();Ok(())}).unwrap();
+        assert!(crate::resume_review(&context,&context.charter_sha256).is_err());
+        assert!(reserve(&context,&model,&body).is_err());
+        let final_state=crate::read_private::<crate::State>(&context.state_path,crate::MAX_STATE).unwrap();
+        assert_eq!(final_state.calls,2);assert_eq!(final_state.reserved_usd,first+second);
+        assert_eq!(final_state.actual_estimated_usd,before.actual_estimated_usd);
+        assert!(final_state.accounting_unknown);
+    }
+
     #[test]
     fn review_credentials_use_private_setup_store_and_refuse_unsafe_store() {
         use std::os::unix::fs::PermissionsExt;

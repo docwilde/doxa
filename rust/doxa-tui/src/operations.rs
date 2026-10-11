@@ -387,7 +387,7 @@ pub fn native_plugin_run_grantless(_name: &str) -> io::Result<i32> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "isolated plugin runner requires Linux"))
 }
 
-fn safe_report_value(value: &str) -> String {
+pub(crate) fn safe_report_value(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()
         && !matches!(*c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
         .take(200).collect()
@@ -419,9 +419,9 @@ pub fn setup_report() -> io::Result<String> {
         }
     };
     Ok(format!(
-        "auth state\n{}\n\nSign in with the provider CLI: claude auth login or codex login. Use the masked API-key rows in /setup to save or remove DeepSeek and z.ai credentials.\n\nLORE store\n{lore}\n\nmodel & effort defaults (stored preferences)\nmodel: {}\neffort: {}\n\nUse `doxa settings` or /settings for native preferences.",
+        "auth state\n{}\n\nSign in with the provider CLI: claude auth login or codex login. Use the masked API-key rows in /setup to save or remove DeepSeek and z.ai credentials.\n\nLORE store\n{lore}\n\nmodel & effort defaults (stored preferences)\nmodel: {}\neffort: {}\n\nUse `doxa settings` or /settings for native preferences.\n\n{}",
         auth_status(None)?, preference(&config, "model", "DOXA_MODEL"),
-        preference(&config, "effort", "DOXA_EFFORT"),
+        preference(&config, "effort", "DOXA_EFFORT"), setup_docker_report(),
     ))
 }
 
@@ -739,25 +739,62 @@ mod tests {
     }
 }
 
+
+/// Setup changes only the explicitly selected owner preference. The shared
+/// Settings validator preserves environment precedence and private atomic I/O.
+pub fn setup_docker_setting(key: &str, value: &str) -> io::Result<String> {
+    if !matches!(key, "docker_image" | "docker_host") {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Docker setup accepts image digest or local socket"));
+    }
+    if value.trim().is_empty() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "Enter a Docker value; Escape keeps the current setting")); }
+    crate::settings::save(&doxa_home()?.join("config.toml"), &[(key.into(), Some(value.into()))], "claude")?;
+    Ok(format!("{key} saved for new Docker sessions\n{}", setup_docker_report()))
+}
+pub fn setup_docker_report() -> String { crate::docker_setup::report() }
+pub fn setup_docker_guide() -> String { crate::docker_setup::guide() }
+
+fn setup_ask(question: &str) -> io::Result<String> {
+    use std::io::Write;
+    print!("{question} "); io::stdout().flush()?;
+    let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim().to_owned())
+}
+
+pub fn setup_docker_interactive() -> io::Result<()> {
+    use std::io::IsTerminal;
+    println!("{}", setup_docker_report());
+    if !io::stdin().is_terminal() { return Ok(()); }
+    for (key, label) in [("docker_image", "Reviewed worker image (sha256:CONTENT_ID or NAME@sha256:DIGEST)"),
+        ("docker_host", "Rootless local socket (unix:///run/user/UID/docker.sock)")] {
+        loop {
+            let value = setup_ask(&format!("{label} (Enter keeps current):"))?;
+            if value.is_empty() { break; }
+            match setup_docker_setting(key, &value) {
+                Ok(message) => { println!("{message}"); break; }
+                Err(error) => println!("{error}"),
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn setup_interactive() -> io::Result<()> {
-    use std::io::{IsTerminal, Write};
+    use std::io::IsTerminal;
     println!("{}", setup_report()?);
     if !io::stdin().is_terminal() { return Ok(()); }
-    fn ask(question: &str) -> io::Result<String> {
-        print!("{question} "); io::stdout().flush()?;
-        let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
-        Ok(answer.trim().to_owned())
-    }
-    match ask("LORE store: [d] create DOXA store, [s] share existing Claude store, Enter skip:")?.as_str() {
+    match setup_ask("LORE store: [d] create DOXA store, [s] share existing Claude store, Enter skip:")?.as_str() {
         "d" => println!("{}", setup_choose_store(false)?),
         "s" => println!("{}", setup_choose_store(true)?),
         _ => {}
     }
     for key in ["model", "effort"] {
-        let value = ask(&format!("{key} default (Enter keeps current):"))?;
+        let value = setup_ask(&format!("{key} default (Enter keeps current):"))?;
         if !value.is_empty() { println!("{}", setup_default(key, Some(&value))?); }
     }
-    println!("setup complete\n{}", setup_report()?);
+    if setup_ask("Configure Docker isolation? [y] yes, Enter skip:")?.eq_ignore_ascii_case("y") {
+        setup_docker_interactive()?;
+    }
+    println!("setup complete · Docker readiness is reported below\n{}", setup_report()?);
     Ok(())
 }
 

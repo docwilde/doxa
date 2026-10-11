@@ -257,6 +257,9 @@ impl Process {
         Self { child, registry, socket: PathBuf::from(entry["daemon_socket"].as_str().unwrap()) }
     }
     fn start_codex_with_inbound(runtime: &Path, codex: &Path, _fixture_interpreter: &Path, inbound: bool) -> Self {
+        Self::start_codex_with_wake_override(runtime, codex, inbound.then_some("yes"))
+    }
+    fn start_codex_with_wake_override(runtime: &Path, codex: &Path, inbound: Option<&str>) -> Self {
         let codex = codex_appserver_fixture(codex);
         let mut command = daemon_command();
         command
@@ -278,7 +281,8 @@ impl Process {
             .stderr(Stdio::piped())
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_CODEX_APPSERVER");
-        if inbound { command.env("DOXA_PEER_INBOUND_TURNS", "yes"); }
+        command.env_remove("DOXA_PEER_INBOUND_TURNS");
+        if let Some(inbound) = inbound { command.env("DOXA_PEER_INBOUND_TURNS", inbound); }
         let manifest_path = runtime.join("home/isolation/codex-session/manifest.json");
         match fs::symlink_metadata(&manifest_path) {
             Ok(_) => {
@@ -627,6 +631,28 @@ fn registry_peer(runtime: &Path, id: &str, scope: &str, title: &str) -> (UnixLis
     registry.write(&record).unwrap();
     (listener, registry.directory().join(format!("{id}.json")))
 }
+#[cfg(target_os = "linux")]
+fn fill_peer_backlog(listener: &UnixListener, path: &Path) -> Vec<std::os::fd::OwnedFd> {
+    use std::os::unix::ffi::OsStrExt;
+    assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_os_str().as_bytes();
+    assert!(bytes.len() < address.sun_path.len());
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) { *slot = *byte as libc::c_char; }
+    let size = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    let mut queued = Vec::new();
+    for _ in 0..32 {
+        let fd = doxa_peers::credentials::nonblocking_unix_socket().unwrap();
+        if unsafe { libc::connect(fd.as_raw_fd(), (&address as *const libc::sockaddr_un).cast(), size) } == 0 {
+            queued.push(fd);
+        } else {
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EAGAIN));
+            return queued;
+        }
+    }
+    panic!("private peer listener backlog did not fill");
+}
 impl Drop for Process {
     fn drop(&mut self) {
         if !self.exited() {
@@ -799,12 +825,21 @@ fn missing_unowned_resume_directory_refuses_before_claude_host_starts() {
 #[test]
 fn claude_resume_restores_verified_missing_managed_checkout() {
     let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let main = dir.path().join("repo");
     let runtime = dir.path().join("runtime");
     let home = dir.path().join("home");
+    fs::create_dir(&home).unwrap();
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
     fs::create_dir(&main).unwrap();
+    fs::set_permissions(&main, fs::Permissions::from_mode(0o700)).unwrap();
     let git = |args: &[&str]| {
-        let output = Command::new("git").args(args).current_dir(&main).output().unwrap();
+        let output = Command::new("git").env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+            .env("HOME", &home).env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args).current_dir(&main).output().unwrap();
         assert!(output.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&output.stderr));
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     };
@@ -1766,11 +1801,12 @@ fn claude_reported_spend_blocks_next_prompt_over_daemon_socket() {
 #[test]
 fn claude_legacy_resume_requires_owned_provider_and_lore_source_then_verifies_live_identity() {
     let dir=tempfile::tempdir().unwrap();let script=dir.path().join("legacy-cli");
+    fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
     claude_fixture(&script,"assert '--resume' in args",r#"if frame['type']=='user':
   emit({'type':'system','subtype':'init','session_id':session,'model':model});delta('restored');result()
 "#);
     let project=dir.path().join("home/claude-cli/projects/legacy");fs::create_dir_all(&project).unwrap();
-    for path in [dir.path().join("home/claude-cli"),dir.path().join("home/claude-cli/projects"),project.clone()] {fs::set_permissions(path,fs::Permissions::from_mode(0o700)).unwrap();}
+    for path in [dir.path().join("home"),dir.path().join("home/claude-cli"),dir.path().join("home/claude-cli/projects"),project.clone()] {fs::set_permissions(path,fs::Permissions::from_mode(0o700)).unwrap();}
     let source=format!("{}\n{}\n",json!({"type":"user","engine":"claude","sessionId":CLAUDE_SESSION,"cwd":dir.path(),"message":{"role":"user","content":"saved task"}}),json!({"type":"assistant","engine":"claude","sessionId":CLAUDE_SESSION,"cwd":dir.path(),"message":{"role":"assistant","content":[{"type":"text","text":"saved answer"}]}}));
     fs::write(project.join(format!("{CLAUDE_SESSION}.jsonl")),&source).unwrap();fs::set_permissions(project.join(format!("{CLAUDE_SESSION}.jsonl")),fs::Permissions::from_mode(0o600)).unwrap();
     fs::create_dir_all(native_transcript_dir(dir.path())).unwrap();fs::set_permissions(native_transcript_dir(dir.path()),fs::Permissions::from_mode(0o700)).unwrap();
@@ -2880,6 +2916,140 @@ mod vendor_process {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn deepseek_reviewed_peer_send_wakes_idle_and_queues_busy_codex_and_claude() {
+        for engine in ["codex", "claude"] { for busy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let receiver_id = if engine == "claude" { CLAUDE_SESSION }
+                else { "862fb5a9-9f1a-43e4-80cb-65bb767993e2" };
+            let sender_id = "0f390f46-5d6c-4a2c-b086-5d65d3e6b911";
+            let captured = root.join("receiver-prompts"); let release = root.join("release-receiver");
+            doxa_state::save_config(&root.join("home/config.toml"), &"peer_inbound_turns = true".parse().unwrap()).unwrap();
+            if !busy { fs::write(&release,b"ready").unwrap(); }
+            let cli = root.join("receiver-cli");
+            let cli = if engine == "codex" {
+                executable(&cli,&format!(r#"#!/bin/sh
+cat >> '{}'
+while [ ! -f '{}' ]; do sleep 0.01; done
+echo '{{"type":"thread.started","thread_id":"cross-peer-thread"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"receiver done"}}}}'
+"#,captured.display(),release.display()));
+                codex_appserver_fixture(&cli)
+            } else {
+                claude_fixture(&cli,"",&format!(r#"elif frame['type']=='user':
+  with root.joinpath('receiver-prompts').open('a') as output: output.write(frame['message']['content']+'\n')
+  deadline=time.monotonic()+40
+  while not root.joinpath('release-receiver').exists():
+   assert time.monotonic()<deadline
+   time.sleep(.01)
+  delta('receiver done'); result(False,.01)
+"#)); cli
+            };
+            let private_command = || {
+                let mut command = daemon_command();
+                command.0.env_clear();
+                command.env("PATH","/usr/bin:/bin").env("TMPDIR",root)
+                    .env("DOXA_HOME",root.join("home")).env("DOXA_WORKTREE","0")
+                    .env("LORE_SKIP","1");
+                if let Some(carrier)=std::env::var_os("DOXA_LORE_RS") { command.env("DOXA_LORE_RS",carrier); }
+                command
+            };
+            let mut command = private_command();
+            command.args(["--runtime-dir",root.to_str().unwrap(),"--cwd",root.to_str().unwrap(),
+                "--session-id",receiver_id,"--engine",engine,if engine=="codex" {"--codex-bin"} else {"--claude-bin"},
+                cli.to_str().unwrap(),"--linger","20"])
+                .env_remove("DOXA_PEER_INBOUND_TURNS").env_remove("DOXA_SESSION_BUDGET_USD")
+                .env("DOXA_LORE","0").env("DOXA_AGENT_PEER_SEND","1")
+                .stdout(Stdio::null()).stderr(Stdio::piped());
+            let mut child=command.spawn().unwrap();
+            let registry=root.join("registry").join(format!("{receiver_id}.json"));
+            wait_for_registry(&mut child,&registry);
+            let entry:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+            let mut receiver=Process{child,registry,socket:PathBuf::from(entry["daemon_socket"].as_str().unwrap())};
+            let (mut received,mut receiver_socket)=receiver.connect();
+            received.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+            receive(&mut received);send(&mut receiver_socket,json!({"type":"attach","cursor":null}));
+            if busy {
+                send(&mut receiver_socket,json!({"type":"prompt","id":1,"text":"Existing user turn."}));
+                claude_receive_until(&mut received,|row|row["event"]["type"]=="turn_started");
+                wait_until_with_timeout(CODEX_PREPARATION_TIMEOUT,||captured.exists());
+            }
+            let arguments=json!({"session_id":receiver_id,"message":"Synthetic cross-engine peer handoff."}).to_string();
+            let first=format!("data: {}\n\ndata: [DONE]\n\n",json!({"model":"deepseek-flash",
+                "choices":[{"finish_reason":"tool_calls","delta":{"tool_calls":[{"index":0,"id":"peer-delivery",
+                    "function":{"name":doxa_engines::peer_tools::SEND,"arguments":arguments}}]}}],
+                "usage":{"prompt_tokens":20,"completion_tokens":8}}));
+            let last=format!("data: {}\n\ndata: [DONE]\n\n",json!({"model":"deepseek-flash",
+                "choices":[{"finish_reason":"stop","delta":{"content":"sender done"}}],
+                "usage":{"prompt_tokens":30,"completion_tokens":4}}));
+            let (endpoint,server)=fake_vendor_frames(vec![first,last]);
+            let mut child=private_command().args(["--runtime-dir",root.to_str().unwrap(),"--cwd",root.to_str().unwrap(),
+                "--session-id",sender_id,"--engine","deepseek","--model","deepseek-flash","--effort","none",
+                "--vendor-endpoint",&endpoint,"--linger","20"])
+                .env("DEEPSEEK_API_KEY","test-key-1234").env_remove("ZAI_API_KEY").env_remove("DOXA_SESSION_BUDGET_USD")
+                .env("DOXA_AGENT_PEER_SEND","1").env("DOXA_PEER_INBOUND_TURNS","off").env("DOXA_LORE","0")
+                .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+            let registry=root.join("registry").join(format!("{sender_id}.json"));
+            wait_for_registry(&mut child,&registry);
+            let entry:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+            let mut sender=Process{child,registry,socket:PathBuf::from(entry["daemon_socket"].as_str().unwrap())};
+            let (mut sent,mut sender_socket)=sender.connect();
+            receive(&mut sent);send(&mut sender_socket,json!({"type":"attach","cursor":null}));
+            send(&mut sender_socket,json!({"type":"prompt","id":1,"text":"Deliver the synthetic peer handoff."}));
+            let mut evidence=Vec::new();let approval=glm_approval(&mut sent,&mut evidence);
+            assert_eq!(approval["tool_name"],doxa_engines::peer_tools::SEND);
+            assert!(approval["input_summary"].as_str().unwrap().contains(receiver_id));
+            send(&mut receiver_socket,json!({"type":"call","id":2,"method":"get_state","params":{}}));
+            let before=receive(&mut received);assert_eq!(before["running"],busy);assert_eq!(before["queued"],0);
+            assert!(!fs::read_to_string(&captured).unwrap_or_default().contains("Synthetic cross-engine peer handoff."));
+            glm_reviewed_answer(&mut sender_socket,2,&approval,"allow");
+            for _ in 0..48 {
+                let frame=receive(&mut sent);if frame["type"]=="event" {evidence.push(frame["event"].clone());}
+                if frame["event"]["type"]=="turn_done" {assert_ne!(frame["event"]["data"]["is_error"],true);break;}
+            }
+            let resolved=evidence.iter().position(|row|row["type"]=="needs_input_resolved").unwrap();
+            let result=evidence.iter().position(|row|row["type"]=="tool_result").unwrap();
+            let terminal=evidence.iter().position(|row|row["type"]=="turn_done").unwrap();
+            assert!(result<terminal&&resolved<terminal);
+            let message=receive(&mut received);
+            assert_eq!(message["event"]["type"],"peer_message");
+            assert_eq!(message["event"]["data"]["from_id"],sender_id);
+            assert_eq!(message["event"]["data"]["wake_policy"],"enabled");
+            if busy {
+                let queued=receive(&mut received);assert_eq!(queued["event"]["type"],"prompt_queued");
+                assert_eq!(queued["event"]["data"]["peer_started"],true);
+                assert!(queued["event"]["data"]["peer_origin"].as_str().unwrap().contains(sender_id));
+                fs::write(&release,b"ready").unwrap();
+            }
+            let mut peer_started=false;let mut terminals=0;
+            while terminals<if busy {2} else {1} {
+                let frame=receive(&mut received);
+                if frame["event"]["type"]=="turn_started" {
+                    peer_started=true;assert!(frame["turn"].as_str().unwrap().starts_with("peer-"));
+                    assert_eq!(frame["event"]["data"]["peer_started"],true);
+                    let prompt=frame["event"]["data"]["prompt"].as_str().unwrap();
+                    assert!(prompt.contains(sender_id)&&prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
+                }
+                if frame["event"]["type"]=="turn_done" {
+                    terminals+=1;assert_ne!(frame["event"]["data"]["is_error"],true);
+                }
+            }
+            assert!(peer_started,"{engine} busy={busy} did not admit peer turn");
+            assert!(fs::read_to_string(&captured).unwrap().contains("Synthetic cross-engine peer handoff."));
+            let requests=server.join().unwrap();assert_eq!(requests.len(),2);
+            let tool=requests[1]["messages"].as_array().unwrap().iter().find(|row|row["role"]=="tool").unwrap();
+            let delivered:Value=serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();
+            assert_eq!(delivered["delivered_to"],json!([receiver_id]));assert_eq!(delivered["failed"],json!([]));
+            for (reader,socket,process) in [(&mut sent,&mut sender_socket,&mut sender),(&mut received,&mut receiver_socket,&mut receiver)] {
+                send(socket,json!({"type":"call","id":3,"method":"stop","params":{}}));
+                assert_eq!(claude_receive_until(reader,|row|row["type"]=="reply"&&row["id"]==3)["ok"],true);
+                wait_until(||process.exited());
+            }
+        }}
+    }
+
+    #[test]
     fn vendor_missing_credential_rejects_session_before_socket() {
         let dir = tempfile::tempdir().unwrap();
         let output = daemon_command()
@@ -2944,6 +3114,67 @@ fn native_peers_rpc_returns_only_scrubbed_same_scope_live_peers() {
     );
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn native_peers_full_backlog_is_bounded_and_exact_healthy_delivery_recovers() {
+    const LIVE: &str = "ae2d13c2-9cc0-4db5-bddb-84a4028b2e41";
+    const BLOCKED: &str = "4c35cceb-4ae3-4ce8-a50c-33920fe3e197";
+    const FOREIGN: &str = "ae2d13c2-9cc0-4db5-bddb-84a4028b2e42";
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("unused-cli"); executable(&codex,"#!/bin/sh\nexit 1\n");
+    let mut process = Process::start_codex(dir.path(), &codex, Path::new("python3"));
+    let (mut reader, mut socket) = process.connect(); receive(&mut reader);
+    send(&mut socket,json!({"type":"attach","cursor":null}));
+    // Warm mandatory scrubbing independently of the timed discovery probe.
+    send(&mut socket,json!({"type":"call","id":1,"method":"peers","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"],true);
+    let (blocked, blocked_record) = registry_peer(dir.path(), BLOCKED, dir.path().to_str().unwrap(), "blocked fixture");
+    let _queued = fill_peer_backlog(&blocked, &dir.path().join(format!("{BLOCKED}.sock")));
+    let before = fs::read(&blocked_record).unwrap();
+    let (healthy, _) = registry_peer(dir.path(), LIVE, dir.path().to_str().unwrap(), "healthy fixture");
+    let (foreign, _) = registry_peer(dir.path(), FOREIGN, "/other-scope", "foreign fixture");
+    let worker = thread::spawn(move || {
+        healthy.set_nonblocking(true).unwrap(); let deadline = Instant::now()+Duration::from_secs(8);
+        loop { match healthy.accept() {
+            Ok((mut stream,_)) => {
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut wire=String::new();stream.read_to_string(&mut wire).unwrap();
+                if !wire.is_empty() { return wire; }
+            },
+            Err(error) if error.kind()==std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now()<deadline,"healthy peer delivery never arrived");thread::sleep(Duration::from_millis(5));
+            },
+            Err(error) => panic!("healthy peer accept failed: {error}"),
+        }}
+    });
+    let started=Instant::now();
+    send(&mut socket,json!({"type":"call","id":2,"method":"peers","params":{}}));
+    let roster=receive(&mut reader); assert_eq!(roster["ok"],true);
+    assert!(started.elapsed()<Duration::from_secs(2),"full backlog stalled native discovery");
+    assert_eq!(roster["peers"],json!([{"session_id":LIVE,"title":"healthy fixture","origin":null}]));
+    assert_eq!(fs::read(&blocked_record).unwrap(),before,"failed probe must not reap a live record");
+    send(&mut socket,json!({"type":"call","id":4,"method":"msg","params":{"target":FOREIGN,"text":"unapproved fixture"}}));
+    assert_eq!(receive(&mut reader)["ok"],false);
+    send(&mut socket,json!({"type":"call","id":5,"method":"msg","params":{"target":LIVE,"text":"bounded healthy delivery"}}));
+    let reply=claude_receive_until(&mut reader,|frame|frame["id"]==5);
+    assert_eq!(reply["ok"],true);assert_eq!(reply["delivered_to"],json!([LIVE]));
+    let wire:Value=serde_json::from_str(worker.join().unwrap().trim()).unwrap();
+    assert_eq!(wire["body"],"bounded healthy delivery");
+    let ledger=fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap();
+    assert!(ledger.contains(LIVE));assert!(!ledger.contains(FOREIGN));
+    foreign.set_nonblocking(true).unwrap();
+    while let Ok((mut stream,_))=foreign.accept() {
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut bytes=Vec::new();stream.read_to_end(&mut bytes).unwrap();
+        assert!(bytes.is_empty(),"foreign scoped peer received message data");
+    }
+    send(&mut socket,json!({"type":"call","id":6,"method":"get_state","params":{}}));
+    let state=claude_receive_until(&mut reader,|frame|frame["id"]==6);
+    assert_eq!(state["running"],false);assert_eq!(state["pending_inputs"],json!([]));
+    send(&mut socket,json!({"type":"call","id":7,"method":"stop","params":{}}));
+    assert_eq!(claude_receive_until(&mut reader,|frame|frame["id"]==7)["ok"],true);wait_until(||process.exited());
 }
 
 #[test]
@@ -3147,7 +3378,7 @@ fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_bef
 
 #[test]
 #[cfg(target_os = "linux")]
-fn inbound_direct_peer_starts_scrubbed_turn_but_broadcast_does_not() {
+fn saved_inbound_direct_peer_starts_scrubbed_codex_turn_but_broadcast_does_not() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("python3");
@@ -3158,7 +3389,8 @@ echo '{{"type":"thread.started","thread_id":"thread-1"}}'
 echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
 "#, captured.display()));
     let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
-    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, true);
+    doxa_state::save_config(&dir.path().join("home/config.toml"), &"peer_inbound_turns = true".parse().unwrap()).unwrap();
+    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, false);
     let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
@@ -3170,13 +3402,17 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         from_repo: Some(dir.path().display().to_string()), kind,
     };
     doxa_peers::delivery::send(&peer_socket, &frame(Some("broadcast".into()), "broadcast note")).unwrap();
-    assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
+    let broadcast = receive(&mut reader);
+    assert_eq!(broadcast["event"]["type"], "peer_message");
+    assert_eq!(broadcast["event"]["data"]["wake_policy"], "broadcast");
     send(&mut socket, json!({"type":"call","id":1,"method":"status","params":{}}));
     let status = receive(&mut reader);
     assert_eq!(status["status"]["running"], false);
     assert_eq!(status["status"]["queued"], 0);
     doxa_peers::delivery::send(&peer_socket, &frame(Some("direct".into()), "sk-ownedCanonicalFixtureSecret1234567890 body")).unwrap();
-    assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
+    let direct = receive(&mut reader);
+    assert_eq!(direct["event"]["type"], "peer_message");
+    assert_eq!(direct["event"]["data"]["wake_policy"], "enabled");
     let mut started = false;
     loop {
         let event = receive(&mut reader);
@@ -3206,7 +3442,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
 
 #[test]
 #[cfg(target_os = "linux")]
-fn inbound_peer_uses_typed_prompt_queue_while_turn_runs() {
+fn saved_inbound_peer_uses_typed_codex_prompt_queue_while_turn_runs() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("python3");
@@ -3220,7 +3456,8 @@ echo '{{"type":"thread.started","thread_id":"thread-1"}}'
 echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
 "#, release.display(), release.display()));
     let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
-    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, true);
+    doxa_state::save_config(&dir.path().join("home/config.toml"), &"peer_inbound_turns = true".parse().unwrap()).unwrap();
+    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, false);
     let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
@@ -3256,6 +3493,88 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn saved_peer_wake_refreshes_running_codex_without_overriding_explicit_off() {
+    for explicit_off in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("codex-fixture");
+        let captured = dir.path().join("captured-peer-context");
+        executable(&codex, &format!(r#"#!/bin/sh
+cat >> '{}'
+echo '{{"type":"thread.started","thread_id":"thread-1"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+"#, captured.display()));
+        let sender = "fcb9d586-96bc-43d2-aecc-0627e4b3a91d";
+        let (_sender_listener, _) = registry_peer(dir.path(), sender, dir.path().to_str().unwrap(), "Claude teammate");
+        let config = dir.path().join("home/config.toml");
+        let save = |enabled| doxa_state::save_config(&config,
+            &format!("peer_inbound_turns = {enabled}").parse().unwrap()).unwrap();
+        save(false);
+        let mut process = Process::start_codex_with_wake_override(dir.path(), &codex, explicit_off.then_some("off"));
+        let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+        let (mut reader, mut socket) = process.connect();
+        reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        let deliver = |body: &str| doxa_peers::delivery::send(&peer_socket, &doxa_peers::delivery::PeerFrame {
+            authenticated_pid: None, from_id: sender.into(), from_title: "Claude teammate".into(),
+            sent_at: peer_now(), body: body.into(), from_repo: None, kind: Some("direct".into()),
+        }).unwrap();
+        deliver("first retained task");
+        let first = receive(&mut reader);
+        assert_eq!(first["event"]["type"], "peer_message");
+        assert_eq!(first["event"]["data"]["wake_policy"], "disabled");
+        send(&mut socket, json!({"type":"call","id":1,"method":"status","params":{}}));
+        assert_eq!(receive(&mut reader)["status"]["running"], false);
+        assert!(!captured.exists());
+        save(true);
+        deliver("second direct task");
+        let second = receive(&mut reader);
+        assert_eq!(second["event"]["type"], "peer_message");
+        assert_eq!(second["event"]["data"]["from_id"], sender);
+        assert_eq!(second["event"]["data"]["wake_policy"], if explicit_off { "disabled" } else { "enabled" });
+        if explicit_off {
+            send(&mut socket, json!({"type":"call","id":2,"method":"status","params":{}}));
+            let status = receive(&mut reader);
+            assert_eq!(status["status"]["running"], false);
+            assert_eq!(status["status"]["queued"], 0);
+            assert!(!captured.exists());
+            // Off affects automatic admission; a typed turn receives retained
+            // peer data under the same protected provider/permission bridge.
+            send(&mut socket, json!({"type":"prompt","id":3,"text":"Read the retained peer data."}));
+        }
+        let mut started = false;
+        loop {
+            let event = receive(&mut reader);
+            if event["event"]["type"] == "turn_started" {
+                started = true;
+                assert_eq!(event["event"]["data"]["peer_started"], !explicit_off);
+                if !explicit_off {
+                    assert!(event["event"]["data"]["peer_origin"].as_str().unwrap().contains(sender));
+                }
+            }
+            if event["event"]["type"] == "turn_done" {
+                assert_ne!(event["event"]["data"]["is_error"], true);
+                break;
+            }
+        }
+        assert!(started);
+        let prompt = fs::read_to_string(&captured).unwrap();
+        assert!(prompt.contains("first retained task") && prompt.contains("second direct task"));
+        assert!(prompt.contains(sender) && prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
+        save(false);
+        deliver("third retained task");
+        assert_eq!(receive(&mut reader)["event"]["data"]["wake_policy"], "disabled");
+        send(&mut socket, json!({"type":"call","id":4,"method":"status","params":{}}));
+        assert_eq!(receive(&mut reader)["status"]["running"], false);
+        assert_eq!(codex_fixture_rpcs(&codex).iter().filter(|row|row["method"] == "turn/start").count(), 1);
+        send(&mut socket, json!({"type":"call","id":5,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        wait_until(|| process.exited());
+    }
 }
 
 #[test]
@@ -3503,6 +3822,131 @@ fn codex_auto_pending(reader: &mut BufReader<UnixStream>, socket: &mut UnixStrea
         assert_ne!(row["event"]["type"], "turn_done", "{row}");
     }
     panic!("approval did not arrive");
+}
+
+fn codex_peer_permission_fixture(root: &Path) -> PathBuf {
+    let codex = root.join("peer-provider");
+    executable(&codex, include_str!("fixtures/codex_peer_permissions.py"));
+    codex
+}
+fn receive_one_peer_delivery(listener: UnixListener) -> thread::JoinHandle<Value> {
+    thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut body = String::new(); stream.read_to_string(&mut body).unwrap();
+                    if !body.is_empty() { return serde_json::from_str(&body).unwrap(); }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline,"exact peer delivery never arrived");
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("private peer listener failed: {error}"),
+            }
+        }
+    })
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn codex_full_access_builtin_peers_deliver_exact_ids_without_second_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = codex_peer_permission_fixture(dir.path());
+    let target = "195603b4-d233-47b0-8f10-93d3a7c1b6e8";
+    let (recipient, _) = registry_peer(dir.path(), target, dir.path().to_str().unwrap(), "Claude teammate");
+    let (foreign, _) = registry_peer(dir.path(), "195603b4-d233-47b0-8f10-93d3a7c1b6e9", "/other-project", "foreign");
+    let delivery = receive_one_peer_delivery(recipient);
+    let mut process = Process::start_codex_appserver_with_settings(dir.path(), &codex, false, false, true);
+    let (mut reader, mut socket) = process.connect();
+    reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+    receive(&mut reader); send(&mut socket,json!({"type":"attach","cursor":null}));
+    let mut frames = Vec::new();
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,1,"set_permission_mode",json!({"mode":"full-access"}),&mut frames)["ok"],true);
+    send(&mut socket,json!({"type":"prompt","id":2,"text":"Exercise builtin peers under full-access."}));
+    loop {
+        let frame = receive(&mut reader);
+        assert_ne!(frame["event"]["type"],"needs_input","full-access added a second peer approval: {frame}");
+        if frame["event"]["type"] == "turn_done" {
+            assert_ne!(frame["event"]["data"]["is_error"],true); break;
+        }
+        frames.push(frame);
+    }
+    assert_eq!(frames.iter().filter(|row|row["event"]["type"]=="tool_call").count(),5);
+    assert_eq!(frames.iter().filter(|row|row["event"]["type"]=="tool_result").count(),5);
+    assert!(!frames.iter().any(|row|row["event"]["type"]=="needs_input_resolved"));
+    let delivered = delivery.join().unwrap();
+    assert_eq!(delivered["body"],"full-access exact delivery");
+    assert_eq!(delivered["from_id"],"codex-session");
+    let results:Vec<Value>=fs::read_to_string(dir.path().join("peer-permission-results.jsonl")).unwrap()
+        .lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(results.len(),5);
+    for (index, expected) in [true,false,false,true,true].into_iter().enumerate() {
+        assert_eq!(results[index]["response"]["result"]["success"],expected,"step {index}");
+    }
+    let roster = results[0]["response"]["result"]["contentItems"][0]["text"].as_str().unwrap();
+    assert!(roster.contains(target)); assert!(!roster.contains("195603b4-d233-47b0-8f10-93d3a7c1b6e9"));
+    let history = results[4]["response"]["result"]["contentItems"][0]["text"].as_str().unwrap();
+    assert!(history.contains(target)); assert!(!history.contains("foreign must refuse"));
+    foreign.set_nonblocking(true).unwrap();
+    while let Ok((mut stream,_))=foreign.accept() {
+        let mut body=String::new();stream.read_to_string(&mut body).unwrap();assert!(body.is_empty());
+    }
+    let checkpoint:Value=serde_json::from_slice(&fs::read(native_transcript(dir.path(),"codex-session.codex.json")).unwrap()).unwrap();
+    assert_eq!(checkpoint["permission_mode"],"full-access");
+    assert_eq!(checkpoint["turn_incomplete"],false);
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,3,"get_state",json!({}),&mut frames)["pending_inputs"],json!([]));
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,4,"stop",json!({}),&mut frames)["ok"],true);
+    wait_until(||process.exited());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn codex_peer_manual_and_midturn_auto_keep_review_until_idle_full_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = codex_peer_permission_fixture(dir.path());
+    let (recipient, _) = registry_peer(dir.path(), "195603b4-d233-47b0-8f10-93d3a7c1b6e8", dir.path().to_str().unwrap(), "Claude teammate");
+    let mut process = Process::start_codex_appserver_with_settings(dir.path(), &codex, false, false, true);
+    let (mut reader, mut socket) = process.connect();
+    reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+    receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+    let mut frames = Vec::new();
+    send(&mut socket,json!({"type":"prompt","id":1,"text":"Keep manual peer approval."}));
+    let pending = claude_receive_until(&mut reader,|row|row["event"]["type"]=="needs_input")
+        ["event"]["data"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,2,"set_permission_mode",json!({"mode":"full-access"}),&mut frames)["ok"],false);
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,3,"set_permission_mode",json!({"mode":"auto"}),&mut frames)["ok"],true);
+    let state=codex_auto_rpc(&mut reader,&mut socket,4,"get_state",json!({}),&mut frames);
+    assert_eq!(state["pending_inputs"][0]["id"],pending,"Auto must not approve an independent existing peer review");
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,5,"answer_needs_input",json!({"id":pending,"answer":{"decision":"deny"}}),&mut frames)["ok"],true);
+    let done=claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_done");
+    assert_ne!(done["event"]["data"]["is_error"],true);
+    let results=fs::read_to_string(dir.path().join("peer-permission-results.jsonl")).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(results.lines().next().unwrap()).unwrap()["response"]["result"]["success"],false);
+    let delivery=receive_one_peer_delivery(recipient);
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,6,"set_permission_mode",json!({"mode":"full-access"}),&mut frames)["ok"],true);
+    send(&mut socket,json!({"type":"prompt","id":7,"text":"Now use exact builtin peers under full-access."}));
+    loop {
+        let frame=receive(&mut reader);assert_ne!(frame["event"]["type"],"needs_input");
+        if frame["event"]["type"]=="turn_done" {assert_ne!(frame["event"]["data"]["is_error"],true);break;}
+    }
+    assert_eq!(delivery.join().unwrap()["body"],"full-access exact delivery");
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,8,"set_permission_mode",json!({"mode":"auto"}),&mut frames)["ok"],true);
+    send(&mut socket,json!({"type":"prompt","id":9,"text":"Keep a new Auto peer review cancellable."}));
+    let cancelled = claude_receive_until(&mut reader,|row|row["event"]["type"]=="needs_input")
+        ["event"]["data"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,10,"interrupt",json!({}),&mut frames)["ok"],true);
+    claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_done");
+    let state=codex_auto_rpc(&mut reader,&mut socket,11,"get_state",json!({}),&mut frames);
+    assert_eq!(state["pending_inputs"],json!([])); assert_eq!(state["running"],false);
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,12,"answer_needs_input",json!({"id":cancelled,"answer":{"decision":"allow"}}),&mut frames)["ok"],false);
+    // Cancellation keeps the canonical restart guard. A permission change
+    // cannot reset accounting/history uncertainty or replay an old tool.
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,13,"set_permission_mode",json!({"mode":"full-access"}),&mut frames)["ok"],false);
+    assert_eq!(codex_auto_rpc(&mut reader,&mut socket,14,"stop",json!({}),&mut frames)["ok"],true);
+    wait_until(||process.exited());
 }
 
 #[test]
@@ -3805,8 +4249,11 @@ assert not sys.stdin.readline()
 fn memory_off_codex_scrubs_and_records_without_snapshot_index_or_compact_review() {
     for (configured, override_env, enabled) in [("0", None, false), ("1", Some("off"), false)] {
         let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir(dir.path().join("home")).unwrap();
+        fs::set_permissions(dir.path().join("home"), fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(dir.path().join("home/config.toml"), format!("lore = '{configured}'\n")).unwrap();
+        fs::set_permissions(dir.path().join("home/config.toml"), fs::Permissions::from_mode(0o600)).unwrap();
         let codex = dir.path().join("codex-fixture");
         let captured = dir.path().join("stdin.txt");
         native_memory_fixture(dir.path(),"- durable memory\n");
@@ -4239,4 +4686,293 @@ while True:
     send(&mut socket,json!({"type":"call","id":5,"method":"stop","params":{}}));
     assert_eq!(claude_receive_until(&mut reader,|frame|frame["type"]=="reply"&&frame["id"]==5)["ok"],true);
     wait_until(||process.exited());
+}
+
+mod engine_known_key_redaction {
+    use super::*;
+    const SAVED: &str = "inertbarevendorcredentialfixture";
+    const INHERITED: &str = "inertinheritedcredentialfixture";
+    const JEV: &str = "inertroutercredentialfixture";
+
+    fn read_peer_fixture(mut stream: UnixStream, deadline: Instant) -> std::io::Result<String> {
+        // Discovery closes without a payload. Avoid timeout socket options
+        // on that already-closed connection and bound reads explicitly.
+        stream.set_nonblocking(true)?;
+        let mut bytes = Vec::new();
+        loop {
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "private peer fixture read timed out"));
+            }
+            let mut buffer = [0u8; 4096];
+            match stream.read(&mut buffer) {
+                Ok(0) if bytes.is_empty() => return Ok(String::new()),
+                Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "private peer fixture frame is incomplete")),
+                Ok(count) => {
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if bytes.len() > doxa_peers::delivery::MAX_FRAME_BYTES {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "private peer fixture frame is oversized"));
+                    }
+                    if bytes.contains(&b'\n') {
+                        if bytes.last() != Some(&b'\n') || bytes[..bytes.len()-1].contains(&b'\n') {
+                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "private peer fixture requires one complete frame"));
+                        }
+                        return String::from_utf8(bytes).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "private peer fixture frame is not UTF-8"));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(2)),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[test]
+    fn peer_fixture_reader_accepts_empty_probes_and_requires_complete_fragmented_frames() {
+        let (probe, closed) = UnixStream::pair().unwrap();
+        drop(closed);
+        assert_eq!(read_peer_fixture(probe, Instant::now()+Duration::from_secs(2)).unwrap(), "");
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"{\"body\":").unwrap();
+        let finish = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(5));
+            writer.write_all(b"\"***\"}\n").unwrap();
+        });
+        assert_eq!(read_peer_fixture(reader, Instant::now()+Duration::from_secs(2)).unwrap(), "{\"body\":\"***\"}\n");
+        finish.join().unwrap();
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"{\"body\":").unwrap();
+        drop(writer);
+        assert_eq!(read_peer_fixture(reader, Instant::now()+Duration::from_secs(2)).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    fn private_keys(root: &Path) {
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(home.join("credentials.json"), json!({"glm":SAVED}).to_string()).unwrap();
+        fs::set_permissions(home.join("credentials.json"), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    fn start(root: &Path, engine: &str, cli: &Path) -> Process {
+        let id = if engine == "claude" { CLAUDE_SESSION } else { "codex-session" };
+        let mut command = daemon_command();
+        command.args(["--runtime-dir",root.to_str().unwrap(),"--cwd",root.to_str().unwrap(),
+            "--session-id",id,"--engine",engine,if engine=="claude" {"--claude-bin"} else {"--codex-bin"},
+            cli.to_str().unwrap(),"--linger","10"])
+            .env("DOXA_HOME",root.join("home")).env("DOXA_LORE","0")
+            .env("DOXA_WORKTREE","0").env("DEEPSEEK_API_KEY",INHERITED).env("TYPESAFE_API_KEY",JEV)
+            .stdout(Stdio::null()).stderr(Stdio::piped());
+        for key in ["ZAI_API_KEY","TAVILY_API_KEY","FIRECRAWL_API_KEY","EXA_API_KEY","BRAVE_API_KEY",
+            "DOXA_SESSION_BUDGET_USD","DOXA_CODEX_APPSERVER","DOXA_CODEX_MIGRATE_APPSERVER"] {
+            command.env_remove(key);
+        }
+        let mut child=command.spawn().unwrap();
+        let registry=root.join("registry").join(format!("{id}.json"));
+        wait_for_registry(&mut child,&registry);
+        let entry:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+        Process {child,registry,socket:entry["daemon_socket"].as_str().unwrap().into()}
+    }
+    fn assert_clean(text: &str) {
+        for key in [SAVED,INHERITED,JEV,"inertbarevendor"] { assert!(!text.contains(key),"known credential escaped boundary"); }
+    }
+    fn turn(reader: &mut BufReader<UnixStream>) -> (String,Value) {
+        let mut text=String::new();
+        loop {
+            let frame=receive(reader);assert_clean(&frame.to_string());
+            if frame["event"]["type"]=="text_delta" {text.push_str(frame["event"]["data"]["text"].as_str().unwrap());}
+            if frame["event"]["type"]=="turn_done" {return (text,frame);}
+        }
+    }
+    fn stop(process: &mut Process, reader: &mut BufReader<UnixStream>, socket: &mut UnixStream) {
+        send(socket,json!({"type":"call","id":99,"method":"stop","params":{}}));
+        claude_receive_until(reader,|frame|frame["id"]==99);wait_until(||process.exited());
+    }
+
+    #[test]
+    fn claude_fragmented_known_keys_are_withheld_live_durable_and_from_provider_prompts() {
+        let dir=tempfile::tempdir().unwrap();private_keys(dir.path());
+        let cli=dir.path().join("claude-known-key.py");
+        claude_fixture(&cli,&format!("saved={SAVED:?}\ninherited={INHERITED:?}\njev={JEV:?}"),r#"if frame['type']=='user':
+  assert all(key not in frame['message']['content'] for key in [saved,inherited,jev])
+  for index in range(1,len(saved)):
+   delta('safe '+saved[:index])
+   emit({'type':'stream_event','session_id':session,'event':{'type':'content_block_stop','index':0}})
+   delta(saved[index:]+' trailing ')
+  emit({'type':'assistant','session_id':session,'message':{'role':'assistant','content':[{'type':'text','text':'safe '+saved[:13]}]}})
+  emit({'type':'assistant','session_id':session,'message':{'role':'assistant','content':[{'type':'text','text':saved[13:]+' '+inherited+' '+jev}]}})
+  emit({'type':'assistant','session_id':session,'message':{'role':'assistant','content':[{'type':'tool_use','id':'tool-fixture','name':'Read','input':{'file_path':saved}}]}})
+  emit({'type':'user','session_id':session,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'tool-fixture','content':inherited}]}})
+  result()
+"#);
+        let mut process=start(dir.path(),"claude",&cli);
+        let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+        send(&mut socket,json!({"type":"prompt","id":1,"text":format!("Fixture {SAVED} {INHERITED} {JEV}")}));
+        let (text,done)=turn(&mut reader);assert_eq!(done["event"]["data"]["is_error"],false);assert!(text.contains("***"));
+        let transcript=fs::read_to_string(native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.jsonl"))).unwrap();assert_clean(&transcript);assert!(transcript.contains("***"));
+        stop(&mut process,&mut reader,&mut socket);
+    }
+
+    #[test]
+    #[cfg(target_os="linux")]
+    fn codex_fragmented_known_key_item_is_scrubbed_before_display_storage_and_prompt() {
+        let dir=tempfile::tempdir().unwrap();private_keys(dir.path());
+        let cli=dir.path().join("codex-known-key");
+        executable(&cli,&format!("#!/usr/bin/python3\nimport json,sys\ntext=sys.stdin.read()\nassert all(key not in text for key in [{SAVED:?},{INHERITED:?},{JEV:?}])\nprint(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'safe '+{SAVED:?}+' '+{INHERITED:?}+' '+{JEV:?}}}}}))\n"));
+        let server=codex_appserver_fixture(&cli);
+        let source=fs::read_to_string(&server).unwrap();
+        let old="                send({'method': 'item/completed', 'params': {'threadId': thread_id, 'turnId': turn_id,\n                      'item': {'type': 'agentMessage', 'id': 'answer-' + str(turn_number), 'text': event['item']['text']}}})";
+        let new="                for char in event['item']['text']:\n                    send({'method':'item/agentMessage/delta','params':{'threadId':thread_id,'turnId':turn_id,'itemId':'answer-'+str(turn_number),'delta':char}})\n                send({'method':'item/completed','params':{'threadId':thread_id,'turnId':turn_id,'item':{'type':'agentMessage','id':'answer-'+str(turn_number)}}})";
+        assert!(source.contains(old));executable(&server,&source.replace(old,new));
+        let mut process=start(dir.path(),"codex",&server);
+        let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+        send(&mut socket,json!({"type":"prompt","id":1,"text":format!("Fixture {SAVED} {INHERITED} {JEV}")}));
+        let (text,done)=turn(&mut reader);assert_eq!(done["event"]["data"]["is_error"],false);assert!(text.contains("***"));
+        assert_clean(&fs::read_to_string(native_transcript(dir.path(),"codex-session.jsonl")).unwrap());
+        stop(&mut process,&mut reader,&mut socket);
+    }
+
+    #[test]
+    fn claude_sensitive_structured_keys_are_refused_without_persistence() {
+        let dir=tempfile::tempdir().unwrap();private_keys(dir.path());
+        let cli=dir.path().join("claude-sensitive-key.py");
+        claude_fixture(&cli,&format!("saved={SAVED:?}"),r#"if frame['type']=='user':
+  emit({'type':'assistant','session_id':session,'message':{'role':'assistant','content':[{'type':'tool_use','id':'tool-fixture','name':'Read','input':{saved:'opaque'}}]}})
+  result()
+"#);
+        let mut process=start(dir.path(),"claude",&cli);
+        let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));send(&mut socket,json!({"type":"prompt","id":1,"text":"fixture"}));
+        let (_,done)=turn(&mut reader);assert_eq!(done["event"]["data"]["is_error"],true);
+        assert_clean(&fs::read_to_string(native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.jsonl"))).unwrap());
+        stop(&mut process,&mut reader,&mut socket);
+    }
+
+    #[test]
+    fn unsafe_credential_store_fails_closed_before_claude_starts() {
+        let dir=tempfile::tempdir().unwrap();private_keys(dir.path());
+        fs::set_permissions(dir.path().join("home/credentials.json"),fs::Permissions::from_mode(0o644)).unwrap();
+        let cli=dir.path().join("should-not-start");executable(&cli,"#!/bin/sh\ntouch provider-started\n");
+        let output=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),
+            "--session-id",CLAUDE_SESSION,"--engine","claude","--claude-bin",cli.to_str().unwrap()])
+            .env("DOXA_HOME",dir.path().join("home")).env("DOXA_LORE","0").output().unwrap();
+        assert!(!output.status.success());assert!(!dir.path().join("provider-started").exists());assert_clean(&String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
+    fn peers_discovery_delivery_and_ledger_redact_inactive_saved_keys() {
+        let dir=tempfile::tempdir().unwrap();private_keys(dir.path());
+        let peer="2874e9c6-34ac-42d9-8750-35fa439c3d01";
+        let (listener,_)=registry_peer(dir.path(),peer,dir.path().to_str().unwrap(),SAVED);
+        listener.set_nonblocking(true).unwrap();
+        let worker=thread::spawn(move || {
+            let deadline=Instant::now()+Duration::from_secs(10);
+            loop {assert!(Instant::now()<deadline);match listener.accept() {
+                Ok((stream,_))=>{let wire=read_peer_fixture(stream,deadline.min(Instant::now()+Duration::from_secs(2))).unwrap();if !wire.is_empty(){return wire;}}
+                Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(5));}
+                Err(_)=>panic!("private peer fixture accept failed"),
+            }}
+        });
+        let cli=dir.path().join("claude-idle.py");claude_fixture(&cli,"","if frame['type']=='user': result()");
+        let mut process=start(dir.path(),"claude",&cli);
+        let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+        send(&mut socket,json!({"type":"call","id":1,"method":"peers","params":{}}));
+        let peers=claude_receive_until(&mut reader,|frame|frame["id"]==1);assert_clean(&peers.to_string());assert_eq!(peers["peers"][0]["title"],"***");
+        send(&mut socket,json!({"type":"call","id":2,"method":"msg","params":{"target":peer,"text":format!("{SAVED} {INHERITED} {JEV}")}}));
+        // The callback reply and its event are independently queued. Check
+        // both orders so expandable sent text cannot leak an inactive key.
+        let (mut delivered,mut sent)=(None,None);
+        for _ in 0..32 {
+            let frame=receive(&mut reader);assert_clean(&frame.to_string());
+            if frame["id"]==2 { delivered=Some(frame.clone()); }
+            if frame["event"]["type"]=="peer_sent" { sent=Some(frame); }
+            if delivered.is_some() && sent.is_some() { break; }
+        }
+        assert_eq!(delivered.expect("peer delivery reply")["ok"],true);
+        let sent=sent.expect("successful peer sent event");
+        assert_eq!(sent["event"]["data"]["body"],"*** *** ***");
+        assert_eq!(sent["event"]["data"]["to"],json!([peer]));
+        assert_eq!(sent["event"]["data"]["failed"],json!([]));
+        let wire=worker.join().unwrap();assert_clean(&wire);
+        let frame:Value=serde_json::from_str(&wire).unwrap();
+        assert_eq!(frame["body"],"*** *** ***");assert_eq!(frame["from_id"],CLAUDE_SESSION);
+        assert_clean(&fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap());
+        stop(&mut process,&mut reader,&mut socket);
+    }
+}
+
+#[test]
+#[cfg(target_os="linux")]
+fn router_stop_and_interrupt_reap_stalled_discovery_and_protected_setup_groups() {
+    for (provider,phase) in [("claude","catalog"),("codex","catalog"),("claude","setup")] {
+        for control in ["interrupt","stop"] {
+            let dir=tempfile::tempdir().unwrap();
+            let cwd=dir.path().join("workspace");fs::create_dir(&cwd).unwrap();
+            let home=dir.path().join("home");fs::create_dir(&home).unwrap();fs::set_permissions(&home,fs::Permissions::from_mode(0o700)).unwrap();
+            let cli=dir.path().join("stalled-cli.py");
+            executable(&cli,&format!(r#"#!/usr/bin/python3
+import json,os,pathlib,subprocess,sys,time
+root=pathlib.Path(__file__).parent
+provider={provider:?}
+phase={phase:?}
+def send(value):print(json.dumps(value),flush=True)
+for line in sys.stdin:
+ r=json.loads(line)
+ if provider=='claude':
+  if r['type']!='control_request':
+   if r['type']=='user':root.joinpath('unexpected-prompt').touch()
+   continue
+  sub=r['request']['subtype']
+ else:sub=r.get('method')
+ if sub=='initialize':
+  count=int(root.joinpath('catalog-count').read_text())+1 if root.joinpath('catalog-count').exists() else 1
+  root.joinpath('catalog-count').write_text(str(count))
+  if count==(3 if phase=='setup' else 1):
+   descendant=subprocess.Popen(['/usr/bin/sleep','60'])
+   root.joinpath('stalled-pids').write_text(json.dumps([os.getpid(),descendant.pid]))
+   time.sleep(30)
+ if provider=='claude':
+  model='fixture-model'
+  value={{'account':{{'tokenSource':'fixture-auth'}},'models':[{{'value':model,'resolvedModel':model,'supportedEffortLevels':['high']}}]}} if sub=='initialize' else {{'applied':{{'model':model,'effort':'high'}}}}
+  send({{'type':'control_response','response':{{'subtype':'success','request_id':r['request_id'],'response':value}}}})
+ elif sub=='initialize':send({{'id':r['id'],'result':{{'userAgent':'fixture'}}}})
+ elif sub=='account/read':send({{'id':r['id'],'result':{{'account':{{'type':'chatgpt'}}}}}})
+ elif sub=='model/list':send({{'id':r['id'],'result':{{'data':[{{'model':'fixture-model','supportedReasoningEfforts':[{{'reasoningEffort':'high'}}],'defaultReasoningEffort':'high'}}],'nextCursor':None}}}})
+"#));
+            let candidate=|id|json!({"id":id,"provider":provider,"billing":"cli_account","model":"fixture-model","effort":"high",
+                "description":"Private process fixture only","context_tokens":131072,"max_output_tokens":512,"supports_tools":true});
+            let config=dir.path().join("router.json");fs::write(&config,json!({"version":1,"jev_model":doxa_router::JEV_MODEL,
+                "criteria_version":"cleanup-fixture-v1","candidates":[candidate("one"),candidate("two")],"fallback_id":"one",
+                "confidence_threshold":0.8,"max_calls":4,"max_spend_usd_micros":10000,"max_input_bytes":8192,"deadline_ms":1000}).to_string()).unwrap();
+            fs::set_permissions(&config,fs::Permissions::from_mode(0o600)).unwrap();
+            let mut command=daemon_command();command.args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",cwd.to_str().unwrap(),
+                "--session-id","router-cleanup","--engine","router","--router-config",config.to_str().unwrap(),
+                if provider=="claude"{"--claude-bin"}else{"--codex-bin"},cli.to_str().unwrap(),"--linger","10"])
+                .env("DOXA_HOME",&home).env("DOXA_LORE","0").env("DOXA_WORKTREE","0").stdout(Stdio::null()).stderr(Stdio::piped());
+            for key in ["DEEPSEEK_API_KEY","ZAI_API_KEY","TYPESAFE_API_KEY","TAVILY_API_KEY","FIRECRAWL_API_KEY","EXA_API_KEY","BRAVE_API_KEY","DOXA_SESSION_BUDGET_USD"] {command.env_remove(key);}
+            let mut child=command.spawn().unwrap();let registry=dir.path().join("registry/router-cleanup.json");wait_for_registry(&mut child,&registry);
+            let entry:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();let mut process=Process{child,registry,socket:entry["daemon_socket"].as_str().unwrap().into()};
+            let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+            send(&mut socket,json!({"type":"prompt","id":1,"text":"Private stalled initialization fixture"}));
+            wait_until(||dir.path().join("stalled-pids").exists());
+            let pids:Vec<i32>=serde_json::from_slice(&fs::read(dir.path().join("stalled-pids")).unwrap()).unwrap();
+            // Always clean the synthetic group if a regression leaves it alive.
+            struct Cleanup(i32);impl Drop for Cleanup{fn drop(&mut self){unsafe{libc::kill(-self.0,libc::SIGKILL);}}}
+            let _cleanup=Cleanup(pids[0]);let started=Instant::now();
+            send(&mut socket,json!({"type":"call","id":2,"method":control,"params":{}}));
+            if control=="stop" {wait_until_with_timeout(Duration::from_secs(7),||process.exited());}
+            else {
+                loop{let frame=receive(&mut reader);if matches!(frame["event"]["type"].as_str(),Some("turn_done"|"turn_refused")){break;}}
+            }
+            assert!(started.elapsed()<Duration::from_secs(7));
+            wait_until(||unsafe{libc::kill(pids[0],0)}==-1);
+            for pid in pids.iter().skip(1) {
+                let stat=fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+                assert!(stat.is_none_or(|text|text.rsplit_once(") ").is_some_and(|(_,tail)|matches!(tail.chars().next(),Some('Z'|'X')))),"owned descendant survived cancellation");
+            }
+            assert!(!dir.path().join("unexpected-prompt").exists());
+            let state:Value=serde_json::from_slice(&fs::read(home.join("router/router-cleanup.router.json")).unwrap()).unwrap();
+            assert_eq!(state["incomplete"],false);assert!(state["pending_cli"].is_null());assert_eq!(state["worker"]["cli_turns"],0);
+            if control=="interrupt" {
+                send(&mut socket,json!({"type":"call","id":3,"method":"stop","params":{}}));wait_until(||process.exited());
+            }
+        }
+    }
 }

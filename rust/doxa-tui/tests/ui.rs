@@ -647,6 +647,8 @@ fn long_transcript_can_render_its_first_and_last_lines() {
 #[test]
 fn structured_events_render_in_target_pane_and_track_status() {
     let mut app = App::default();
+    app.rail_visible = false;
+    app.handle(Event::Resize(110, 30));
     for id in ["one", "two"] {
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":id, "model":id, "cwd":"repo"}));
     }
@@ -663,7 +665,7 @@ fn structured_events_render_in_target_pane_and_track_status() {
         ),
         (
             "peer_message",
-            json!({"from_title":"Worker", "body":"Ready for review"}),
+            json!({"from_title":"Worker", "from_id":"worker-1", "kind":"direct", "body":"Ready for review"}),
         ),
         (
             "peer_joined",
@@ -688,7 +690,21 @@ fn structured_events_render_in_target_pane_and_track_status() {
     assert!(!rendered.contains("Checking the repository"));
     assert!(rendered.contains("1 tool call"));
     assert!(rendered.contains("Peer Worker"));
-    assert!(rendered.contains("Ready for review"));
+    assert!(!rendered.contains("Ready for review"), "peer body starts collapsed: {rendered}");
+    assert!(rendered.contains("worker-1") && rendered.contains("kind: direct"), "{rendered}");
+    let (row, column) = rendered.lines().enumerate()
+        .find_map(|(row, line)| line.find("Peer Worker").map(|column| (row, line[..column].chars().count())))
+        .expect("target pane peer header");
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), column as u16, row as u16)));
+    assert_eq!(app.active_group, 1);
+    assert_eq!(app.focus, Focus::Transcript);
+    let expanded = screen(&app, 110, 30);
+    assert!(expanded.contains("Ready for review"), "{expanded}");
+    assert!(expanded.contains("worker-1") && expanded.contains("kind: direct"));
+    assert!(!expanded.contains("Checking the repository"));
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    assert!(!screen(&app, 110, 30).contains("Ready for review"));
+    assert!(app.sessions[0].transcript.is_empty(), "fold toggles stay with target session");
     let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     assert!(terminal.backend().buffer().content.iter()

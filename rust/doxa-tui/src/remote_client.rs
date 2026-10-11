@@ -18,6 +18,7 @@ const MAX_SESSIONS: usize = 64;
 const MAX_JSON: usize = 128_000;
 const MAX_SSE: usize = 128_000;
 const MAX_RETRY_IDS: usize = 64;
+type Availability = Arc<Mutex<HashMap<String, Option<String>>>>;
 type RetryIds = HashMap<String, (String, Instant, Option<Value>)>;
 
 fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
@@ -104,7 +105,7 @@ async fn post(http: &Client, base: &Url, path: &str, body: Value) -> io::Result<
 }
 
 #[derive(Clone, Debug)]
-struct SessionInfo { id: String, title: String, host: String, engine: String, model: String, encrypted: bool }
+struct SessionInfo { id: String, title: String, host: String, engine: String, model: String, encrypted: bool, incarnation: String }
 fn sessions(value: &Value) -> io::Result<Vec<SessionInfo>> {
     let rows = value["sessions"].as_array().ok_or_else(|| invalid("invalid hub inventory"))?;
     if rows.len() > MAX_SESSIONS { return Err(invalid("hub session inventory exceeds bound")); }
@@ -112,6 +113,8 @@ fn sessions(value: &Value) -> io::Result<Vec<SessionInfo>> {
     rows.iter().map(|row| {
         let id = row["id"].as_str().filter(|id| valid_target(id)).ok_or_else(|| invalid("invalid remote session ID"))?;
         if !seen.insert(id) { return Err(invalid("duplicate remote session ID")); }
+        let incarnation=row["incarnation"].as_str().filter(|value|!value.is_empty()&&value.len()<=128)
+            .ok_or_else(||invalid("remote session incarnation missing"))?;
         let host = id.split_once('~').unwrap().0;
         let clean = |key: &str, limit: usize| -> String {
             row[key].as_str().unwrap_or("").chars().filter(|c| !c.is_control())
@@ -120,7 +123,7 @@ fn sessions(value: &Value) -> io::Result<Vec<SessionInfo>> {
         let title = clean("title", 160);
         Ok(SessionInfo { id: id.into(), title: if title.is_empty() { id.into() } else { title },
             host: host.into(), engine: clean("engine", 40), model: clean("model", 100),
-            encrypted:row["encrypted"]==true })
+            encrypted:row["encrypted"]==true, incarnation:incarnation.into() })
     }).collect()
 }
 fn hello(session: &SessionInfo) -> WorkerFrame {
@@ -201,8 +204,9 @@ async fn command_result(http: &Client, base: &Url, target: &str, operation: &str
     }
     Err(unavailable("command acknowledgement timed out; inspect session before retrying"))
 }
-async fn snapshot(http: &Client, base: &Url, target: &str, key:Option<&[u8;32]>) -> io::Result<(String, Value, bool, u64, Option<u64>, bool)> {
+async fn snapshot(http: &Client, base: &Url, target: &str, key:Option<&[u8;32]>, incarnation:&str) -> io::Result<(String, Value, bool, u64, Option<u64>, bool)> {
     let result = command_result(http, base, target, "transcript", json!({}),key).await?;
+    if result["incarnation"] != incarnation || result["pending_inputs_complete"] != true { return Err(invalid("remote review incomplete or session changed")); }
     if result["ok"] != true { return Err(unavailable("remote transcript refused")); }
     let markdown = snapshot_markdown(&result)?;
     let inputs = result["pending_inputs"].as_array().filter(|items| items.len() <= 64)
@@ -236,14 +240,22 @@ impl SseDecoder {
 }
 
 async fn session_stream(session: SessionInfo, http: Client, base: Url,
-    frames: async_mpsc::Sender<WorkerFrame>, mut cancel: watch::Receiver<bool>, key:Option<[u8;32]>) {
+    frames: async_mpsc::Sender<WorkerFrame>, mut cancel: watch::Receiver<bool>, key:Option<[u8;32]>, available:Availability) {
     let mut cursor = None;
     loop {
         if *cancel.borrow() { return; }
         if cursor.is_none() {
-            match snapshot(&http, &base, &session.id,key.as_ref()).await {
+            match snapshot(&http, &base, &session.id,key.as_ref(),&session.incarnation).await {
                 Ok((markdown, pending_inputs, pending_inputs_complete, next, before, has_more)) => {
-                    if frames.send(WorkerFrame::RemoteSnapshot { session_id: session.id.clone(), markdown, pending_inputs, pending_inputs_complete,before,has_more }).await.is_err() { return; }
+                    let fresh=get(&http,&base,"api/sessions").await.and_then(|value|sessions(&value));
+                    if !fresh.is_ok_and(|rows|rows.iter().any(|row|row.id==session.id&&row.incarnation==session.incarnation&&row.encrypted==session.encrypted)) {
+                        available.lock().unwrap_or_else(|poison|poison.into_inner()).insert(session.id.clone(),None);
+                        let _=frames.send(WorkerFrame::RemoteConnectivity{session_id:session.id.clone(),status:"Remote session identity changed".into()}).await;
+                        tokio::select! { _=cancel.changed()=>return, _=tokio::time::sleep(Duration::from_secs(3))=>{} }
+                        continue;
+                    }
+                    available.lock().unwrap_or_else(|poison|poison.into_inner()).insert(session.id.clone(),Some(session.incarnation.clone()));
+                    if frames.send(WorkerFrame::RemoteSnapshot { session_id: session.id.clone(), incarnation:session.incarnation.clone(), markdown, pending_inputs, pending_inputs_complete,before,has_more }).await.is_err() { return; }
                     cursor = Some(next);
                 }
                 Err(_) => {
@@ -272,6 +284,12 @@ async fn session_stream(session: SessionInfo, http: Client, base: Url,
                     let Some(Ok(chunk)) = next.ok().flatten() else { break };
                     let decoded = match decoder.push(&chunk) { Ok(frames) => frames, Err(_) => break };
                     for frame in decoded {
+                        if frame["type"]=="hello" {
+                            if frame["incarnation"]!=session.incarnation || frame.get("pending_inputs").is_some() {
+                                cursor=None; break;
+                            }
+                            continue;
+                        }
                         if frame["event"]["type"] == "replay_gap" { cursor=None; break; }
                         if frame["type"] != "event" { continue; }
                         let Some(seq) = frame["seq"].as_u64() else { cursor=None; break };
@@ -302,6 +320,7 @@ async fn session_stream(session: SessionInfo, http: Client, base: Url,
         // whole buffer even if no subsequent frame exists to expose a gap.
         // Refresh transcript and pending inputs before the next subscription.
         cursor = None;
+        available.lock().unwrap_or_else(|poison|poison.into_inner()).insert(session.id.clone(),None);
         let _ = frames.send(WorkerFrame::RemoteConnectivity { session_id: session.id.clone(), status: "Remote reconnecting".into() }).await;
         tokio::select! { _=cancel.changed()=>return, _=tokio::time::sleep(Duration::from_secs(2))=>{} }
     }
@@ -309,17 +328,22 @@ async fn session_stream(session: SessionInfo, http: Client, base: Url,
 
 async fn command_worker(command: WorkerCommand, http: Client, base: Url,
     frames: async_mpsc::Sender<WorkerFrame>, uncertain: Arc<Mutex<RetryIds>>,
-    available: Arc<Mutex<HashSet<String>>>, crypto_key:Option<[u8;32]>) {
+    available: Availability, crypto_key:Option<[u8;32]>) {
     match command {
-        WorkerCommand::Prompt(id, text) if valid_target(&id) && available.lock().unwrap_or_else(|poison| poison.into_inner()).contains(&id) => {
-            let key = retry_key("prompt", &id, &text);
+        WorkerCommand::Prompt(id, text) if valid_target(&id) && available.lock().unwrap_or_else(|poison| poison.into_inner()).contains_key(&id) => {
+            let incarnation=available.lock().unwrap_or_else(|poison|poison.into_inner()).get(&id).cloned().flatten();
+            let Some(incarnation)=incarnation else {
+                let _=frames.send(WorkerFrame::PromptFailed{session_id:id,text,message:"Remote review unavailable; wait for a fresh snapshot".into(),delivery:PromptDelivery::Rejected}).await;
+                return;
+            };
+            let key = retry_key("prompt", &id, &format!("{incarnation}:{text}"));
             let Some(request_id) = retry_id(&uncertain, &key) else {
                 let _ = frames.send(WorkerFrame::PromptFailed { session_id:id, text,
                     message:"Too many uncertain remote commands; inspect the sessions before retrying".into(),
                     delivery:PromptDelivery::Rejected }).await;
                 return;
             };
-            let request=retry_body(&uncertain,&key,&id,"prompt",json!({"text":text,"request_id":request_id}),crypto_key.as_ref());
+            let request=retry_body(&uncertain,&key,&id,"prompt",json!({"text":text,"request_id":request_id,"incarnation":incarnation}),crypto_key.as_ref());
             let result=match request {
                 Ok(request)=>command_result(&http,&base,&id,"prompt",request,crypto_key.as_ref()).await,
                 Err(error)=>Err(error),
@@ -334,7 +358,16 @@ async fn command_worker(command: WorkerCommand, http: Client, base: Url,
                 }
             }
         }
-        WorkerCommand::Answer(id, request, answer) if valid_target(&id) && available.lock().unwrap_or_else(|poison| poison.into_inner()).contains(&id) => {
+        WorkerCommand::Answer(id, request, answer) if valid_target(&id) && available.lock().unwrap_or_else(|poison| poison.into_inner()).contains_key(&id) => {
+            let incarnation=available.lock().unwrap_or_else(|poison|poison.into_inner()).get(&id).cloned().flatten();
+            let review=&answer["remote_review"];
+            if incarnation.as_deref()!=review["incarnation"].as_str() || incarnation.is_none()
+                || !review["reviewed_request"].is_object() || review["reviewed_request"]["id"]!=request
+                || !answer["answer"].is_object() {
+                let _=frames.send(WorkerFrame::Command{session_id:id,result:CommandResult::Answer{request_id:request,
+                    ok:false,uncertain:Some(false),message:"Displayed remote review expired; wait for a fresh snapshot".into()}}).await;
+                return;
+            }
             let key = retry_key("answer", &id, &format!("{request}:{answer}"));
             let Some(request_id) = retry_id(&uncertain, &key) else {
                 let _ = frames.send(WorkerFrame::Command { session_id:id,
@@ -343,23 +376,24 @@ async fn command_worker(command: WorkerCommand, http: Client, base: Url,
                 return;
             };
             let body=retry_body(&uncertain,&key,&id,"answer",
-                json!({"id":request,"answer":answer,"request_id":request_id}),crypto_key.as_ref());
+                json!({"id":request,"answer":answer["answer"],"request_id":request_id,
+                    "incarnation":review["incarnation"],"reviewed_request":review["reviewed_request"]}),crypto_key.as_ref());
             let result=match body {
                 Ok(body)=>command_result(&http,&base,&id,"answer",body,crypto_key.as_ref()).await,
                 Err(error)=>Err(error),
             };
-            let uncertain_reply = result.as_ref().err().is_some_and(|error| error.kind() != io::ErrorKind::PermissionDenied);
+            let uncertain_reply = result.as_ref().err().is_some_and(|error| !matches!(error.kind(),io::ErrorKind::PermissionDenied|io::ErrorKind::InvalidInput));
             if !uncertain_reply { clear_retry(&uncertain, &key); }
             let _ = frames.send(WorkerFrame::Command { session_id:id,
                 result:CommandResult::Answer { request_id:request, ok:result.is_ok(),
                     uncertain:Some(uncertain_reply), message:result.err().map(|error|error.to_string()).unwrap_or_default() } }).await;
         }
         WorkerCommand::Attach(id, group) => {
-            let known = available.lock().unwrap_or_else(|poison| poison.into_inner()).contains(&id);
+            let known = available.lock().unwrap_or_else(|poison| poison.into_inner()).contains_key(&id);
             let _ = frames.send(WorkerFrame::Attach { session_id:id, group,
                 result:if known { Ok(()) } else { Err("Remote session is no longer live".into()) } }).await;
         }
-        WorkerCommand::RemoteHistory(id,before) if valid_target(&id) && available.lock().unwrap_or_else(|poison|poison.into_inner()).contains(&id) => {
+        WorkerCommand::RemoteHistory(id,before) if valid_target(&id) && available.lock().unwrap_or_else(|poison|poison.into_inner()).contains_key(&id) => {
             let result=command_result(&http,&base,&id,"transcript",json!({"before":before}),crypto_key.as_ref()).await;
             let page=match result {
                 Ok(page) if page["ok"]==true=>match snapshot_markdown(&page){
@@ -431,27 +465,32 @@ pub fn start(raw_url: &str) -> io::Result<RemoteWorker> {
         let Ok(runtime) = runtime else { return };
         runtime.block_on(async move {
             let uncertain = Arc::new(Mutex::new(HashMap::new()));
-            let available = Arc::new(Mutex::new(HashSet::new()));
+            let available:Availability = Arc::new(Mutex::new(HashMap::new()));
             let command_slots = Arc::new(Semaphore::new(8));
-            let mut tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+            let mut tasks: HashMap<String, (String,tokio::task::JoinHandle<()>)> = HashMap::new();
             let mut current = initial;
             let mut cancel = cancel_rx;
             loop {
                 let present: HashSet<_> = current.iter().map(|session| session.id.as_str()).collect();
-                *available.lock().unwrap_or_else(|poison| poison.into_inner()) = present.iter().map(|id| (*id).to_owned()).collect();
-                for (id, task) in tasks.iter() {
-                    if !present.contains(id.as_str()) {
+                {
+                    let mut admitted=available.lock().unwrap_or_else(|poison|poison.into_inner());
+                    admitted.retain(|id,_|present.contains(id.as_str()));
+                    for session in &current { admitted.entry(session.id.clone()).or_insert(None); }
+                }
+                for (id, (incarnation,task)) in tasks.iter() {
+                    if !current.iter().any(|session|session.id==*id&&session.incarnation==*incarnation) {
+                        available.lock().unwrap_or_else(|poison|poison.into_inner()).remove(id);
                         task.abort();
                         let _ = async_frames.send(WorkerFrame::RemoteConnectivity {
                             session_id:id.clone(), status:"Remote session offline".into() }).await;
                     }
                 }
-                tasks.retain(|id, _| present.contains(id.as_str()));
+                tasks.retain(|id,(incarnation,_)|current.iter().any(|session|session.id==*id&&session.incarnation==*incarnation));
                 for session in &current {
                     if tasks.contains_key(&session.id) { continue; }
                     if async_frames.send(hello(session)).await.is_err() { return; }
-                    tasks.insert(session.id.clone(), tokio::spawn(session_stream(session.clone(), http.clone(), base.clone(),
-                        async_frames.clone(), cancel.clone(), key)));
+                    tasks.insert(session.id.clone(), (session.incarnation.clone(),tokio::spawn(session_stream(session.clone(), http.clone(), base.clone(),
+                        async_frames.clone(), cancel.clone(), key, available.clone()))));
                 }
                 tokio::select! {
                     _ = cancel.changed() => break,
@@ -524,7 +563,7 @@ mod tests {
         for url in ["http://owner.tail.ts.net/", "https://evil.example.com/", "https://user@owner.tail.ts.net/", "https://owner.tail.ts.net/path"] {
             assert!(hub_url(url).is_err(), "{url}");
         }
-        assert!(sessions(&json!({"sessions":[{"id":"host~session","title":"Work","engine":"codex","model":"gpt"}]})).is_ok());
+        assert!(sessions(&json!({"sessions":[{"id":"host~session","title":"Work","engine":"codex","model":"gpt","incarnation":"first"}]})).is_ok());
         assert!(sessions(&json!({"sessions":[{"id":"host~session"},{"id":"host~session"}]})).is_err());
         let saved = Mutex::new(HashMap::new());
         let key = retry_key("prompt", "host~session", "private prompt");
@@ -586,7 +625,7 @@ mod tests {
     async fn hub_snapshot_and_sse_feed_the_native_frame_path() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let check = SseDecoder::default().push(concat!(
-            "data: {\"type\":\"hello\"}\n\n",
+            "data: {\"type\":\"hello\",\"incarnation\":\"first\"}\n\n",
             "id: 7\ndata: {\"type\":\"event\",\"seq\":7,\"event\":{\"type\":\"text_delta\",\"data\":{\"text\":\"live\"}}}\n\n"
         ).as_bytes()).unwrap();
         assert_eq!(check.len(), 2);
@@ -606,8 +645,9 @@ mod tests {
                         let sends = sends.clone();
                         let snapshots = snapshots.clone();
                         async move {
-                        let path = request.uri().path();
-                        let body = match path {
+                        let path = request.uri().path().to_owned();
+                        let body = match path.as_str() {
+                            "/api/sessions" => json!({"sessions":[{"id":"host~session","incarnation":"first","encrypted":false}]}).to_string(),
                             "/api/sessions/host~session/transcript" => {
                                 snapshots.fetch_add(1, Ordering::SeqCst);
                                 json!({"command_id":"command-1"}).to_string()
@@ -616,15 +656,21 @@ mod tests {
                                 sends.fetch_add(1, Ordering::SeqCst);
                                 json!({"command_id":"command-2"}).to_string()
                             },
-                            "/api/sessions/host~session/answer" => json!({"command_id":"command-3"}).to_string(),
+                            "/api/sessions/host~session/answer" => {
+                                let bytes=request.into_body().collect().await.unwrap().to_bytes();
+                                let answer:Value=serde_json::from_slice(&bytes).unwrap();
+                                assert_eq!(answer["incarnation"],"first");
+                                assert_eq!(answer["reviewed_request"],json!({"id":"ask-1","kind":"permission"}));
+                                json!({"command_id":"command-3"}).to_string()
+                            },
                             "/api/commands/command-1" => json!({"status":"accepted","result":{
-                                "ok":true,"turns":[{"prompt":"hello","text":"answer","tools":[]}],
+                                "ok":true,"incarnation":"first","turns":[{"prompt":"hello","text":"answer","tools":[]}],
                                 "pending_inputs":[{"id":if snapshots.load(Ordering::SeqCst)==1 {"ask-1"} else {"ask-2"},"kind":"permission"}],
                                 "pending_inputs_complete":true,"next_seq":7}}).to_string(),
                             "/api/commands/command-2" | "/api/commands/command-3" =>
                                 json!({"status":"accepted","result":{"ok":true}}).to_string(),
                             "/api/sessions/host~session/events" => concat!(
-                                "data: {\"type\":\"hello\"}\n\n",
+                                "data: {\"type\":\"hello\",\"incarnation\":\"first\"}\n\n",
                                 "id: 7\ndata: {\"type\":\"event\",\"seq\":7,\"event\":{\"type\":\"text_delta\",\"data\":{\"text\":\"live\"}}}\n\n"
                             ).to_owned(),
                             _ => "{}".into(),
@@ -639,10 +685,11 @@ mod tests {
         let (frames, mut received) = async_mpsc::channel(8);
         let (cancel, stop) = watch::channel(false);
         let client = http_client().unwrap();
+        let available=Arc::new(Mutex::new(HashMap::from([("host~session".to_owned(),None)])));
         let task = tokio::spawn(session_stream(SessionInfo {
             id:"host~session".into(),title:"Work".into(),host:"host".into(),
-            engine:"codex".into(),model:"gpt".into(),encrypted:false,
-        }, client.clone(), base.clone(), frames, stop, None));
+            engine:"codex".into(),model:"gpt".into(),encrypted:false,incarnation:"first".into(),
+        }, client.clone(), base.clone(), frames, stop, None,available.clone()));
         let first = tokio::time::timeout(Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
         assert!(matches!(first, WorkerFrame::RemoteSnapshot { markdown, pending_inputs, .. }
             if markdown.contains("answer") && pending_inputs[0]["id"] == "ask-1"));
@@ -660,13 +707,19 @@ mod tests {
         assert_eq!(sends.load(Ordering::SeqCst),0);
         cancel.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
-        let available = Arc::new(Mutex::new(HashSet::from(["host~session".to_owned()])));
+        let available = Arc::new(Mutex::new(HashMap::from([("host~session".to_owned(),Some("first".into()))])));
         let retries = Arc::new(Mutex::new(HashMap::new()));
         let (replies, mut reply_rx) = async_mpsc::channel(4);
         command_worker(WorkerCommand::Prompt("host~session".into(), "next turn".into()),
             client.clone(), base.clone(), replies.clone(), retries.clone(), available.clone(),None).await;
         assert_eq!(sends.load(Ordering::SeqCst), 1);
-        command_worker(WorkerCommand::Answer("host~session".into(), "ask-1".into(), json!({"decision":"allow"})),
+        for rejected in [json!({"decision":"allow"}),json!({"answer":{"decision":"allow"},"remote_review":{
+            "incarnation":"stale","reviewed_request":{"id":"ask-1","kind":"permission"}}})] {
+            command_worker(WorkerCommand::Answer("host~session".into(),"ask-1".into(),rejected),
+                client.clone(),base.clone(),replies.clone(),retries.clone(),available.clone(),None).await;
+            assert!(matches!(reply_rx.recv().await,Some(WorkerFrame::Command{result:CommandResult::Answer{ok:false,uncertain:Some(false),..},..})));
+        }
+        command_worker(WorkerCommand::Answer("host~session".into(), "ask-1".into(), json!({"answer":{"decision":"allow"},"remote_review":{"incarnation":"first","reviewed_request":{"id":"ask-1","kind":"permission"}}})),
             client, base, replies, retries, available,None).await;
         assert!(matches!(reply_rx.recv().await, Some(WorkerFrame::Command {
             result:CommandResult::Answer { ok:true, .. }, ..

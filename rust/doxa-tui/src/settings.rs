@@ -3,14 +3,14 @@
 use std::{io, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind { Text, Number, Bool, BoolOn, Choice, Format, Key }
+pub enum Kind { Text, Number, Bool, BoolOn, Choice, Format, Key, Credential }
 #[derive(Debug, Clone, Copy)]
 pub struct Setting {
     pub key: &'static str, pub env: &'static str, pub label: &'static str,
     pub category: &'static str, pub kind: Kind, pub choices: &'static [&'static str],
     pub default: &'static str, pub read_only: bool, pub help: &'static str, pub note: &'static str,
 }
-pub const CATEGORIES: &[&str] = &["Session", "Fleet", "Memory", "Appearance", "Keys", "Notifications", "Remote", "Paths", "About"];
+pub const CATEGORIES: &[&str] = &["Session", "Fleet", "Memory", "Appearance", "Keys", "Notifications", "Remote", "Paths", "About", "MCP"];
 pub fn engine_label(value: &str) -> &str {
     match value {
         "router"=>"Jev Router (on for new sessions)",
@@ -71,6 +71,8 @@ pub const SETTINGS: &[Setting] = &[
     key_setting!("key_lore", "LORE beliefs", "Alt+L"),
     key_setting!("key_stop", "stop session", "Ctrl+X"),
     key_setting!("key_delete_transcript", "delete session transcript", "Ctrl+Delete"),
+    Setting { key: "glm_account_profile", env: "DOXA_GLM_ACCOUNT_PROFILE", label: "GLM account reporting", category: "Session", kind: Kind::Choice, choices: &["standard_api", "api_resource_bundle"], default: "standard_api", read_only: false, help: "Declare standard API or an API resource bundle for reporting. Bundle ownership is owner-declared; cash balance, bundle remainder and actual charges remain unknown. Check the Z.ai billing console.", note: "GLM still uses the standard API endpoint. Session costs are list-price estimates, separate from actual prepaid charges." },
+    Setting { key: "glm_plan_monitor", env: "DOXA_GLM_PLAN_MONITOR", label: "external Coding Plan monitor", category: "Session", kind: Kind::Bool, choices: &[], default: "0", read_only: false, help: "Opt in to a separate read-only external Coding Plan quota monitor. Open /usage and press R to refresh using the GLM key. Availability stays unknown until a valid provider response.", note: "Monitor only: no Coding Plan entitlement or inference endpoint change. No query at startup or during model turns; quota failure does not block work." },
     Setting { key: "model", env: "DOXA_MODEL", label: "model", category: "Session", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Model preference for new sessions of this engine; /model switches the live session. Router uses auto or an exact configured target ID and ignores DOXA_MODEL.", note: "Router target choice is separate from the effective provider/model for each turn and from permission mode." },
     Setting { key: "effort", env: "DOXA_EFFORT", label: "effort", category: "Session", kind: Kind::Choice, choices: &["", "low", "medium", "high", "xhigh", "max"], default: "", read_only: false, help: "Default reasoning effort for new sessions; router effort is fixed per target in its candidate config. Use the effort chip or /effort on supported engines", note: "Supported current-session changes require an idle provider and verified capability. Claude resumes its existing provider conversation with the selected effort; Codex applies it to the next turn." },
     Setting { key: "allow_bypass", env: "DOXA_ALLOW_BYPASS", label: "allow bypass", category: "Session", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Let NEW sessions reach bypassPermissions at all (spawns their CLI with --allow-dangerously-skip-permissions)", note: "OFF by default, and the default is the point. The claude CLI arms this capability at LAUNCH, not at runtime: a session started without the flag cannot enter bypassPermissions, and no setting can retrofit one that is already running. While this is off, the mode is absent from the permission picker, the chip's picker and /mode's list rather than being offered and refused. Turning it on puts every session spawned afterwards one keystroke away from running tools unapproved, in every repository you open." },
@@ -78,7 +80,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "auto_diff", env: "DOXA_AUTO_DIFF", label: "auto-open the live diff", category: "Session", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Open the live diff beside a session the FIRST time it edits the worktree, once per session (doxa.diff.auto_open_enabled / PaneRuntimeMixin._maybe_auto_open_diff)", note: "OFF by default, and the default is the argument: opening the diff splits the group the session is in, halving the width of the transcript you are reading, and a surface that rearranges the screen mid-turn without being asked is worse than one you have to know about. ONCE per session, so closing it is final -- it never re-opens behind you. It never takes the keyboard (the prompt keeps focus), and on a window too narrow to split it REFUSES and says so rather than making an unusable sliver. The `diff N files +A −R` status chip is on either way and is how you see there are changes at all; F2 and /diff open the pane by hand at any time." },
     Setting { key: "spawn_sessions", env: "DOXA_SPAWN_SESSIONS", label: "let sessions spawn sessions", category: "Session", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Offer the model the spawn_session tool, which starts a SECOND daemon-backed DOXA session in this repo and hands it a task (doxa.session_ops)", note: "OFF by default, and this row is the ONLY place it can be turned on: it is read through config.raw, so ~/.doxa/config.toml or DOXA_SPAWN_SESSIONS in your own shell are the two doors, and nothing inside a repository you open is one of them -- a repo that could arm this would be arbitrary code execution on `doxa new` against an untrusted clone. Turning it on costs real money and real machine: each spawned session is another claude process (~294 MB measured), another linked worktree (~18 MB measured for this repo), and its own token spend, additive to the session that asked for it. Every call still stops and asks you, showing the exact task text the child will be given, in every permission mode except bypassPermissions; the depth/live-count/rate caps in doxa.session_ops are enforced regardless of mode and cannot be raised from here." },
     Setting { key: "agent_peer_send", env: "DOXA_AGENT_PEER_SEND", label: "let the model message other sessions", category: "Session", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Offer the model the peer_send tool, which delivers a message straight into another live DOXA session (doxa.operators)", note: "OFF by default, and this is the knob that retires DOXA's oldest statement about itself: until now the model had NO send tool, and every peer message crossed because a human typed /msg. Turning this on lets a model reach another session's context on its own initiative -- possibly in a different repository, since addressing is not scope-limited. Nothing about it is silent: every send is charged against a rate limit priced in DELIVERIES (a broadcast to 31 peers costs 31), every send is appended with its full body to $DOXA_HOME/peers/messages.jsonl, and both directions flash a light on the status bar. Read through config.raw, so this file or the environment are the two doors and nothing inside a repository you open is one of them. peer_list and peer_history stay available either way: seeing who is running changes nothing outside this process." },
-    Setting { key: "peer_inbound_turns", env: "DOXA_PEER_INBOUND_TURNS", label: "let an arriving message start a turn", category: "Session", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "An incoming peer message starts a turn when this session is idle, and queues behind the running one when it is not (doxa.engine.SessionEngine._on_peer_frame)", note: "OFF by default, and deliberately NOT part of the row above: accepting messages and being woken by them are different grants, and a session may reasonably want the first without the second. With this off, an arriving message renders immediately and the model sees it on the next turn you start -- the behaviour DOXA has always had. With it on, a peer can spend this session's budget while you are not watching; a turn it started says so in its own first line and carries a peer- turn id into the ledger, so the spend has a traceable cause. A BROADCAST never starts a turn at any setting." },
+    Setting { key: "peer_inbound_turns", env: "DOXA_PEER_INBOUND_TURNS", label: "Wake on peer messages", category: "Session", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Allow direct peer messages to start an idle turn or queue behind a running turn. File-backed changes apply to the next arrival in running native sessions.", note: "OFF by default. Receiving messages and letting them spend this session's budget are separate grants. With this off, the message renders immediately and is kept for your next typed turn. With it on, direct arrivals start or queue a peer- turn under the same permissions, reviews and budget as a typed turn. A broadcast never wakes the model. An explicit DOXA_PEER_INBOUND_TURNS environment override or fleet grant wins over Settings and remains fixed for that session." },
     Setting { key: "session_budget_usd", env: "DOXA_SESSION_BUDGET_USD", label: "session spend ceiling ($)", category: "Session", kind: Kind::Number, choices: &[], default: "", read_only: false, help: "Stop STARTING turns once this session has spent this many dollars (doxa.budget.session_ceiling / doxa.engine.SessionEngine._budget_refusal)", note: "OFF by default -- unset, and nothing about any session changes -- and it is the row the two above make necessary. With peer_send and inbound turns armed, sessions address each other across repositories and wake each other, and until this row existed nothing anywhere bounded what that cost. It bounds STARTING a turn, not a turn in flight: the only dollar figure that exists arrives with the message that ENDS a turn, so a session may exceed this by the price of the one turn that crosses it, and DOXA will not multiply tokens by a price sheet to pretend otherwise (see doxa.vendors). A session at its ceiling is STOPPED, not dead: it says so in the transcript, every command still answers, and raising this number here lets the next prompt through with no restart. A turn an arriving PEER message started is refused exactly like a typed one -- that path is the reason this exists. Read through config.raw, so this file and the environment are the two doors and nothing inside a repository you open is one of them. Enforceable only on an engine that reports cost: codex and both API vendors report none, their spend reads as $0.00, and the row says so rather than appearing to work. doxa.fleet's --run-budget sets a run-wide total and derives this per session, because thirty-two individually reasonable limits multiply into one unreasonable one." },
     Setting { key: "permission_mode", env: "DOXA_PERMISSION_MODE", label: "permission mode", category: "Session", kind: Kind::Choice, choices: &["", "default", "acceptEdits", "plan"], default: "", read_only: false, help: "Claude permission mode for new sessions; use the permission chip or /mode for the current session", note: "Only default, acceptEdits and plan may be saved as Claude defaults. Codex uses a separate current-session picker: on-request, sandboxed auto, or full-access. Codex restores that session's choice; this setting does not select it for all new Codex sessions." },
     Setting { key: "linger_secs", env: "DOXA_LINGER_SECS", label: "linger secs", category: "Session", kind: Kind::Number, choices: &[], default: "120", read_only: false, help: "Seconds a daemon outlives its last client before finalizing (doxa.cli --linger default)", note: "" },
@@ -100,7 +102,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "graph_context", env: "DOXA_GRAPH_CONTEXT", label: "graph context", category: "Memory", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Add LORE's graph-backed context block (beliefs reached by a relation, ranked confidence-first) to the act-time consult (doxa.engine.graph_context_enabled)", note: "OFF by default. Calls LORE's OWN builder (lore_core.graph.context_candidates/render_context_block, LORE 0.44.0+) rather than a second ranking implementation, as a SEPARATE stage from the consult floor above -- the two toggle independently. Unlike the consult note (silent unless something clears the relevance floor), this block falls back to the best-supported beliefs in scope when nothing matches the prompt, so once on it rides EVERY turn, budgeted under its own char cap but real, recurring cost -- see the graph_context_chars row in /context." },
     Setting { key: "graph_view", env: "DOXA_GRAPH_VIEW", label: "belief graph view", category: "Memory", kind: Kind::Choice, choices: &["", "browser", "ascii"], default: "browser", read_only: false, help: "How the beliefs picker's 'g graph' row action shows a belief's neighbourhood (doxa.beliefgraph.graph_view_mode): 'browser' writes LORE's pan/zoom mermaid page under $DOXA_HOME/graphs and opens it; 'ascii' inserts LORE's own edge block as rows beneath the belief, in the TUI. Empty = browser.", note: "Per BELIEF, never whole-graph, and that is measured rather than chosen: a whole-graph view filtered to asserted relations fragmented 104 beliefs into 44 clusters, which mermaid stacks vertically -- 1188x13814 pixels, fitting on screen at 5%. A k-hop neighbourhood is connected by construction. 'ascii' is the answer for a headless or SSH session; 'browser' prints the file's path into the transcript either way, so one still ends up with something to scp when no browser opens." },
     Setting { key: "lore_root", env: "LORE_ROOT", label: "lore store", category: "Memory", kind: Kind::Text, choices: &[], default: "", read_only: true, help: "Where the belief store and session index live (lore_core.ROOT)", note: "Shared with the Claude Code LORE plugin -- one store, two carriers. Set LORE_ROOT to point elsewhere; a private store would fork your memory into two divergent halves. /setup makes and stickies this choice -- read_only here because this row is /setup's, not the settings modal's, to edit." },
-    Setting { key: "nerd_font", env: "DOXA_NERD_FONT", label: "nerd font", category: "Appearance", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Use the nerd-font branch glyph instead of the branch sign in the status line (doxa.app.git_branch_symbol)", note: "" },
+    Setting { key: "nerd_font", env: "DOXA_NERD_FONT", label: "nerd font", category: "Appearance", kind: Kind::Bool, choices: &[], default: "1", read_only: false, help: "Use Nerd Font branch glyphs and tool, peer and reasoning icons (enabled by default).", note: "Explicit off preserves plain fold labels and [peer received]/[peer sent] markers; no font is installed. DOXA_NERD_FONTS is an alias; DOXA_NERD_FONT takes precedence when both are set." },
     Setting { key: "ctx_absolute", env: "DOXA_CTX_ABSOLUTE", label: "ctx: absolute tokens", category: "Appearance", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Print used/total tokens beside the ctx% chip (doxa.ui.labels.ctx_chip)", note: "Off, the numbers are still one hover away -- the ctx chip's tooltip carries them either way, and /usage prints them in full. On, they are dropped again on a terminal narrower than 100 columns rather than pushing other chips off the bar. A context limit the CLI never reported reads `?`; DOXA does not guess a window size." },
     Setting { key: "image_mode", env: "DOXA_IMAGE_MODE", label: "image mode", category: "Appearance", kind: Kind::Choice, choices: &["halfblock", "probe", "kgp", "sixel", "iterm2", "text"], default: "halfblock", read_only: false, help: "Render local Markdown image attachments: halfblock works in every terminal; probe detects Kitty, Sixel or iTerm2; text shows alt labels only.", note: "Only absolute image paths inside the verified session workspace render. Probe can pause briefly for terminal replies; forced graphics needs terminal support. File and pixel bounds apply." },
     Setting { key: "mermaid_renderer", env: "DOXA_MERMAID_RENDERER", label: "Mermaid renderer executable", category: "Appearance", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Optional absolute path to a reviewed local mmdc-compatible renderer. Empty keeps Mermaid source fences.", note: "Requires /usr/bin/bwrap and the renderer root below. Runs with no network and only system runtime, renderer package and a private temporary directory mounted. No renderer is downloaded or invoked from PATH." },
@@ -114,7 +116,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "rail_entries", env: "DOXA_RAIL_ENTRIES", label: "rail entries", category: "Appearance", kind: Kind::Choice, choices: &["sessions", "panes"], default: "sessions", read_only: false, help: "Show one row per session or one row per open pane; /collection view switches it.", note: "Pane view navigates the existing pane instead of moving its active tab. Hidden tabs contribute urgency to the pane row. Unknown or mixed project roots do not receive a project hue." },
     Setting { key: "collection_sort", env: "DOXA_COLLECTION_SORT", label: "rail group order", category: "Appearance", kind: Kind::Choice, choices: &["manual", "urgency"], default: "manual", read_only: false, help: "Order collection and project headings by their most urgent session; /collection sort toggles this setting.", note: "Manual is the default. Urgency only moves whole groups after marks settle and the pointer and keyboard have left the rail. Session order within each group stays fixed; Past sessions stay last." },
     Setting { key: "sidebar_width", env: "DOXA_SIDEBAR_WIDTH", label: "session sidebar: width", category: "Appearance", kind: Kind::Number, choices: &[], default: "25", read_only: false, help: "Columns the session rail occupies (doxa.layout.SIDEBAR_WIDTH; clamped to 22–41). Drag the rail's right edge, or Alt+Shift+←/→, to change it", note: "Clamped, never rejected: 25 is derived as the rail's own chrome (9 columns) plus half the tab-label cap the strip writes at, 22 is the width below which a row cannot show the label floor the tab strip keeps legible, and 41 is the width at which the whole capped label fits and wider buys nothing. All three moved by two in v1.5.0: doxa.layout.SIDEBAR_CHROME was re-measured against the rail's DEEPEST row -- a tab row under a pane entry under a heading -- which v1.2.0 added without re-pricing. A drag and the keys write this row, and both refuse at the same floor opening the rail refuses at." },
-    Setting { key: "clock_show", env: "DOXA_CLOCK_SHOW", label: "clock: show", category: "Appearance", kind: Kind::BoolOn, choices: &[], default: "1", read_only: false, help: "Show the fixed-width clock at the right edge of the tab bar (doxa.clock.ClockConfig)", note: "The one bool setting in this app that defaults ON -- an empty field here still means the clock shows; type 0 to turn it off." },
+    Setting { key: "clock_show", env: "DOXA_CLOCK_SHOW", label: "clock: show", category: "Appearance", kind: Kind::BoolOn, choices: &[], default: "1", read_only: false, help: "Show the fixed-width clock at the right edge of the tab bar (doxa.clock.ClockConfig)", note: "An empty field keeps the default visible clock; type 0 to turn it off." },
     Setting { key: "clock_date", env: "DOXA_CLOCK_DATE", label: "clock: show date", category: "Appearance", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Prefix the clock with %Y-%m-%d (doxa.clock.builtin_format)", note: "" },
     Setting { key: "clock_hour", env: "DOXA_CLOCK_HOUR", label: "clock: hour format", category: "Appearance", kind: Kind::Choice, choices: &["", "12", "24"], default: "24", read_only: false, help: "12- or 24-hour clock (doxa.clock.builtin_format)", note: "" },
     Setting { key: "clock_seconds", env: "DOXA_CLOCK_SECONDS", label: "clock: show seconds", category: "Appearance", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Show :SS; also switches the clock's one timer from minute- to second-aligned (doxa.clock.seconds_until_boundary)", note: "" },
@@ -127,6 +129,12 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "notify_needs_input", env: "DOXA_NOTIFY_NEEDS_INPUT", label: "notify: needs input", category: "Notifications", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Notify when a session is waiting on you", note: "OFF by default -- the ONLY notification-worthy turn outcome (a plain finished response is not one; see the module docstring of doxa.notify) is still opt-in, on the owner's own call. Fires on an AskUserQuestion or a permission request the CLI would have prompted on (doxa.engine's can_use_tool callback) -- while it's attached, gated like every other trigger above; a fully detached session (nobody attached at all) always notifies once this is on, since there is no window to blink instead." },
     Setting { key: "", env: "DOXA_HOME", label: "doxa home", category: "Paths", kind: Kind::Text, choices: &[], default: "", read_only: true, help: "Durable DOXA state: this config, the window layout", note: "" },
     Setting { key: "", env: "DOXA_RUNTIME_DIR", label: "runtime dir", category: "Paths", kind: Kind::Text, choices: &[], default: "", read_only: true, help: "Ephemeral endpoints: daemon sockets and the peer registry (doxa.peers.runtime_dir)", note: "Deliberately NOT under ~/.doxa: home directories can be NFS (AF_UNIX misbehaves) and stale sockets must not outlive a reboot." },
+    Setting {key:"mcp_enabled",env:"DOXA_MCP_ENABLED",label:"API worker MCP",category:"MCP",kind:Kind::Bool,choices:&[],default:"off",read_only:false,help:"Opt in to the explicitly configured local MCP servers for DeepSeek, GLM and API router workers.",note:"Off means zero host MCP connections or tool exposure. Native Claude/Codex CLI workers retain their own MCP configuration. Local MCP processes run on the trusted host, outside any worker Docker sandbox."},
+    Setting {key:"mcp_config",env:"DOXA_MCP_CONFIG",label:"MCP server config",category:"MCP",kind:Kind::Text,choices:&[],default:"",read_only:false,help:"Absolute owner-private MCP JSON path. Ctrl+P connects and lists only enabled configured servers; no tools are called.",note:"Each server has an explicit tool allowlist and bounded limits. No discovery, imports or automatic installation. The probe does not enable MCP; credentials and endpoints stay local."},
+    Setting {key:"tavily_api_key",env:"TAVILY_API_KEY",label:"Tavily API key",category:"MCP",kind:Kind::Credential,choices:&[],default:"",read_only:false,help:"Enter opens a masked private credential editor; Enter saves the key, Esc discards. Delete removes a saved key.",note:"Environment-owned keys are read-only. Values are saved only to the private credential store, never config.toml or MCP JSON. The standard environment reference also resolves a saved key when the environment is unset."},
+    Setting {key:"firecrawl_api_key",env:"FIRECRAWL_API_KEY",label:"Firecrawl API key",category:"MCP",kind:Kind::Credential,choices:&[],default:"",read_only:false,help:"Enter opens a masked private credential editor; Enter saves the key, Esc discards. Delete removes a saved key.",note:"Environment-owned keys are read-only. Values are saved only to the private credential store, never config.toml or MCP JSON. The standard environment reference also resolves a saved key when the environment is unset."},
+    Setting {key:"exa_api_key",env:"EXA_API_KEY",label:"Exa API key",category:"MCP",kind:Kind::Credential,choices:&[],default:"",read_only:false,help:"Enter opens a masked private credential editor; Enter saves the key, Esc discards. Delete removes a saved key.",note:"Environment-owned keys are read-only. Values are saved only to the private credential store, never config.toml or MCP JSON. The standard environment reference also resolves a saved key when the environment is unset."},
+    Setting {key:"brave_api_key",env:"BRAVE_API_KEY",label:"Brave Search API key",category:"MCP",kind:Kind::Credential,choices:&[],default:"",read_only:false,help:"Enter opens a masked private credential editor; Enter saves the key, Esc discards. Delete removes a saved key.",note:"Environment-owned keys are read-only. Values are saved only to the private credential store, never config.toml or MCP JSON. The standard environment reference also resolves a saved key when the environment is unset."},
 ];
 
 #[derive(Debug, Clone)]
@@ -136,6 +144,7 @@ pub fn find(key: &str) -> io::Result<&'static Setting> {
 }
 pub fn config_path() -> io::Result<std::path::PathBuf> { Ok(crate::operations::doxa_home()?.join("config.toml")) }
 pub fn raw_from(config: &toml::Table, setting: &Setting, override_value: Option<&str>, engine: &str) -> String {
+    if setting.kind==Kind::Credential {return String::new();}
     if let Some(value) = override_value.filter(|v| !v.trim().is_empty() && !(setting.key == "model" && engine == "router")) { return value.trim().into(); }
     if setting.kind == Kind::Key {
         let mut effective = config.clone();
@@ -145,12 +154,23 @@ pub fn raw_from(config: &toml::Table, setting: &Setting, override_value: Option<
     if setting.key == "model" && engine != "claude" {
         return config.get("models").and_then(toml::Value::as_table).and_then(|v| v.get(engine)).and_then(toml::Value::as_str).unwrap_or("").trim().into();
     }
+    // This historically boolean setting now defaults on. Preserve old explicit
+    // TOML false rather than treating it like an absent value in raw_setting.
+    if setting.key == "nerd_font" && config.get(setting.key).and_then(toml::Value::as_bool) == Some(false) {
+        return "0".into();
+    }
     doxa_state::raw_setting(None, config, setting.key).trim().into()
 }
+pub(crate) fn environment_override(setting: &Setting) -> Option<(String, &'static str)> {
+    std::env::var(setting.env).ok().filter(|value| !value.trim().is_empty()).map(|value| (value, setting.env))
+        .or_else(|| (setting.key == "nerd_font").then(|| std::env::var("DOXA_NERD_FONTS").ok()
+            .filter(|value| !value.trim().is_empty()).map(|value| (value, "DOXA_NERD_FONTS"))).flatten())
+}
+
 pub fn raw(key: &str) -> String {
     let Ok(s) = find(key) else { return String::new(); };
     let config = config_path().map(|p| doxa_state::load_config(&p)).unwrap_or_default();
-    raw_from(&config, s, std::env::var(s.env).ok().as_deref(), "claude")
+    raw_from(&config, s, environment_override(s).as_ref().map(|(value, _)| value.as_str()), "claude")
 }
 pub fn enabled(key: &str) -> bool {
     let Ok(s) = find(key) else { return false; };
@@ -163,12 +183,30 @@ pub fn rows(engine: &str, session_model: Option<&str>) -> io::Result<Vec<Row>> {
     let config = doxa_state::load_config_checked(&path)?;
     let home = crate::operations::doxa_home()?;
     let mut rows = Vec::new();
+    let search_statuses=doxa_vendors::credentials::search_status_all();
     for s in SETTINGS {
-        let override_value = std::env::var(s.env).ok().filter(|v| !v.trim().is_empty() && !(engine == "router" && matches!(s.key, "model" | "effort")));
+        if s.kind==Kind::Credential {
+            use doxa_vendors::credentials::{CredentialStatus,SearchProvider};
+            let provider=SearchProvider::from_setting_key(s.key).expect("fixed search setting");
+            let environment=std::env::var_os(s.env).is_some_and(|value|!value.is_empty());
+            let status=search_statuses.as_ref().map_err(|_|()).and_then(|statuses|
+                statuses.iter().find(|(candidate,_)|*candidate==provider).map(|(_,status)|*status).ok_or(()));
+            let (value,source)=match status {
+                Ok(CredentialStatus::Environment)=>("set","environment-owned"),
+                Ok(CredentialStatus::Saved)=>("set","private credential store"),
+                Ok(CredentialStatus::Missing)=>("missing","not configured"),
+                Err(_)=>("unavailable","credential status unavailable"),
+            };
+            rows.push(Row {setting:s,value:value.into(),source:source.into(),shadowed:environment,stored:String::new()});
+            continue;
+        }
+        let environment = environment_override(s).filter(|_| !(engine == "router" && matches!(s.key, "model" | "effort")));
+        let override_name = environment.as_ref().map_or(s.env, |(_, name)| *name);
+        let override_value = environment.map(|(value, _)| value);
         let shadowed = override_value.is_some();
         let stored = raw_from(&config, s, None, engine);
         let mut value = raw_from(&config, s, override_value.as_deref(), engine);
-        let mut source = if shadowed { format!("env {} — overrides config", s.env) } else if (s.key != "model" && config.contains_key(s.key)) || !stored.is_empty() { "config.toml".into() } else { "default".into() };
+        let mut source = if shadowed { format!("env {} — overrides config", override_name) } else if (s.key != "model" && config.contains_key(s.key)) || !stored.is_empty() { "config.toml".into() } else { "default".into() };
         if value.is_empty() { value = s.default.into(); }
         if s.env == "DOXA_HOME" { value = home.display().to_string(); }
         if s.env == "DOXA_RUNTIME_DIR" { value = crate::discovery::runtime_dir()?.display().to_string(); }
@@ -187,6 +225,7 @@ pub fn rows(engine: &str, session_model: Option<&str>) -> io::Result<Vec<Row>> {
     Ok(rows)
 }
 pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value>> {
+    if s.kind==Kind::Credential {return Err(io::Error::new(io::ErrorKind::PermissionDenied,"Use the masked MCP Settings editor; keys never enter regular settings"));}
     if s.read_only || s.key.is_empty() { return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} is read-only. {}", s.label, s.note))); }
     let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else { return Ok(None); };
     let invalid = |reason: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("{}: {reason}", s.key));
@@ -216,7 +255,11 @@ pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value
         Kind::Choice => { if !s.choices.contains(&value) { return Err(invalid(&format!("accepts {}", s.choices.join(" | ")))); } toml::Value::String(value.into()) },
         Kind::Format => { crate::preferences::validate_clock_format(value).map_err(|_| invalid("invalid strftime format"))?; toml::Value::String(value.into()) },
         Kind::Key => { let chord = crate::keybindings::Chord::parse(value).map_err(|e| invalid(&e.to_string()))?; toml::Value::String(chord.map(|c| c.display()).unwrap_or_else(|| "none".into())) },
-        Kind::Text => {if s.key=="router_config" {
+        Kind::Credential => unreachable!("credential edits never enter config.toml"),
+        Kind::Text => {if matches!(s.key,"docker_image"|"docker_host") {crate::docker_setup::validate_setting(s.key,value)?;}if s.key=="mcp_config" {
+            if !Path::new(value).is_absolute(){return Err(invalid("requires an absolute path"));}
+            doxa_mcp::Config::load(Path::new(value)).map_err(|_|invalid("requires a valid owner-private MCP JSON file"))?;
+        }if s.key=="router_config" {
             if !Path::new(value).is_absolute(){return Err(invalid("requires an absolute path"));}
             doxa_router::Config::load(Path::new(value)).map_err(|_|invalid("requires a valid owner-private router JSON file; review with Ctrl+P"))?;
         }if matches!(s.key,"fleet_alignment_supervisor"|"fleet_message_judge"){let model=doxa_fleet::judge::Model::parse(value).map_err(|_|invalid("requires a supported provider:model"))?;if s.key=="fleet_alignment_supervisor"&&model.provider=="jev"{return Err(invalid("Jev judges messages; select an LLM supervisor"));}}toml::Value::String(value.into())},
@@ -262,7 +305,7 @@ pub(crate) fn save_with_review(path: &Path, edits: &[(String, Option<String>)], 
     let mut parsed = Vec::new();
     for (key, value) in edits {
         let s = find(key)?;
-        if std::env::var(s.env).ok().is_some_and(|v| !v.trim().is_empty()) { return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} overrides config.toml; unset it before changing {key}", s.env))); }
+        if let Some((_, name)) = environment_override(s) { return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{name} overrides config.toml; unset it before changing {key}"))); }
         parsed.push((s, coerce(s, value.as_deref())?));
     }
     let key_edited = parsed.iter().any(|(setting, _)| setting.kind == Kind::Key);
@@ -284,6 +327,17 @@ pub(crate) fn save_with_review(path: &Path, edits: &[(String, Option<String>)], 
                     "Jev Router needs a current config/account/catalog review with an available fallback and Jev key; select router config and press Ctrl+P"));
             }
         }
+        if edits.iter().any(|(key,_)|matches!(key.as_str(),"mcp_enabled"|"mcp_config")) {
+            let enabled=std::env::var("DOXA_MCP_ENABLED").ok().filter(|value|!value.is_empty())
+                .map(|value|!matches!(value.to_ascii_lowercase().as_str(),"off"|"0"|"false"|"no"))
+                .unwrap_or_else(||config.get("mcp_enabled").and_then(toml::Value::as_bool).unwrap_or(false));
+            if enabled {
+                let selected=std::env::var("DOXA_MCP_CONFIG").ok().filter(|value|!value.is_empty())
+                    .or_else(||config.get("mcp_config").and_then(toml::Value::as_str).map(str::to_owned))
+                    .ok_or_else(||io::Error::new(io::ErrorKind::InvalidInput,"Select an explicit private MCP config before enabling MCP"))?;
+                doxa_mcp::Config::load(Path::new(&selected)).map_err(|_|io::Error::new(io::ErrorKind::InvalidInput,"MCP requires a valid owner-private config"))?;
+            }
+        }
         if key_edited { config.insert("keybindings_schema".into(), toml::Value::Integer(2)); }
         crate::keybindings::Bindings::from_config(config)?;
         Ok(())
@@ -294,6 +348,23 @@ pub(crate) fn save_with_review(path: &Path, edits: &[(String, Option<String>)], 
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn glm_account_settings_save_only_declarations_and_preserve_standard_inference() {
+        let profile=find("glm_account_profile").unwrap();let monitor=find("glm_plan_monitor").unwrap();
+        assert_eq!(profile.default,"standard_api");assert_eq!(monitor.default,"0");
+        assert!(coerce(profile,Some("coding_plan")).is_err());assert!(coerce(monitor,Some("maybe")).is_err());
+        let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path=dir.path().join("config.toml");
+        std::fs::write(&path,"engine='glm'\nfuture='keep'\n[models]\nglm='glm-5.3-flash'\n").unwrap();
+        save(&path,&[(profile.key.into(),Some("api_resource_bundle".into())),(monitor.key.into(),Some("on".into()))],"glm").unwrap();
+        let config=doxa_state::load_config_checked(&path).unwrap();
+        assert_eq!(config[profile.key].as_str(),Some("api_resource_bundle"));assert_eq!(config[monitor.key].as_bool(),Some(true));
+        assert_eq!(config["engine"].as_str(),Some("glm"));assert_eq!(config["models"]["glm"].as_str(),Some("glm-5.3-flash"));
+        assert_eq!(config["future"].as_str(),Some("keep"));assert!(!config.contains_key("endpoint"));
+        assert_eq!(raw_from(&config,profile,Some("standard_api"),"glm"),"standard_api");
+        assert_eq!(raw_from(&config,monitor,Some("off"),"glm"),"off");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode()&0o777,0o600);
+    }
     #[test]
     fn router_settings_keep_target_selection_and_private_config_explicit() {
         let config: toml::Table = "[models]\nrouter='reviewed-target'\n".parse().unwrap();

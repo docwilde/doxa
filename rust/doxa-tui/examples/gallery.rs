@@ -5,6 +5,7 @@ use doxa_tui::{history, transport::TranscriptSnapshot};
 use doxa_worktrees::RepoStatus;
 use ratatui::{backend::TestBackend, style::Color, Terminal};
 use serde_json::{json, Value};
+use unicode_width::UnicodeWidthStr;
 
 fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.handle(Event::Key(KeyEvent::new(code, modifiers)));
@@ -19,6 +20,10 @@ fn click_visible_text(app: &mut App, text: &str) {
 }
 
 fn click_visible_text_order(app: &mut App, text: &str, from_bottom: bool) {
+    mouse_visible_text(app,text,from_bottom,MouseEventKind::Down(MouseButton::Left));
+}
+
+fn mouse_visible_text(app: &mut App, text: &str, from_bottom: bool, kind: MouseEventKind) {
     let mut terminal = Terminal::new(TestBackend::new(126, 31)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     let label = text.chars().map(|c| c.to_string()).collect::<Vec<_>>();
@@ -29,7 +34,7 @@ fn click_visible_text_order(app: &mut App, text: &str, from_bottom: bool) {
             terminal.backend().buffer()[(x + offset as u16, y)].symbol() == symbol.as_str())
             .then_some((x, y))
     })).expect("visible fixture control");
-    app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+    app.handle(Event::Mouse(MouseEvent { kind,
         column: point.0, row: point.1, modifiers: KeyModifiers::NONE }));
 }
 
@@ -264,7 +269,27 @@ fn scene(name: &str) -> App {
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             // The production title-tab hit path, with no preference writes.
             click_visible_text(&mut app, "Appearance");
-            app.notice = "Fixture · Settings title tabs · changes are not saved".into();
+            mouse_visible_text(&mut app,"Memory",false,MouseEventKind::Moved);
+            app.notice = "Fixture · Appearance selected · Memory hovered · changes are not saved".into();
+        }
+        "settings-mcp" => {
+            app.groups[0].tabs=vec!["demo-deepseek-03".into()];
+            app.input="/settings".into();key(&mut app,KeyCode::Enter,KeyModifiers::NONE);
+            key(&mut app,KeyCode::Char('0'),KeyModifiers::NONE);
+            app.notice="Fixture · MCP off · four search-key editors · no connections or credentials".into();
+        }
+        "glm-account" => {
+            use doxa_vendors::glm_billing::{account_report,Profile,QuotaSnapshot};
+            let report=account_report(Some(Profile::ApiResourceBundle),true,false,&QuotaSnapshot::not_checked());
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-glm-04","engine":"glm","model":"glm-5.3-flash","cwd":"/demo/project","billing":report}));
+            app.groups[0].tabs=vec!["demo-glm-04".into()];app.groups[0].active=0;
+            app.input="/usage".into();key(&mut app,KeyCode::Enter,KeyModifiers::NONE);
+            app.notice="Fixture · owner-declared API bundle · cash and remainder unknown · monitor off".into();
+        }
+        "setup-docker" => {
+            app.groups[0].tabs=vec!["demo-codex-01".into()];
+            app.input="/setup docker".into();key(&mut app,KeyCode::Enter,KeyModifiers::NONE);
+            app.notice="Fixture · Docker setup actions · no Engine/image changes".into();
         }
         "settings-router" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];
@@ -327,7 +352,7 @@ fn scene(name: &str) -> App {
                 "text":"Review **bounds** and **reconnect** checks next.\n\n- Keep the parser API stable\n- Explain remaining errors"}));
             app.notice = "Fixture · queued user prompt · same Markdown and stripe as ordinary prompts".into();
         }
-        "peer-messages" => {
+        "peer-messages" | "peer-expanded" => {
             app.groups[0].tabs = vec!["demo-claude-02".into()];
             app.sessions.iter_mut().for_each(|session| session.transcript.clear());
             event(&mut app,"demo-claude-02","turn_started",json!({"prompt":"Review the parser changes."}));
@@ -337,10 +362,17 @@ fn scene(name: &str) -> App {
             event(&mut app,"demo-claude-02","peer_message",json!({"from_id":sender,
                 "from_title":"Parser reviewer","sent_at":"2026-10-11T13:25:00Z",
                 "body":"**Reviewer handoff**\n\nThe boundary checks passed. Please verify reconnect before approving."}));
+            event(&mut app,"demo-claude-02","peer_sent",json!({"to":[sender],"failed":[],
+                "sent_at":"2026-10-11T13:26:00Z",
+                "body":"Received the handoff. I will verify reconnect before approving."}));
             event(&mut app,"demo-claude-02","prompt_queued",json!({"id":"q-peer","peer_started":true,
                 "peer_origin":format!("Parser reviewer ({sender})"),"timestamp":"2026-10-11T13:25:00Z",
                 "text":"Run the **reconnect review** next.\n\nReport unresolved errors before release."}));
-            app.notice = "Fixture · attributed peer receipt and queued peer task · no message delivery".into();
+            if name == "peer-expanded" {
+                click_visible_text(&mut app, "Peer Parser reviewer");
+                click_visible_text(&mut app, "Peer sent from");
+            }
+            app.notice = "Fixture · peer receipts, sent message and queued task · no message delivery".into();
         }
         "needs-input" => {
             event(&mut app,"demo-codex-01","needs_input",json!({"id":"req-1","kind":"ask_user","title":"Choose migration target","questions":[{"question":"Where should the migration run?","header":"Environment","options":[{"label":"Staging","description":"Validate before release"},{"label":"Production","description":"Apply to live data"}]}]}));
@@ -534,7 +566,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "settings-router" | "context" | "routing-status" | "queued-prompts" | "peer-messages" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
+        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "settings-router" | "settings-mcp" | "glm-account" | "setup-docker" | "context" | "routing-status" | "queued-prompts" | "peer-messages" | "peer-expanded" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
@@ -568,7 +600,15 @@ fn main() {
     let cells: Vec<Value> = (0..height).flat_map(|y| (0..width).map(move |x| (x,y)))
         .map(|(x,y)| {
             let cell = &terminal.backend().buffer()[(x,y)];
-            json!([cell.symbol(),rgb(cell.fg),rgb(cell.bg),cell.modifier.bits()])
+            // A printed wide glyph paints both terminal cells. Ratatui's
+            // unused continuation cell can retain Reset; it is not a new
+            // independently painted background in the real terminal.
+            let background = if x > 0 {
+                let previous = &terminal.backend().buffer()[(x - 1,y)];
+                if previous.symbol().width() > 1 { previous.bg } else { cell.bg }
+            } else { cell.bg };
+            let background = if background == Color::Reset { doxa_tui::theme::BASE } else { background };
+            json!([cell.symbol(),rgb(cell.fg),rgb(background),cell.modifier.bits()])
         }).collect();
     println!("{}",json!({"version":env!("CARGO_PKG_VERSION"),"width":width,"height":height,"cells":cells}));
 }

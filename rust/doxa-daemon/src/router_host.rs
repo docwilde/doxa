@@ -6,6 +6,7 @@ use doxa_runtime::Host;
 use doxa_vendors::{TurnLimits, Vendor};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::time::Duration;
 use std::{fs, io::{self, Read, Write}, path::{Path, PathBuf},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}};
@@ -148,7 +149,7 @@ pub struct RouterHost {
     state: Mutex<State>,
     turn_lock: Mutex<()>,
     active: AtomicBool,
-    cancel: AtomicBool,
+    cancel: Arc<AtomicBool>,
     closing: AtomicBool,
     #[cfg(feature = "local-test-server")]
     jev_endpoint: Option<String>,
@@ -209,13 +210,20 @@ impl RouterHost {
         if !resume { inner.initialize_router_conversation()?; }
         journal.write(&state).map_err(|_| "Router initial accounting could not be persisted")?;
         Ok(Self { inner, cli, cwd:cwd.to_owned(), active_worker:Mutex::new(None),peer_handler:Mutex::new(None),session_handler:Mutex::new(None),config, ceiling_micros, journal, state: Mutex::new(state),
-            turn_lock: Mutex::new(()), active: AtomicBool::new(false), cancel: AtomicBool::new(false), closing: AtomicBool::new(false),
+            turn_lock: Mutex::new(()), active: AtomicBool::new(false), cancel: Arc::new(AtomicBool::new(false)), closing: AtomicBool::new(false),
             #[cfg(feature = "local-test-server")] jev_endpoint: endpoint })
     }
 
     pub fn shutdown(&self) {
         self.closing.store(true, Ordering::Release); self.cancel.store(true, Ordering::Release);
         if let Some(worker)=self.active_worker.lock().unwrap().clone() { let _=worker.host().call("interrupt",&json!({})); }
+        // Catalog and protected startup own provisional children before an
+        // active worker exists. Cancellation wakes those owners; keep the
+        // daemon alive until their bounded teardown has completed.
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        while self.active.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         self.inner.shutdown();
     }
     fn save(&self, state: &mut State) -> Result<(), String> {
@@ -256,7 +264,7 @@ impl RouterHost {
             if !self.config.candidates.iter().any(|candidate|candidate.provider == provider
                 && pinned.is_none_or(|id|candidate.id == id)) { continue; }
             if self.cancel.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) { break; }
-            if let Ok(rows)=self.cli.catalog(provider,&self.cwd) { cli_catalogs.push((provider,rows)); }
+            if let Ok(rows)=self.cli.catalog(provider,&self.cwd,&self.cancel) { cli_catalogs.push((provider,rows)); }
         } }
         self.config.candidates.iter().filter(|candidate| {
             if pinned.is_some_and(|id| candidate.id != id) { return false; }
@@ -315,7 +323,7 @@ impl RouterHost {
             output_tokens: candidate.max_output_tokens };
         let target = json!({"target_id":candidate.id,"engine":vendor(candidate.provider).engine_id(),
             "model":candidate.model,"effort":candidate.effort});
-        self.inner.select_route(vendor(candidate.provider), &candidate.model, &candidate.effort, target.clone(), limits)?;
+        self.inner.select_route(vendor(candidate.provider), &candidate.model, &candidate.effort, target.clone(), limits, None)?;
         let admitted = AtomicBool::new(false);
         let mut admit = |body: &Value, review: &Value| -> Result<(), ()> {
             if self.cancel.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire)
@@ -431,7 +439,7 @@ impl RouterHost {
                 "input_cap_bytes":cap,"output_cap_tokens":candidate.max_output_tokens,"permission":state.permission}));
             self.save(&mut state)?;state.permission.clone()
         };
-        let worker=match self.cli.start(candidate,&self.cwd,&worker_id,&permission,self.inner.router_agent()) {
+        let worker=match self.cli.start(candidate,&self.cwd,&worker_id,&permission,self.inner.router_agent(),&self.cancel) {
             Ok(worker)=>worker,
             Err(_)=>{let mut state=self.state.lock().unwrap();state.pending_cli=None;state.incomplete=false;self.save(&mut state)?;
                 return Err("Selected CLI worker authentication, catalog or protected startup unavailable; no user prompt submitted".into());}
@@ -634,7 +642,7 @@ impl RouterHost {
         }
         if let Err(error) = self.inner.select_route(vendor(candidate.provider), &candidate.model, &candidate.effort, selection.clone(),
             TurnLimits { input_bytes: usize::try_from(candidate.context_tokens-candidate.max_output_tokens).map_err(|_| "Worker context cap overflow")?,
-                output_tokens: candidate.max_output_tokens }) {
+                output_tokens: candidate.max_output_tokens }, Some(self.cancel.clone())) {
             let mut state = self.state.lock().unwrap();
             state.worker.retained_reservation_usd_micros -= reserve; state.incomplete = false; self.save(&mut state)?;
             return Err(error);
@@ -703,8 +711,9 @@ impl Host for RouterHost {
         struct Active<'a>(&'a AtomicBool);
         impl Drop for Active<'_> { fn drop(&mut self) { self.0.store(false, Ordering::Release); } }
         let _active = Active(&self.active);
-        if let Err(message) = self.route(text, emit) {
-            emit(json!({"type":"turn_refused","data":{"reason":"routing","message":message}}));
+        let mut emit_mcp = |mut event| { self.inner.decorate_mcp(&mut event); emit(event); };
+        if let Err(message) = self.route(text, &mut emit_mcp) {
+            emit_mcp(json!({"type":"turn_refused","data":{"reason":"routing","message":message}}));
         }
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
@@ -768,7 +777,8 @@ impl Host for RouterHost {
         let state = self.state.lock().ok()?;
         Some(json!({"mode":if self.config.candidates.iter().any(|row|row.provider.is_cli()){"mixed"}else{"api"},
             "cost_scope":"jev_and_direct_api_only","cli_provider_charge_usd":null,
-            "total_cost_usd":if self.config.candidates.iter().any(|row|row.provider.is_cli()) {Value::Null}else{json!(state.estimated_spent().map(|sum|sum as f64/1_000_000.0))},
+            "total_cost_usd":if self.inner.external_mcp().is_some() || self.config.candidates.iter().any(|row|row.provider.is_cli()) {Value::Null}else{json!(state.estimated_spent().map(|sum|sum as f64/1_000_000.0))},
+            "external_mcp":self.inner.external_mcp(),
             "routing":state.selection,"compaction":state.compaction,"router_usage":state.router,"worker_usage":state.worker,
             "cost_usd":state.estimated_spent().map(|sum|sum as f64/1_000_000.0),
             "session_cost_usd":state.estimated_spent().map(|sum|sum as f64/1_000_000.0),

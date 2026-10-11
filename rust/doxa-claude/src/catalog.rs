@@ -1,7 +1,7 @@
 //! Read the connected CLI's model catalog without submitting a user prompt.
 use crate::{Cli, CliOptions, Error};
 use serde_json::{json, Value};
-use std::time::{Duration, Instant};
+use std::{time::{Duration, Instant}, sync::atomic::{AtomicBool, Ordering}};
 
 pub fn decode(value: &Value) -> Result<Value, Error> {
     let rows = value["models"].as_array().filter(|rows| !rows.is_empty() && rows.len() <= 64)
@@ -40,20 +40,31 @@ pub fn authenticated(value: &Value) -> bool {
 /// Initialize the connected account without a user prompt. A catalog alone is
 /// not authentication evidence; missing account metadata remains unavailable.
 pub fn discover_authenticated(options: CliOptions<'_>, timeout: Duration) -> Result<Value, Error> {
-    discover_inner(options, timeout, true)
+    discover_inner(options, timeout, true, None)
 }
 
 pub fn discover(options: CliOptions<'_>, timeout: Duration) -> Result<Value, Error> {
-    discover_inner(options, timeout, false)
+    discover_inner(options, timeout, false, None)
 }
-fn discover_inner(options: CliOptions<'_>, timeout: Duration, require_auth: bool) -> Result<Value, Error> {
+/// Router discovery owns the CLI until cancellation has killed and reaped it.
+pub fn discover_authenticated_cancellable(options: CliOptions<'_>, timeout: Duration,
+    cancel: &AtomicBool) -> Result<Value, Error> {
+    discover_inner(options, timeout, true, Some(cancel))
+}
+fn discover_inner(options: CliOptions<'_>, timeout: Duration, require_auth: bool, cancel: Option<&AtomicBool>) -> Result<Value, Error> {
+    if cancel.is_some_and(|cancel|cancel.load(Ordering::Acquire)) { return Err(Error::Closed); }
     let deadline = Instant::now() + timeout;
     let mut cli = Cli::spawn(options)?;
+    if cancel.is_some_and(|cancel|cancel.load(Ordering::Acquire)) { return Err(Error::Closed); }
     let id = cli.control(json!({"subtype":"initialize","sdkMcpServers":[]}))?;
     loop {
+        if cancel.is_some_and(|cancel|cancel.load(Ordering::Acquire)) { return Err(Error::Closed); }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() { return Err(Error::Timeout); }
-        let frame = cli.recv(remaining)?;
+        let frame = match cli.recv(if cancel.is_some() {remaining.min(Duration::from_millis(10))} else {remaining}) {
+            Err(Error::Timeout) if cancel.is_some() => continue,
+            frame => frame?,
+        };
         match frame["type"].as_str() {
             Some("control_response") if frame["response"]["request_id"] == id => {
                 if frame["response"]["subtype"] != "success" { return Err(Error::Protocol); }

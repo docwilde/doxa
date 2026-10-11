@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -415,19 +416,23 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         send(JSONObject().put("text", text), "prompt", session)
     }
 
-    fun chooseOption(question: JSONObject, label: String) {
+    val reviewGeneration: Int get() = generation
+
+    private fun displayedCurrent(item: JSONObject, session: Session, mine: Int): Boolean =
+        mine == generation && selected == session && AndroidReview.sameDisplayedRequest(item, pending.firstOrNull())
+
+    fun chooseOption(question: JSONObject, label: String, item: JSONObject, session: Session, mine: Int) {
+        if (!displayedCurrent(item, session, mine)) return
         answers = answers + (question.optString("question", question.optString("header")) to label)
         questionIndex++
-        val questions = pending.firstOrNull()?.optJSONArray("questions") ?: JSONArray()
-        if (questionIndex >= questions.length()) sendAnswer(JSONObject().put("answers", JSONObject(answers)))
+        val questions = item.optJSONArray("questions") ?: JSONArray()
+        if (questionIndex >= questions.length()) sendAnswer(JSONObject().put("answers", JSONObject(answers)), item, session, mine)
     }
 
-    fun sendAnswer(answer: JSONObject) {
-        val session = selected ?: return
-        val item = pending.firstOrNull() ?: return
+    fun sendAnswer(answer: JSONObject, item: JSONObject, session: Session, mine: Int) {
+        if (!displayedCurrent(item, session, mine)) { status = "Displayed review changed; review it again"; return }
         val id = item.optString("id")
         if (!Wire.id(id) || busy || uncertain != null || writeRecovery.blocked) return
-        val mine = generation
         scope.launch {
             busy = true
             var submittedMarker: PendingWriteMarker? = null
@@ -653,8 +658,8 @@ class MainActivity : ComponentActivity() {
         } }
     }
 
-    override fun onStart() { super.onStart(); LocalAlerts.appVisible = true; if (::alerts.isInitialized) alerts.visible = true }
-    override fun onStop() { LocalAlerts.appVisible = false; if (::alerts.isInitialized) alerts.visible = false; super.onStop() }
+    override fun onStart() { super.onStart(); LocalAlerts.appVisible = true; if (::alerts.isInitialized) alerts.visible = true; if (::push.isInitialized) push.foreground(true) }
+    override fun onStop() { LocalAlerts.appVisible = false; if (::alerts.isInitialized) alerts.visible = false; if (::push.isInitialized) push.foreground(false); super.onStop() }
 
     override fun onDestroy() {
         state.close()
@@ -784,10 +789,14 @@ private fun RemoteScreen(state: RemoteController, alerts: LocalAlerts, push: Bac
 
 @Composable
 private fun PendingInput(state: RemoteController, item: JSONObject) {
+    val session = state.selected ?: return
+    val mine = state.reviewGeneration
+    val reviewed = remember(item.toString()) { JSONObject(item.toString()) }
     Card(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
         Column(Modifier.padding(12.dp).heightIn(max = 220.dp).verticalScroll(rememberScrollState())) {
             Text(item.optString("title", item.optString("input_summary", "Input needed")),
                 style = MaterialTheme.typography.titleMedium)
+            SelectionContainer { Text(AndroidReview.displayRequest(reviewed)) }
             if (item.optString("kind") == "ask_user") {
                 val questions = item.optJSONArray("questions") ?: JSONArray()
                 if (state.questionIndex < questions.length()) {
@@ -796,18 +805,18 @@ private fun PendingInput(state: RemoteController, item: JSONObject) {
                     val options = question.optJSONArray("options") ?: JSONArray()
                     for (i in 0 until minOf(options.length(), 32)) {
                         val label = options.getJSONObject(i).optString("label")
-                        OutlinedButton(onClick = { state.chooseOption(question, label) }, enabled = !state.busy && state.uncertain == null && !state.recoveryBlocked) {
+                        OutlinedButton(onClick = { state.chooseOption(question, label, reviewed, session, mine) }, enabled = !state.busy && state.uncertain == null && !state.recoveryBlocked) {
                             Text(label)
                         }
                     }
                 }
-                TextButton(onClick = { state.sendAnswer(JSONObject().put("declined", true)) },
+                TextButton(onClick = { state.sendAnswer(JSONObject().put("declined", true), reviewed, session, mine) },
                     enabled = !state.busy && state.uncertain == null && !state.recoveryBlocked) { Text("Decline") }
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { state.sendAnswer(JSONObject().put("decision", "allow")) },
+                    Button(onClick = { state.sendAnswer(JSONObject().put("decision", "allow"), reviewed, session, mine) },
                         enabled = !state.busy && state.uncertain == null && !state.recoveryBlocked) { Text("Allow") }
-                    OutlinedButton(onClick = { state.sendAnswer(JSONObject().put("decision", "deny")) },
+                    OutlinedButton(onClick = { state.sendAnswer(JSONObject().put("decision", "deny"), reviewed, session, mine) },
                         enabled = !state.busy && state.uncertain == null && !state.recoveryBlocked) { Text("Deny") }
                 }
             }

@@ -4,6 +4,60 @@ use std::{fs, os::unix::fs::PermissionsExt};
 use std::os::unix::ffi::OsStrExt;
 
 #[test]
+fn busy_config_lock_refuses_without_editing_then_allows_explicit_retry() {
+    use std::{os::fd::AsRawFd, sync::mpsc, time::{Duration, Instant}};
+    let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.path().join("config.toml");
+    fs::write(&path, "counter = 1\n").unwrap();
+    let lock = fs::OpenOptions::new().read(true).write(true).create(true)
+        .open(dir.path().join(".config.toml.lock")).unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let (release, wait) = mpsc::channel();
+    // A broken blocking implementation is released after500ms, so this
+    // regression fails instead of stranding the whole suite indefinitely.
+    let holder = std::thread::spawn(move || { let _ = wait.recv_timeout(Duration::from_millis(500)); drop(lock); });
+    let started = Instant::now();
+    let mut edited = false;
+    let result = update_config(&path, |_| { edited = true; Ok(()) });
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert!(started.elapsed() < Duration::from_millis(400));
+    assert!(!edited); assert_eq!(fs::read_to_string(&path).unwrap(), "counter = 1\n");
+    release.send(()).unwrap(); holder.join().unwrap();
+    update_config(&path, |table| { table.insert("counter".into(), toml::Value::Integer(2)); Ok(()) }).unwrap();
+    assert_eq!(load_config_checked(&path).unwrap()["counter"].as_integer(), Some(2));
+}
+
+#[test]
+fn overlapping_config_edits_refuse_contention_then_retry_without_losing_the_first_write() {
+    use std::{sync::mpsc, time::Duration};
+    let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.path().join("config.toml"); fs::write(&path, "counter = 0\n").unwrap();
+    let worker_path = path.clone(); let (entered, ready) = mpsc::channel();
+    let (release, held) = mpsc::channel();
+    let worker = std::thread::spawn(move || update_config(&worker_path, |table| {
+        let before = table["counter"].as_integer().unwrap();
+        entered.send(()).unwrap();
+        held.recv_timeout(Duration::from_secs(5)).unwrap();
+        table.insert("counter".into(), toml::Value::Integer(before + 1)); Ok(())
+    }));
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut edited = false;
+    assert_eq!(update_config(&path, |_| { edited = true; Ok(()) }).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock);
+    assert!(!edited);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "counter = 0\n");
+    release.send(()).unwrap();
+    worker.join().unwrap().unwrap();
+    update_config(&path, |table| {
+        assert_eq!(table["counter"].as_integer(), Some(1));
+        table.insert("counter".into(), toml::Value::Integer(2)); Ok(())
+    }).unwrap();
+    assert_eq!(load_config_checked(&path).unwrap()["counter"].as_integer(), Some(2));
+}
+
+#[test]
 fn claude_startup_deadlines_cover_sdk_initialize_retry_and_user_override() {
     assert_eq!(claude_startup_seconds(None), Ok((135, 150)));
     assert_eq!(claude_startup_seconds(Some("1")), Ok((135, 150)));

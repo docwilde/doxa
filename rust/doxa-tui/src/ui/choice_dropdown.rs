@@ -1,7 +1,7 @@
 //! Shared, staged selection for settings and new-session choice fields.
 use std::cell::Cell;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{layout::{Position, Rect}, style::{Style}, text::{Line, Span}, widgets::{Block, Borders, Clear, Paragraph}, Frame};
+use ratatui::{layout::{Position, Rect}, style::{Modifier, Style}, text::{Line, Span}, widgets::{Block, Borders, Clear, Paragraph}, Frame};
 use unicode_width::UnicodeWidthStr;
 use super::{App, safe_label, vendor_models};
 use crate::{launch, settings, theme};
@@ -10,6 +10,16 @@ use crate::{launch, settings, theme};
 pub(super) enum Owner {
     Setting(String),
     NewSession { engine: launch::Engine, field: usize, effort_model: Option<String> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TitleTabOwner { Settings, Lore }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TitleTabHit {
+    pub owner: TitleTabOwner,
+    pub index: usize,
+    pub rect: Rect,
 }
 
 #[derive(Debug)]
@@ -233,9 +243,45 @@ impl App {
         let Some(menu) = self.settings_menu.as_mut() else { return; };
         if index >= settings::CATEGORIES.len() { return; }
         menu.finish_draft();
+        self.title_tab_hover = None;
         menu.category = index;
+        self.mcp_secret=None;
         menu.selected = menu.indices().first().copied().unwrap_or(0);
         self.choice_dropdown = None;
+    }
+
+    /// Match the tabs of the visible chooser; modal children never expose a
+    /// parent's title controls. The same rectangles drive clicks and hover.
+    pub(super) fn title_tab_at(&self, point: Position) -> Option<TitleTabHit> {
+        if self.choice_dropdown.is_some() || self.active_request_index().is_some()
+            || self.delete_confirmation.is_some() || self.stop_confirmation.is_some()
+            || self.diff_modal || self.map_modal { return None; }
+        let area = self.active_chooser_rect()?;
+        let (owner, tabs) = if let Some(menu) = &self.settings_menu {
+            (TitleTabOwner::Settings, settings_tabs(area, menu.category))
+        } else {
+            if self.engine_picker || self.new_session.is_some() || self.model_picker.is_some()
+                || self.effort_picker.is_some() || self.permission_picker.is_some()
+                || self.repo_picker.is_some() { return None; }
+            let picker = self.lore_picker.as_ref()?;
+            if !picker.proposal_mode && (picker.belief_review.is_some()
+                || self.belief_graph_lines.as_ref().is_some_and(|(id, _)|
+                    picker.rows.get(picker.selected).is_some_and(|row| row.id == *id))) { return None; }
+            (TitleTabOwner::Lore, lore_tabs(area, lore_selected(picker)))
+        };
+        tabs.into_iter().find(|(_, rect, _)| rect.contains(point))
+            .map(|(index, rect, _)| TitleTabHit { owner, index, rect })
+    }
+
+    pub(super) fn settings_tab_line(&self, area: Rect, selected: usize) -> Line<'static> {
+        title_tab_line(area, selected, settings_tabs(area, selected),
+            self.title_tab_hover.filter(|hit| hit.owner == TitleTabOwner::Settings))
+    }
+
+    pub(super) fn lore_tab_line(&self, area: Rect, picker: &super::LorePicker) -> Line<'static> {
+        let selected = lore_selected(picker);
+        title_tab_line(area, selected, lore_tabs(area, selected),
+            self.title_tab_hover.filter(|hit| hit.owner == TitleTabOwner::Lore))
     }
 }
 
@@ -245,7 +291,21 @@ fn choice_label(value: &str) -> String {
 
 /// Render and hit testing consume the same title-bar tabs, including overflow.
 pub(super) fn settings_tabs(area: Rect, selected: usize) -> Vec<(usize, Rect, String)> {
-    let labels = settings::CATEGORIES.iter().enumerate().map(|(index, label)| format!(" {} {label} ", index + 1)).collect::<Vec<_>>();
+    let labels = settings::CATEGORIES.iter().enumerate().map(|(index, label)| format!(" {} {label} ", if index==9 {0} else {index+1})).collect::<Vec<_>>();
+    title_tabs(area, selected, &labels)
+}
+
+fn lore_selected(picker: &super::LorePicker) -> usize {
+    if picker.cluster_mode { 2 } else if picker.proposal_mode { 1 } else { 0 }
+}
+
+fn lore_tabs(area: Rect, selected: usize) -> Vec<(usize, Rect, String)> {
+    title_tabs(area, selected, &[" 1 Active ".into(), " 2 Pending ".into(), " 3 Clustered ".into()])
+}
+
+fn title_tabs(area: Rect, selected: usize, labels: &[String]) -> Vec<(usize, Rect, String)> {
+    if labels.is_empty() || area.width < 5 || area.height == 0 { return Vec::new(); }
+    let selected = selected.min(labels.len() - 1);
     let capacity = usize::from(area.width.saturating_sub(4));
     let mut start = 0;
     while start < selected && labels[start..=selected].iter().map(|s| s.width()).sum::<usize>() > capacity { start += 1; }
@@ -270,13 +330,17 @@ pub(super) fn settings_tabs(area: Rect, selected: usize) -> Vec<(usize, Rect, St
     result
 }
 
-pub(super) fn settings_tab_line(area: Rect, selected: usize) -> Line<'static> {
-    let tabs = settings_tabs(area, selected);
+fn title_tab_line(area: Rect, selected: usize, tabs: Vec<(usize, Rect, String)>,
+    hovered: Option<TitleTabHit>) -> Line<'static> {
     let mut spans = Vec::new();
     let mut x = area.x + 1;
     for (index, rect, label) in tabs {
         if rect.x > x { spans.push(Span::raw(" ".repeat(usize::from(rect.x - x)))); }
-        spans.push(Span::styled(label, super::chooser_row_style(index == selected)));
+        let mut style = super::chooser_row_style(index == selected);
+        if hovered.is_some_and(|hit| hit.index == index && hit.rect == rect) {
+            style = style.fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::UNDERLINED);
+        }
+        spans.push(Span::styled(label, style));
         x = rect.right();
     }
     Line::from(spans)
@@ -353,7 +417,7 @@ mod tests {
         let mut app = settings_app();
         assert!(paint(&app).contains("1 Session"));
         for category in 0..settings::CATEGORIES.len() {
-            key(&mut app, KeyCode::Char(char::from(b'1' + category as u8)));
+            key(&mut app, KeyCode::Char(if category == 9 { '0' } else { char::from(b'1' + category as u8) }));
             assert_eq!(app.settings_menu.as_ref().unwrap().category, category);
             let area = app.active_chooser_rect().unwrap();
             let tab = settings_tabs(area, category).into_iter().find(|(index, _, label)| *index == category && label.contains(settings::CATEGORIES[category])).unwrap();
@@ -381,6 +445,117 @@ mod tests {
         assert_eq!(app.settings_menu.as_ref().unwrap().edits["linger_secs"].as_deref(), Some("1209"));
         key(&mut app, KeyCode::Esc);
         assert!(app.settings_menu.is_none());
+    }
+
+    fn title_buffer(app: &App) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(app.size.width, app.size.height)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn assert_title_hover(app: &App, rect: Rect, highlighted: bool) {
+        let buffer = title_buffer(app);
+        for x in rect.x..rect.right() {
+            let cell = &buffer[(x, rect.y)];
+            assert_eq!(cell.modifier.contains(Modifier::UNDERLINED), highlighted,
+                "title cell {x},{}", rect.y);
+            if highlighted {
+                assert_eq!(cell.fg, theme::ACCENT);
+                assert_eq!(cell.bg, theme::HIGHLIGHT);
+            }
+        }
+    }
+
+    #[test]
+    fn settings_title_hover_highlights_without_selecting_and_clears_on_leave_close_resize() {
+        let mut app = settings_app();
+        let area = app.active_chooser_rect().unwrap();
+        let (_, rect, _) = settings_tabs(area, 0).into_iter().find(|(index, _, _)| *index == 1).unwrap();
+        let menu = app.settings_menu.as_mut().unwrap();
+        menu.draft = Some(("linger_secs".into(), "41".into()));
+        let selected = menu.selected;
+        assert_title_hover(&app, rect, false);
+        assert!(app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: rect.x, row: rect.y, modifiers: KeyModifiers::NONE })));
+        assert_title_hover(&app, rect, true);
+        let menu = app.settings_menu.as_ref().unwrap();
+        assert_eq!(menu.category, 0);
+        assert_eq!(menu.selected, selected);
+        assert_eq!(menu.draft.as_ref().unwrap().1, "41");
+        assert!(menu.edits.is_empty());
+        mouse(&mut app, MouseEventKind::Moved, area.x + 1, area.y + 1);
+        assert!(app.title_tab_hover.is_none());
+        assert_title_hover(&app, rect, false);
+        mouse(&mut app, MouseEventKind::Moved, rect.x, rect.y);
+        app.handle(Event::Resize(100, 32));
+        assert!(app.title_tab_hover.is_none());
+        let area = app.active_chooser_rect().unwrap();
+        let (_, rect, _) = settings_tabs(area, 0).into_iter().find(|(index, _, _)| *index == 1).unwrap();
+        mouse(&mut app, MouseEventKind::Moved, rect.x, rect.y);
+        app.close_settings_menu();
+        assert!(app.title_tab_hover.is_none());
+        app.settings_menu = settings_app().settings_menu;
+        assert_title_hover(&app, rect, false);
+        assert!(app.pending_launches.is_empty() && app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn settings_title_hover_and_click_share_overflow_and_tenth_mcp_geometry() {
+        for width in [40, 70, 100] {
+            for selected in [0, 9] {
+                let mut app = settings_app();
+                app.size.width = width;
+                key(&mut app, KeyCode::Char(if selected == 9 { '0' } else { '1' }));
+                let area = app.active_chooser_rect().unwrap();
+                let tabs = settings_tabs(area, selected);
+                assert!(tabs.iter().any(|(_, _, label)| label == "‹" || label == "›"));
+                if selected == 9 { assert!(tabs.iter().any(|(index, _, label)| *index == 9 && label.contains("0 MCP"))); }
+                for (index, rect, _) in &tabs {
+                    assert!(area.contains(Position::new(rect.x, rect.y)));
+                    mouse(&mut app, MouseEventKind::Moved, rect.x, rect.y);
+                    assert_eq!(app.title_tab_hover, Some(TitleTabHit { owner: TitleTabOwner::Settings, index: *index, rect: *rect }));
+                    assert_eq!(app.settings_menu.as_ref().unwrap().category, selected);
+                    assert_title_hover(&app, *rect, true);
+                    for (_, other, _) in &tabs {
+                        if other != rect { assert_title_hover(&app, *other, false); }
+                    }
+                }
+                let (index, rect, _) = tabs.iter().find(|(_, _, label)| label == "‹" || label == "›").unwrap();
+                mouse(&mut app, MouseEventKind::Down(MouseButton::Left), rect.x, rect.y);
+                assert_eq!(app.settings_menu.as_ref().unwrap().category, *index);
+                assert!(app.title_tab_hover.is_none());
+                assert_eq!(app.drag, None);
+                mouse(&mut app, MouseEventKind::Moved, area.x, area.y);
+                assert!(app.title_tab_hover.is_none(), "border is not a title tab");
+            }
+        }
+    }
+
+    #[test]
+    fn lore_title_tabs_share_hover_geometry_without_switching_or_leaking_to_a_modal() {
+        let mut app = App { size: Rect::new(0, 0, 100, 32), rail_visible: false, ..Default::default() };
+        app.show_belief_browser_fixture(0, &[(7, "subject", "claim")]);
+        let area = app.active_chooser_rect().unwrap();
+        let (_, rect, _) = lore_tabs(area, 0).into_iter().find(|(index, _, _)| *index == 1).unwrap();
+        mouse(&mut app, MouseEventKind::Moved, rect.x, rect.y);
+        assert_eq!(app.title_tab_hover, Some(TitleTabHit { owner: TitleTabOwner::Lore, index: 1, rect }));
+        assert_title_hover(&app, rect, true);
+        let picker = app.lore_picker.as_ref().unwrap();
+        assert!(!picker.proposal_mode && !picker.cluster_mode);
+        assert!(picker.pending.is_none());
+        app.delete_confirmation = Some(("fixture".into(), "fixture".into(), 1));
+        mouse(&mut app, MouseEventKind::Moved, rect.x, rect.y);
+        assert!(app.title_tab_hover.is_none());
+        app.delete_confirmation = None;
+        mouse(&mut app, MouseEventKind::Moved, rect.x, rect.y);
+        app.handle(Event::FocusLost);
+        assert!(app.title_tab_hover.is_none());
+        assert_title_hover(&app, rect, false);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), rect.x, rect.y);
+        assert!(app.lore_picker.as_ref().unwrap().proposal_mode);
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_none(), "render fixture makes no LORE request");
+        assert!(app.title_tab_hover.is_none());
+        assert_eq!(app.drag, None);
     }
 
     #[test]

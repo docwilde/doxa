@@ -8,7 +8,7 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 #[derive(Clone)]
 enum Action { Report, Store(bool), Plugins(bool), Auth(crate::operations::AuthRequest), Reload, Skip,
-    Maintenance(&'static str, bool), MeshOpen, MeshStop, CredentialEdit(Vendor), CredentialRemove(Vendor) }
+    Maintenance(&'static str, bool), MeshOpen, MeshStop, CredentialEdit(Vendor), CredentialRemove(Vendor), Preference(&'static str), DockerReport, DockerGuide }
 
 pub struct Menu {
     kind: String,
@@ -38,6 +38,10 @@ impl Menu {
         let mut menu = Self { kind: kind.into(), rows: Vec::new(), selected: 0, messages: Vec::new(), worker: None, closed: false, step: 0, editing: None, input: String::new(), scroll: 0, cancel: None, requested: false,
             engine: None, restart_ready: false, restart_complete: None, mesh: None, mesh_revision: 0, worker_thread: None, plugins_changed: false, secret: None, credentials_changed: Vec::new() };
         menu.prepare(); menu
+    }
+    pub fn docker_setup() -> Self {
+        let mut menu=Self::new("setup");menu.step=3;menu.prepare();
+        menu.messages=vec![crate::operations::setup_docker_guide()];menu
     }
     /// Parsing/selection is pure. The UI calls start_requested only after the
     /// popup fits above the prompt, so a hidden popup cannot start authentication.
@@ -95,7 +99,12 @@ impl Menu {
             "setup" => match self.step {
                 0 => vec![("Check authentication and continue".into(), Action::Report)],
                 1 => vec![("Create separate DOXA LORE store".into(), Action::Store(false)), ("Share existing Claude LORE store".into(), Action::Store(true)), ("Skip store selection".into(), Action::Skip)],
-                _ => vec![("Edit model default".into(), Action::Report), ("Edit effort default".into(), Action::Report), ("Finish setup".into(), Action::Skip)],
+                2 => vec![("Edit model default".into(), Action::Preference("model")), ("Edit effort default".into(), Action::Preference("effort")), ("Continue to Docker setup".into(), Action::Skip)],
+                _ => vec![("Check Docker prerequisites".into(), Action::DockerReport),
+                    ("Edit Docker worker image digest".into(), Action::Preference("docker_image")),
+                    ("Edit rootless Docker socket".into(), Action::Preference("docker_host")),
+                    ("Show rootless Engine and image build steps".into(), Action::DockerGuide),
+                    ("Finish setup".into(), Action::Skip)],
             },
             _ => vec![("Refresh discovered Claude plugins".into(), Action::Reload), ("Enable adoption for new sessions".into(), Action::Plugins(true)), ("Disable adoption for new sessions".into(), Action::Plugins(false))],
         };
@@ -210,8 +219,11 @@ impl Menu {
                 KeyCode::Char(c) if !c.is_control() => self.input.push(c),
                 KeyCode::Backspace => { self.input.pop(); }
                 KeyCode::Enter => {
-                    let result = crate::operations::setup_default(field, Some(&self.input));
-                    self.messages.push(result.unwrap_or_else(|e| e.to_string())); self.editing = None; self.input.clear();
+                    let result = if field.starts_with("docker_") { crate::operations::setup_docker_setting(field, &self.input) }
+                        else { crate::operations::setup_default(field, Some(&self.input)) };
+                    let saved = result.is_ok();
+                    self.messages.push(result.unwrap_or_else(|e| e.to_string()));
+                    if saved { self.editing = None; self.input.clear(); }
                 }
                 _ => {}
             }
@@ -228,6 +240,14 @@ impl Menu {
         self.scroll = 0;
         let action = self.rows[self.selected].1.clone();
         match action {
+            Action::Preference(field) => { self.editing = Some(field); self.input.clear(); return; }
+            Action::DockerGuide => { self.messages = vec![crate::operations::setup_docker_guide()]; return; }
+            Action::DockerReport => {
+                let (sender, receiver) = mpsc::channel(); self.worker = Some(receiver);
+                self.worker_thread = Some(std::thread::spawn(move || {
+                    let _ = sender.send((true, crate::operations::setup_docker_report()));
+                })); return;
+            }
             Action::CredentialEdit(vendor) => { self.secret = Some(Editor::new(vendor)); self.selected = 0; return; }
             Action::CredentialRemove(vendor) => {
                 match doxa_vendors::credentials::remove(vendor) {
@@ -273,9 +293,6 @@ impl Menu {
             if setup { self.step += 1; self.prepare(); }
             return;
         }
-        if self.kind == "setup" && self.step >= 2 && self.selected < 2 {
-            self.editing = Some(if self.selected == 0 { "model" } else { "effort" }); return;
-        }
         let result = match action {
             Action::Store(shared) => crate::operations::setup_choose_store(shared),
             Action::Plugins(on) => crate::operations::plugins_change(on),
@@ -283,11 +300,12 @@ impl Menu {
             Action::Reload => crate::operations::plugins_reload(),
             Action::Skip => Ok("Skipped".into()),
             Action::Auth(_) => unreachable!(),
-            Action::Maintenance(_, _) | Action::MeshOpen | Action::MeshStop | Action::CredentialEdit(_) | Action::CredentialRemove(_) => unreachable!(),
+            Action::Maintenance(_, _) | Action::MeshOpen | Action::MeshStop | Action::CredentialEdit(_) | Action::CredentialRemove(_) | Action::Preference(_) | Action::DockerReport | Action::DockerGuide => unreachable!(),
         };
         let success = result.is_ok(); self.plugins_changed |= success && matches!(self.kind.as_str(), "plugins" | "reload-plugins"); self.messages.push(result.unwrap_or_else(|e| e.to_string()));
         if self.kind == "setup" && success {
-            if self.step >= 2 { self.closed = true; } else { self.step += 1; self.prepare(); }
+            if self.step >= 3 { self.closed = true; } else { self.step += 1; self.prepare();
+                if self.step == 3 { self.messages = vec![crate::operations::setup_docker_guide()]; } }
         }
     }
 }
@@ -299,6 +317,18 @@ impl Drop for Menu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn setup_docker_stage_has_reviewable_actions_and_does_not_finish_with_defaults() {
+        let mut menu=Menu::new("setup");
+        menu.step=2; menu.prepare();
+        menu.selected=2; menu.key(KeyEvent::new(KeyCode::Enter,crossterm::event::KeyModifiers::NONE));
+        assert_eq!(menu.step,3); assert!(!menu.closed() && !menu.busy());
+        let lines=menu.lines(140).join("\n");
+        for label in ["Check Docker prerequisites","Edit Docker worker image digest","Edit rootless Docker socket","Show rootless Engine and image build steps"] { assert!(lines.contains(label)); }
+        menu.selected=1; menu.key(KeyEvent::new(KeyCode::Enter,crossterm::event::KeyModifiers::NONE));
+        assert_eq!(menu.editing,Some("docker_image"));
+        assert!(!menu.closed() && !menu.busy());
+    }
     #[test]
     fn maintenance_menu_keeps_update_reviewable_until_enter() {
         let doctor = Menu::maintenance("doctor", Some("codex".into()), false);

@@ -629,7 +629,8 @@ impl App {
                 .filter(|(k, _)| k == row.setting.key)
                 .map(|(_, v)| v.as_str());
             let edited = menu.edits.get(row.setting.key);
-            let shown = draft
+            let secret_mask=self.mcp_secret_mask(row.setting.key);
+            let shown = secret_mask.as_deref().or(draft)
                 .or_else(|| edited.and_then(|v| v.as_deref()))
                 .unwrap_or(if edited == Some(&None) {
                     "(default after save)"
@@ -732,7 +733,16 @@ impl App {
         let mermaid_selected = menu.rows.get(menu.selected).is_some_and(|row|
             matches!(row.setting.key, "mermaid_renderer" | "mermaid_renderer_root"));
         let router_selected=menu.rows.get(menu.selected).is_some_and(|row|matches!(row.setting.key,"engine"|"router_config"));
-        let mut preflight_lines = if router_selected {
+        let mut preflight_lines = if crate::settings::CATEGORIES[menu.category]=="MCP" {
+            let path=std::path::PathBuf::from(menu.effective_value("mcp_config"));
+            let width=usize::from(area.width.saturating_sub(3)).max(1);
+            let mut footer=vec![Line::styled(if self.mcp_secret.is_some() {
+                " Key editor · masked · Enter/Ctrl+S save privately · Esc discards"
+            } else {" Ctrl+P probe · Ctrl+R reload config · PgUp/PgDn servers · no tools"},Style::default().fg(theme::ACCENT))];
+            footer.extend(self.mcp_probe_lines(&path).into_iter().flat_map(|line|
+                crate::memory_menu::wrap_review(&format!(" {line}"),width)).take(4).map(Line::from));
+            footer
+        } else if router_selected {
             let path=std::path::PathBuf::from(menu.effective_value("router_config"));
             let mut footer=vec![Line::styled(" Ctrl+P: review Jev Router config/accounts/catalogs · no inference",
                 Style::default().fg(theme::ACCENT))];
@@ -758,13 +768,13 @@ impl App {
         lines.push(Line::from(if menu.draft.is_some() {
             " Enter accept edit · Ctrl+S save · Esc cancel edit"
         } else {
-            " 1–9 category · Enter/click choose/edit · Ctrl+S save · Esc discard/close"
+            " 1–9 / 0 MCP category · Enter/click choose/edit · Ctrl+S save · Esc discard/close"
         }));
         frame.render_widget(
             Paragraph::new(chooser_list_lines(lines, usize::from(area.width.saturating_sub(3))))
                 .block(
                     Block::default()
-                        .title(super::choice_dropdown::settings_tab_line(area, menu.category))
+                        .title(self.settings_tab_line(area, menu.category))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(theme::ACCENT)),
                 )
@@ -1457,7 +1467,7 @@ impl App {
                 lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(3)));
             }
             frame.render_widget(Paragraph::new(lines)
-                .block(Block::default().title(lore_view_title(picker))
+                .block(Block::default().title(self.lore_tab_line(area, picker))
                     .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), area);
             draw_menu_scrollbar(frame, area, scrollbar.0, scrollbar.1, scrollbar.2);
@@ -1641,7 +1651,7 @@ impl App {
             Paragraph::new(lines)
                 .block(
                     Block::default()
-                        .title(lore_view_title(picker))
+                        .title(self.lore_tab_line(area, picker))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(theme::ACCENT)),
                 )
@@ -2420,7 +2430,7 @@ impl App {
                 if cache.len() == MAX_RENDERED_TRANSCRIPTS {
                     cache.remove(0);
                 }
-                cache.push(RenderedTranscript::render_media(
+                cache.push(RenderedTranscript::render_media_style(
                     index,
                     id,
                     content,
@@ -2432,10 +2442,11 @@ impl App {
                     image_rows,
                     mermaid_revision,
                     Some(&ready_mermaids),
+                    self.preferences.on("nerd_font"),
                 ));
                 cache.len() - 1
             };
-            cache[position].update_media(
+            cache[position].update_media_style(
                 content,
                 inner[1].width.saturating_sub(2),
                 self.expanded_tool_sections.get(id),
@@ -2445,6 +2456,7 @@ impl App {
                 image_rows,
                 mermaid_revision,
                 Some(&ready_mermaids),
+                self.preferences.on("nerd_font"),
             );
             let (window, top) = transcript_window(
                 &cache[position].lines,
@@ -2504,13 +2516,15 @@ impl App {
             }
         };
         for section in sections {
-            if section.line >= top && section.line < top + usize::from(inner[1].height) {
+            let start = section.line.max(top);
+            let end = section.line.saturating_add(section.height).min(top + usize::from(inner[1].height));
+            if start < end {
                 self.visible_tool_sections.borrow_mut().push((
                     Rect::new(
                         inner[1].x.saturating_add(1),
-                        inner[1].y.saturating_add((section.line - top) as u16),
+                        inner[1].y.saturating_add((start - top) as u16),
                         inner[1].width.saturating_sub(2),
-                        1,
+                        (end - start) as u16,
                     ),
                     index,
                     id.to_owned(),
@@ -2929,11 +2943,6 @@ pub(super) fn transcript_window(
         }
     }
     (window, top)
-}
-
-fn lore_view_title(picker: &super::LorePicker) -> Line<'static> {
-    Line::from([("1 Active", !picker.proposal_mode), ("2 Pending", picker.proposal_mode && !picker.cluster_mode), ("3 Clustered", picker.cluster_mode)]
-        .into_iter().map(|(label, selected)| Span::styled(format!(" {label} "), chooser_row_style(selected))).collect::<Vec<_>>())
 }
 
 pub(super) fn draw_menu_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize, start: usize) {

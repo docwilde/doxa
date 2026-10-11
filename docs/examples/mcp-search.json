@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "servers": [
+    {
+      "id": "brave", "enabled": false, "allow_tools": ["brave_web_search"],
+      "transport": {
+        "transport": "stdio", "program": "/usr/bin/node",
+        "args": ["/owner/installed/brave-search-mcp-server/dist/index.js", "--transport", "stdio"],
+        "env": {"BRAVE_API_KEY": {"env": "BRAVE_API_KEY"}}
+      }
+    },
+    {
+      "id": "tavily", "enabled": false, "allow_tools": ["tavily-search"],
+      "transport": {
+        "transport": "streamable_http", "url": "https://mcp.tavily.com/mcp/",
+        "headers": {"Authorization": {"env": "TAVILY_API_KEY", "bearer": true}}
+      }
+    },
+    {
+      "id": "firecrawl", "enabled": false, "allow_tools": ["firecrawl_search"],
+      "transport": {
+        "transport": "streamable_http", "url": "https://mcp.firecrawl.dev/v2/mcp",
+        "headers": {"Authorization": {"env": "FIRECRAWL_API_KEY", "bearer": true}}
+      }
+    },
+    {
+      "id": "exa", "enabled": false, "allow_tools": ["web_search_exa"],
+      "transport": {
+        "transport": "streamable_http", "url": "https://mcp.exa.ai/mcp",
+        "headers": {"x-api-key": {"env": "EXA_API_KEY"}}
+      }
+    }
+  ]
+}

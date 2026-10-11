@@ -13,7 +13,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use time::{format_description::well_known::Iso8601, OffsetDateTime};
 
 pub const STALE_AFTER_SECS: i64 = 60;
@@ -158,8 +158,12 @@ impl Registry {
     }
     pub fn read(&self, scrubber: &impl Scrubber, reap: bool, probe: bool) -> io::Result<Vec<PeerRecord>> {
         let paths = doxa_state::registry_paths(&self.directory)?;
+        let deadline = Instant::now() + delivery::DISCOVERY_TIMEOUT;
         let mut out = Vec::new();
         for path in paths {
+            if probe && Instant::now() >= deadline {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "peer socket discovery timed out"));
+            }
             let record = read_one(&path, false);
             match record {
                 Ok(mut peer) => {
@@ -172,15 +176,15 @@ impl Registry {
                         if reap { remove_regular_entry(&path); self.reap_socket(&peer.socket_path, !alive); }
                         continue;
                     }
-                    #[cfg(target_os = "macos")]
-                    if probe && !delivery::probe_socket(std::path::Path::new(&peer.socket_path)) { continue; }
-                    #[cfg(not(target_os = "macos"))]
-                    if probe && std::os::unix::net::UnixStream::connect(&peer.socket_path).is_err() { continue; }
+                    if probe && !delivery::probe_socket(std::path::Path::new(&peer.socket_path), deadline) { continue; }
                     peer.scrub_display(scrubber);
                     out.push(peer);
                 }
                 Err(_) => { if reap { remove_regular_entry(&path); } }
             }
+        }
+        if probe && Instant::now() >= deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "peer socket discovery timed out"));
         }
         Ok(out)
     }

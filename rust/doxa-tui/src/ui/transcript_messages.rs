@@ -26,6 +26,14 @@ pub(super) struct Message {
     pub unreviewed: bool,
     #[serde(default)]
     pub starts_turn: bool,
+    #[serde(default)]
+    pub sent: bool,
+    #[serde(default)]
+    pub recipients: Vec<String>,
+    #[serde(default)]
+    pub failed: Vec<String>,
+    #[serde(default)]
+    pub metadata: Vec<String>,
 }
 
 fn queue_id(data: &Value) -> Option<String> {
@@ -62,44 +70,63 @@ impl Message {
             text: body(data["text"].as_str()?),
             timestamp: timestamp(data.get("timestamp").or(event_timestamp)),
             sender: (data["peer_started"] == true).then(|| attribution(data["peer_origin"].as_str().unwrap_or("Peer"))),
-            nerd_font, unreviewed: false, starts_turn: false,
+            nerd_font, unreviewed: false, starts_turn: false, sent: false, recipients: vec![], failed: vec![], metadata: vec![],
         })
     }
 
     pub(super) fn peer(data: &Value, nerd_font: bool) -> Option<Self> {
         let title: String = attribution(data["from_title"].as_str().unwrap_or("Peer")).chars().take(128).collect();
-        let id = data["from_id"].as_str().filter(|id| !id.is_empty() && id.len() <= 128
-            && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'));
+        let id = data["from_id"].as_str().and_then(peer_id);
         Some(Self { queue_id: None, state: None, text: body(data["body"].as_str()?),
             timestamp: timestamp(data.get("sent_at")),
             sender: Some(id.map(|id| format!("{title} ({id})")).unwrap_or(title)),
-            nerd_font, unreviewed: data["fleet_admission"]["unreviewed"] == true, starts_turn: false })
+            nerd_font, unreviewed: data["fleet_admission"]["unreviewed"] == true, starts_turn: false,
+            sent: false, recipients: vec![], failed: vec![], metadata: peer_metadata(data) })
     }
 
     pub(super) fn peer_turn(data: &Value, nerd_font: bool) -> Option<Self> {
         (data["peer_started"] == true).then(|| Self { queue_id: None, state: None,
             text: body(data["prompt"].as_str().unwrap_or("")), timestamp: timestamp(data.get("timestamp")),
             sender: Some(attribution(data["peer_origin"].as_str().unwrap_or("Peer"))),
-            nerd_font, unreviewed: false, starts_turn: true })
+            nerd_font, unreviewed: false, starts_turn: true, sent: false, recipients: vec![], failed: vec![], metadata: vec![] })
+    }
+
+    pub(super) fn sent(data: &Value, owner: &str, nerd_font: bool) -> Option<Self> {
+        let to = data["to"].as_array().filter(|rows| !rows.is_empty() && rows.len() <= 256)?;
+        let recipients = to.iter().map(|id| peer_id(id.as_str()?).map(str::to_owned)).collect::<Option<Vec<_>>>()?;
+        let failed = match data.get("failed").filter(|value| !value.is_null()) {
+            Some(value) => value.as_array().filter(|rows| rows.len() <= 256)?.iter()
+                .map(|id| peer_id(id.as_str()?).map(str::to_owned)).collect::<Option<Vec<_>>>()?,
+            None => vec![],
+        };
+        Some(Self { queue_id: None, state: None, text: data["body"].as_str().map(body).unwrap_or_default(),
+            timestamp: timestamp(data.get("sent_at").or(data.get("timestamp"))),
+            sender: Some(attribution(owner)), nerd_font, unreviewed: false, starts_turn: false,
+            sent: true, recipients, failed, metadata: peer_metadata(data) })
     }
 
     pub(super) fn parse(paragraph: &str) -> Option<Self> {
         let record = paragraph.strip_prefix(PREFIX)?;
-        if record.len() > MAX_INPUT_BYTES * 6 + 1024 { return None; }
+        if record.len() > MAX_INPUT_BYTES * 6 + 64 * 1024 { return None; }
         let mut message: Self = serde_json::from_str(record).ok()?;
         if let Some(id) = message.queue_id.as_deref() {
             if id.is_empty() || id.len() > 128
                 || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
-                || message.state.is_none() || message.starts_turn { return None; }
+                || message.state.is_none() || message.starts_turn || message.sent { return None; }
         } else if message.state.is_some() || message.sender.is_none() { return None; }
-        if message.text.len() > MAX_INPUT_BYTES + 3 { return None; }
+        if message.text.len() > MAX_INPUT_BYTES + 3 || message.recipients.len() > 256
+            || message.recipients.iter().any(|id| peer_id(id).is_none())
+            || message.failed.len() > 256 || message.failed.iter().any(|id| peer_id(id).is_none())
+            || (message.sent && message.recipients.is_empty())
+            || message.metadata.len() > 8 || message.metadata.iter().any(|row| row.len() > 2048) { return None; }
+        message.metadata = message.metadata.iter().map(|row| attribution(row)).collect();
         message.text = body(&message.text);
         message.timestamp = timestamp(message.timestamp.as_ref().map(|text| Value::String(text.clone())).as_ref());
         message.sender = message.sender.map(|sender| attribution(&sender));
         Some(message)
     }
 
-    pub(super) fn label(&self) -> String {
+    pub(super) fn label_with_style(&self, glyphs: bool) -> String {
         let state = match self.state {
             Some(QueueState::Queued) => "Queued",
             Some(QueueState::Started) => "Queued prompt started",
@@ -108,14 +135,29 @@ impl Message {
             None => "Message",
         };
         let queued = self.queue_id.as_ref().map(|id| format!("{state} · {id}")).unwrap_or_default();
-        let peer = self.sender.as_ref().map(|sender| format!("{} Peer {sender}{}",
-            if self.nerd_font { "\u{f06a9}" } else { "🤖" },
+        let peer = self.sender.as_ref().map(|sender| format!("{} Peer {}{sender}{}{}",
+            if glyphs { if self.sent { "🤖↑" } else { "🤖↓" } }
+            else if self.sent { "[peer sent]" } else { "[peer received]" },
+            if self.sent { "sent from " } else { "" },
+            if self.recipients.is_empty() { String::new() } else { format!(" {} {}", if glyphs { "→" } else { "->" }, self.recipients.join(", ")) },
             if self.unreviewed { " [unreviewed fleet message]" } else { "" })).unwrap_or_default();
         let separator = if !queued.is_empty() && !peer.is_empty() { " · " } else { "" };
-        format!("{queued}{separator}{peer}{}", self.timestamp.as_ref().map(|time| format!(" · {time}")).unwrap_or_default())
+        format!("{queued}{separator}{peer}{}{}{}", self.timestamp.as_ref().map(|time| format!(" · {time}")).unwrap_or_default(),
+            if self.metadata.is_empty() { String::new() } else { format!(" · {}", self.metadata.join(" · ")) },
+            if self.failed.is_empty() { String::new() } else { format!(" · failed recipients: {}", self.failed.join(", ")) })
     }
 
     fn encoded(&self) -> String { format!("{PREFIX}{}", serde_json::to_string(self).unwrap()) }
+}
+
+fn peer_id(text: &str) -> Option<&str> {
+    (!text.is_empty() && text.len() <= 128
+        && text.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'~' | b':' | b'@'))).then_some(text)
+}
+
+fn peer_metadata(data: &Value) -> Vec<String> {
+    ["from_repo", "kind", "origin", "message_id", "in_reply_to"].into_iter().filter_map(|key|
+        data[key].as_str().filter(|value| !value.is_empty()).map(|value| attribution(&format!("{key}: {value}")))).collect()
 }
 
 fn attribution(text: &str) -> String {
@@ -171,6 +213,6 @@ pub(super) fn settle(session: &mut Session, data: &Value, state: QueueState) -> 
         return (true, replace(session, range, &message));
     }
     let message = Message { queue_id: Some(id), state: Some(state), text: String::new(),
-        timestamp: timestamp(data.get("timestamp")), sender: None, nerd_font: false, unreviewed: false, starts_turn: false };
+        timestamp: timestamp(data.get("timestamp")), sender: None, nerd_font: false, unreviewed: false, starts_turn: false, sent: false, recipients: vec![], failed: vec![], metadata: vec![] };
     (true, append_transcript(session, &format!("\n\n{}\n\n", message.encoded())))
 }

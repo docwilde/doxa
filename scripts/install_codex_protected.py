@@ -363,7 +363,78 @@ def active_installation(root):
     return None
 
 
-def install(binary, root, official_cli, launcher, code_mode_host, helper_identity=None, verified=None):
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def pointer_identity(path):
+    metadata = path.lstat()
+    return [metadata.st_dev, metadata.st_ino]
+
+
+def write_rollback_receipt(path, value):
+    private_directory(path.parent)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write((json.dumps(value, sort_keys=True) + "\n").encode())
+        stream.flush()
+        os.fsync(stream.fileno())
+    sync_directory(path.parent)
+
+
+def rollback_publication(path):
+    receipt = json.loads(private_read(path, 8192))
+    keys = {"version", "root", "old_target", "old_artifact", "old_identity", "new_target", "new_identity"}
+    def artifact(value):
+        return isinstance(value, str) and re.fullmatch(re.escape(PROVIDER) + r"-[0-9a-f]{64}", value)
+    def identity(value):
+        return isinstance(value, list) and len(value) == 2 and all(type(n) is int and n >= 0 for n in value)
+    if (not isinstance(receipt, dict) or set(receipt) != keys or receipt["version"] != 1
+            or not isinstance(receipt["root"], str) or not Path(receipt["root"]).is_absolute()
+            or not artifact(receipt["new_target"]) or not identity(receipt["new_identity"])
+            or (receipt["old_target"] is not None and not artifact(receipt["old_target"]))
+            or (receipt["old_artifact"] is not None and receipt["old_artifact"] != PROVIDER and not artifact(receipt["old_artifact"]))
+            or (receipt["old_identity"] is not None and not identity(receipt["old_identity"]))
+            or ((receipt["old_target"] is None) != (receipt["old_identity"] is None))
+            or (receipt["old_target"] is not None and receipt["old_target"] != receipt["old_artifact"])):
+        raise ValueError("invalid provider rollback receipt")
+    root = Path(receipt["root"])
+    with locked_directory(root):
+        active = root / "codex-current"
+        if not active.is_symlink():
+            if not active.exists() and receipt["old_target"] is None:
+                return  # No publication happened.
+            raise ValueError("provider pointer changed; rollback refused")
+        current = os.readlink(active)
+        current_identity = pointer_identity(active)
+        if current == receipt["old_target"] and current_identity == receipt["old_identity"]:
+            return
+        if current != receipt["new_target"] or current_identity != receipt["new_identity"]:
+            raise ValueError("provider pointer changed; rollback refused")
+        prior = receipt["old_artifact"]
+        if prior is not None:
+            destination = root / prior
+            private_directory(destination)
+            previous = json.loads(private_read(destination / "receipt.json", 16384))
+            verify_installed(destination, previous)
+        if receipt["old_target"] is None:
+            active.unlink()
+        else:
+            pointer = root / (".codex-rollback-" + os.urandom(16).hex())
+            try:
+                pointer.symlink_to(receipt["old_target"])
+                os.replace(pointer, active)
+            finally:
+                if pointer.is_symlink():
+                    pointer.unlink()
+        sync_directory(root)
+
+
+def install(binary, root, official_cli, launcher, code_mode_host, helper_identity=None, verified=None, rollback_receipt=None):
     probe(binary)
     private_directory(root)
     current = active_installation(root)
@@ -415,7 +486,17 @@ def install(binary, root, official_cli, launcher, code_mode_host, helper_identit
         pointer = root / (".codex-current-" + artifact)
         try:
             pointer.symlink_to(destination.name)
+            if rollback_receipt is not None:
+                active = root / "codex-current"
+                write_rollback_receipt(rollback_receipt, {
+                    "version": 1, "root": str(root),
+                    "old_target": os.readlink(active) if active.is_symlink() else None,
+                    "old_identity": pointer_identity(active) if active.is_symlink() else None,
+                    "old_artifact": current.name if current is not None else None,
+                    "new_target": destination.name, "new_identity": pointer_identity(pointer),
+                })
             os.replace(pointer, root / "codex-current")
+            sync_directory(root)
         finally:
             if pointer.is_symlink():
                 pointer.unlink()
@@ -495,8 +576,19 @@ def main():
     parser.add_argument("--install-root", type=Path, default=Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "doxa/providers")
     parser.add_argument("--official-cli", type=Path)
     parser.add_argument("--cargo", help="explicit Rust 1.95.0 cargo; default bootstraps a private pinned toolchain")
-    parser.add_argument("--launcher", type=Path, required=True, help="native doxa-codex-protected binary built from this DOXA checkout")
+    parser.add_argument("--rollback-receipt", type=Path, help="private outer-install rollback receipt; contains no credentials")
+    parser.add_argument("--rollback", action="store_true", help="restore only the exact recorded provider publication")
+    parser.add_argument("--launcher", type=Path, help="native doxa-codex-protected binary built from this DOXA checkout")
     options = parser.parse_args()
+    if options.rollback_receipt is not None and not options.rollback_receipt.is_absolute():
+        parser.error("--rollback-receipt must be absolute")
+    if options.rollback:
+        if options.rollback_receipt is None:
+            parser.error("--rollback requires --rollback-receipt")
+        rollback_publication(options.rollback_receipt)
+        return
+    if options.launcher is None:
+        parser.error("--launcher is required for installation")
     private_directory(options.cache)
     official = options.official_cli or (Path(found) if (found := shutil.which("codex")) else None)
     if official is None or not official.is_absolute() or not os.access(official, os.X_OK):
@@ -509,7 +601,7 @@ def main():
         code_mode_host, helper_identity = build_code_mode_host(options.cache, options.cargo)
         verified = verified_artifacts(options.cache, binary, code_mode_host, helper_identity)
         with locked_directory(options.install_root):
-            install(binary, options.install_root, official, options.launcher, code_mode_host, helper_identity, verified)
+            install(binary, options.install_root, official, options.launcher, code_mode_host, helper_identity, verified, options.rollback_receipt)
 
 
 if __name__ == "__main__":

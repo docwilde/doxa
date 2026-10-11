@@ -224,7 +224,9 @@ Defaults are $100/M input and output, not a claim about the selected model's
 price. `--review-input-price` and `--review-output-price` change these estimates.
 Pinned Jev 1.13 uses its documented $0.042/M input-only rate. UI status labels
 reservations and token-based usage as estimates, not invoices. Usage exceeding
-a reservation makes accounting unknown and prevents automatic recovery.
+a reservation, or a reserved call failing without verified usage, makes accounting
+unknown and prevents automatic recovery. The failed reservation and prior verified
+usage subtotal remain recorded; resume cannot clear that uncertainty.
 
 The Fleet view shows model selections, mode, alignment, pause reason, charter
 hash, reservation estimates, and calls. After reviewing the evidence, explicitly
@@ -317,6 +319,10 @@ outcome remains unknown. It counts typed handoffs, read-backs, confirmations,
 corrections and recorded human release entries (which may be stale), and verifies signed host test receipts before
 counting them. The review-event history retains at most 256 observations, so
 quarantine and supervisor counts are labeled as counts within that window.
+Review cost is a recorded known-usage subtotal. A reservation count does not prove
+that every attempt settled, including older journals, so the debrief leaves the
+total token estimate and actual billed cost unknown when calls were reserved.
+
 Test duration and token-based review cost are estimates or measurements only
 where the journal records them. Worker spend and total run wall time remain
 unknown. The report reads no peer message bodies, makes no model calls, and

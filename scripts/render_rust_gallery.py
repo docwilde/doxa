@@ -27,25 +27,26 @@ ORIGIN = ((SIZE[0] - GRID[0] * CELL[0]) // 2, (SIZE[1] - GRID[1] * CELL[1]) // 2
 SCENES = (
     "hero", "triage", "pane-triage", "project-label", "image-preview", "isolation", "fleet-review", "fleet-dependency", "fleet-release-review", "fleet-view",
     "beliefs", "tool-entries", "memory-management", "commands", "help", "codegraph",
-    "settings", "context", "queued-prompts", "peer-messages", "routing-status", "settings-router",
+    "settings", "context", "queued-prompts", "peer-messages", "peer-expanded", "reasoning", "routing-status", "settings-router", "settings-mcp", "glm-account", "setup-docker",
 )
 FONT = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
 FONT_BOLD = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf")
 FONT_EMOJI = Path("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf")
 
 
-@lru_cache(maxsize=1)
-def robot_glyph() -> Image.Image:
-    """Rasterize the App's actual Unicode robot using the installed emoji font."""
+@lru_cache(maxsize=8)
+def emoji_glyph(symbol: str) -> Image.Image:
+    """Rasterize the App's Unicode marker within its terminal cell width."""
     font = ImageFont.truetype(FONT_EMOJI, 109)  # Noto's fixed bitmap strike
-    left, top, right, bottom = font.getbbox("🤖")
+    left, top, right, bottom = font.getbbox(symbol)
     glyph = Image.new("RGBA", (right - left, bottom - top))
-    ImageDraw.Draw(glyph).text((-left, -top), "🤖", font=font, embedded_color=True)
-    scale = min(CELL[0] * 2 / glyph.width, (CELL[1] - 4) / glyph.height)
+    ImageDraw.Draw(glyph).text((-left, -top), symbol, font=font, embedded_color=True)
+    cells = 1 if symbol == "🛠" else 2
+    scale = min(CELL[0] * cells / glyph.width, (CELL[1] - 4) / glyph.height)
     return glyph.resize((round(glyph.width * scale), round(glyph.height * scale)), Image.Resampling.LANCZOS)
 
 
-def capture(binary: Path, scene: str, destination: Path, version: str, env: dict[str, str]) -> None:
+def capture(binary: Path, scene: str, destination: Path, version: str, env: dict[str, str], icon_font: Path | None) -> None:
     raw = subprocess.check_output([str(binary), scene], cwd=ROOT, env=env, timeout=30)
     frame = json.loads(raw)
     if frame.get("version") != version:
@@ -59,19 +60,29 @@ def capture(binary: Path, scene: str, destination: Path, version: str, env: dict
     required = {
         "settings": ("Appearance", "Ctrl+S save"),
         "settings-router": ("Jev Router (on for new sessions)", "Jev Router config", "/private/reviewed-router.json", "Not checked", "no inference"),
+        "settings-mcp": ("API worker MCP", "Tavily API key", "Firecrawl API key", "Exa API key", "Brave Search API key", "no tools"),
+        "glm-account": ("GLM account reporting", "owner-declared", "Cash balance: unknown", "bundle remainder: unknown"),
+        "setup-docker": ("Check Docker prerequisites", "Edit Docker worker image digest", "Edit rootless Docker socket", "Show rootless Engine and image build steps"),
         "context": ("21.0% in use", "42000 / 200000 tokens", "Conversation", "Available"),
         "routing-status": ("Route auto", "ds-fast", "$0.000004 est", "session cost includes worker calls"),
         "queued-prompts": ("Queued · q-next", "parser API stable"),
-        "peer-messages": ("Peer Parser reviewer", "q-peer", "reconnect review"),
+        "peer-messages": ("🤖 ↓", "🤖 ↑", "Peer Parser reviewer", "q-peer", "12345678-1234-1234-1234-123456789abc"),
+        "peer-expanded": ("🤖 ↓", "🤖 ↑", "Reviewer handoff", "Please verify reconnect", "Received the handoff"),
+        "reasoning": ("🧠", "Thinking", "128"),
+        "tool-entries": ("🛠", "src/parser.rs", "check_bounds(input)?;"),
     }
     for label in required.get(scene, ()):
         if label not in "\n".join(rows):
             raise ValueError(f"{scene}: expected fixture content not visible: {label}")
+    if scene == "peer-messages" and any(label in "\n".join(rows)
+            for label in ("Reviewer handoff", "Received the handoff", "Run the reconnect review")):
+        raise ValueError("peer-messages: peer body visible despite default collapse")
 
     canvas = Image.new("RGB", SIZE, (23, 20, 28))
     draw = ImageDraw.Draw(canvas)
     regular = ImageFont.truetype(FONT, 38)
     bold = ImageFont.truetype(FONT_BOLD, 38)
+    icons = ImageFont.truetype(icon_font, 38) if icon_font else None
     ox, oy = ORIGIN
     cw, ch = CELL
     # Fill backgrounds before glyphs, so a wide Unicode glyph is not erased by
@@ -85,11 +96,14 @@ def capture(binary: Path, scene: str, destination: Path, version: str, env: dict
         left, top = ox + x * cw, oy + y * ch
         if not symbol or symbol == " ":
             continue
-        if symbol == "🤖":
-            glyph = robot_glyph()
+        if symbol in {"🤖", "🛠", "🧠"}:
+            glyph = emoji_glyph(symbol)
             canvas.paste(glyph, (left, top + (ch - glyph.height) // 2), glyph)
             continue
-        font = bold if modifier & 1 else regular
+        private_use = any(0xE000 <= ord(ch) <= 0xF8FF or 0xF0000 <= ord(ch) <= 0xFFFFD for ch in symbol)
+        if private_use and icons is None:
+            raise ValueError("Nerd Font glyph requires --icon-font; refusing a missing-glyph screenshot")
+        font = icons if private_use else bold if modifier & 1 else regular
         bbox = font.getbbox(symbol)
         if bbox is None:
             continue
@@ -101,7 +115,7 @@ def capture(binary: Path, scene: str, destination: Path, version: str, env: dict
     metadata.add_text("DOXA version", version)
     metadata.add_text("Scene", scene)
     metadata.add_text("Capture", "production App, Ratatui TestBackend, deterministic fixture")
-    metadata.add_text("Fonts", "DejaVu Sans Mono; Noto Color Emoji for the robot glyph")
+    metadata.add_text("Fonts", "DejaVu Sans Mono; Noto Color Emoji; " + (icon_font.name if icon_font else "no private-use glyphs"))
     destination.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(destination, pnginfo=metadata, optimize=True)
     if Image.open(destination).size != SIZE:
@@ -113,6 +127,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=ROOT / "target/debug/examples/gallery")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "assets/shots")
+    parser.add_argument("--icon-font", type=Path, help="Symbols Nerd Font Mono for the default private-use icons")
     parser.add_argument("scenes", nargs="*", choices=SCENES, default=SCENES)
     args = parser.parse_args()
     binary = args.binary.resolve()
@@ -134,7 +149,7 @@ def main() -> None:
         env.update({"HOME": str(home), "DOXA_HOME": str(doxa_home), "LORE_ROOT": str(lore_root),
                     "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "DOXA_CLOCK_SHOW": "0"})
         for scene in args.scenes:
-            capture(binary, scene, args.output_dir / f"rust-{version}-{scene}.png", version, env)
+            capture(binary, scene, args.output_dir / f"rust-{version}-{scene}.png", version, env, args.icon_font)
 
 
 if __name__ == "__main__":

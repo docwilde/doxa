@@ -90,6 +90,8 @@ jobs:
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_codex_protected_installer.py -v
           python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_install_transaction.py -v
+          python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_codex_code_mode_proof.py -v
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_lore_bump.py -v

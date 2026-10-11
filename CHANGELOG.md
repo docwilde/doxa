@@ -5,6 +5,42 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.47 — 2026-10-11
+
+**MCP and search**
+
+- Add **`doxa-mcp`** with bounded stdio and Streamable HTTP clients for DeepSeek, GLM and routed API workers. External calls require one-call review; uncertain attempts are not replayed.
+- Add **Settings → 0 MCP** with explicit config, allowlist/status, connect/list probe and masked Tavily, Firecrawl, Exa and Brave key editors. Provider recipes stay disabled until configured.
+- Scrub saved and inherited credentials across provider output, prompts, structured history, MCP arguments/results and peer events; refuse unsafe stores and reflected secret property names.
+
+**GLM reporting**
+
+- Add **`glm_account_profile`** for an owner-declared API resource bundle and an optional explicit Coding Plan quota refresh. Keep cash balance, bundle remainder and actual charges unknown.
+- Separate cached quota telemetry and list-price estimates; bound refresh, cancellation and staleness. Startup and ordinary turns perform no quota request.
+
+**Settings and peers**
+
+- Highlight hovered title tabs and extend **`/setup`** with Docker prerequisites, pinned image and rootless socket controls. **`/setup docker`** opens the Docker stage directly.
+- Fix **`peer_wake`** retaining launch-time Settings and peer discovery blocking on full socket backlogs. Verify DeepSeek delivery to idle/busy Codex and Claude with full session IDs.
+- Admit built-in Codex peer tools in **full-access**; retain Auto/manual reviews. Fold peer bodies by default, add **🤖↓ / 🤖↑**, **🛠** and **🧠**, and enable Nerd Fonts by default with explicit off support.
+
+**Resource and accounting bounds**
+
+- Bound recursive Rust parsing, config/fleet lock waits, FIFO transcript append and Git discovery. Preserve scope, source hashes and live peer records when admission times out.
+- Fix provisional Router child cleanup, full-queue **`CommandRouter`** shutdown and isolation command waits that outlive child exit through inherited pipes.
+- Keep fleet totals unknown after incomplete reserved calls; reject impossible routed worker usage before tools or continuation while retaining uncertain allowance holds.
+
+**Remote and installation**
+
+- Bind remote decisions to the complete displayed request and session incarnation; retire controls across replay gaps. Android shows full arguments and uses captured review callbacks.
+- Renew Android push leases on foreground/timer proof and reject stale callbacks. Bound configured-hub HTTP bodies and deadlines; physical device/push verification remains open.
+- Roll back protected Codex publication when a later frontend install fails; exercise outer transaction failure paths in CI.
+
+**Review and gallery**
+
+- Publish the scoped beta.46 review with evidence and remaining findings, including upstream stored-Python admission and Settings paint I/O. No GPT-6-Terra review occurred.
+- Regenerate **27** uniform **3068 × 1734** terminal scenes, including folded/expanded peers, thinking, MCP keys, GLM reporting and Docker setup.
+
 ## 2.0.0-beta.46 — 2026-10-11
 
 **Interface**

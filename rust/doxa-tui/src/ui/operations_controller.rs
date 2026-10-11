@@ -568,6 +568,8 @@ impl App {
         }
     }
     pub(super) fn open_settings_menu(&mut self) {
+        self.title_tab_hover = None;
+        self.mcp_secret=None;
         self.choice_dropdown = None;
         let identity = self.groups[self.active_group]
             .active_id()
@@ -712,10 +714,11 @@ impl App {
     }
     pub(super) fn settings_menu_key(&mut self, key: KeyEvent) -> bool {
         if self.choice_dropdown.is_some() { return self.choice_dropdown_key(key); }
+        if self.mcp_page_key(key) {return true;}
         if self.settings_menu.as_ref().is_some_and(|menu| menu.draft.is_none())
             && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
-            if let KeyCode::Char(number @ '1'..='9') = key.code {
-                self.select_settings_category(number as usize - '1' as usize);
+            if let KeyCode::Char(number @ '0'..='9') = key.code {
+                self.select_settings_category(if number=='0' {9} else {number as usize - '1' as usize});
                 return true;
             }
         }
@@ -727,6 +730,9 @@ impl App {
             return true;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+            if crate::settings::CATEGORIES[menu.category]=="MCP" {
+                self.start_mcp_probe();return true;
+            }
             if menu.rows.get(menu.selected).is_some_and(|row|matches!(row.setting.key,"engine"|"router_config")) {
                 menu.finish_draft();
                 let path=std::path::PathBuf::from(menu.effective_value("router_config"));
@@ -803,6 +809,11 @@ impl App {
                 } else if row.setting.read_only || row.setting.key.is_empty() {
                     self.notice =
                         format!("{} is read-only. {}", row.setting.label, row.setting.note);
+                } else if row.setting.kind==crate::settings::Kind::Credential {
+                    let provider=doxa_vendors::credentials::SearchProvider::from_setting_key(row.setting.key).expect("fixed search setting");
+                    if matches!(key.code,KeyCode::Char('u')|KeyCode::Delete) {self.remove_mcp_secret(provider);}
+                    else {self.start_mcp_secret(provider);}
+                    return true;
                 } else if matches!(key.code, KeyCode::Char('u') | KeyCode::Delete) {
                     menu.edits.insert(row.setting.key.into(), None);
                 } else if row.setting.kind == crate::settings::Kind::Choice {
@@ -1069,6 +1080,17 @@ impl App {
         }
     }
 
+    pub(super) fn refresh_usage_info(&mut self, id: &str) {
+        let scroll=self.chip_info.as_ref().filter(|info|info.kind=="usage"
+            && info.owner.as_ref().is_some_and(|owner|owner.0==id)).map(|info|info.scroll);
+        if let Some(scroll)=scroll {
+            if self.groups[self.active_group].active_id()==Some(id) {
+                self.open_diagnostic("usage");
+                if let Some(info)=self.chip_info.as_mut() {info.scroll=scroll.min(info.lines.len().saturating_sub(1));}
+            }
+        }
+    }
+
     pub(super) fn open_diagnostic(&mut self, kind: &'static str) {
         let Some(id) = self.groups[self.active_group]
             .active_id()
@@ -1127,9 +1149,13 @@ impl App {
             if telemetry.is_some_and(|value|value.tracked_cost_only) {
                 lines.push("CLI account charges unknown and excluded; total session spend unknown.".into());
             }
+            if telemetry.is_some_and(|value| value.external_mcp_cost_unknown) {
+                lines.push("External MCP charges unknown and outside model allowance; total spend unknown.".into());
+            }
             if let Some(quota) = telemetry.and_then(|value| value.quota.as_deref()) {
                 lines.push(format!("quota    {}", safe_label(quota)));
             }
+            if let Some(account)=telemetry.and_then(|value|value.glm_account.as_ref()) {lines.extend(account.lines());}
         }
         let used = telemetry.and_then(|value| value.context_tokens);
         let limit = telemetry.and_then(|value| value.context_limit);

@@ -50,3 +50,12 @@ only the runtime files and icon, never tests, fixtures or a key.
   plaintext while in use.
 - Chrome/Chromium desktop is supported. Android browsers are not covered by
   this extension; a later packaged Android app can reuse the wire protocol.
+
+## Approval recovery
+
+The tab shows the complete reviewed request beside its answer controls. Every
+answer carries that exact request and the selected session incarnation. Missing
+or changed snapshots are refused by the host. Disconnects, replay gaps, missing
+sequence numbers and replacement sessions remove controls immediately; a fresh
+complete transcript and matching inventory are required before writes resume.
+A failed reload remains read-only and retains the unsent prompt draft.

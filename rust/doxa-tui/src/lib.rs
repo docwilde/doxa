@@ -27,6 +27,7 @@ pub mod collections;
 pub mod launch;
 pub mod isolation_migration;
 pub mod operations;
+mod docker_setup;
 
 pub mod peer_map;
 pub mod fleet_view;

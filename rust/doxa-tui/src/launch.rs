@@ -424,7 +424,9 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
         }
     }
     let mut command = Command::new(daemon);
-    for (key, env_key) in [("peer_inbound_turns", "DOXA_PEER_INBOUND_TURNS"), ("session_budget_usd", "DOXA_SESSION_BUDGET_USD")] {
+    // The daemon refreshes file-backed peer wake at receipt. Keep genuine
+    // inherited/fleet env overrides, rather than freezing a Settings value.
+    for (key, env_key) in [("session_budget_usd", "DOXA_SESSION_BUDGET_USD")] {
         if !environment.iter().any(|(candidate, _)| *candidate == env_key) {
             if let Some(value) = configured_scalar(key, env_key, cfg.as_ref()) {
                 let value = if key == "session_budget_usd" && value.trim().parse::<f64>().ok() == Some(0.0) { String::new() } else { value };

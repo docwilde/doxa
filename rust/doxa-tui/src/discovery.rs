@@ -8,7 +8,6 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Deserialize;
 use time::format_description::well_known::Rfc3339;
@@ -158,14 +157,7 @@ pub fn current_scope() -> io::Result<String> {
 /// Resolve a checkout to the main repository, including linked worktrees.
 /// None means there is no verified Git repository at this session directory.
 pub fn repo_root_for(cwd: &Path) -> Option<PathBuf> {
-    let output = Command::new("git").args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR").env_remove("GIT_INDEX_FILE")
-        .current_dir(cwd).output().ok()?;
-    if !output.status.success() { return None; }
-    let common = PathBuf::from(std::str::from_utf8(&output.stdout).ok()?.trim());
-    if !common.is_absolute() || common.file_name()? != ".git" { return None; }
-    common.parent()?.canonicalize().ok()
+    doxa_worktrees::observed_main_repo_root(cwd)
 }
 
 fn pid_alive(pid: i32) -> bool {

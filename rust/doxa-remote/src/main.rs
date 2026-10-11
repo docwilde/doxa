@@ -215,8 +215,7 @@ async fn handle(request: Request<Incoming>, app: Arc<App>, attested: bool) -> Re
             let is_prompt = *operation == "prompt";
             let entry = match app.session(id) { Ok(Some(entry))=>entry, Ok(None)=>return error(StatusCode::NOT_FOUND,"session not found"), Err(_)=>return error(StatusCode::SERVICE_UNAVAILABLE,"session registry unavailable") };
             let input = match body_json(request).await { Ok(value)=>value, Err(reply)=>return reply };
-            if input.get("incarnation").is_some()
-                && input["incarnation"].as_str()!=Some(entry.incarnation.as_deref().unwrap_or(&entry.started_at)) {
+            if input["incarnation"].as_str()!=Some(entry.incarnation.as_deref().unwrap_or(&entry.started_at)) {
                 return denied("session incarnation changed");
             }
             if is_prompt && !input["text"].as_str().is_some_and(|text| !text.trim().is_empty() && text.len() <= 58_000) {
@@ -238,7 +237,7 @@ async fn handle(request: Request<Incoming>, app: Arc<App>, attested: bool) -> Re
                     let Some(reviewed) = state["pending_inputs"].as_array().and_then(|items|items.iter().find(|item|item["id"]==input["id"])) else {
                         return Err(io::Error::new(io::ErrorKind::PermissionDenied,"input request expired"));
                     };
-                    if input.get("reviewed_request").is_some() && input.get("reviewed_request")!=Some(reviewed) {
+                    if !uplink::reviewed_input_is_current(&input,reviewed) {
                         return Err(io::Error::new(io::ErrorKind::PermissionDenied,"reviewed input changed"));
                     }
                     client.call("answer_needs_input",json!({"id":input["id"],"answer":input["answer"],"reviewed_request":reviewed}))
@@ -269,7 +268,7 @@ impl Drop for BoundSocket { fn drop(&mut self) { if fs::symlink_metadata(&self.p
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let args=std::env::args().skip(1).collect::<Vec<_>>();
-    if args.first().is_some_and(|action|matches!(action.as_str(),"list"|"send"|"answer")){
+    if args.first().is_some_and(|action|matches!(action.as_str(),"list"|"send"|"review"|"answer")){
         return uplink::client_action(&args).await;
     }
     if !policy::remote_enabled() { return Err(io::Error::new(io::ErrorKind::PermissionDenied,"remote listening is off")); }
@@ -290,7 +289,7 @@ async fn main() -> io::Result<()> {
                     "browser adapter cannot serve encrypted sessions; use the native remote TUI"));
             }
         },
-        _=>return Err(io::Error::new(io::ErrorKind::InvalidInput,"usage: doxa-remote serve | connect URL HOST_ID | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny")),
+        _=>return Err(io::Error::new(io::ErrorKind::InvalidInput,"usage: doxa-remote serve | connect URL HOST_ID | list URL | send URL SESSION TEXT | review URL SESSION REQUEST_ID | answer URL SESSION REQUEST_ID allow|deny /ABS_REVIEW.json")),
     }
     let path=runtime.join("remote-browser.sock");
     if fs::symlink_metadata(&path).is_ok() { return Err(io::Error::new(io::ErrorKind::AlreadyExists,"remote browser socket already exists")); }

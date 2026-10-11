@@ -549,6 +549,15 @@ impl Host for CodexHost {
         self.store.transcript_snapshot()
     }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        let text = match doxa_vendors::credentials::redact(text) {
+            Ok(text) => text,
+            Err(_) => {
+                self.scrub_failed.store(true, Ordering::Release);
+                emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex credential scrub failed; prompt withheld"}}));
+                return;
+            }
+        };
+        let text = text.as_str();
         if self.transport != "app-server" {
             // Refuse before public_prompt, persistence, snapshot or provider
             // execution. Saved thread/transcript bytes remain unchanged.
@@ -765,7 +774,15 @@ impl Host for CodexHost {
                                             self.input.begin_operator(frame, scrub, tools.handler(), &tools.callback_definitions())
                                         } else {
                                             let handler = self.peer_tools.lock().unwrap().clone().ok_or("Codex tool unavailable")?;
-                                            self.input.begin_peer(frame, scrub, handler)
+                                            // begin_peer scrubs before dispatch. A failed
+                                            // scrub must withhold even preset-authorized calls.
+                                            let failed = self.scrub_failed.clone();
+                                            let handler: doxa_engines::peer_tools::Handler = Arc::new(move |rpc,args| {
+                                                if failed.load(Ordering::Acquire) { Err("LORE scrub unavailable".into()) }
+                                                else { handler(rpc,args) }
+                                            });
+                                            self.input.begin_peer_with_approval(frame, scrub, handler,
+                                                frame["doxa_permission_mode"] != "full-access")
                                         }
                                     } else { self.input.begin(frame, scrub) };
                                     pending.and_then(|pending| {

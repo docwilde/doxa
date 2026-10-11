@@ -1467,11 +1467,15 @@ Every guard below exists because of that, not as ceremony.
   every candidate. The sender's repo travels with the message and is
   shown on arrival.
 
-**Being woken by a message is a second switch.** *Let an arriving message
-start a turn* (`peer_inbound_turns` / `DOXA_PEER_INBOUND_TURNS`), also off
+**Being woken by a message is a second switch.** *Wake on peer messages*
+in `/settings` → Session (`peer_inbound_turns` / `DOXA_PEER_INBOUND_TURNS`), also off
 by default, decides whether an incoming message starts a turn when this
-session is idle — it queues behind a running one either way, in the same
-bounded FIFO a prompt you type mid-turn goes through. Accepting messages
+session is idle or queues behind a running one in the same bounded FIFO
+as a typed prompt. With the switch off, reception still displays the peer
+message and retains it for your next typed turn; a notice explains that
+automatic wake is disabled. Saved file-backed changes apply to the next
+arrival in running native sessions. An explicit inherited environment or
+fleet grant stays fixed and takes precedence over Settings. Accepting messages
 and being woken by them are different grants, which is why they are
 different switches. A **broadcast never starts a turn** at any setting: at
 thirty-two sessions one broadcast would otherwise wake the whole fleet in
@@ -1874,7 +1878,7 @@ commands this session carries, and is omitted entirely when there are none
 | `/login [provider]` | Sign in through a provider's own auth CLI (default: `claude`) |
 | `/logout [provider]` | Sign out through a provider's own auth CLI |
 | `/settings` | Open the settings modal (`ctrl+,`) |
-| `/setup` | Check state, fix findings one at a time |
+| `/setup [docker]` | Check state and optional Docker prerequisites; `docker` opens pinned image/rootless socket setup directly |
 | `/doctor` | Read-only health checks: pass/fail and the fix command for each |
 | `/plugins` | Your Claude Code plugins/skills: discovered, adopted or refused, and why (see [docs/plans/plugins.md](plans/plugins.md)) |
 | `/reload-plugins` | Re-scan Claude Code plugins/skills now (new sessions/tabs only) |
@@ -1901,6 +1905,14 @@ says `(set by env — editing here would be shadowed; unset DOXA_X to use
 the config file)`. A save against a config file that exists but will not
 parse is refused rather than clobbering it.
 
+Nerd Font rendering is enabled by default in the Rust TUI; this does not install a
+font. Set `nerd_font = "0"` in Settings → Appearance or `DOXA_NERD_FONT=0` for
+plain fold labels. `DOXA_NERD_FONTS` is also accepted; the canonical singular
+`DOXA_NERD_FONT` wins when both are set. Received and sent peer messages start
+collapsed, with sender, recipient and delivery metadata in the header. Click the
+header or press Enter with transcript focus to expand or collapse the message;
+older sent records without a body explicitly say that the body was not recorded.
+
 | setting | env | default | what it controls |
 |---|---|---|---|
 | `engine` | `DOXA_ENGINE` | `claude` | which engine drives NEW sessions; the row's choices are the registry itself, so every registered engine is offered (see [Engines](#engines)) |
@@ -1922,7 +1934,7 @@ parse is refused rather than clobbering it.
 | `graph_context` | `DOXA_GRAPH_CONTEXT` | off | attach a graph-context block to every turn. Recurring per-turn token cost once on, which is why it is off |
 | `graph_view` | `DOXA_GRAPH_VIEW` | `browser` | how the beliefs picker's `g` shows one belief's neighbourhood: `browser` (mermaid page under `~/.doxa/graphs`) or `ascii` (LORE's edge block, in the TUI) |
 | `lore_root` | `LORE_ROOT` | `~/.claude/lore` | where the belief store and session index live; sticky, set by `/setup` |
-| `nerd_font` | `DOXA_NERD_FONT` | off | use a Nerd Font glyph for the branch chip |
+| `nerd_font` | `DOXA_NERD_FONT` | on | Nerd Font branch glyphs and 🛠 tool / 🤖↓ received / 🤖↑ sent / 🧠 reasoning icons; explicit off uses plain labels |
 | `ctx_absolute` | `DOXA_CTX_ABSOLUTE` | off | print `24k/200k` beside the `ctx%` chip (below 100 columns it drops again) |
 | `image_mode` | `DOXA_IMAGE_MODE` | text | `probe` to detect support, or force a rung (`kgp`/`sixel`/`halfblock`/`text`) |
 | `boot_banner` | `DOXA_BOOT_BANNER` | on | draw the DOXA mark above the opening identity block |

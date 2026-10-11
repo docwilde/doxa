@@ -8,7 +8,7 @@ pub mod evidence;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, io::{self, Read, Write}, os::{fd::AsRawFd, unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}}, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::BTreeMap, fs, io::{self, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
 
 pub const PREFIX: &str = "[DOXA-FLEET-V1] ";
 pub const MAX_BODY: usize = 6_000;
@@ -238,7 +238,7 @@ pub fn transaction<T>(context:&Context,work:impl FnOnce(&mut State)->io::Result<
     let lock=fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(context.state_path.with_extension("lock"))?;
     let meta=lock.metadata()?;
     if !meta.is_file()||meta.nlink()!=1||meta.uid()!=unsafe{libc::geteuid()}||meta.mode()&0o077!=0{return Err(invalid("untrusted fleet state lock"));}
-    if unsafe{libc::flock(lock.as_raw_fd(),libc::LOCK_EX)}!=0{return Err(io::Error::last_os_error());}
+    doxa_state::lock_exclusive_bounded(&lock)?;
     let assignments_sha256=hash(&context.assignments)?;
     let mut state=match read_private::<State>(&context.state_path,MAX_STATE){Ok(state)=>state,Err(err) if err.kind()==io::ErrorKind::NotFound=>State{charter_sha256:context.charter_sha256.clone(),assignments_sha256:assignments_sha256.clone(),supervisor_status:if context.review.supervisor.is_some(){"pending"}else{"off"}.into(),..Default::default()},Err(err)=>return Err(err)};
     if state.charter_sha256!=context.charter_sha256{return Err(invalid("fleet charter changed; admission withheld"));}
