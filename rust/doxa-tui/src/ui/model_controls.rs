@@ -14,6 +14,7 @@ use super::{
 };
 use crate::launch;
 
+#[derive(Debug)]
 pub(super) struct CatalogJob {
     pub(super) engine: launch::Engine,
     pub(super) generation: u64,
@@ -21,7 +22,7 @@ pub(super) struct CatalogJob {
     pub(super) receiver: mpsc::Receiver<Result<serde_json::Value, &'static str>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct CatalogRequest {
     engine: launch::Engine,
     generation: u64,
