@@ -789,6 +789,140 @@ use super::*;
     }
 
     #[test]
+    fn settings_outside_click_dismisses_dropdown_and_focuses_clicked_pane_draft() {
+        if std::env::var_os("DOXA_SETTINGS_OUTSIDE_CLICK_FIXTURE").is_none() {
+            // Exercise the real save path only under a disposable private home.
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ui::tests::settings_outside_click_dismisses_dropdown_and_focuses_clicked_pane_draft",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env("DOXA_HOME", home.path())
+                .env("DOXA_SETTINGS_OUTSIDE_CLICK_FIXTURE", "1")
+                .env_remove("DOXA_BACKGROUND")
+                .env_remove("DOXA_RAIL_ENTRIES")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(220, 42));
+        for id in ["left-session", "right-session"] {
+            app.apply_daemon_frame(&json!({"type":"hello", "session_id":id,
+                "engine":"claude", "model":"fixture"}));
+        }
+        app.groups[0].tabs = vec!["left-session".into()];
+        app.groups[1].tabs = vec!["right-session".into()];
+        app.split = Split::Vertical;
+        app.split_requested = true;
+        app.active_group = 0;
+        app.focus = Focus::Prompt;
+        app.input_drafts.insert(
+            (1, "right-session".into()),
+            ("right pane draft".into(), "right pane draft".len()),
+        );
+
+        // Open Settings through the prompt command, change and save one value
+        // to the private test home, then leave a second dropdown active.
+        app.input = "/settings".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.settings_menu.is_some());
+
+        // A click outside an active inline editor closes that editor and
+        // returns keyboard ownership to the pane selected by the click.
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        let renderer = app.settings_menu.as_ref().unwrap().rows.iter()
+            .position(|row| row.setting.key == "mermaid_renderer").unwrap();
+        app.settings_menu.as_mut().unwrap().selected = renderer;
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.settings_menu.as_ref().unwrap().draft.is_some());
+        let panes = app.layout(app.size).panes.unwrap();
+        let prompt = app.pane_regions(1, panes[1])[4];
+        app.handle(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: prompt.x + 2,
+            row: prompt.y + 1,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.settings_menu.is_none());
+        assert_eq!(app.active_group, 1);
+        assert_eq!(app.focus, Focus::Prompt);
+        assert_eq!(app.input, "right pane draft");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)));
+        assert_eq!(app.input, "right pane draft?");
+
+        // Reopen Settings through its command, change and save one value to
+        // the private test home, then leave a second dropdown active.
+        app.input = "/settings".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.settings_menu.is_some());
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        let background = app.settings_menu.as_ref().unwrap().rows.iter()
+            .position(|row| row.setting.key == "background").unwrap();
+        app.settings_menu.as_mut().unwrap().selected = background;
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.choice_dropdown.is_some());
+        let transparent = app.choice_dropdown.as_ref().unwrap().choices.iter()
+            .position(|choice| choice == "transparent").unwrap();
+        app.settings_menu_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        for _ in 0..transparent {
+            app.settings_menu_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.settings_menu.as_ref().unwrap().edits["background"].as_deref(), Some("transparent"));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        let stored = doxa_state::load_config_checked(&crate::settings::config_path().unwrap()).unwrap();
+        assert_eq!(stored["background"].as_str(), Some("transparent"));
+
+        let rail_entries = app.settings_menu.as_ref().unwrap().rows.iter()
+            .position(|row| row.setting.key == "rail_entries").unwrap();
+        app.settings_menu.as_mut().unwrap().selected = rail_entries;
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.choice_dropdown.is_some());
+        let mut terminal = Terminal::new(TestBackend::new(220, 42)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let painted = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(painted.contains("rail entries"));
+        assert!(painted.contains("sessions") || painted.contains("panes"));
+
+        let panes = app.layout(app.size).panes.unwrap();
+        let prompt = app.pane_regions(0, panes[0])[4];
+        app.handle(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: prompt.x + 2,
+            row: prompt.y + 1,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.settings_menu.is_none());
+        assert!(app.choice_dropdown.is_none());
+        assert_eq!(app.active_group, 0);
+        assert_eq!(app.focus, Focus::Prompt);
+        assert_eq!(app.input_drafts.get(&(1, "right-session".into())).unwrap().0, "right pane draft?");
+
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE)));
+        assert_eq!(app.input, "!");
+        let mut terminal = Terminal::new(TestBackend::new(220, 42)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let painted = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(painted.contains("!") && painted.contains("left-session"));
+    }
+
+    #[test]
     fn mermaid_settings_preflight_checks_draft_without_saving_or_exposing_source() {
         let mut app = App::default();
         let rows = ["mermaid_renderer", "mermaid_renderer_root"].into_iter().map(|key| {

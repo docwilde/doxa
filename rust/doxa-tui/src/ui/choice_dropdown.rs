@@ -194,7 +194,10 @@ impl App {
     }
 
     pub(super) fn choice_dropdown_mouse(&mut self, mouse: MouseEvent) -> bool {
-        let Some(area) = self.choice_dropdown_rect() else { self.choice_dropdown = None; return true; };
+        let Some(area) = self.choice_dropdown_rect() else {
+            self.choice_dropdown = None;
+            return !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+        };
         let point = Position::new(mouse.column, mouse.row);
         if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
             if area.contains(point) {
@@ -212,6 +215,7 @@ impl App {
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left) { self.select_dropdown_choice(); }
             } else if mouse.kind == MouseEventKind::Down(MouseButton::Left) && !area.contains(point) {
                 self.choice_dropdown = None;
+                return false;
             }
         }
         true

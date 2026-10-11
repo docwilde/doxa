@@ -32,6 +32,7 @@ impl App {
         self.title_tab_hover = None;
         self.settings_menu = None;
         self.choice_dropdown = None;
+        self.mcp_secret = None;
         if self.docker_settings_open {
             self.docker_settings_open = false;
             self.refresh_docker_setup();

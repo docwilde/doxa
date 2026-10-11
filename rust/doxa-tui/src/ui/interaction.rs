@@ -2234,9 +2234,13 @@ impl App {
         if self.choice_dropdown.is_some() {
             if self.active_request_index().is_none() && self.delete_confirmation.is_none()
                 && self.stop_confirmation.is_none() && !self.diff_modal && !self.map_modal {
-                return self.choice_dropdown_mouse(mouse);
+                if self.choice_dropdown_mouse(mouse) {
+                    return true;
+                }
             }
-            self.choice_dropdown = None;
+            if self.choice_dropdown.is_some() {
+                self.choice_dropdown = None;
+            }
         }
         if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Down(_)
             | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
@@ -2619,12 +2623,15 @@ impl App {
                         self.settings_menu.as_mut().unwrap().selected = index;
                         return self.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                     }
-                } else {
-                    self.close_settings_menu();
+                    return true;
                 }
-                return true;
+                // Dismiss the settings stack, then let this same click choose
+                // the prompt, pane, tab, or chip underneath it.
+                self.close_settings_menu();
+            } else {
+                // Keep the settings stack modal for non-click mouse events.
+                return false;
             }
-            return false;
         }
         if self.chip_info.is_some() {
             let area = self.active_chooser_rect();
