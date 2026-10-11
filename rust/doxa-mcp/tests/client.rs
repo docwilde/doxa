@@ -163,6 +163,7 @@ async fn initialization_timeout_sends_no_cancel_notification() {
 fn private_config_rejects_public_symlink_duplicate_and_unknown_fields() {
     let _environment=isolated();
     let directory=tempfile::tempdir().unwrap();let path=directory.path().join("config.json");
+    std::fs::set_permissions(directory.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
     let config=json!({"schema_version":1,"servers":[serde_json::to_value(stdio_config("good",&directory.path().join("journal"))).unwrap()]});
     std::fs::write(&path,config.to_string()).unwrap();std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(Config::load(&path).unwrap().enabled_servers().count(),1);

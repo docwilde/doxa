@@ -626,6 +626,7 @@ dependencies = [
  "doxa-fleet",
  "doxa-isolation",
  "doxa-lore",
+ "doxa-mcp",
  "doxa-peers",
  "doxa-router",
  "doxa-runtime",
@@ -727,6 +728,7 @@ dependencies = [
 name = "doxa-mcp"
 version = "2.0.0-beta.47"
 dependencies = [
+ "doxa-vendors",
  "libc",
  "reqwest",
  "serde",
@@ -853,6 +855,7 @@ dependencies = [
  "doxa-fleet",
  "doxa-isolation",
  "doxa-lore",
+ "doxa-mcp",
  "doxa-peers",
  "doxa-protocol",
  "doxa-remote-wire",
