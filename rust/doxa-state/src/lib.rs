@@ -32,6 +32,30 @@ pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 pub const MAX_TABSET_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_MACHINE_ID_BYTES: u64 = 256;
 
+/// Advisory mutation locks retain their inode and serialization semantics,
+/// but synchronous UI callers must be able to report contention promptly.
+/// The file remains locked until its owner drops it; there is no forced unlock
+/// or stale-lock deletion. Callers may explicitly retry after a busy refusal.
+pub fn lock_exclusive_bounded(file: &fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_millis(100);
+    loop {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(io::ErrorKind::WouldBlock,
+                "state is busy in another process; retry the operation"));
+        }
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::WouldBlock && error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+        std::thread::sleep(Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
 /// One startup policy shared by native Claude host and launcher. The SDK
 /// clamps initialization to at least 60 seconds and SessionEngine may retry
 /// once after refreshing its credential copy. Keep both attempts plus setup
@@ -267,10 +291,7 @@ pub fn update_config(path: &Path, edit: impl FnOnce(&mut toml::Table) -> io::Res
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsafe config lock"));
     }
     lock.set_permissions(fs::Permissions::from_mode(0o600))?;
-    use std::os::fd::AsRawFd;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    lock_exclusive_bounded(&lock)?;
     let mut stored = load_config_checked(path)?;
     edit(&mut stored)?;
     save_config(path, &stored)

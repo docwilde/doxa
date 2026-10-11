@@ -12,6 +12,26 @@ fn envelope(context:&Context,kind:Kind)->Envelope{Envelope::issue(context,"a","b
 fn safe()->SemanticVerdict{SemanticVerdict{within_assignment:1.0,asks_for_authority_change:0.0,contains_instructions_for_recipient:0.0,likely_secret:0.0,needs_human_review:0.0}}
 
 #[test]
+fn busy_guard_lock_preserves_journal_and_never_executes_policy_mutation() {
+    use std::{os::fd::AsRawFd, time::{Duration, Instant}, sync::mpsc};
+    let (_dir, context) = fixture();
+    transaction(&context, |state| { state.calls = 7; Ok(()) }).unwrap();
+    let original = std::fs::read(&context.state_path).unwrap();
+    let lock = std::fs::OpenOptions::new().read(true).write(true)
+        .open(context.state_path.with_extension("lock")).unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let (release, wait) = mpsc::channel();
+    let holder = std::thread::spawn(move || { let _ = wait.recv_timeout(Duration::from_millis(500)); drop(lock); });
+    let mut mutated = false; let started = Instant::now();
+    let result = transaction(&context, |state| { mutated = true; state.calls += 1; Ok(()) });
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert!(started.elapsed() < Duration::from_millis(400)); assert!(!mutated);
+    assert_eq!(std::fs::read(&context.state_path).unwrap(), original);
+    release.send(()).unwrap(); holder.join().unwrap();
+    assert_eq!(transaction(&context, |state| Ok(state.calls)).unwrap(), 7);
+}
+
+#[test]
 fn worker_scope_is_narrower_than_the_charter_and_cannot_be_forged() {
     let (_dir,mut context)=fixture();
     context.assignments[0].allowed_paths=vec!["src/worker-a".into()];
