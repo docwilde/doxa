@@ -4694,6 +4694,57 @@ mod engine_known_key_redaction {
     const INHERITED: &str = "inertinheritedcredentialfixture";
     const JEV: &str = "inertroutercredentialfixture";
 
+    fn read_peer_fixture(mut stream: UnixStream, deadline: Instant) -> std::io::Result<String> {
+        // Discovery closes without a payload. Avoid timeout socket options
+        // on that already-closed connection and bound reads explicitly.
+        stream.set_nonblocking(true)?;
+        let mut bytes = Vec::new();
+        loop {
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "private peer fixture read timed out"));
+            }
+            let mut buffer = [0u8; 4096];
+            match stream.read(&mut buffer) {
+                Ok(0) if bytes.is_empty() => return Ok(String::new()),
+                Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "private peer fixture frame is incomplete")),
+                Ok(count) => {
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if bytes.len() > doxa_peers::delivery::MAX_FRAME_BYTES {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "private peer fixture frame is oversized"));
+                    }
+                    if bytes.contains(&b'\n') {
+                        if bytes.last() != Some(&b'\n') || bytes[..bytes.len()-1].contains(&b'\n') {
+                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "private peer fixture requires one complete frame"));
+                        }
+                        return String::from_utf8(bytes).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "private peer fixture frame is not UTF-8"));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(2)),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[test]
+    fn peer_fixture_reader_accepts_empty_probes_and_requires_complete_fragmented_frames() {
+        let (probe, closed) = UnixStream::pair().unwrap();
+        drop(closed);
+        assert_eq!(read_peer_fixture(probe, Instant::now()+Duration::from_secs(2)).unwrap(), "");
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"{\"body\":").unwrap();
+        let finish = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(5));
+            writer.write_all(b"\"***\"}\n").unwrap();
+        });
+        assert_eq!(read_peer_fixture(reader, Instant::now()+Duration::from_secs(2)).unwrap(), "{\"body\":\"***\"}\n");
+        finish.join().unwrap();
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"{\"body\":").unwrap();
+        drop(writer);
+        assert_eq!(read_peer_fixture(reader, Instant::now()+Duration::from_secs(2)).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
     fn private_keys(root: &Path) {
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
@@ -4813,8 +4864,8 @@ mod engine_known_key_redaction {
         listener.set_nonblocking(true).unwrap();
         let worker=thread::spawn(move || {
             let deadline=Instant::now()+Duration::from_secs(10);
-            loop {match listener.accept() {
-                Ok((mut stream,_))=>{stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();let mut wire=String::new();stream.read_to_string(&mut wire).unwrap();if !wire.is_empty(){return wire;}}
+            loop {assert!(Instant::now()<deadline);match listener.accept() {
+                Ok((stream,_))=>{let wire=read_peer_fixture(stream,deadline.min(Instant::now()+Duration::from_secs(2))).unwrap();if !wire.is_empty(){return wire;}}
                 Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(5));}
                 Err(_)=>panic!("private peer fixture accept failed"),
             }}
@@ -4839,7 +4890,9 @@ mod engine_known_key_redaction {
         assert_eq!(sent["event"]["data"]["body"],"*** *** ***");
         assert_eq!(sent["event"]["data"]["to"],json!([peer]));
         assert_eq!(sent["event"]["data"]["failed"],json!([]));
-        let wire=worker.join().unwrap();assert_clean(&wire);assert!(wire.contains("***"));
+        let wire=worker.join().unwrap();assert_clean(&wire);
+        let frame:Value=serde_json::from_str(&wire).unwrap();
+        assert_eq!(frame["body"],"*** *** ***");assert_eq!(frame["from_id"],CLAUDE_SESSION);
         assert_clean(&fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap());
         stop(&mut process,&mut reader,&mut socket);
     }
