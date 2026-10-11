@@ -43,7 +43,7 @@ impl CompactionStatus {
     pub(super) fn lines(&self) -> Vec<String> {
         vec![self.summary(), "A verified managed summary is separate context; canonical originals are retained.".into(),
             "Auto/pin and the last ordinary routed worker remain unchanged; no Jev selection call.".into(),
-            "Summary call cost is included in the aggregate session estimate.".into()]
+            "Summary call cost is included in the tracked Jev/direct API estimate for Router sessions.".into()]
     }
 }
 
@@ -136,6 +136,9 @@ impl SessionTelemetry {
         // incomplete status replies cannot turn the partial amount into a total.
         self.tracked_cost_only |= data["cost_scope"] == "jev_and_direct_api_only"
             || self.routing.as_ref().is_some_and(|routing|routing.tracked_cost_only);
+        if self.tracked_cost_only {
+            if let Some(routing)=self.routing.as_mut() {routing.tracked_cost_only=true;}
+        }
     }
     fn store_context(&mut self, context: super::context_usage::ContextUsage) {
         self.context = context.chip_label();
@@ -370,6 +373,7 @@ mod tests {
             "effort":"high","route_mode":"pinned","latency_ms":0,"cost_usd":0},
             "cost_usd":0.02,"session_cost_usd":0.03,"cost_is_estimate":true}));
         assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$0.0300 est Jev/API · CLI ?"));
+        assert!(telemetry.routing.as_ref().unwrap().lines().join("\n").contains("total spend are unknown"));
         let mut restored=SessionTelemetry::default();
         restored.update_status(&json!({"routing":routing,"total_cost_usd":null,"billing":{
             "mode":"api","cost_usd":0.03,"session_cost_usd":0.03,"cost_is_estimate":true,
