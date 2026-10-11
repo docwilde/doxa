@@ -27,7 +27,7 @@ ORIGIN = ((SIZE[0] - GRID[0] * CELL[0]) // 2, (SIZE[1] - GRID[1] * CELL[1]) // 2
 SCENES = (
     "hero", "triage", "pane-triage", "project-label", "image-preview", "isolation", "fleet-review", "fleet-dependency", "fleet-release-review", "fleet-view",
     "beliefs", "tool-entries", "memory-management", "commands", "help", "codegraph",
-    "settings", "context", "queued-prompts", "peer-messages", "routing-status", "settings-router", "settings-mcp", "glm-account", "setup-docker",
+    "settings", "context", "queued-prompts", "peer-messages", "peer-expanded", "reasoning", "routing-status", "settings-router", "settings-mcp", "glm-account", "setup-docker",
 )
 FONT = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
 FONT_BOLD = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf")
@@ -66,11 +66,17 @@ def capture(binary: Path, scene: str, destination: Path, version: str, env: dict
         "context": ("21.0% in use", "42000 / 200000 tokens", "Conversation", "Available"),
         "routing-status": ("Route auto", "ds-fast", "$0.000004 est", "session cost includes worker calls"),
         "queued-prompts": ("Queued · q-next", "parser API stable"),
-        "peer-messages": ("Peer Parser reviewer", "q-peer", "reconnect review"),
+        "peer-messages": ("🤖↓", "🤖↑", "Peer Parser reviewer", "q-peer", "12345678-1234-1234-1234-123456789abc"),
+        "peer-expanded": ("🤖↓", "🤖↑", "Reviewer handoff", "Please verify reconnect", "Received the handoff"),
+        "reasoning": ("🧠", "Thinking", "128"),
+        "tool-entries": ("🛠", "src/parser.rs", "File read successfully"),
     }
     for label in required.get(scene, ()):
         if label not in "\n".join(rows):
             raise ValueError(f"{scene}: expected fixture content not visible: {label}")
+    if scene == "peer-messages" and any(label in "\n".join(rows)
+            for label in ("Reviewer handoff", "Received the handoff", "Run the reconnect review")):
+        raise ValueError("peer-messages: peer body visible despite default collapse")
 
     canvas = Image.new("RGB", SIZE, (23, 20, 28))
     draw = ImageDraw.Draw(canvas)

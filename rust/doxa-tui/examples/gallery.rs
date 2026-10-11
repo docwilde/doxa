@@ -351,7 +351,7 @@ fn scene(name: &str) -> App {
                 "text":"Review **bounds** and **reconnect** checks next.\n\n- Keep the parser API stable\n- Explain remaining errors"}));
             app.notice = "Fixture · queued user prompt · same Markdown and stripe as ordinary prompts".into();
         }
-        "peer-messages" => {
+        "peer-messages" | "peer-expanded" => {
             app.groups[0].tabs = vec!["demo-claude-02".into()];
             app.sessions.iter_mut().for_each(|session| session.transcript.clear());
             event(&mut app,"demo-claude-02","turn_started",json!({"prompt":"Review the parser changes."}));
@@ -361,10 +361,17 @@ fn scene(name: &str) -> App {
             event(&mut app,"demo-claude-02","peer_message",json!({"from_id":sender,
                 "from_title":"Parser reviewer","sent_at":"2026-10-11T13:25:00Z",
                 "body":"**Reviewer handoff**\n\nThe boundary checks passed. Please verify reconnect before approving."}));
+            event(&mut app,"demo-claude-02","peer_sent",json!({"to":[sender],"failed":[],
+                "sent_at":"2026-10-11T13:26:00Z",
+                "body":"Received the handoff. I will verify reconnect before approving."}));
             event(&mut app,"demo-claude-02","prompt_queued",json!({"id":"q-peer","peer_started":true,
                 "peer_origin":format!("Parser reviewer ({sender})"),"timestamp":"2026-10-11T13:25:00Z",
                 "text":"Run the **reconnect review** next.\n\nReport unresolved errors before release."}));
-            app.notice = "Fixture · attributed peer receipt and queued peer task · no message delivery".into();
+            if name == "peer-expanded" {
+                click_visible_text(&mut app, "Peer Parser reviewer");
+                click_visible_text(&mut app, "Peer sent from");
+            }
+            app.notice = "Fixture · peer receipts, sent message and queued task · no message delivery".into();
         }
         "needs-input" => {
             event(&mut app,"demo-codex-01","needs_input",json!({"id":"req-1","kind":"ask_user","title":"Choose migration target","questions":[{"question":"Where should the migration run?","header":"Environment","options":[{"label":"Staging","description":"Validate before release"},{"label":"Production","description":"Apply to live data"}]}]}));
@@ -558,7 +565,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "settings-router" | "settings-mcp" | "glm-account" | "setup-docker" | "context" | "routing-status" | "queued-prompts" | "peer-messages" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
+        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "settings-router" | "settings-mcp" | "glm-account" | "setup-docker" | "context" | "routing-status" | "queued-prompts" | "peer-messages" | "peer-expanded" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
