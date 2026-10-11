@@ -373,7 +373,7 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let y = area.y + 3;
         assert_eq!(buffer[(area.x + 1, y)].symbol(), "[");
-        assert_eq!(buffer[(area.right() - 2, y)].symbol(), "]");
+        assert_eq!(buffer[(area.right() - 3, y)].symbol(), "]");
         let cells = usize::from(area.width.saturating_sub(5));
         let system = cells * 100 / 1000;
         let tools = cells * 300 / 1000 - system;
