@@ -312,4 +312,53 @@ mod tests {
             assert_eq!(server.bodies().len(),count);resumed.shutdown();
         }
     }
+
+    #[test]
+    fn zero_worker_usage_retains_allowance_and_blocks_tools_continuations_and_resume_replay() {
+        use std::sync::atomic::AtomicUsize;
+        for tool in [false,true] {
+            let env=Env::new();let mut workers=0;
+            let server=Server::new(move|method,body| {
+                if method=="GET" {return catalog();}
+                assert_ne!(body["model"],doxa_router::JEV_MODEL,"single eligible worker needs no Jev call");
+                workers+=1;
+                if workers>1 {return worker(body,false);}
+                let delta=if tool {json!({"tool_calls":[{"index":0,"id":"peer-zero-usage",
+                    "function":{"name":doxa_engines::peer_tools::LIST,"arguments":"{}"}}]})}
+                    else {json!({"content":"generated zero-usage answer"})};
+                ("text/event-stream".into(),format!("data: {}\n\ndata: [DONE]\n\n",json!({"model":body["model"],
+                    "choices":[{"finish_reason":if tool {"tool_calls"} else {"stop"},"delta":delta}],
+                    "usage":{"prompt_tokens":0,"completion_tokens":0}})),Duration::ZERO)
+            });
+            let mut cfg=config();cfg.candidates.retain(|candidate|candidate.id=="ds");
+            let host=make_host(&env,cfg.clone(),&server,false,Some(2.0));
+            let calls=Arc::new(AtomicUsize::new(0));let executed=calls.clone();
+            assert!(host.set_peer_tool_handler(Arc::new(move|_,_|{executed.fetch_add(1,Ordering::SeqCst);Ok(json!({"peers":[]}))})));
+            let mut events=Vec::new();
+            host.prompt("nonempty request",&mut|event| {
+                // A buggy pre-validation tool admission would really execute
+                // this callback instead of merely stalling at its approval.
+                if event["type"]=="needs_input" {
+                    host.call("answer_needs_input",&json!({"id":event["data"]["id"],"answer":{"decision":"allow"}})).unwrap();
+                }
+                events.push(event);
+            });
+            assert_eq!(events.last().unwrap()["data"]["is_error"],true);
+            assert!(!events.iter().any(|event|matches!(event["type"].as_str(),Some("needs_input"|"tool_call"|"tool_result"))));
+            assert_eq!(calls.load(Ordering::SeqCst),0);assert_eq!(server.bodies().len(),1);
+            let state=env.state();assert_eq!(state["worker"]["accounting_unknown"],true);
+            assert_eq!(state["incomplete"],true);assert_eq!(state["worker"]["estimated_actual_usd_micros"],0);
+            assert!(state["worker"]["retained_reservation_usd_micros"].as_u64().unwrap()>0);
+            assert!(host.billing_snapshot().unwrap()["session_cost_usd"].is_null());
+            let projects=env.root.path().join("projects");
+            let project=fs::read_dir(projects).unwrap().next().unwrap().unwrap().path();
+            let messages:Value=serde_json::from_slice(&fs::read(project.join("routed.messages.json")).unwrap()).unwrap();
+            assert_eq!(messages["messages"],json!([]));assert!(!project.join("routed.jsonl").exists());
+            host.shutdown();drop(host);
+            let resumed=make_host(&env,cfg,&server,true,Some(2.0));
+            assert_eq!(prompt(&resumed,"do not replay")[0]["type"],"turn_refused");
+            assert_eq!(server.bodies().len(),1);assert_eq!(env.state()["worker"],state["worker"]);
+            resumed.shutdown();
+        }
+    }
 }

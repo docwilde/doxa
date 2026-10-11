@@ -77,6 +77,9 @@ async fn bounded_turn_checks_usage_and_model_before_tools_and_refuses_oversized_
     std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
     for (model,usage) in [("deepseek-flash",json!({"prompt_tokens":2})),
         ("different-model",json!({"prompt_tokens":2,"completion_tokens":3})),
+        ("deepseek-flash",json!({"prompt_tokens":0,"completion_tokens":0})),
+        ("deepseek-flash",json!({"prompt_tokens":0,"completion_tokens":3})),
+        ("deepseek-flash",json!({"prompt_tokens":2,"completion_tokens":0})),
         ("deepseek-flash",json!({"prompt_tokens":2,"completion_tokens":11}))] {
         let body=format!("data: {}\n\ndata: [DONE]\n\n",json!({"model":model,
             "choices":[{"finish_reason":"tool_calls","delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"lookup","arguments":"{\"x\":1}"}}]}}],"usage":usage}));
@@ -92,6 +95,23 @@ async fn bounded_turn_checks_usage_and_model_before_tools_and_refuses_oversized_
     let result=run_turn_limited_local(Vendor::DeepSeek,&format!("http://{}/chat",listener.local_addr().unwrap()),"deepseek-flash","none",
         &mut history,"too large",None,cancel,Duration::from_secs(3),|_|{},TurnLimits{input_bytes:1,output_tokens:10}).await;
     assert!(matches!(result,Err(Error::HistoryTooLarge)));assert!(listener.accept().is_err());
+}
+
+#[tokio::test]
+async fn bounded_nonempty_text_refuses_zero_usage_without_changing_direct_vendor_compatibility() {
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
+    const ZERO: &str = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"generated answer\"}}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0}}\n\ndata: [DONE]\n\n";
+    let (url,task)=multi_server(vec![ZERO]);let mut history=Vec::new();let (_,cancel)=watch::channel(false);
+    let result=run_turn_limited_local(Vendor::DeepSeek,&url,"deepseek-flash","none",&mut history,"question",
+        None,cancel,Duration::from_secs(3),|_|{},TurnLimits{input_bytes:16384,output_tokens:10}).await;
+    assert!(matches!(result,Err(Error::IncompleteStream)));assert!(history.is_empty());
+    assert_eq!(task.join().unwrap().0.len(),1);
+    let (url,task)=multi_server(vec![ZERO]);let (_,cancel)=watch::channel(false);
+    let result=run_turn_local(Vendor::DeepSeek,&url,"deepseek-flash","none",&mut history,"question",
+        None,cancel,Duration::from_secs(3),|_|{}).await.unwrap();
+    assert!(result.usage_complete);assert_eq!(history.last().unwrap()["content"],"generated answer");
+    assert_eq!(task.join().unwrap().0.len(),1);
 }
 
 fn accept(listener: &TcpListener) -> std::net::TcpStream {

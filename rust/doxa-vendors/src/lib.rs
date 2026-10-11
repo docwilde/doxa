@@ -1055,8 +1055,17 @@ async fn run_turn_at(
         });
         outcome.usage.add(completion.usage.as_ref())?;
         if let Some(limits) = limits {
+            // A serialized nonempty request cannot have zero input usage.
+            // Generated text, reasoning or tool arguments also require output
+            // usage before admitting tools or another paid continuation.
+            let plausible_usage = completion.usage.as_ref().is_some_and(|usage| {
+                usage["prompt_tokens"].as_u64().is_some_and(|tokens| tokens > 0)
+                    && ((completion.text.is_empty() && completion.reasoning.is_empty()
+                        && completion.tool_calls.is_empty())
+                        || usage["completion_tokens"].as_u64().is_some_and(|tokens| tokens > 0))
+            });
             if !outcome.usage_complete || !outcome.model_consistent
-                || outcome.usage.completion_tokens > limits.output_tokens {
+                || !plausible_usage || outcome.usage.completion_tokens > limits.output_tokens {
                 return Err(Error::IncompleteStream);
             }
             if !completion.tool_calls.is_empty() && outcome.usage.completion_tokens == limits.output_tokens {
