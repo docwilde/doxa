@@ -95,6 +95,8 @@ while True:
             print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "error": {
                 "code": -32042, "message": os.environ.get("TEST_SECRET", "synthetic")}}), flush=True)
         else:
+            if mode == "slow_call":
+                time.sleep(0.08)
             secret = os.environ.get("TEST_SECRET", "synthetic")
             reply(request, {"content": [{"type": "text", "text": "Local result " + secret}],
                             "structuredContent": {"source": secret}, "isError": mode == "tool_error"})

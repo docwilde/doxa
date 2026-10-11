@@ -113,7 +113,14 @@ pub struct Client {
 }
 impl Client {
     pub async fn connect(config: &ServerConfig, cwd: &Path, cancel: Arc<AtomicBool>) -> Result<Self> {
+        Self::connect_bounded(config,cwd,cancel,config.limits.timeout_ms).await
+    }
+    /// Cap each initialize/initialized phase without changing later call/list
+    /// limits. The host retains its separate aggregate preparation deadline.
+    pub async fn connect_bounded(config: &ServerConfig, cwd: &Path, cancel: Arc<AtomicBool>, handshake_timeout_ms: u64) -> Result<Self> {
         config.validate()?;
+        if handshake_timeout_ms==0 {return Err(Error::config("handshake deadline must be positive"));}
+        let handshake_timeout_ms=handshake_timeout_ms.min(config.limits.timeout_ms);
         if !config.enabled { return Err(Error::new(ErrorKind::Disabled,false)); }
         if !cwd.is_absolute() { return Err(Error::config("MCP cwd must be absolute")); }
         if cancel.load(Ordering::SeqCst) { return Err(Error::new(ErrorKind::Cancelled,false)); }
@@ -128,13 +135,13 @@ impl Client {
             }
         };
         let mut client = Self { transport, config:config.clone(), info:None, next_id:1, closed:false, changed:false, catalog_generation:0, catalog:BTreeMap::new(), secrets };
-        let initialized = client.initialize(cancel).await;
+        let initialized = client.initialize(cancel,handshake_timeout_ms).await;
         if let Err(error) = initialized { client.close().await; return Err(error); }
         Ok(client)
     }
-    async fn initialize(&mut self, cancel: Arc<AtomicBool>) -> Result<()> {
-        let result = self.request("initialize",json!({"protocolVersion":PROTOCOL_VERSIONS[0],"capabilities":{},
-            "clientInfo":{"name":"doxa","version":env!("CARGO_PKG_VERSION")}}),cancel.clone()).await?;
+    async fn initialize(&mut self, cancel: Arc<AtomicBool>, timeout_ms:u64) -> Result<()> {
+        let result = self.request_with_timeout("initialize",json!({"protocolVersion":PROTOCOL_VERSIONS[0],"capabilities":{},
+            "clientInfo":{"name":"doxa","version":env!("CARGO_PKG_VERSION")}}),cancel.clone(),timeout_ms).await?;
         let version = result["protocolVersion"].as_str().filter(|v|PROTOCOL_VERSIONS.contains(v))
             .ok_or_else(||Error::new(ErrorKind::UnsupportedVersion,true))?;
         if !result["capabilities"].is_object() || !result["capabilities"]["tools"].is_object() {
@@ -152,7 +159,7 @@ impl Client {
                 Transport::Stdio(transport) => transport.send(&notification,limits.max_frame_bytes,&AtomicBool::new(false)).await,
                 Transport::Http(transport) => transport.notify(&notification,&limits).await,
             }
-        },limits.timeout_ms,cancel).await;
+        },timeout_ms,cancel).await;
         result.map_err(|mut error|{error.attempted = true;error})
     }
     pub fn info(&self) -> &ServerInfo { self.info.as_ref().expect("only initialized clients are public") }

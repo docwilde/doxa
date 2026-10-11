@@ -318,3 +318,16 @@ async fn changed_or_missing_credentials_refuse_calls_without_refresh_or_send() {
     assert!(!journal(&path).iter().any(|value|value["method"]=="tools/call"));
     client.close().await;
 }
+
+#[tokio::test]
+async fn bounded_handshake_preserves_the_configured_call_deadline() {
+    let _environment=isolated();
+    let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
+    let mut config=stdio_config("slow_call",&path);config.limits.timeout_ms=500;
+    let mut client=Client::connect_bounded(&config,directory.path(),cancel(),50).await.unwrap();
+    client.list_tools(cancel()).await.unwrap();
+    assert!(client.call_tool("search",&json!({}),cancel()).await.is_ok());client.close().await;
+    let path=directory.path().join("initialization-timeout");
+    let error=Client::connect_bounded(&stdio_config("init_timeout",&path),directory.path(),cancel(),50).await.err().unwrap();
+    assert_eq!(error.kind,ErrorKind::Timeout);assert!(error.attempted);
+}
