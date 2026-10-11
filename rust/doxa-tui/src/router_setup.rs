@@ -136,6 +136,9 @@ fn candidate_availability(candidate: &Value, catalog: &Value) -> Availability {
     }
     let provider = candidate["provider"].as_str().unwrap_or("");
     if matches!(provider, "claude" | "codex") {
+        if row["resolved_model"].as_str().is_some_and(|resolved| Some(resolved) != candidate["model"].as_str()) {
+            return Availability::Unavailable("exact resolved model required");
+        }
         return if candidate["billing"] == "cli_account" { Availability::Available }
             else { Availability::Unavailable("CLI account billing must be explicit") };
     }
@@ -189,6 +192,8 @@ pub(crate) mod tests {
             Availability::Unavailable("exact model not in live catalog"));
         let mut wrong=candidate.clone();wrong["billing"]=json!("api");
         assert_eq!(candidate_availability(&wrong,&catalog),Availability::Unavailable("CLI account billing must be explicit"));
+        let alias=json!({"capabilities":[{"model":"account-model","resolved_model":"different-model","efforts":["high"]}]});
+        assert_eq!(candidate_availability(&candidate,&alias),Availability::Unavailable("exact resolved model required"));
     }
 
     #[test]
