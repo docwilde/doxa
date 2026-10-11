@@ -568,6 +568,79 @@ use super::*;
     }
 
     #[test]
+    fn settings_mcp_standard_pane_shows_all_search_key_fields_and_bounded_footer() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(126, 31));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"settings-fixture","engine":"glm","model":"fixture"}));
+        let rows = crate::settings::SETTINGS.iter().map(|setting| crate::settings::Row {
+            setting, value: if setting.kind == crate::settings::Kind::Credential { "missing".into() } else { setting.default.into() },
+            stored: String::new(), source: "fixture".into(), shadowed: false,
+        }).collect::<Vec<_>>();
+        let selected = rows.iter().position(|row| row.setting.key == "mcp_enabled").unwrap();
+        let category = crate::settings::CATEGORIES.iter().position(|category| *category == "MCP").unwrap();
+        app.settings_menu = Some(SettingsMenu { rows, selected, category,
+            draft: None, edits: HashMap::new(), engine: "glm".into() });
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(menu.height > 12, "MCP needs category fields plus footer, got {menu:?}");
+        let text = painted_at(&app, 126, 31);
+        for key in ["mcp_enabled", "mcp_config", "tavily_api_key", "firecrawl_api_key", "exa_api_key", "brave_api_key"] {
+            let label = crate::settings::find(key).unwrap().label;
+            assert!(text.contains(&format!("{label}:")), "missing {key}: {text}");
+        }
+        assert!(text.contains("Ctrl+P probe"), "{text}");
+        assert!(text.contains("no tools"), "{text}");
+        assert!(text.contains("Config snapshot"), "{text}");
+        let menu = app.settings_menu.as_ref().unwrap();
+        assert_eq!(menu.visible_indices(app.active_chooser_rect().unwrap().height).len(), 6);
+        assert!(app.pending_prompts.is_empty() && app.pending_queue_commands.is_empty());
+    }
+
+    #[test]
+    fn settings_category_sizing_stays_within_short_narrow_panes_and_keeps_selected_rows() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"settings-fixture"}));
+        let rows = crate::settings::SETTINGS.iter().map(|setting| crate::settings::Row {
+            setting, value: setting.default.into(), stored: String::new(),
+            source: "fixture".into(), shadowed: false,
+        }).collect::<Vec<_>>();
+        app.settings_menu = Some(SettingsMenu { rows, selected: 0, category: 0,
+            draft: None, edits: HashMap::new(), engine: "claude".into() });
+        for category in 0..crate::settings::CATEGORIES.len() {
+            let indices = {
+                let menu = app.settings_menu.as_mut().unwrap();
+                menu.category = category;
+                menu.indices()
+            };
+            let mut edges = indices.first().copied().into_iter().chain(indices.last().copied()).collect::<Vec<_>>();
+            edges.dedup();
+            for selected in edges {
+                app.settings_menu.as_mut().unwrap().selected = selected;
+                for (width, height) in [(30, 20), (58, 18), (126, 31)] {
+                    app.handle(Event::Resize(width, height));
+                    let area = app.active_chooser_rect().expect("fixture pane fits Settings");
+                    let layout = app.layout(app.size);
+                    let pane = layout.panes.map_or(layout.body, |panes| panes[app.active_group]);
+                    assert!(area.x >= pane.x && area.right() <= pane.right());
+                    assert!(area.y >= pane.y && area.bottom() <= pane.bottom());
+                    let menu = app.settings_menu.as_ref().unwrap();
+                    assert!(menu.visible_indices(area.height).contains(&selected));
+                    if area.height >= 7 {
+                        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                        terminal.draw(|frame| app.draw(frame)).unwrap();
+                        let buffer = terminal.backend().buffer();
+                        let selected_row = (area.y + 1..area.bottom() - 1).find(|y|
+                            (area.x + 1..area.right() - 1).any(|x| buffer[(x, *y)].symbol() == "›"
+                                && buffer[(x, *y)].bg == theme::HIGHLIGHT));
+                        assert!(selected_row.is_some(), "category {category}, field {selected}, {width}x{height}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn settings_category_switch_keeps_unsaved_edits_and_escape_discards_them() {
         let mut app=App::default();app.input="keep prompt".into();
         let rows=crate::settings::SETTINGS.iter().map(|setting|crate::settings::Row {setting,value:setting.default.into(),stored:setting.default.into(),source:"default".into(),shadowed:false}).collect::<Vec<_>>();

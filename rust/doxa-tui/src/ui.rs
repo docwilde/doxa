@@ -454,9 +454,19 @@ impl SettingsMenu {
         self.rows.get(self.selected).is_some_and(|row| matches!(row.setting.key,
             "engine" | "router_config" | "mermaid_renderer" | "mermaid_renderer_root"))
     }
+    const MAX_PREFLIGHT_ROWS: usize = 5;
+    fn desired_height(&self) -> u16 {
+        // Nine rows cover the borders, heading, action hint and help/note.
+        // Preflight status is wrapped before rendering and capped at five
+        // physical rows. Account for that same cap before pane-height clipping,
+        // so a footer does not consume the category's configured field rows.
+        let footer = if self.has_preflight() { Self::MAX_PREFLIGHT_ROWS } else { 0 };
+        self.indices().len().saturating_add(9).saturating_add(footer)
+            .max(8).min(usize::from(u16::MAX)) as u16
+    }
     fn preflight_rows(&self, height: u16) -> usize {
         // Reserve the header, selected row, action hint and borders first.
-        if self.has_preflight() { usize::from(height.saturating_sub(6)).min(5) } else { 0 }
+        if self.has_preflight() { usize::from(height.saturating_sub(6)).min(Self::MAX_PREFLIGHT_ROWS) } else { 0 }
     }
     fn visible_window(&self, height: u16) -> (Vec<usize>, usize, usize) {
         let indices = self.indices();

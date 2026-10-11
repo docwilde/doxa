@@ -507,7 +507,7 @@ impl App {
         } else if self.delete_confirmation.is_some() {
             6
         } else if let Some(menu) = &self.settings_menu {
-            if menu.has_preflight() { 12 } else { 8 }
+            menu.desired_height()
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
