@@ -5,6 +5,7 @@ use doxa_tui::{history, transport::TranscriptSnapshot};
 use doxa_worktrees::RepoStatus;
 use ratatui::{backend::TestBackend, style::Color, Terminal};
 use serde_json::{json, Value};
+use unicode_width::UnicodeWidthStr;
 
 fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.handle(Event::Key(KeyEvent::new(code, modifiers)));
@@ -599,7 +600,15 @@ fn main() {
     let cells: Vec<Value> = (0..height).flat_map(|y| (0..width).map(move |x| (x,y)))
         .map(|(x,y)| {
             let cell = &terminal.backend().buffer()[(x,y)];
-            json!([cell.symbol(),rgb(cell.fg),rgb(cell.bg),cell.modifier.bits()])
+            // A printed wide glyph paints both terminal cells. Ratatui's
+            // unused continuation cell can retain Reset; it is not a new
+            // independently painted background in the real terminal.
+            let background = if x > 0 {
+                let previous = &terminal.backend().buffer()[(x - 1,y)];
+                if previous.symbol().width() > 1 { previous.bg } else { cell.bg }
+            } else { cell.bg };
+            let background = if background == Color::Reset { doxa_tui::theme::BASE } else { background };
+            json!([cell.symbol(),rgb(cell.fg),rgb(background),cell.modifier.bits()])
         }).collect();
     println!("{}",json!({"version":env!("CARGO_PKG_VERSION"),"width":width,"height":height,"cells":cells}));
 }
