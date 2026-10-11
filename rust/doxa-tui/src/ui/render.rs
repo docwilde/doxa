@@ -732,7 +732,7 @@ impl App {
         let mermaid_selected = menu.rows.get(menu.selected).is_some_and(|row|
             matches!(row.setting.key, "mermaid_renderer" | "mermaid_renderer_root"));
         let router_selected=menu.rows.get(menu.selected).is_some_and(|row|matches!(row.setting.key,"engine"|"router_config"));
-        let preflight_lines = if router_selected {
+        let mut preflight_lines = if router_selected {
             let path=std::path::PathBuf::from(menu.effective_value("router_config"));
             let mut footer=vec![Line::styled(" Ctrl+P: review Jev Router config/accounts/catalogs · no inference",
                 Style::default().fg(theme::ACCENT))];
@@ -751,6 +751,7 @@ impl App {
                 .into_iter().take(3).map(Line::from));
             footer
         } else { Vec::new() };
+        preflight_lines.truncate(menu.preflight_rows(area.height));
         // Keep the action hint and preflight result visible even when a note is long.
         lines.truncate(usize::from(area.height.saturating_sub(3)).saturating_sub(preflight_lines.len()));
         lines.extend(preflight_lines);

@@ -487,6 +487,33 @@ use super::*;
     }
 
     #[test]
+    fn settings_preflight_preserves_selected_row_in_short_menus() {
+        let mut app = App::default();
+        let rows = crate::settings::SETTINGS.iter().map(|setting| crate::settings::Row {
+            setting, value: setting.default.into(), stored: setting.default.into(),
+            source: "default".into(), shadowed: false,
+        }).collect::<Vec<_>>();
+        app.settings_menu = Some(SettingsMenu { rows, selected: 0, category: 0,
+            draft: None, edits: HashMap::new(), engine: "claude".into() });
+        for key in ["engine", "router_config", "mermaid_renderer", "mermaid_renderer_root"] {
+            let menu = app.settings_menu.as_mut().unwrap();
+            menu.selected = menu.rows.iter().position(|row| row.setting.key == key).unwrap();
+            let setting = menu.rows[menu.selected].setting;
+            menu.category = crate::settings::CATEGORIES.iter().position(|category| *category == setting.category).unwrap();
+            for height in [7, 8, 10, 12] {
+                let mut terminal = Terminal::new(TestBackend::new(120, height)).unwrap();
+                terminal.draw(|frame| app.draw_settings_menu(frame, frame.area())).unwrap();
+                let buffer = terminal.backend().buffer();
+                let text = (0..height).map(|y| (0..120).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                    .collect::<Vec<_>>().join("\n");
+                assert!(text.contains(&format!("› {}:", setting.label)), "{key}, height={height}: {text}");
+                let menu = app.settings_menu.as_ref().unwrap();
+                assert!(menu.visible_indices(height).contains(&menu.selected));
+            }
+        }
+    }
+
+    #[test]
     fn settings_category_switch_keeps_unsaved_edits_and_escape_discards_them() {
         let mut app=App::default();app.input="keep prompt".into();
         let rows=crate::settings::SETTINGS.iter().map(|setting|crate::settings::Row {setting,value:setting.default.into(),stored:setting.default.into(),source:"default".into(),shadowed:false}).collect::<Vec<_>>();

@@ -447,9 +447,19 @@ impl SettingsMenu {
         let (indices, start, count) = self.visible_window(height);
         indices.into_iter().skip(start).take(count).collect()
     }
+    fn has_preflight(&self) -> bool {
+        self.rows.get(self.selected).is_some_and(|row| matches!(row.setting.key,
+            "engine" | "router_config" | "mermaid_renderer" | "mermaid_renderer_root"))
+    }
+    fn preflight_rows(&self, height: u16) -> usize {
+        // Reserve the header, selected row, action hint and borders first.
+        if self.has_preflight() { usize::from(height.saturating_sub(6)).min(5) } else { 0 }
+    }
     fn visible_window(&self, height: u16) -> (Vec<usize>, usize, usize) {
         let indices = self.indices();
-        let count = usize::from(height.saturating_sub(if height < 12 { 5 } else { 9 })).max(1);
+        let count = usize::from(height.saturating_sub(if height < 12 { 5 } else { 9 }))
+            .min(usize::from(height.saturating_sub(5)).saturating_sub(self.preflight_rows(height)))
+            .max(1);
         let position = indices
             .iter()
             .position(|i| *i == self.selected)

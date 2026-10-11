@@ -506,8 +506,8 @@ impl App {
                 .clamp(6, 18) as u16
         } else if self.delete_confirmation.is_some() {
             6
-        } else if self.settings_menu.is_some() {
-            8
+        } else if let Some(menu) = &self.settings_menu {
+            if menu.has_preflight() { 12 } else { 8 }
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
