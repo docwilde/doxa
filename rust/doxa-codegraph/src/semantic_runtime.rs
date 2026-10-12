@@ -1391,10 +1391,15 @@ elif args[:2] == ['container', 'inspect']:
 elif args[:1] == ['run']:
     cidfile = pathlib.Path(args[args.index('--cidfile') + 1])
     mode = (root / 'probe-mode').read_text()
-    if mode != 'no_cid': cidfile.write_text((root / 'run-cid').read_text())
     (root / 'run-name').write_text(args[args.index('--name') + 1])
     (root / 'container-active').write_text((root / 'run-cid').read_text())
     (root / 'child.pid.cidpath').write_text(str(cidfile))
+    if mode != 'no_cid':
+        # CID existence admits inspection. Publish complete bytes only after
+        # the fake container name and active record are ready for that probe.
+        staged_cid = cidfile.with_suffix('.pending')
+        staged_cid.write_text((root / 'run-cid').read_text())
+        staged_cid.replace(cidfile)
     target_uri = 'file://' + str(root / 'b.rs')
     lsp_mode = mode if mode in ['change_cid', 'lsp_hang'] else 'ok'
     if lsp_mode == 'lsp_hang': lsp_mode = 'hang'
