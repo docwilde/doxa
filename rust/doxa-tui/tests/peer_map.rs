@@ -52,11 +52,15 @@ fn invalid_event_before_roster_keeps_loading_text() {
 }
 
 #[test]
-fn peer_joined_updates_title_after_traffic_arrives_first() {
+fn peer_joined_updates_title_only_after_live_discovery_confirms_presence() {
     let mut map = PeerMap::default();
     assert!(map.event("owner-a", "peer_sent", &json!({"to":["peer-1"]})));
     assert!(map.event("owner-a", "peer_joined", &json!({"session_id":"peer-1","title":"Planner"})));
+    assert!(!map_screen(&map, "owner-a").contains("Planner"));
+    assert!(map.roster("owner-a", &json!({"ok":true,"peers":[{"session_id":"peer-1"}]})));
+    assert!(map.event("owner-a", "peer_joined", &json!({"session_id":"peer-1","title":"Planner"})));
     assert!(map_screen(&map, "owner-a").contains("Planner"));
+    assert!(map_screen(&map, "owner-a").contains("1 sent"));
 }
 
 #[test]

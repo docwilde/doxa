@@ -1091,10 +1091,29 @@ for line in sys.stdin:
             app.apply_daemon_frame(&json!({"type":"hello","session_id":"owner","engine":"codex"}));
             app.input = "kept draft".into();
             app.input_cursor = app.input.len();
-            app.open_peer_map(0);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame|app.draw(frame)).unwrap();
+            let chip = app.rendered_chip_hits.borrow().as_ref()
+                .and_then(|hits|hits.iter().find(|hit|hit.kind == "peers").cloned());
+            let (column, row) = if let Some(chip) = chip {
+                let point = (chip.rect.x + chip.rect.width / 2, chip.rect.y);
+                app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Down(MouseButton::Left),
+                    column:point.0,row:point.1,modifiers:KeyModifiers::NONE}));
+                point
+            } else {
+                // Tiny terminals can clip chips; keyboard opening must still
+                // allow outside-click dismissal without losing the draft.
+                app.open_peer_map(0);
+                (0, 0)
+            };
             assert!(app.map_modal);
+            if width >= 80 {
+                app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Down(MouseButton::Left),
+                    column:width / 2,row:height / 2,modifiers:KeyModifiers::NONE}));
+                assert!(app.map_modal, "clicks inside the peer menu must keep it open");
+            }
             assert!(app.handle(Event::Mouse(MouseEvent {
-                kind:MouseEventKind::Down(MouseButton::Left),column:0,row:0,modifiers:KeyModifiers::NONE,
+                kind:MouseEventKind::Down(MouseButton::Left),column,row,modifiers:KeyModifiers::NONE,
             })));
             assert!(!app.map_modal);
             assert_eq!(app.focus, Focus::Prompt);
