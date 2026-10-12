@@ -25,6 +25,19 @@ agree-or-correct response against the exact host artifacts. Open questions or
 corrections remain visible as review evidence and require another handoff
 before human dependency release; the text grants no authority.
 
+Pinned `jev:jev-1.13.0` now has a separate independent alignment-supervisor
+adapter, in addition to its message-judge role. It evaluates scrubbed host
+checkpoints through closed alignment, charter-basis and supplied-artifact
+Choices; Rust validates model/usage, probability distributions and citation
+membership, then applies the existing shadow/enforce policy. The frozen
+threshold guards Choice distribution confidence; it is not an accuracy claim.
+Low confidence, contradictory answers or missing supporting citations become
+uncertain. Model verdicts never grant tool approval, certify completion, clear a
+pause or release dependencies. Local synthetic HTTP regressions cover role
+separation, accounting, malformed replies and pre-call bounds. Real Jev
+supervisor quality, calibrated thresholds and live-fleet recovery remain open;
+see [the operator contract](../fleet-supervision.md#jev-as-the-independent-alignment-supervisor).
+
 This plan complements
 [per-session Docker isolation](session-isolation-docker.md). Containers limit
 what a worker can reach; fleet supervision limits what workers can ask one
