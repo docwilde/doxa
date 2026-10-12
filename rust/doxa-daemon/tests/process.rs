@@ -87,6 +87,44 @@ except sqlite3.OperationalError as exc:
 fn native_db_rows(runtime:&Path)->usize {
     native_db_rows_maybe_busy(runtime).expect("SQLite index remains locked")
 }
+// A discovery probe may already be closed when accept returns. Darwin can
+// reject SO_RCVTIMEO on that socket, and accepted streams can inherit the
+// listener's nonblocking mode. Read the same bounded one-line peer protocol
+// with poll instead of setting a socket timeout or waiting for sender EOF.
+fn read_peer_fixture(mut stream: UnixStream) -> String {
+    stream.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut bytes = Vec::new();
+    loop {
+        assert!(Instant::now() < deadline, "peer fixture frame timed out");
+        let mut buf = [0u8; 4096];
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&buf[..n]);
+                assert!(bytes.len() <= doxa_peers::delivery::MAX_FRAME_BYTES, "peer fixture frame exceeded protocol bound");
+                if bytes.contains(&b'\n') { break; }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let mut fd = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                let ready = unsafe { libc::poll(&mut fd, 1, remaining.as_millis().max(1) as i32) };
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted { panic!("peer fixture poll failed: {error}"); }
+                }
+            }
+            Err(error) => panic!("peer fixture read failed: {error}"),
+        }
+    }
+    if !bytes.is_empty() {
+        assert_eq!(bytes.last(), Some(&b'\n'), "incomplete peer fixture frame");
+        assert!(!bytes[..bytes.len()-1].contains(&b'\n'), "multiple peer fixture frames");
+    }
+    String::from_utf8(bytes).unwrap()
+}
+
 struct NativeWriterLock(Child);
 impl NativeWriterLock {
     fn acquire(runtime:&Path)->Self {
@@ -2400,7 +2438,6 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     }
 
     #[test]
-    #[cfg_attr(target_os = "macos", ignore = "issue #197: macOS native LORE finalization reported zero indexed rows; isolate the carrier failure")]
     fn native_vendor_refreshes_private_system_memory_and_indexes_only_on_finalization() {
         for enabled in [true, false] {
             let dir = tempfile::tempdir().unwrap();
@@ -3273,7 +3310,6 @@ fn peers_rpc_fails_closed_when_native_configuration_is_invalid() {
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "issue #197: macOS fixture peer socket read returned EINVAL; delivery still needs isolation")]
 fn native_msg_sends_scrubbed_frame_records_ledger_and_denies_other_scope() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
@@ -3300,12 +3336,8 @@ fn native_msg_sends_scrubbed_frame_records_ledger_and_denies_other_scope() {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             match same_listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream
-                        .set_read_timeout(Some(Duration::from_millis(500)))
-                        .unwrap();
-                    let mut body = String::new();
-                    stream.read_to_string(&mut body).unwrap();
+                Ok((stream, _)) => {
+                    let body = read_peer_fixture(stream);
                     if !body.is_empty() {
                         return body;
                     }
@@ -4389,7 +4421,6 @@ fn native_child_keeps_parent_identity_and_starts_task_without_an_attachment() {
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "issue #197: macOS fixture peer socket read returned EINVAL; delivery still needs isolation")]
 fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
     let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");let python = Path::new("python3");executable(&codex,"#!/bin/sh\nexit 0\n");
     let (first,_)=registry_peer(dir.path(),"first",dir.path().to_str().unwrap(),"first teammate");
@@ -4399,7 +4430,7 @@ fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
         listener.set_nonblocking(true).unwrap();let deadline=Instant::now()+Duration::from_secs(5);
         loop {
             match listener.accept() {
-                Ok((mut stream,_))=>{stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();let mut body=String::new();stream.read_to_string(&mut body).unwrap();if !body.is_empty() { return serde_json::from_str::<Value>(&body).unwrap(); }},
+                Ok((stream,_))=>{let body=read_peer_fixture(stream);if !body.is_empty() { return serde_json::from_str::<Value>(&body).unwrap(); }},
                 Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(5));},
                 Err(error)=>panic!("{error}"),
             }
@@ -4427,8 +4458,8 @@ fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
     }
     assert_eq!(fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap().lines().count(),1);
     foreign.set_nonblocking(true).unwrap();
-    while let Ok((mut stream,_))=foreign.accept() {
-        stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();let mut body=String::new();stream.read_to_string(&mut body).unwrap();
+    while let Ok((stream,_))=foreign.accept() {
+        let body=read_peer_fixture(stream);
         assert!(body.is_empty(),"foreign scope received a message rather than an empty discovery probe");
     }
     send(&mut socket,json!({"type":"call","id":6,"method":"stop","params":{}}));
@@ -4436,7 +4467,6 @@ fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "issue #197: macOS fixture peer socket read returned EINVAL; delivery still needs isolation")]
 fn claude_sdk_mcp_peer_send_uses_full_scoped_ids_and_can_reply_to_received_context() {
     const PEER: &str = "a1234567-89ab-4cde-8123-0123456789ab";
     const SAME_PREFIX: &str = "a1234567-fedc-4ba9-8321-abcdef012345";
@@ -4455,9 +4485,8 @@ fn claude_sdk_mcp_peer_send_uses_full_scoped_ids_and_can_reply_to_received_conte
         while frames.len() < 2 {
             assert!(Instant::now() < deadline, "Claude SDK peer delivery deadline");
             match recipient.accept() {
-                Ok((mut socket, _)) => {
-                    socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-                    let mut body = String::new(); socket.read_to_string(&mut body).unwrap();
+                Ok((socket, _)) => {
+                    let body = read_peer_fixture(socket);
                     if !body.is_empty() { frames.push(serde_json::from_str::<Value>(&body).unwrap()); }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(5)),
@@ -4555,8 +4584,8 @@ def next_peer_call():
     for (path, before) in originals {assert_eq!(fs::read(path).unwrap(), before, "tool query changed another registry owner");}
     for listener in [other, foreign] {
         listener.set_nonblocking(true).unwrap();
-        while let Ok((mut socket, _)) = listener.accept() {
-            socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();let mut body=String::new();socket.read_to_string(&mut body).unwrap();
+        while let Ok((socket, _)) = listener.accept() {
+            let body=read_peer_fixture(socket);
             assert!(body.is_empty(), "prefix/name/foreign target delivered to another peer");
         }
     }
@@ -4886,7 +4915,7 @@ mod engine_known_key_redaction {
     fn codex_fragmented_known_key_item_is_scrubbed_before_display_storage_and_prompt() {
         let dir=tempfile::tempdir().unwrap();private_keys(dir.path());
         let cli=dir.path().join("codex-known-key");
-        executable(&cli,&format!("#!/usr/bin/python3\nimport json,sys\ntext=sys.stdin.read()\nassert all(key not in text for key in [{SAVED:?},{INHERITED:?},{JEV:?}])\nprint(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'safe '+{SAVED:?}+' '+{INHERITED:?}+' '+{JEV:?}}}}}))\n"));
+        executable(&cli,&format!("#!/usr/bin/env python3\nimport json,sys\ntext=sys.stdin.read()\nassert all(key not in text for key in [{SAVED:?},{INHERITED:?},{JEV:?}])\nprint(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'safe '+{SAVED:?}+' '+{INHERITED:?}+' '+{JEV:?}}}}}))\n"));
         let server=codex_appserver_fixture(&cli);
         let source=fs::read_to_string(&server).unwrap();
         let old="                send({'method': 'item/completed', 'params': {'threadId': thread_id, 'turnId': turn_id,\n                      'item': {'type': 'agentMessage', 'id': 'answer-' + str(turn_number), 'text': event['item']['text']}}})";
@@ -4977,7 +5006,7 @@ fn router_stop_and_interrupt_reap_stalled_discovery_and_protected_setup_groups()
             let cwd=dir.path().join("workspace");fs::create_dir(&cwd).unwrap();
             let home=dir.path().join("home");fs::create_dir(&home).unwrap();fs::set_permissions(&home,fs::Permissions::from_mode(0o700)).unwrap();
             let cli=dir.path().join("stalled-cli.py");
-            executable(&cli,&format!(r#"#!/usr/bin/python3
+            executable(&cli,&format!(r#"#!/usr/bin/env python3
 import json,os,pathlib,subprocess,sys,time
 root=pathlib.Path(__file__).parent
 provider={provider:?}
