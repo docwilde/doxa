@@ -901,7 +901,7 @@ impl LoreClient {
         -> Result<CodegraphSnapshot, LoreError> {
         if !Path::new(cwd).is_absolute() || cwd.len() > 4096 || cwd.chars().any(char::is_control)
             || !matches!(query, "file" | "imports" | "calls" | "modules")
-            || path.is_empty() || path.len() > 4096 || !path.ends_with(".rs")
+            || path.is_empty() || path.len() > 4096 || !(path.ends_with(".rs") || path.ends_with(".py"))
             || path.chars().any(char::is_control)
             || !Path::new(path).components().all(|part|
                 matches!(part, std::path::Component::Normal(_))) {
@@ -1781,6 +1781,19 @@ mod codegraph_snapshot_tests {
             "freshness":"requested_source_verified_only","binding":"unknown","graph":graph})
     }
 
+    fn python_response(cwd: &str, path: &str) -> Value {
+        let graph = json!({"scope":cwd,"query":"file","value":path,"status":"ok",
+            "requested_source_sha256":"b".repeat(64),"requested_source_read_unix_ms":1,
+            "coverage":{},"rows":[{"kind":"function","name":"run","path":path}],
+            "edges":[],"module_edges":[]});
+        let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&graph).unwrap()));
+        json!({"status":"current","schema_version":1,
+            "project_key":lore_core::config::project_slug(Path::new(cwd)),
+            "worktree_root":cwd,"query":"file","path":path,"revision":1,
+            "source_sha256":"b".repeat(64),"graph_sha256":digest,
+            "freshness":"requested_source_verified_only","binding":"unknown","graph":graph})
+    }
+
     #[test]
     fn stored_snapshot_requires_exact_scope_source_digest_and_unknown_binding() {
         let cwd = "/owned/codegraph-fixture";
@@ -1812,6 +1825,28 @@ mod codegraph_snapshot_tests {
         }
         assert!(CodegraphSnapshot::parse(json!({"status":"missing","graph":{}}), cwd,
             "modules", "lib.rs").is_err());
+    }
+
+    #[test]
+    fn python_snapshot_response_is_scoped_and_keeps_binding_unknown() {
+        let cwd = "/owned/python-codegraph-fixture";
+        let valid = python_response(cwd, "src/service.py");
+        let CodegraphSnapshot::Current(snapshot) = CodegraphSnapshot::parse(
+            valid.clone(), cwd, "file", "src/service.py").unwrap() else { panic!("missing") };
+        let rendered = snapshot.to_value();
+        assert_eq!(rendered["path"], "src/service.py");
+        assert_eq!(rendered["binding"], "unknown");
+        assert_eq!(rendered["graph"]["rows"][0]["name"], "run");
+
+        let mut cross_worktree = valid.clone();
+        cross_worktree["worktree_root"] = json!("/other/worktree");
+        assert!(CodegraphSnapshot::parse(cross_worktree, cwd, "file", "src/service.py").is_err());
+        let mut wrong_path = valid.clone();
+        wrong_path["path"] = json!("src/other.py");
+        assert!(CodegraphSnapshot::parse(wrong_path, cwd, "file", "src/service.py").is_err());
+        let mut semantic_binding = valid;
+        semantic_binding["binding"] = json!("resolved");
+        assert!(CodegraphSnapshot::parse(semantic_binding, cwd, "file", "src/service.py").is_err());
     }
 
     #[test]

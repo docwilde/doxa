@@ -1,9 +1,10 @@
 #![cfg(unix)]
 
-use doxa_lore::{BeliefAction, BeliefStatus, LoreClient, LoreError, MemoryUsage, PendingDecision, PendingResolution, MAX_FRAME_BYTES};
+use doxa_lore::{BeliefAction, BeliefStatus, CodegraphSnapshot, LoreClient, LoreError, MemoryUsage, PendingDecision, PendingResolution, MAX_FRAME_BYTES};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use sha2::{Digest, Sha256};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -130,6 +131,45 @@ for line in sys.stdin:
         client.snapshot("/repo", "invalid"),
         Err(LoreError::InvalidFrame)
     ));
+}
+
+#[test]
+fn fake_sidecar_python_snapshot_response_is_bounded_and_worktree_scoped() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let graph = serde_json::json!({"scope":cwd,"query":"file","value":"src/service.py","status":"ok",
+        "requested_source_sha256":"c".repeat(64),"requested_source_read_unix_ms":1,
+        "coverage":{},"rows":[],"edges":[],"module_edges":[]});
+    let graph_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&graph).unwrap()));
+    let response = serde_json::json!({"status":"current","schema_version":1,
+        "project_key":lore_core::config::project_slug(Path::new(cwd)),"worktree_root":cwd,
+        "query":"file","path":"src/service.py","revision":3,"source_sha256":"c".repeat(64),
+        "graph_sha256":graph_sha256,"freshness":"requested_source_verified_only",
+        "binding":"unknown","graph":graph});
+    let response_literal = serde_json::to_string(&serde_json::to_string(&response).unwrap()).unwrap();
+    let script = format!(r#"
+import json, sys
+response = json.loads({response_literal})
+print(json.dumps(dict(type='hello', proto=1,
+    capabilities=['scrub','snapshot','codegraph_snapshot_read_v1'])), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    assert req['op'] == 'codegraph_snapshot_read_v1'
+    assert req['query'] == 'file'
+    assert req['path'] == 'src/service.py'
+    print(json.dumps(dict(type='reply', id=req['id'], ok=True, value=response)), flush=True)
+"#);
+    let path = fake(dir.path(), &script);
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+
+    let CodegraphSnapshot::Current(snapshot) = client.codegraph_snapshot(cwd, "file", "src/service.py").unwrap()
+        else { panic!("expected Python snapshot fixture") };
+    assert_eq!(snapshot.path, "src/service.py");
+    assert_eq!(snapshot.to_value()["binding"], "unknown");
+    assert!(matches!(client.codegraph_snapshot(cwd, "file", "../service.py"), Err(LoreError::InvalidFrame)));
+    assert!(matches!(client.codegraph_snapshot(cwd, "file", "service.js"), Err(LoreError::InvalidFrame)));
+    assert!(matches!(client.codegraph_snapshot("/other/worktree", "file", "src/service.py"),
+        Err(LoreError::InvalidFrame)), "a response bound to another worktree must be rejected");
 }
 
 #[test]

@@ -43,24 +43,22 @@ process-group cleanup paths when cancellation is observed.
 
 ## Python snapshots and the pinned LORE service
 
-DOXA keeps the Python snapshot gate closed; its existing Rust snapshot support
-remains enabled. The pinned LORE revision is
+DOXA currently pins LORE revision
 `760e739410d8c5d99e9a74ededd7e719aa47d5b4`, also the current local LORE `main`
-at review time. Its `rust/lore-core/src/codegraph_snapshot.rs::query` rejects
-every requested path not ending in `.rs`, and the read protocol documentation
-describes Rust source paths. DOXA's `LoreClient::codegraph_snapshot` applies the
-same restriction before sending the request. A source-only LORE patch is ready
-on branch `feature/codegraph-python-snapshots` at
-`57e26c7e76b34c924b8045ec6fcfaf89d0b3598c` in a separate local worktree. It
-accepts bounded `.py` paths through the same validator and adds Python
-round-trip, stale-source, and invalid-path tests. All six `codegraph_snapshot`
-tests passed offline in a separate build target; it is not released or pinned.
+at the time of this review. That released service validates requested paths as
+`.rs` only. A LORE 0.62.21 candidate adds bounded `.py` path support; its
+release tag and commit have not yet been verified here. This branch prepares
+the matching bounded `.rs`/`.py` client guard and adds parser, fake-sidecar, and
+native response fixtures for Python round trips, stale source, worktree scope,
+and invalid paths. Bindings remain `unknown`; syntax candidates do not prove
+semantic resolution, and DOXA still exposes no background store operation.
 
-The upstream prerequisite is for the prepared capability to be reviewed and
-released. Only after DOXA updates its dependency pin to that
-released revision should it relax its client guard and cover Python snapshot
-response parsing. Changing the DOXA side alone would still be rejected by the
-pinned LORE service and would leave the stored-snapshot contract unverified.
+This client change is a release-gated follow-up, not support against the
+currently pinned service. Do not integrate it until the root verifies the
+actual LORE 0.62.21 release tag and updates `rust/doxa-lore/Cargo.toml` plus
+`Cargo.lock` to that released commit. After verification, the root will replace
+this note with the exact release tag and commit hash; until then, the pin stays
+at the revision above.
 
 ## Retiring a fleet with unknown review spend
 
