@@ -143,3 +143,28 @@ mod http {
         let started=Instant::now();let out=call_at(&cfg,&prepared,"fixture-key",&flag,&endpoint);stop.join().unwrap();assert_eq!(out.reason,Reason::Cancelled);assert!(out.attempted);assert!(out.router_cost_usd_micros.is_none());assert!(started.elapsed()<Duration::from_millis(200));server.join().unwrap();
     }
 }
+
+#[test]
+fn snap_routing_freezes_model_rates_and_accepts_documented_confidence() {
+    let mut cfg = config(); cfg.jev_model = SUBQ_MODEL.into();
+    cfg.validate().unwrap();
+    let prepared = prepare(&cfg,&input()).unwrap();
+    assert_eq!(prepared.body["model"],SUBQ_MODEL);
+    assert_eq!(cfg.decision().endpoint(),"https://api.subq.ai/v1/systemone");
+    assert_eq!(prepared.reservation_usd_micros,token_cost(prepared.input_token_reservation,0,50_000,0).unwrap());
+    let mut wire = response(); wire["model"]=json!(SUBQ_MODEL); wire["usage"]["output_tokens"]=json!(0);
+    wire["answers"]["target"]["confidence"]=json!(0.9);
+    let out = parse_response(&cfg,&prepared,&wire,1);
+    assert_eq!(out.reason,Reason::Selected); assert_eq!(out.router_cost_usd_micros,Some(5));
+    let mut ledger=Ledger::default(); let hold=reserve(&cfg,&mut ledger,&prepared).unwrap();
+    settle(&mut ledger,&hold,&out).unwrap(); assert!(!ledger.accounting_unknown);
+    let mut changed=cfg.clone(); changed.jev_model=JEV_MODEL.into();
+    assert!(reserve(&changed,&mut Ledger::default(),&prepared).is_err());
+    for (pointer, value) in [("/model",json!("subq-preview")),("/usage/output_tokens",json!(1)),("/answers/target/choice",json!("invented")),("/answers/target/confidence",json!(1.1))] {
+        let mut bad=wire.clone(); *bad.pointer_mut(pointer).unwrap()=value;
+        assert_eq!(parse_response(&cfg,&prepared,&bad,1).reason,Reason::InvalidResponse);
+    }
+    let mut old=serde_json::to_value(config()).unwrap(); let model=old.as_object_mut().unwrap().remove("jev_model").unwrap();
+    old["router_model"]=model;
+    assert_eq!(serde_json::from_value::<Config>(old).unwrap().hash().unwrap(),config().hash().unwrap());
+}

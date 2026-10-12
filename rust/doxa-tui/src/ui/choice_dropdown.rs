@@ -55,7 +55,7 @@ impl App {
                 let menu = self.settings_menu.as_ref()?;
                 let row = menu.rows.get(menu.selected)?;
                 if row.setting.key != key || row.setting.category != settings::CATEGORIES[menu.category]
-                    || row.shadowed || row.setting.read_only || row.setting.kind != settings::Kind::Choice { return None; }
+                    || row.shadowed || row.setting.read_only || (row.setting.kind != settings::Kind::Choice && row.setting.choices.is_empty()) { return None; }
                 Some((row.setting.label.into(), row.setting.choices.iter().map(|s| (*s).into()).collect(), menu.effective_value(key)))
             }
             Owner::NewSession { engine, field, effort_model } => {
@@ -113,7 +113,11 @@ impl App {
             self.notice = "Choices changed; reopen the dropdown".into(); return;
         }
         match dropdown.owner {
-            Owner::Setting(key) => { self.settings_menu.as_mut().unwrap().edits.insert(key, Some(value.clone())); }
+            Owner::Setting(key) => {
+                let menu = self.settings_menu.as_mut().unwrap();
+                if value == "Custom model…" { let current=menu.effective_value(&key); menu.draft=Some((key,current)); }
+                else { menu.edits.insert(key, Some(value.clone())); }
+            }
             Owner::NewSession { field, .. } => {
                 let form = self.new_session.as_mut().unwrap();
                 let vendor = !vendor_models(form.engine).is_empty();

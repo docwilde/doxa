@@ -221,7 +221,8 @@ pub fn router_config_path(explicit: Option<&Path>) -> io::Result<PathBuf> {
 
 pub fn router_config(explicit: Option<&Path>) -> io::Result<(PathBuf,doxa_router::Config)> {
     let path=router_config_path(explicit)?;
-    let config=doxa_router::Config::load(&path).map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
+    let model=configured_string("router_model","DOXA_ROUTER_MODEL",config().as_ref());
+    let config=doxa_router::Config::load_with_model(&path,model.as_deref()).map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
     Ok((path,config))
 }
 
@@ -540,6 +541,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
                 return Err(invalid("router model must be auto or an exact configured target ID"));
             }
             command.args(["--engine","router","--router-config"]).arg(path);
+            command.env("DOXA_ROUTER_MODEL", &config.jev_model);
             if config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Codex) {
                 let executable=if options.codex_bin.is_some(){Some(codex_executable(options)?)}else{codex_executable(options).ok()};
                 if let Some(path)=executable {command.arg("--codex-bin").arg(path);}

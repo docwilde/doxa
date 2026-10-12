@@ -16,26 +16,31 @@ static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialStatus { Saved, Environment, Missing }
 
-/// Search credentials share the protected store and its workspace exclusions.
+/// Search and decision credentials share the protected store and its workspace exclusions.
 /// Their inherited environment values take precedence over saved values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SearchProvider { Tavily, Firecrawl, Exa, Brave }
-impl SearchProvider {
+pub enum ApiProvider { Tavily, Firecrawl, Exa, Brave, Jev, Subq }
+/// Compatibility name for the original search credential API.
+pub type SearchProvider = ApiProvider;
+impl ApiProvider {
     pub const ALL: [Self; 4] = [Self::Tavily, Self::Firecrawl, Self::Exa, Self::Brave];
+    pub const ALL_KEYS: [Self; 6] = [Self::Tavily, Self::Firecrawl, Self::Exa, Self::Brave, Self::Jev, Self::Subq];
     pub fn env_var(self) -> &'static str { match self {
         Self::Tavily=>"TAVILY_API_KEY", Self::Firecrawl=>"FIRECRAWL_API_KEY",
         Self::Exa=>"EXA_API_KEY", Self::Brave=>"BRAVE_API_KEY",
+        Self::Jev=>"TYPESAFE_API_KEY", Self::Subq=>"SUBQ_API_KEY",
     } }
     pub fn store_key(self) -> &'static str { match self {
-        Self::Tavily=>"tavily", Self::Firecrawl=>"firecrawl", Self::Exa=>"exa", Self::Brave=>"brave",
+        Self::Tavily=>"tavily", Self::Firecrawl=>"firecrawl", Self::Exa=>"exa", Self::Brave=>"brave", Self::Jev=>"jev", Self::Subq=>"subq",
     } }
     pub fn label(self) -> &'static str { match self {
-        Self::Tavily=>"Tavily", Self::Firecrawl=>"Firecrawl", Self::Exa=>"Exa", Self::Brave=>"Brave Search",
+        Self::Tavily=>"Tavily", Self::Firecrawl=>"Firecrawl", Self::Exa=>"Exa", Self::Brave=>"Brave Search", Self::Jev=>"Jev", Self::Subq=>"SubQ Snap",
     } }
-    pub fn from_env_var(name: &str) -> Option<Self> { Self::ALL.into_iter().find(|provider|provider.env_var()==name) }
-    pub fn from_setting_key(name: &str) -> Option<Self> { Self::ALL.into_iter().find(|provider|match provider {
+    pub fn from_env_var(name: &str) -> Option<Self> { Self::ALL_KEYS.into_iter().find(|provider|provider.env_var()==name) }
+    pub fn from_setting_key(name: &str) -> Option<Self> { Self::ALL_KEYS.into_iter().find(|provider|match provider {
         Self::Tavily=>name=="tavily_api_key", Self::Firecrawl=>name=="firecrawl_api_key",
         Self::Exa=>name=="exa_api_key", Self::Brave=>name=="brave_api_key",
+        Self::Jev=>name=="jev_api_key", Self::Subq=>name=="subq_api_key",
     }) }
 }
 
@@ -149,7 +154,7 @@ impl Store {
             let value: Value = serde_json::from_slice(&bytes).map_err(|_| error(io::ErrorKind::InvalidData))?;
             values = value.as_object().cloned().ok_or_else(|| error(io::ErrorKind::InvalidData))?;
             for (vendor, value) in &values {
-                if !matches!(vendor.as_str(), "deepseek" | "glm" | "tavily" | "firecrawl" | "exa" | "brave") || value.as_str().is_none_or(|k| valid_key(k).is_err() || k.trim() != k) {
+                if !matches!(vendor.as_str(), "deepseek" | "glm" | "tavily" | "firecrawl" | "exa" | "brave" | "jev" | "subq") || value.as_str().is_none_or(|k| valid_key(k).is_err() || k.trim() != k) {
                     return Err(error(io::ErrorKind::InvalidData));
                 }
             }
@@ -213,7 +218,7 @@ pub fn remove(vendor: Vendor) -> io::Result<()> {
 /// an inherited key is available. No key is retained by a client struct.
 pub fn resolve(vendor: Vendor) -> io::Result<Option<String>> { clean(saved(vendor).map(|key| key.or_else(|| environment(vendor)))) }
 
-fn search_environment(provider: SearchProvider) -> io::Result<Option<String>> {
+fn search_environment(provider: ApiProvider) -> io::Result<Option<String>> {
     match std::env::var(provider.env_var()) {
         Ok(value) if value.is_empty()=>Ok(None),
         Ok(value)=>valid_key(&value).map(|key|Some(key.to_owned())),
@@ -221,7 +226,7 @@ fn search_environment(provider: SearchProvider) -> io::Result<Option<String>> {
         Err(_)=>Err(error(io::ErrorKind::InvalidInput)),
     }
 }
-pub fn search_status(provider: SearchProvider) -> io::Result<CredentialStatus> {
+pub fn search_status(provider: ApiProvider) -> io::Result<CredentialStatus> {
     clean((|| {
         let store=Store::open(&home()?,false)?;
         Ok(if search_environment(provider)?.is_some() { CredentialStatus::Environment }
@@ -230,10 +235,10 @@ pub fn search_status(provider: SearchProvider) -> io::Result<CredentialStatus> {
     })())
 }
 /// One protected store read for the Settings catalog; only source enums leave.
-pub fn search_status_all() -> io::Result<Vec<(SearchProvider,CredentialStatus)>> {
+pub fn search_status_all() -> io::Result<Vec<(ApiProvider,CredentialStatus)>> {
     clean((|| {
         let store=Store::open(&home()?,false)?;
-        SearchProvider::ALL.into_iter().map(|provider| {
+        ApiProvider::ALL_KEYS.into_iter().map(|provider| {
             let status=if search_environment(provider)?.is_some() {CredentialStatus::Environment}
                 else if store.as_ref().is_some_and(|store|store.values.contains_key(provider.store_key())) {CredentialStatus::Saved}
                 else {CredentialStatus::Missing};
@@ -243,14 +248,14 @@ pub fn search_status_all() -> io::Result<Vec<(SearchProvider,CredentialStatus)>>
 }
 /// A fresh resolution; an invalid environment or unsafe private store fails
 /// closed. No saved value silently replaces an invalid environment value.
-pub fn search_resolve(provider: SearchProvider) -> io::Result<Option<String>> {
+pub fn search_resolve(provider: ApiProvider) -> io::Result<Option<String>> {
     clean((|| {
         let store=Store::open(&home()?,false)?;
         Ok(search_environment(provider)?.or_else(||store.as_ref().and_then(|store|
             store.values.get(provider.store_key()).and_then(Value::as_str).map(str::to_owned))))
     })())
 }
-pub fn search_save(provider: SearchProvider, value: &str) -> io::Result<()> {
+pub fn search_save(provider: ApiProvider, value: &str) -> io::Result<()> {
     clean((|| {
         if search_environment(provider)?.is_some() { return Err(private_error()); }
         let key=valid_key(value)?;
@@ -259,7 +264,7 @@ pub fn search_save(provider: SearchProvider, value: &str) -> io::Result<()> {
         store.write()
     })())
 }
-pub fn search_remove(provider: SearchProvider) -> io::Result<()> {
+pub fn search_remove(provider: ApiProvider) -> io::Result<()> {
     clean((|| {
         if search_environment(provider)?.is_some() { return Err(private_error()); }
         if let Some(mut store)=Store::open(&home()?,false)? {
@@ -278,12 +283,9 @@ pub(crate) fn known_keys() -> io::Result<Vec<String>> {
             let saved = store.as_ref().and_then(|s| s.values.get(vendor.engine_id())).and_then(Value::as_str).map(str::to_owned);
             saved.into_iter().chain(environment(vendor))
         }).collect();
-        for provider in SearchProvider::ALL {
+        for provider in ApiProvider::ALL_KEYS {
             if let Some(value)=store.as_ref().and_then(|store|store.values.get(provider.store_key())).and_then(Value::as_str) { keys.push(value.to_owned()); }
             if let Some(value)=search_environment(provider)? { keys.push(value); }
-        }
-        if let Ok(value) = std::env::var("TYPESAFE_API_KEY") {
-            if let Ok(key) = valid_key(&value) { keys.push(key.to_owned()); }
         }
         expand_url_variants(&mut keys);
         keys.sort_by(|left,right|right.len().cmp(&left.len()).then_with(||left.cmp(right)));
@@ -398,7 +400,7 @@ pub(crate) mod tests {
     pub(crate) fn fixture() -> (EnvironmentGuard, tempfile::TempDir) {
         let lock = ENV_LOCK.lock().unwrap();
         // Opaque snapshots are restored only, never resolved/asserted/displayed.
-        let previous = ["DOXA_HOME", "DEEPSEEK_API_KEY", "ZAI_API_KEY", "TYPESAFE_API_KEY", "TAVILY_API_KEY", "FIRECRAWL_API_KEY", "EXA_API_KEY", "BRAVE_API_KEY"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
+        let previous = ["DOXA_HOME", "DEEPSEEK_API_KEY", "ZAI_API_KEY", "TYPESAFE_API_KEY", "SUBQ_API_KEY", "TAVILY_API_KEY", "FIRECRAWL_API_KEY", "EXA_API_KEY", "BRAVE_API_KEY"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
         let guard = EnvironmentGuard { _lock: lock, previous };
         let dir = tempfile::tempdir().unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -407,14 +409,14 @@ pub(crate) mod tests {
         std::env::set_var("DEEPSEEK_API_KEY", "inherited-deepseek-fixture");
         std::env::set_var("ZAI_API_KEY", "inherited-zai-fixture");
         std::env::set_var("TYPESAFE_API_KEY", "inherited-typesafe-fixture");
-        for provider in SearchProvider::ALL { std::env::remove_var(provider.env_var()); }
+        for provider in ApiProvider::ALL_KEYS { std::env::remove_var(provider.env_var()); }
         (guard, dir)
     }
     #[test]
     fn search_namespace_has_environment_precedence_and_global_redaction() {
         let (_guard,dir)=fixture();
         save(Vendor::Glm,"saved-zai-fixture").unwrap();
-        for provider in SearchProvider::ALL {
+        for provider in ApiProvider::ALL_KEYS {
             assert_eq!(search_status(provider).unwrap(),CredentialStatus::Missing);
             let saved=format!("saved-{}-fixture",provider.store_key());
             let inherited=format!("inherited-{}-fixture",provider.store_key());
@@ -444,7 +446,7 @@ pub(crate) mod tests {
     #[test]
     fn raw_and_percent_encoded_reflections_are_scrubbed_without_exposing_values() {
         let (_guard,_dir)=fixture();
-        search_save(SearchProvider::Exa,"fixture+search/secret=opaque").unwrap();
+        search_save(ApiProvider::Exa,"fixture+search/secret=opaque").unwrap();
         let upper="fixture%2Bsearch%2Fsecret%3Dopaque";
         let lower="fixture%2bsearch%2fsecret%3dopaque";
         assert_eq!(redact(&format!("raw=fixture+search/secret=opaque url={upper} lower={lower}")).unwrap(),"raw=*** url=*** lower=***");
@@ -459,8 +461,8 @@ pub(crate) mod tests {
         std::env::set_var("TAVILY_API_KEY","synthetic-tavily-fixture");
         fs::write(dir.path().join(FILE_NAME),"{}").unwrap();
         fs::set_permissions(dir.path().join(FILE_NAME),fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(search_resolve(SearchProvider::Tavily).is_err());
-        assert!(search_status(SearchProvider::Tavily).is_err());
+        assert!(search_resolve(ApiProvider::Tavily).is_err());
+        assert!(search_status(ApiProvider::Tavily).is_err());
         assert!(redact("synthetic-tavily-fixture").is_err());
     }
     #[test]
@@ -571,6 +573,7 @@ pub(crate) mod tests {
         let (_guard, dir) = fixture();
         save(Vendor::DeepSeek, "saved-deepseek-fixture").unwrap();
         save(Vendor::Glm, "saved-zai-fixture").unwrap();
+        std::env::set_var("TYPESAFE_API_KEY", "inherited-typesafe-fixture");
         let text = "saved-deepseek-fixture inherited-deepseek-fixture saved-zai-fixture inherited-zai-fixture inherited-typesafe-fixture ordinary";
         assert_eq!(redact(text).unwrap(), "*** *** *** *** *** ordinary");
         assert!(is_credential_file(&File::open(dir.path().join(FILE_NAME)).unwrap()).unwrap());

@@ -2,13 +2,13 @@
 //! Settings draft, provider prompt, debug output or asynchronous result.
 use super::{App, credential_editor};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use doxa_vendors::credentials::{self, CredentialStatus, SearchProvider};
+use doxa_vendors::credentials::{self, CredentialStatus, ApiProvider};
 use sha2::{Digest, Sha256};
 use std::{path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}}, time::Duration};
 
 pub(super) struct SecretEdit {
     pub token: u64,
-    provider: SearchProvider,
+    provider: ApiProvider,
     owner: (usize, String),
     buffer: credential_editor::Buffer,
 }
@@ -67,7 +67,7 @@ mod tests {
         assert!(!app.settings_menu.as_ref().unwrap().edits.contains_key("tavily_api_key"));
         key(&mut app,KeyCode::Enter);
         assert!(app.mcp_secret.is_none());
-        assert_eq!(credentials::search_resolve(SearchProvider::Tavily).unwrap().as_deref(),Some(secret));
+        assert_eq!(credentials::search_resolve(ApiProvider::Tavily).unwrap().as_deref(),Some(secret));
         assert!(!crate::operations::settings_report().unwrap().contains(secret));
         let config_path=crate::settings::config_path().unwrap();
         assert!(!std::fs::read_to_string(&config_path).unwrap_or_default().contains(secret));
@@ -79,7 +79,7 @@ mod tests {
         assert!(app.notice.contains("Environment"));
         assert!(!crate::operations::settings_report().unwrap().contains("fixture-environment-tavily"));
         std::env::remove_var("TAVILY_API_KEY");app.open_settings_menu();key(&mut app,KeyCode::Char('0'));select(&mut app,"tavily_api_key");
-        key(&mut app,KeyCode::Delete);assert_eq!(credentials::search_status(SearchProvider::Tavily).unwrap(),CredentialStatus::Missing);
+        key(&mut app,KeyCode::Delete);assert_eq!(credentials::search_status(ApiProvider::Tavily).unwrap(),CredentialStatus::Missing);
     }
     #[test]
     fn mcp_secret_owner_change_resize_and_late_clipboard_discard_input() {
@@ -97,7 +97,7 @@ mod tests {
         app.open_settings_menu();key(&mut app,KeyCode::Char('0'));select(&mut app,"exa_api_key");key(&mut app,KeyCode::Enter);
         app.handle(Event::Paste("fixture-resize-exa".into()));app.handle(Event::Resize(20,5));
         assert!(app.mcp_secret.is_none());assert!(app.settings_menu.is_none());
-        assert_eq!(credentials::search_status(SearchProvider::Exa).unwrap(),CredentialStatus::Missing);
+        assert_eq!(credentials::search_status(ApiProvider::Exa).unwrap(),CredentialStatus::Missing);
     }
     #[test]
     fn mcp_probe_results_are_bound_to_owner_and_path() {
@@ -242,7 +242,7 @@ async fn inspect(path: &Path, cwd: &Path, cancel: Arc<AtomicBool>) -> Result<Rep
 
 impl App {
     pub(super) fn poll_mcp_config_view(&mut self)->bool {
-        let selected=self.settings_menu.as_ref().filter(|menu|crate::settings::CATEGORIES[menu.category]=="MCP" && menu.draft.is_none())
+        let selected=self.settings_menu.as_ref().filter(|menu|row.setting.category==crate::settings::CATEGORIES[menu.category] && menu.draft.is_none())
             .map(|menu|(self.prompt_owner(),PathBuf::from(menu.effective_value("mcp_config"))));
         if let Some(view)=self.mcp_config_view.as_mut() {
             if let ConfigViewState::Running(receiver)=&view.state {
@@ -265,7 +265,7 @@ impl App {
         self.mcp_config_view=Some(ConfigView {owner,path,state:ConfigViewState::Running(receiver)});true
     }
     pub(super) fn mcp_page_key(&mut self,key:KeyEvent)->bool {
-        if !self.settings_menu.as_ref().is_some_and(|menu|crate::settings::CATEGORIES[menu.category]=="MCP" && menu.draft.is_none()) {return false;}
+        if !self.settings_menu.as_ref().is_some_and(|menu|row.setting.category==crate::settings::CATEGORIES[menu.category] && menu.draft.is_none()) {return false;}
         match key.code {
             KeyCode::PageUp=>self.mcp_server_page=self.mcp_server_page.saturating_sub(1),
             KeyCode::PageDown=>self.mcp_server_page=(self.mcp_server_page+1).min(15),
@@ -282,8 +282,8 @@ impl App {
         self.mcp_secret.as_ref().is_some_and(|secret|secret.owner==self.prompt_owner()
             && !std::env::var_os(secret.provider.env_var()).is_some_and(|value|!value.is_empty())
             && self.settings_menu.as_ref().is_some_and(|menu|menu.rows.get(menu.selected)
-                .is_some_and(|row|SearchProvider::from_setting_key(row.setting.key)==Some(secret.provider)
-                    && crate::settings::CATEGORIES[menu.category]=="MCP")))
+                .is_some_and(|row|ApiProvider::from_setting_key(row.setting.key)==Some(secret.provider)
+                    && row.setting.category==crate::settings::CATEGORIES[menu.category])))
     }
     pub(super) fn retire_mcp_if_changed(&mut self) {
         if self.mcp_secret.is_some() && !self.mcp_secret_current() {self.mcp_secret=None;}
@@ -292,10 +292,10 @@ impl App {
             self.mcp_probe.as_ref().unwrap().cancel.store(true,Ordering::SeqCst);
         }
     }
-    pub(super) fn start_mcp_secret(&mut self, provider: SearchProvider) {
+    pub(super) fn start_mcp_secret(&mut self, provider: ApiProvider) {
         match credentials::search_status(provider) {
             Ok(CredentialStatus::Environment)=>{self.notice=format!("{} is environment-owned; unset {} to edit",provider.label(),provider.env_var());return;},
-            Err(_)=>{self.notice="Private search credential store unavailable".into();return;},
+            Err(_)=>{self.notice="Private API credential store unavailable".into();return;},
             _=>{},
         }
         self.mcp_secret=Some(SecretEdit {token:credential_editor::next_token(),provider,
@@ -303,10 +303,10 @@ impl App {
         self.choice_dropdown=None;
         self.notice="Masked key editor · Enter saves privately · Esc discards".into();
     }
-    pub(super) fn remove_mcp_secret(&mut self, provider: SearchProvider) {
+    pub(super) fn remove_mcp_secret(&mut self, provider: ApiProvider) {
         match credentials::search_remove(provider) {
-            Ok(())=>{self.refresh_search_rows();self.notice="Saved search key removed".into();},
-            Err(_)=>self.notice="Search key unchanged; environment ownership or private store prevents removal".into(),
+            Ok(())=>{self.refresh_search_rows();self.notice="Saved API key removed".into();},
+            Err(_)=>self.notice="API key unchanged; environment ownership or private store prevents removal".into(),
         }
     }
     fn refresh_search_rows(&mut self) {
@@ -321,7 +321,7 @@ impl App {
     }
     pub(super) fn mcp_secret_mask(&self,key:&str)->Option<String> {
         self.mcp_secret.as_ref().filter(|secret|self.mcp_secret_current()
-            && SearchProvider::from_setting_key(key)==Some(secret.provider)).map(|secret| {
+            && ApiProvider::from_setting_key(key)==Some(secret.provider)).map(|secret| {
                 let mask=secret.buffer.mask();if mask.is_empty() {"(enter key · masked)".into()} else {mask}
             })
     }

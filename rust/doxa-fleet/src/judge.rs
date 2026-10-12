@@ -1,10 +1,12 @@
 //! Stateless, no-tools HTTP adapters. Inputs/outputs are bounded and provider
 //! errors never become model instructions or policy authority.
-mod jev_supervisor;
+mod decision_supervisor;
 mod strict;
 #[cfg(test)]
-mod jev_supervisor_tests;
+#[path = "judge/jev_supervisor_tests.rs"]
+mod decision_supervisor_tests;
 use crate::{hash, invalid, transaction, Context, SemanticVerdict, SupervisorVerdict, MAX_BODY};
+use doxa_vendors::decisions::DecisionModel;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{io, time::{Duration,Instant}};
@@ -19,23 +21,26 @@ impl Model {
     pub fn parse(value:&str)->io::Result<Self>{
         let value=value.strip_prefix("llm:").unwrap_or(value);
         let (provider,model)=value.split_once(':').ok_or_else(||invalid("review model requires provider:model"))?;
-        if !matches!(provider,"claude"|"codex"|"deepseek"|"glm"|"jev")||model.is_empty()||model.len()>128||model.chars().any(char::is_control){return Err(invalid("unsupported independent review model"));}
+        if !matches!(provider,"claude"|"codex"|"deepseek"|"glm"|"jev"|"subq")||model.is_empty()||model.len()>128||model.chars().any(char::is_control){return Err(invalid("unsupported independent review model"));}
+        if provider == "subq" && model != "subq-snap-preview" { return Err(invalid("SubQ decisions require subq:subq-snap-preview")); }
         Ok(Self{provider:provider.into(),model:model.into()})
     }
     pub fn display(&self)->String{format!("{}:{}",self.provider,self.model)}
     pub fn validate_supervisor(&self)->io::Result<()> {
         if Self::parse(&self.display())? != *self { return Err(invalid("invalid independent supervisor model")); }
-        if self.provider=="jev" && self.model!=jev_supervisor::MODEL {
+        if self.provider=="jev" && self.model!="jev-1.13.0" {
             return Err(invalid("Jev alignment supervision requires pinned jev:jev-1.13.0"));
         }
         Ok(())
     }
+    fn is_decision(&self) -> bool { matches!(self.provider.as_str(), "jev" | "subq") }
     fn service(&self)->(&'static str,&'static str){match self.provider.as_str(){
         "claude"=>("https://api.anthropic.com/v1/messages","ANTHROPIC_API_KEY"),
         "codex"=>("https://api.openai.com/v1/responses","OPENAI_API_KEY"),
         "deepseek"=>("https://api.deepseek.com/chat/completions","DEEPSEEK_API_KEY"),
         "glm"=>("https://api.z.ai/api/paas/v4/chat/completions","ZAI_API_KEY"),
         "jev"=>("https://api.typesafe.ai/v1/systemone","TYPESAFE_API_KEY"),
+        "subq"=>("https://api.subq.ai/v1/systemone","SUBQ_API_KEY"),
         _=>("",""),
     }}
 }
@@ -54,13 +59,13 @@ pub fn request(model:&Model,instructions:&str,input:&Value)->io::Result<Value>{
     request_with_threshold(model,instructions,input,0.5)
 }
 fn request_with_threshold(model:&Model,instructions:&str,input:&Value,threshold:f64)->io::Result<Value>{
-    if model.provider=="jev" && jev_supervisor::selected(instructions) {
-        return jev_supervisor::request(model,input,threshold);
+    if model.is_decision() && decision_supervisor::selected(instructions) {
+        return decision_supervisor::request(model,input,threshold);
     }
     if serde_json::to_vec(input)?.len()>MAX_INPUT{return Err(invalid("review input exceeds bound"));}
     let text=serde_json::to_string(input)?;
     Ok(match model.provider.as_str(){
-        "jev"=>{let questions=NOUL_FIELDS.iter().map(|(key,question)|((*key).to_owned(),json!({"type":"noul","instructions":question}))).collect::<serde_json::Map<_,_>>();json!({"model":model.model,"state":input,"questions":questions})},
+        "jev" | "subq"=>{let questions=NOUL_FIELDS.iter().map(|(key,question)|((*key).to_owned(),json!({"type":"noul","instructions":question}))).collect::<serde_json::Map<_,_>>();json!({"model":model.model,"state":input,"questions":questions})},
         "claude"=>json!({"model":model.model,"max_tokens":OUTPUT_TOKENS,"system":instructions,"messages":[{"role":"user","content":text}]}),
         "codex"=>json!({"model":model.model,"max_output_tokens":OUTPUT_TOKENS,"store":false,"instructions":instructions,"input":text,"tools":[]}),
         _=>json!({"model":model.model,"max_tokens":OUTPUT_TOKENS,"stream":false,"messages":[{"role":"system","content":instructions},{"role":"user","content":text}],"response_format":{"type":"json_object"}}),
@@ -72,7 +77,7 @@ fn request_with_threshold(model:&Model,instructions:&str,input:&Value,threshold:
 fn reserve(context:&Context,model:&Model,request:&Value)->io::Result<(f64,f64,f64)>{
     let input_bound=serde_json::to_vec(request)?.len() as f64;
     if input_bound>MAX_INPUT as f64+8_000.0{return Err(invalid("review request exceeds token bound"));}
-    let (input_rate,output_rate)=if model.provider=="jev"&&(model.model=="jev-1.13.0"){(0.042,0.0)}else{(context.review.input_usd_per_million,context.review.output_usd_per_million)};
+    let (input_rate,output_rate)=if let Some(decision) = DecisionModel::parse(&model.model).filter(|decision| decision.provider() == model.provider) {(decision.input_usd_micros_per_million() as f64 / 1_000_000.0,0.0)}else{(context.review.input_usd_per_million,context.review.output_usd_per_million)};
     let cost=(input_bound*input_rate+OUTPUT_TOKENS as f64*output_rate)/1_000_000.0;
     transaction(context,|state|{
         if state.accounting_unknown{state.paused=true;return Err(invalid("independent review spend is unknown; reconcile before retry"));}
@@ -86,6 +91,8 @@ fn credential(model: &Model) -> io::Result<String> {
     let resolved = match model.provider.as_str() {
         "deepseek" => doxa_vendors::credentials::resolve(doxa_vendors::Vendor::DeepSeek),
         "glm" => doxa_vendors::credentials::resolve(doxa_vendors::Vendor::Glm),
+        "jev" => doxa_vendors::credentials::search_resolve(doxa_vendors::credentials::ApiProvider::Jev),
+        "subq" => doxa_vendors::credentials::search_resolve(doxa_vendors::credentials::ApiProvider::Subq),
         _ => Ok(std::env::var(model.service().1).ok()),
     }.map_err(|_| invalid("independent review credential unavailable"))?;
     resolved.filter(|key| (8..=4096).contains(&key.len()) && key.bytes().all(|byte| byte.is_ascii_graphic()))
@@ -138,7 +145,7 @@ fn call_at(model:&Model,endpoint:&str,key:&str,body:&Value)->io::Result<Response
         if !response.status().is_success(){return Err(invalid("independent review service refused"));}
         if response.content_length().is_some_and(|n|n>MAX_OUTPUT as u64){return Err(invalid("review response exceeds bound"));}
         let mut raw=Vec::new();while let Some(chunk)=response.chunk().await.map_err(|_|invalid("invalid review response"))?{raw.extend_from_slice(&chunk);if raw.len()>MAX_OUTPUT{return Err(invalid("review response exceeds bound"));}}
-        if model.provider=="jev" && jev_supervisor::is_request(body) {
+        if model.is_decision() {
             strict::parse(&raw).map_err(|_|invalid("invalid or duplicate Jev supervisor JSON"))
         } else { serde_json::from_slice(&raw).map_err(|_|invalid("invalid review response JSON")) }
     })?;
@@ -150,10 +157,11 @@ pub fn parse_response(model:&Model,value:&Value,latency_ms:u128)->io::Result<Res
 fn parse_response_for_request(model:&Model,value:&Value,latency_ms:u128,request:Option<&Value>)->io::Result<Response>{
     let usage=&value["usage"];
     let (result,input_tokens,output_tokens)=match model.provider.as_str(){
-        "jev" if request.is_some_and(jev_supervisor::is_request)=>{
-            (jev_supervisor::result(model,value,request.unwrap())?,usage["input_tokens"].as_u64(),usage["output_tokens"].as_u64())
+        "jev" | "subq" if request.is_some_and(decision_supervisor::is_request)=>{
+            (decision_supervisor::result(model,value,request.unwrap())?,usage["input_tokens"].as_u64(),usage["output_tokens"].as_u64())
         },
-        "jev"=>{
+        "jev" | "subq"=>{
+            if model.provider == "subq" && (value["model"] != model.model || usage["input_tokens"].as_u64().is_none_or(|n| n == 0) || usage["output_tokens"] != 0) { return Err(invalid("invalid pinned SubQ model or usage")); }
             let answers=value["answers"].as_object().filter(|rows|rows.len()==5).ok_or_else(||invalid("invalid Jev answer set"))?;
             let mut result=serde_json::Map::new();for (name,_) in NOUL_FIELDS{let row=answers.get(name).ok_or_else(||invalid("missing Jev answer"))?;if row["type"]!="noul"||row.as_object().is_none_or(|fields|fields.len()!=2){return Err(invalid("invalid Jev answer type"));}let score=row["noul"].as_f64().filter(|score|score.is_finite()&&(0.0..=1.0).contains(score)).ok_or_else(||invalid("invalid Jev probability"))?;result.insert(name.into(),json!(score));}
             (Value::Object(result),usage["input_tokens"].as_u64(),usage["output_tokens"].as_u64())
@@ -179,8 +187,8 @@ pub fn supervise(context:&Context,input:&Value)->Result<SupervisorVerdict,String
     let result=(||{
         let model=context.review.supervisor.as_ref().ok_or_else(||invalid("alignment supervisor not selected"))?;
         model.validate_supervisor()?;
-        if model.provider=="jev" {
-            let ids=jev_supervisor::evidence_ids(input)?;
+        if model.is_decision() {
+            let ids=decision_supervisor::evidence_ids(input)?;
             transaction(context,|state| if ids.iter().any(|id|!state.artifacts.contains_key(id)) {
                 Err(invalid("supervisor snapshot contains non-host evidence"))
             } else {Ok(())})?;

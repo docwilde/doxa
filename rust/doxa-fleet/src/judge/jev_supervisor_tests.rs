@@ -113,7 +113,7 @@ fn jev_low_confidence_contradictory_uncited_and_empty_snapshot_decisions_are_unc
     for (alignment,basis,evidence) in [("drifted","task_scope","none"),("blocked","evidence","none"),
         ("aligned","authority","host-checkpoint"),("aligned","within_charter","none")] {
         let raw=response(&body,alignment,basis,evidence);
-        let verdict=jev_supervisor::result(context.review.supervisor.as_ref().unwrap(),&raw,&body).unwrap();
+        let verdict=decision_supervisor::result(context.review.supervisor.as_ref().unwrap(),&raw,&body).unwrap();
         assert_eq!(verdict["verdict"],"uncertain");
         assert!(verdict["reason"].as_str().unwrap().contains("human review"));
     }
@@ -125,12 +125,12 @@ fn jev_low_confidence_contradictory_uncited_and_empty_snapshot_decisions_are_unc
     assert_eq!(crate::apply_supervisor(&context,serde_json::from_value(result.result).map_err(|_|"fixture".into())).unwrap().supervisor_status,"uncertain");
     assert!(!state(&context).accounting_unknown,"uncertainty with verified usage has a known charge subtotal");
     let mut empty=snapshot;empty["artifacts"]=json!([]);let empty_body=supervisor_request(&context,&empty);
-    assert_eq!(jev_supervisor::result(context.review.supervisor.as_ref().unwrap(),&response(&empty_body,"aligned","within_charter","none"),&empty_body).unwrap()["verdict"],"uncertain");
+    assert_eq!(decision_supervisor::result(context.review.supervisor.as_ref().unwrap(),&response(&empty_body,"aligned","within_charter","none"),&empty_body).unwrap()["verdict"],"uncertain");
     let mut zero_guard=empty_body.clone();zero_guard["questions"]["alignment"]["instructions"]["minimum_confidence"]=json!(0.0);
     let mut tied=response(&zero_guard,"aligned","within_charter","none");
     tied["answers"]["alignment"]["probabilities"]=json!({"aligned":0.5,"uncertain":0.5,"drifted":0.0,"blocked":0.0});
     tied["answers"]["alignment"]["confidence"]=json!(1.0/3.0);
-    assert_eq!(jev_supervisor::result(context.review.supervisor.as_ref().unwrap(),&tied,&zero_guard).unwrap()["verdict"],"uncertain");
+    assert_eq!(decision_supervisor::result(context.review.supervisor.as_ref().unwrap(),&tied,&zero_guard).unwrap()["verdict"],"uncertain");
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn jev_malformed_outage_and_unsupplied_citations_retain_unknown_reservations() {
 }
 
 #[test]
-fn jev_supervisor_budget_and_call_refusals_never_open_http() {
+fn decision_supervisor_budget_and_call_refusals_never_open_http() {
     for calls_exhausted in [false,true] {
         let (_dir,mut context,snapshot)=fixture(Mode::Enforce);
         if calls_exhausted {context.review.max_calls=1;transaction(&context,|state|{state.calls=1;Ok(())}).unwrap();}
@@ -177,7 +177,7 @@ fn jev_supervisor_budget_and_call_refusals_never_open_http() {
 }
 
 #[test]
-fn jev_supervisor_rejects_aliases_nonhost_artifacts_and_context_overflow_before_reservation() {
+fn decision_supervisor_rejects_aliases_nonhost_artifacts_and_context_overflow_before_reservation() {
     let (_dir,context,mut snapshot)=fixture(Mode::Enforce);
     for model in ["jev:jev-latest","jev:jev-preview","jev:jev-1.13.0-new"] {
         let mut review=context.review.clone();review.supervisor=Some(Model::parse(model).unwrap());assert!(review.validate().is_err());
@@ -189,4 +189,32 @@ fn jev_supervisor_rejects_aliases_nonhost_artifacts_and_context_overflow_before_
     assert!(request(context.review.supervisor.as_ref().unwrap(),SUPERVISOR_INSTRUCTIONS,&snapshot).is_err());
     assert_eq!(state(&context).reserved_usd,0.0);
     assert!(ReviewConfig::default().supervisor.is_none());
+}
+
+#[test]
+fn snap_supervision_uses_frozen_choice_evidence_and_budget_with_local_http() {
+    let (_dir,mut context,snapshot)=fixture(Mode::Enforce);
+    context.review.supervisor=Some(Model::parse("subq:subq-snap-preview").unwrap());
+    context.validate().unwrap();
+    let body=supervisor_request(&context,&snapshot);
+    assert_eq!(body["model"],"subq-snap-preview");
+    assert!(body["questions"]["alignment"]["instructions"].is_string());
+    let mut wire=response(&body,"drifted","task_scope","host-checkpoint");
+    wire["model"]=json!("subq-snap-preview");wire["usage"]["output_tokens"]=json!(0);
+    for answer in wire["answers"].as_object_mut().unwrap().values_mut() { answer["confidence"]=json!(0.95); }
+    let (endpoint,thread)=server(wire.to_string(),200);
+    let result=evaluate_request_at(&context,context.review.supervisor.as_ref().unwrap(),&body,&endpoint,"fixture-key").unwrap();
+    assert_eq!(thread.join().unwrap(),body);
+    assert_eq!(result.result["verdict"],"drifted");assert_eq!(result.result["evidence_refs"],json!(["host-checkpoint"]));
+    let state=crate::read_private::<State>(&context.state_path,crate::MAX_STATE).unwrap();
+    assert_eq!(state.calls,1);assert!(!state.accounting_unknown);
+    assert!((state.actual_estimated_usd-0.000005).abs()<1e-10);
+    let model=context.review.supervisor.as_ref().unwrap();
+    let mut unsupported=response(&body,"aligned","within_charter","no_support");
+    unsupported["model"]=json!("subq-snap-preview");unsupported["usage"]["output_tokens"]=json!(0);
+    assert_eq!(parse_response_for_request(model,&unsupported,1,Some(&body)).unwrap().result["verdict"],"uncertain");
+    let mut empty=snapshot;empty["artifacts"]=json!([]);
+    let body=supervisor_request(&context,&empty);
+    assert_eq!(body["questions"]["evidence"]["criteria"].as_object().unwrap().len(),2);
+    assert!(Model::parse("subq:subq-preview").is_err());
 }

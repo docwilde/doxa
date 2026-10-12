@@ -667,6 +667,7 @@ dependencies = [
 name = "doxa-router"
 version = "2.0.0-beta.49"
 dependencies = [
+ "doxa-vendors",
  "libc",
  "reqwest",
  "serde",

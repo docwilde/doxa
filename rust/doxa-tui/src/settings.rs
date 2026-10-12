@@ -13,7 +13,7 @@ pub struct Setting {
 pub const CATEGORIES: &[&str] = &["Session", "Fleet", "Memory", "Appearance", "Keys", "Notifications", "Remote", "Paths", "About", "MCP"];
 pub fn engine_label(value: &str) -> &str {
     match value {
-        "router"=>"Jev Router (on for new sessions)",
+        "router"=>"Model Router (on for new sessions)",
         ""=>"(default)",
         _=>value,
     }
@@ -27,17 +27,20 @@ macro_rules! key_setting {
     };
 }
 pub const SETTINGS: &[Setting] = &[
-    Setting { key: "engine", env: "DOXA_ENGINE", label: "default engine", category: "Session", kind: Kind::Choice, choices: &["", "claude", "codex", "deepseek", "glm", "router"], default: "claude", read_only: false, help: "Select Jev Router to route NEW sessions. Select a fixed engine to turn routing off.", note: "For Jev Router, enter the private config path below, Ctrl+P reviews current account catalogs, then Ctrl+S saves. Existing sessions retain their engine. Routing Auto and command permissions are separate controls." },
-    Setting { key: "router_config", env: "DOXA_ROUTER_CONFIG", label: "Jev Router config", category: "Session", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Absolute path to a reviewed owner-private router JSON file; Ctrl+P checks config, auth and exact target catalogs without inference.", note: "Configure exact model/effort targets before selecting Jev Router. CLI account targets need explicit cli_account billing; their charges are unknown and excluded from the tracked Jev/API allowance. Native isolation only. Review does not create or edit the candidate file." },
+    Setting { key: "engine", env: "DOXA_ENGINE", label: "default engine", category: "Session", kind: Kind::Choice, choices: &["", "claude", "codex", "deepseek", "glm", "router"], default: "claude", read_only: false, help: "Select Model Router to route NEW sessions. Select a fixed engine to turn routing off.", note: "For Model Router, enter the private config path below, Ctrl+P reviews current account catalogs, then Ctrl+S saves. Existing sessions retain their engine. Routing Auto and command permissions are separate controls." },
+    Setting { key: "router_config", env: "DOXA_ROUTER_CONFIG", label: "Model Router config", category: "Session", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Absolute path to a reviewed owner-private router JSON file; Ctrl+P checks config, auth and exact target catalogs without inference.", note: "Configure exact model/effort targets before selecting Model Router. CLI account targets need explicit cli_account billing; their charges are unknown and excluded from the tracked Jev/API allowance. Native isolation only. Review does not create or edit the candidate file." },
+    Setting { key: "router_model", env: "DOXA_ROUTER_MODEL", label: "routing decision model", category: "Session", kind: Kind::Choice, choices: &["", "jev-1.13.0", "subq-snap-preview"], default: "", read_only: false, help: "Use the config's decision model, Jev, or SubQ Snap for new Router sessions.", note: "Ctrl+P reviews the selected service key and worker catalogs. Existing sessions retain their frozen routing model. Jev: $0.042/M input; Snap: $0.05/M input; output free." },
+    Setting { key: "jev_api_key", env: "TYPESAFE_API_KEY", label: "Jev API key", category: "Session", kind: Kind::Credential, choices: &[], default: "", read_only: false, help: "Masked private key for Jev routing and independent fleet review.", note: "Enter saves to the private credential store. An environment key takes precedence; Delete removes the saved key." },
+    Setting { key: "subq_api_key", env: "SUBQ_API_KEY", label: "SubQ API key", category: "Session", kind: Kind::Credential, choices: &[], default: "", read_only: false, help: "Masked private key for SubQ Snap routing and independent fleet review.", note: "Create a key at console.subq.ai. Enter saves privately. Environment keys take precedence; keys never enter config.toml." },
     Setting { key: "session_isolation", env: "DOXA_SESSION_ISOLATION", label: "new-session isolation", category: "Session", kind: Kind::Choice, choices: &["native", "docker-open", "docker-offline"], default: "native", read_only: false, help: "Default execution boundary for new sessions; the new-session form can override it.", note: "Docker requires a reviewed pinned image and local rootless Engine. Saved sessions retain their recorded policy. No-network Docker blocks online CLI inference; API-vendor HTTP stays on the trusted host." },
-    Setting { key: "fleet_alignment_supervisor", env: "DOXA_FLEET_ALIGNMENT_SUPERVISOR", label: "independent supervisor model", category: "Fleet", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Provider:model for independent read-only fleet review, e.g. codex:gpt-6-astra. Empty disables it; claude, codex, deepseek, glm or pinned jev:jev-1.13.0.", note: "These stateless calls use API credentials, separate from CLI subscription sessions. Model has no tools or worker conversation history. Pinned Jev uses TYPESAFE_API_KEY and bounded checkpoint Choices. Review budget is mandatory." },
+    Setting { key: "fleet_alignment_supervisor", env: "DOXA_FLEET_ALIGNMENT_SUPERVISOR", label: "independent supervisor model", category: "Fleet", kind: Kind::Text, choices: &["", "jev:jev-1.13.0", "subq:subq-snap-preview", "Custom model…"], default: "", read_only: false, help: "Provider:model for independent read-only fleet review, e.g. codex:gpt-6-astra. Empty disables it; claude, codex, deepseek, glm, jev:jev-1.13.0 or subq:subq-snap-preview.", note: "These stateless calls use API credentials, separate from CLI subscription sessions. Model has no tools or worker conversation history. Jev and Snap use the private service keys or TYPESAFE_API_KEY / SUBQ_API_KEY and bounded checkpoint Choices. Review budget is mandatory." },
     Setting { key: "fleet_supervision_mode", env: "DOXA_FLEET_SUPERVISION_MODE", label: "independent supervisor action", category: "Fleet", kind: Kind::Choice, choices: &["shadow", "enforce"], default: "enforce", read_only: false, help: "Shadow records verdicts; enforce pauses delegation for uncertainty, drift or blocked work.", note: "Enforce mode pauses new delegation on reviewer outages. Shadow records outages. Only an explicit human continue clears an enforced pause." },
     Setting { key: "fleet_message_review", env: "DOXA_FLEET_MESSAGE_REVIEW", label: "fleet message review", category: "Fleet", kind: Kind::Choice, choices: &["off", "shadow", "enforce"], default: "off", read_only: false, help: "Fast semantic admission mode for actual fleet peer messages.", note: "Selecting a mode opts scrubbed charter, assignments and messages into the selected external judgment service. Deterministic scope and provenance gates always apply to reviewed fleets." },
-    Setting { key: "fleet_message_judge", env: "DOXA_FLEET_MESSAGE_JUDGE", label: "fast message judge model", category: "Fleet", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Choose jev:jev-1.13.0 or llm:provider:model (e.g. llm:codex:gpt-6-astra) independently of the supervisor.", note: "Jev needs TYPESAFE_API_KEY. LLM providers: claude, codex, deepseek, glm; these require API credentials. Results cannot approve new authority or task changes." },
+    Setting { key: "fleet_message_judge", env: "DOXA_FLEET_MESSAGE_JUDGE", label: "fast message judge model", category: "Fleet", kind: Kind::Text, choices: &["", "jev:jev-1.13.0", "subq:subq-snap-preview", "Custom model…"], default: "", read_only: false, help: "Choose jev:jev-1.13.0, subq:subq-snap-preview or llm:provider:model (e.g. llm:codex:gpt-6-astra) independently of the supervisor.", note: "Decision services use the private keys in Session settings or their environment keys. LLM providers: claude, codex, deepseek, glm; these require API credentials. Results cannot approve new authority or task changes." },
     Setting { key: "fleet_review_budget", env: "DOXA_FLEET_REVIEW_BUDGET", label: "fleet review budget ($)", category: "Fleet", kind: Kind::Number, choices: &[], default: "", read_only: false, help: "Dollar allocation for all independent supervisor and message judge calls in each new fleet.", note: "Subtracted from the worker budget. Shared conservative token reservations and call ceilings include failed calls. Reserved estimates are not invoices." },
-    Setting { key: "fleet_review_input_price", env: "DOXA_FLEET_REVIEW_INPUT_PRICE", label: "review input price ($/Mtok)", category: "Fleet", kind: Kind::Number, choices: &[], default: "100", read_only: false, help: "Conservative owner-approved input rate for the selected LLM reviewer.", note: "Unknown model rates never imply free work. The default is deliberately conservative. Pinned Jev 1.13 uses documented input-only pricing." },
+    Setting { key: "fleet_review_input_price", env: "DOXA_FLEET_REVIEW_INPUT_PRICE", label: "review input price ($/Mtok)", category: "Fleet", kind: Kind::Number, choices: &[], default: "100", read_only: false, help: "Conservative owner-approved input rate for the selected LLM reviewer.", note: "Unknown model rates never imply free work. The default is deliberately conservative. Jev and Snap use documented input-only rates." },
     Setting { key: "fleet_review_output_price", env: "DOXA_FLEET_REVIEW_OUTPUT_PRICE", label: "review output price ($/Mtok)", category: "Fleet", kind: Kind::Number, choices: &[], default: "100", read_only: false, help: "Conservative owner-approved output rate for the selected LLM reviewer.", note: "Every LLM call has a hard 512 output token limit." },
-    Setting { key: "fleet_review_threshold", env: "DOXA_FLEET_REVIEW_THRESHOLD", label: "message risk threshold", category: "Fleet", kind: Kind::Number, choices: &[], default: "0.5", read_only: false, help: "Message risk threshold; pinned Jev supervisors use the same frozen value as a minimum Choice confidence guard.", note: "Choice confidence describes distribution concentration, not calibrated accuracy. Review labeled examples before enforcing. Each launch review shows the exact threshold; it never grants permission." },
+    Setting { key: "fleet_review_threshold", env: "DOXA_FLEET_REVIEW_THRESHOLD", label: "message risk threshold", category: "Fleet", kind: Kind::Number, choices: &[], default: "0.5", read_only: false, help: "Message risk threshold; typed decision supervisors use the same frozen value as a minimum Choice confidence guard.", note: "Choice confidence describes distribution concentration, not calibrated accuracy. Review labeled examples before enforcing. Each launch review shows the exact threshold; it never grants permission." },
     Setting {key:"docker_image",env:"DOXA_DOCKER_IMAGE",label:"Docker worker image digest",category:"Session",kind:Kind::Text,choices:&[],default:"",read_only:false,help:"Reviewed local image pinned as sha256:CONTENT_ID or NAME@sha256:DIGEST.",note:"DOXA never builds repository Dockerfiles or pulls an unreviewed image when a session starts."},
     Setting {key:"docker_host",env:"DOXA_DOCKER_HOST",label:"local rootless Docker socket",category:"Paths",kind:Kind::Text,choices:&[],default:"",read_only:false,help:"Local unix:///run/user/UID/docker.sock endpoint; default follows the host user.",note:"Remote TCP Engines, the rootful system socket and Docker sockets inside workers are forbidden."},
     Setting {key:"docker_memory_bytes",env:"DOXA_DOCKER_MEMORY_BYTES",label:"Docker memory ceiling (bytes)",category:"Session",kind:Kind::Number,choices:&[],default:"4294967296",read_only:false,help:"Enforced cgroup memory limit; default 4 GiB, configurable for the workload.",note:"Disk usage has a separate monitored soft ceiling, not a hard quota."},
@@ -270,7 +273,7 @@ pub fn save(path: &Path, edits: &[(String, Option<String>)], engine: &str) -> io
     // interactive menu supplies its asynchronously obtained review instead.
     let proposed = proposed_router_path(path, edits)?;
     let review = proposed.as_ref().map(|router_path| {
-        crate::router_setup::review(router_path,&std::env::current_dir()?)
+        crate::router_setup::review_with_model(router_path,&std::env::current_dir()?,Some(&proposed_router_model(path,edits)?))
             .map_err(|reason|io::Error::new(io::ErrorKind::InvalidInput,reason))
     }).transpose()?;
     save_with_review(path,edits,engine,review.as_ref())
@@ -279,12 +282,12 @@ pub fn save(path: &Path, edits: &[(String, Option<String>)], engine: &str) -> io
 fn router_edit_requires_review(config: &toml::Table, edits: &[(String, Option<String>)]) -> bool {
     let engine=std::env::var("DOXA_ENGINE").ok().filter(|value|!value.trim().is_empty())
         .or_else(||config.get("engine").and_then(toml::Value::as_str).map(str::to_owned));
-    engine.as_deref()==Some("router") && edits.iter().any(|(key,_)|matches!(key.as_str(),"engine"|"router_config"))
+    engine.as_deref()==Some("router") && edits.iter().any(|(key,_)|matches!(key.as_str(),"engine"|"router_config"|"router_model"))
 }
 
 pub(crate) fn proposed_router_path(path: &Path, edits: &[(String, Option<String>)]) -> io::Result<Option<std::path::PathBuf>> {
     let mut config=doxa_state::load_config_checked(path)?;
-    for (key,value) in edits.iter().filter(|(key,_)|matches!(key.as_str(),"engine"|"router_config")) {
+    for (key,value) in edits.iter().filter(|(key,_)|matches!(key.as_str(),"engine"|"router_config"|"router_model")) {
         let setting=find(key)?;
         if std::env::var(setting.env).is_ok_and(|value|!value.trim().is_empty()) {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied,format!("{} overrides config.toml; unset it before changing {key}",setting.env)));
@@ -296,8 +299,20 @@ pub(crate) fn proposed_router_path(path: &Path, edits: &[(String, Option<String>
     if !router_edit_requires_review(&config,edits) {return Ok(None);}
     let path=std::env::var("DOXA_ROUTER_CONFIG").ok().filter(|value|!value.trim().is_empty())
         .or_else(||config.get("router_config").and_then(toml::Value::as_str).map(str::to_owned))
-        .ok_or_else(||io::Error::new(io::ErrorKind::InvalidInput,"Select a private Jev Router config before enabling routing"))?;
+        .ok_or_else(||io::Error::new(io::ErrorKind::InvalidInput,"Select a private Model Router config before enabling routing"))?;
     Ok(Some(path.into()))
+}
+
+fn router_model_from_config(config: &toml::Table) -> String {
+    std::env::var("DOXA_ROUTER_MODEL").ok().filter(|model| !model.is_empty())
+        .or_else(||config.get("router_model").and_then(toml::Value::as_str).map(str::to_owned)).unwrap_or_default()
+}
+pub(crate) fn proposed_router_model(path: &Path, edits: &[(String,Option<String>)]) -> io::Result<String> {
+    let mut config = doxa_state::load_config_checked(path)?;
+    for (key,value) in edits.iter().filter(|(key,_)| key=="router_model") {
+        match coerce(find(key)?,value.as_deref())? { Some(value)=>{config.insert(key.clone(),value);},None=>{config.remove(key);} }
+    }
+    Ok(router_model_from_config(&config))
 }
 
 pub(crate) fn save_with_review(path: &Path, edits: &[(String, Option<String>)], engine: &str,
@@ -322,9 +337,9 @@ pub(crate) fn save_with_review(path: &Path, edits: &[(String, Option<String>)], 
             let router_path=std::env::var("DOXA_ROUTER_CONFIG").ok().filter(|value|!value.trim().is_empty())
                 .or_else(||config.get("router_config").and_then(toml::Value::as_str).map(str::to_owned));
             if !router_path.as_deref().is_some_and(|path|review.is_some_and(|review|
-                review.ready() && review.current(Path::new(path)))) {
+                review.ready() && review.current_with_model(Path::new(path), Some(&router_model_from_config(config))))) {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                    "Jev Router needs a current config/account/catalog review with an available fallback and Jev key; select router config and press Ctrl+P"));
+                    "Model Router needs a current config/account/catalog review with an available fallback and Jev service key; select router config and press Ctrl+P"));
             }
         }
         if edits.iter().any(|(key,_)|matches!(key.as_str(),"mcp_enabled"|"mcp_config")) {
@@ -390,7 +405,7 @@ mod tests {
         assert!(coerce(find("router_config").unwrap(), Some(path.to_str().unwrap())).is_err());
         assert!(find("engine").unwrap().choices.contains(&"router"));
         assert_eq!(SETTINGS[0].key,"engine");assert_eq!(SETTINGS[1].key,"router_config");
-        assert!(engine_label("router").contains("Jev Router"));
+        assert!(engine_label("router").contains("Model Router"));
     }
     #[test]
     fn unrelated_settings_remain_editable_when_inherited_router_config_is_unavailable() {

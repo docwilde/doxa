@@ -26,10 +26,10 @@ fn run(args: &[String]) -> io::Result<()> {
     let config=Config::load(Path::new(&args[1]))?;
     let (text,_)=evaluation::load_cases(Path::new(&args[2]))?;
     if args[0]=="fixture" {println!("{}",evaluation::fixture_recordings(&config,&text)?);return Ok(());}
-    let key=if live{doxa_router::credential().ok()}else{None};
+    let key=if live{config.decision().credential().ok()}else{None};
     let mut log=if live {
         let mut file=journal(Path::new(&args[5]))?;
-        write_event(&mut file,serde_json::json!({"event":"evaluation_start","model":doxa_router::JEV_MODEL,
+        write_event(&mut file,serde_json::json!({"event":"evaluation_start","model":config.jev_model,
             "config_sha256":config.hash()?,"synthetic_only":true,"call_ceiling":20,"spend_ceiling_usd_micros":10000}))?;
         unsafe {libc::signal(libc::SIGINT,cancelled as *const () as libc::sighandler_t);libc::signal(libc::SIGTERM,cancelled as *const () as libc::sighandler_t);}
         Some(file)

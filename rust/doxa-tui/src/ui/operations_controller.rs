@@ -646,11 +646,11 @@ impl App {
         let result = crate::settings::config_path().and_then(|path| {
             if let Some(router_path)=crate::settings::proposed_router_path(&path,&edits)? {
                 let reviewed=self.router_review_result(&router_path).is_some_and(|review|
-                    review.ready() && review.current(&router_path));
+                    review.ready() && review.current_with_model(&router_path,Some(&crate::settings::proposed_router_model(&path,&edits).unwrap_or_default())));
                 if !reviewed {
                     self.start_router_review(router_path);
                     return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
-                        "Review Jev Router config/auth/catalog first; Ctrl+S saves after the check is ready"));
+                        "Review Model Router config/auth/catalog first; Ctrl+S saves after the check is ready"));
                 }
             }
             let review=self.router_review.as_ref().and_then(|review|match &review.state {
@@ -733,7 +733,7 @@ impl App {
             if crate::settings::CATEGORIES[menu.category]=="MCP" {
                 self.start_mcp_probe();return true;
             }
-            if menu.rows.get(menu.selected).is_some_and(|row|matches!(row.setting.key,"engine"|"router_config")) {
+            if menu.rows.get(menu.selected).is_some_and(|row|matches!(row.setting.key,"engine"|"router_config"|"router_model")) {
                 menu.finish_draft();
                 let path=std::path::PathBuf::from(menu.effective_value("router_config"));
                 self.start_router_review(path);
@@ -816,7 +816,7 @@ impl App {
                     return true;
                 } else if matches!(key.code, KeyCode::Char('u') | KeyCode::Delete) {
                     menu.edits.insert(row.setting.key.into(), None);
-                } else if row.setting.kind == crate::settings::Kind::Choice {
+                } else if row.setting.kind == crate::settings::Kind::Choice || !row.setting.choices.is_empty() {
                     self.open_setting_dropdown();
                 } else if matches!(
                     row.setting.kind,

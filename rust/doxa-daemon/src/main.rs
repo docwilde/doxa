@@ -279,7 +279,7 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
         if resume && !explicit_session_id {return Err(invalid("router resume needs --session-id"));}
         let path=router_config.as_ref().filter(|path|path.is_absolute())
             .ok_or_else(||invalid("router needs an absolute --router-config PATH"))?;
-        let config=doxa_router::Config::load(path).map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
+        let config=doxa_router::Config::load_with_model(path,env::var("DOXA_ROUTER_MODEL").ok().as_deref()).map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
         let needs_codex=config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Codex);
         let needs_claude=config.candidates.iter().any(|row|row.provider==doxa_router::Provider::Claude);
         if needs_codex { codex_bin=codex_bin.map(executable).transpose()?; }
@@ -709,7 +709,7 @@ fn run() -> io::Result<()> {
             host
         }
         Engine::Router => {
-            let config=doxa_router::Config::load(options.router_config.as_deref().expect("validated router config"))
+            let config=doxa_router::Config::load_with_model(options.router_config.as_deref().expect("validated router config"),env::var("DOXA_ROUTER_MODEL").ok().as_deref())
                 .map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
             let host=Arc::new(RouterHost::new_with_cli(config,&options.cwd,&options.session_id,options.resume,ceiling,
                 router_cli::CliOptions {claude:options.claude_bin.clone(),codex:options.codex_bin.clone()},

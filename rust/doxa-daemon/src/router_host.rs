@@ -572,7 +572,7 @@ impl RouterHost {
         let prepared = doxa_router::prepare(&turn_config, &RoutingInput { summary, estimated_input_tokens: input_tokens,
             max_output_tokens: required_output, requires_tools: tools, allowed_candidate_ids: allowed })
             .map_err(|_| "Router input or configured fallback is ineligible")?;
-        let key = doxa_router::credential().ok();
+        let key = turn_config.decision().credential().ok();
         let reservation = {
             let mut state = self.state.lock().unwrap();
             state.turn = state.turn.checked_add(1).ok_or("Router turn count overflow")?;

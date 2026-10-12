@@ -22,25 +22,30 @@ pub(super) enum ReviewState {
 impl App {
     pub(super) fn start_router_review(&mut self, path: PathBuf) -> bool {
         if self.router_review.as_ref().is_some_and(|review| matches!(review.state, ReviewState::Running(_))) {
-            self.notice="Jev Router account/catalog review is already running".into();
+            self.notice="Model Router account/catalog review is already running".into();
             return false;
         }
         if path.as_os_str().is_empty() || !path.is_absolute() {
-            self.notice="Set Jev Router config to an absolute owner-private JSON path, then Ctrl+P reviews it".into();
+            self.notice="Set Model Router config to an absolute owner-private JSON path, then Ctrl+P reviews it".into();
             return false;
         }
         let Ok(cwd)=std::env::current_dir() else {return false;};
         if cfg!(test) { return false; }
         let (tx,rx)=mpsc::sync_channel(1);
         let worker_path=path.clone();
+        let model=self.router_review_model();
         if std::thread::Builder::new().name("router-settings-review".into()).spawn(move || {
-            let _=tx.send(crate::router_setup::review(&worker_path,&cwd));
+            let _=tx.send(crate::router_setup::review_with_model(&worker_path,&cwd,Some(&model)));
         }).is_err() {self.notice="Router review worker unavailable; retry Ctrl+P".into();return false;}
         self.router_review=Some(RouterReview{path,state:ReviewState::Running(rx),freshness:None});
-        self.notice="Checking Router config and current account catalogs; no Jev or worker turn".into();
+        self.notice="Checking Router config and current account catalogs; no routing or worker turn".into();
         true
     }
 
+    pub(super) fn router_review_model(&self) -> String {
+        self.settings_menu.as_ref().map(|menu|menu.effective_value("router_model"))
+            .unwrap_or_else(||crate::settings::raw("router_model"))
+    }
     pub(super) fn router_review_result(&self, path: &Path) -> Option<&Review> {
         self.router_review.as_ref().filter(|review|review.path==path).and_then(|review|match &review.state {
             ReviewState::Complete(Ok(result))=>Some(result), _=>None,
@@ -52,7 +57,7 @@ impl App {
             return vec!["Not checked · Ctrl+P reviews config/auth/catalog; no inference".into()];
         };
         match &review.state {
-            ReviewState::Running(_)=>vec!["Checking current account catalogs… no Jev or worker turn".into()],
+            ReviewState::Running(_)=>vec!["Checking current account catalogs… no routing or worker turn".into()],
             ReviewState::Complete(Err(reason))=>vec![(*reason).into()],
             ReviewState::Complete(Ok(result)) if result.checked.elapsed()>crate::router_setup::REVIEW_LIFETIME
                 || review.freshness.is_some_and(|(current,_)|!current)
@@ -81,8 +86,8 @@ impl App {
                 Err(TryRecvError::Empty)=>return self.poll_router_freshness(),
             };
             self.notice=match &result {
-                Ok(result)=>format!("Jev Router: {} · Ctrl+S saves staged settings",result.summary()),
-                Err(reason)=>format!("Jev Router review: {reason}"),
+                Ok(result)=>format!("Model Router: {} · Ctrl+S saves staged settings",result.summary()),
+                Err(reason)=>format!("Model Router review: {reason}"),
             };
             if let Some(form)=self.new_session.as_mut().filter(|form|
                 form.engine==crate::launch::Engine::Router && form.router_config.as_deref()==Some(path.as_path())) {
@@ -150,8 +155,9 @@ impl App {
                 let checked=review.checked;
                 let (tx,receiver)=mpsc::sync_channel(1);
                 let worker_path=path.clone();
+                let model=self.router_review_model();
                 let spawned=std::thread::Builder::new().name("router-review-freshness".into()).spawn(move || {
-                    let _=tx.send(review.current(&worker_path));
+                    let _=tx.send(review.current_with_model(&worker_path,Some(&model)));
                 });
                 if spawned.is_ok() {
                     self.router_freshness_pending=Some((path,hash,checked,receiver));
@@ -165,7 +171,7 @@ impl App {
     }
 
     pub(super) fn router_target_label(&self, id: &str) -> String {
-        if id=="auto" {return "Auto · Jev chooses once at each turn boundary".into();}
+        if id=="auto" {return "Auto · selected router chooses at each turn boundary".into();}
         self.new_session.as_ref().and_then(|form|form.router_config.as_deref())
             .and_then(|path|self.router_review_result(path))
             .and_then(|review|review.targets.iter().find(|target|target.id==id))
