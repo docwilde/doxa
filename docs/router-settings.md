@@ -14,6 +14,8 @@ Open `/settings` → **Session**.
    the exact effective config, selected key availability and worker catalogs.
    It submits no decision or worker inference. Key presence does not prove
    authentication or available credits.
+   Saved service keys use owner-private `<DOXA_HOME>/decision-credentials.json`
+   with file mode `0600`.
 5. Choose **Model Router (on for new sessions)** as default engine, then
    **Ctrl+S** after the review is ready. Choose a fixed engine to disable it.
 

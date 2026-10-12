@@ -7,6 +7,6 @@
 
 The fixture expands received and sent messages with their session addresses and direction markers.
 
-[![Expanded received and sent peer messages with session addresses](../../../assets/shots/rust-2.0.0-beta.49-peer-expanded.png)](../../../assets/shots/rust-2.0.0-beta.49-peer-expanded.png)
+[![Expanded received and sent peer messages with session addresses](../../../assets/shots/rust-2.0.0-beta.50-peer-expanded.png)](../../../assets/shots/rust-2.0.0-beta.50-peer-expanded.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#peer-expanded) · [Back to the README gallery](../../../README.md#gallery)

@@ -95,9 +95,9 @@ These beta.49 screenshots capture the production Ratatui app in a real GTK/VTE t
 <!-- gallery-carousel:start -->
 **Workspace** — Three engine tabs, a project rail, and a Markdown turn in the production Ratatui app.
 
-[![DOXA workspace with three engine tabs, a project rail, and a Markdown turn](assets/shots/rust-2.0.0-beta.49-hero.png)](assets/shots/rust-2.0.0-beta.49-hero.png)
+[![DOXA workspace with three engine tabs, a project rail, and a Markdown turn](assets/shots/rust-2.0.0-beta.50-hero.png)](assets/shots/rust-2.0.0-beta.50-hero.png)
 
-[← Code graph](docs/gallery/scenes/codegraph.md) · [Next: Jev Router settings →](docs/gallery/scenes/settings-router.md)
+[← Code graph](docs/gallery/scenes/codegraph.md) · [Next: Model Router settings →](docs/gallery/scenes/settings-router.md)
 <!-- gallery-carousel:end -->
 
 The [interactive gallery](https://docwilde.github.io/doxa/gallery/) has keyboard and on-page previous/next controls. GitHub's README view shows one static frame above; each [one-frame Markdown page](docs/gallery/scenes/settings-router.md) also has previous and next links.

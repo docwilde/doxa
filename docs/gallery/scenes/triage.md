@@ -7,6 +7,6 @@
 
 The project rail points to a hidden tab that needs input.
 
-[![Project rail showing a hidden tab that needs input](../../../assets/shots/rust-2.0.0-beta.49-triage.png)](../../../assets/shots/rust-2.0.0-beta.49-triage.png)
+[![Project rail showing a hidden tab that needs input](../../../assets/shots/rust-2.0.0-beta.50-triage.png)](../../../assets/shots/rust-2.0.0-beta.50-triage.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#triage) · [Back to the README gallery](../../../README.md#gallery)

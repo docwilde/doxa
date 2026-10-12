@@ -7,6 +7,6 @@
 
 Synthetic checkpoint and handoff evidence appear in the production review modal; release is disabled.
 
-[![Synthetic checkpoint and handoff evidence in the dependency release modal; release disabled](../../../assets/shots/rust-2.0.0-beta.49-fleet-release-review.png)](../../../assets/shots/rust-2.0.0-beta.49-fleet-release-review.png)
+[![Synthetic checkpoint and handoff evidence in the dependency release modal; release disabled](../../../assets/shots/rust-2.0.0-beta.50-fleet-release-review.png)](../../../assets/shots/rust-2.0.0-beta.50-fleet-release-review.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#fleet-release-review) · [Back to the README gallery](../../../README.md#gallery)

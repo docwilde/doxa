@@ -7,6 +7,6 @@
 
 Curated project-memory controls are shown with writes disabled.
 
-[![Curated project memory controls](../../../assets/shots/rust-2.0.0-beta.49-memory-management.png)](../../../assets/shots/rust-2.0.0-beta.49-memory-management.png)
+[![Curated project memory controls](../../../assets/shots/rust-2.0.0-beta.50-memory-management.png)](../../../assets/shots/rust-2.0.0-beta.50-memory-management.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#memory-management) · [Back to the README gallery](../../../README.md#gallery)

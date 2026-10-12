@@ -7,6 +7,6 @@
 
 A synthetic launch review shows the acting coordinator, independent alignment supervisor, message judge, and bounded review budget. Launch is disabled.
 
-[![Synthetic fleet plan with independent alignment supervisor and message judge; launch disabled](../../../assets/shots/rust-2.0.0-beta.49-fleet-review.png)](../../../assets/shots/rust-2.0.0-beta.49-fleet-review.png)
+[![Synthetic fleet plan with independent alignment supervisor and message judge; launch disabled](../../../assets/shots/rust-2.0.0-beta.50-fleet-review.png)](../../../assets/shots/rust-2.0.0-beta.50-fleet-review.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#fleet-review) · [Back to the README gallery](../../../README.md#gallery)

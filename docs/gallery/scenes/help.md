@@ -7,6 +7,6 @@
 
 Built-in command help is open in the workspace.
 
-[![Built-in command help](../../../assets/shots/rust-2.0.0-beta.49-help.png)](../../../assets/shots/rust-2.0.0-beta.49-help.png)
+[![Built-in command help](../../../assets/shots/rust-2.0.0-beta.50-help.png)](../../../assets/shots/rust-2.0.0-beta.50-help.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#help) · [Back to the README gallery](../../../README.md#gallery)

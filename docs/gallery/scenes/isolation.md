@@ -7,6 +7,6 @@
 
 A synthetic worker report shows Docker isolation policy details; no container launches.
 
-[![Docker isolation details from a synthetic worker report](../../../assets/shots/rust-2.0.0-beta.49-isolation.png)](../../../assets/shots/rust-2.0.0-beta.49-isolation.png)
+[![Docker isolation details from a synthetic worker report](../../../assets/shots/rust-2.0.0-beta.50-isolation.png)](../../../assets/shots/rust-2.0.0-beta.50-isolation.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#isolation) · [Back to the README gallery](../../../README.md#gallery)
