@@ -5115,3 +5115,36 @@ fn long_claude_restore_keeps_logical_identity_original_turns_and_bounded_hook_co
     send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));
     claude_receive_until(&mut reader,|frame|frame["id"]==2);wait_until(||process.exited());
 }
+
+#[test]
+fn long_codex_restore_creates_bounded_thread_without_replacing_logical_history() {
+    let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
+    let slug:String=dir.path().to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();
+    let store=doxa_transcript::TranscriptStore::new(&dir.path().join("native-projects"),&slug,"codex-session").unwrap();
+    for (user,answer) in [("older task ".repeat(4000),"older answer ".repeat(4000)),("recent owner task".into(),"recent complete answer".into())] {
+        store.try_append(json!({"type":"user","message":{"role":"user","content":user}}),"codex",|s|Ok(s.into())).unwrap();
+        store.try_append(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":answer}]}}),"codex",|s|Ok(s.into())).unwrap();
+    }
+    store.try_write_thread(json!({"thread_id":"previous-thread","engine":"codex","transport":"app-server","cwd":dir.path(),"lore_enabled":true,"lore_tools":false,"peer_tools":false,"turn_incomplete":false,"model":"account-model","effort":"high","permission_mode":"default"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
+    let original=fs::read(store.transcript_path()).unwrap();
+    let codex=dir.path().join("codex-recovery");executable(&codex,include_str!("fixtures/codex_appserver.py"));
+    executable(&codex.with_extension("turn"),&format!(r#"#!/bin/sh
+cat > '{}'
+echo '{{"type":"thread.started","thread_id":"fresh-thread"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"continued"}}}}'
+"#,dir.path().join("provider-prompt.txt").display()));
+    let mut child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id","codex-session","--engine","codex","--codex-bin",codex.to_str().unwrap(),"--resume","true","--linger","10"]).env_remove("DOXA_CODEX_APPSERVER").stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry=dir.path().join("registry/codex-session.json");wait_for_registry(&mut child,&registry);
+    let row:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    let mut process=Process {child,registry,socket:PathBuf::from(row["daemon_socket"].as_str().unwrap())};
+    let (mut reader,mut socket)=process.connect();reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();assert_eq!(receive(&mut reader)["session_id"],"codex-session");
+    assert_eq!(fs::read(store.transcript_path()).unwrap(),original);
+    send(&mut socket,json!({"type":"attach","cursor":null}));send(&mut socket,json!({"type":"prompt","id":1,"text":"continue"}));
+    let terminal=claude_receive_until(&mut reader,|frame|frame["event"]["type"]=="turn_done");assert_eq!(terminal["event"]["data"]["is_error"],false,"{terminal}");
+    let prompt=fs::read_to_string(dir.path().join("provider-prompt.txt")).unwrap();
+    let tail=prompt.split("[DOXA RESTORED CONVERSATION]\n").nth(1).unwrap().split("\n[CURRENT USER REQUEST]").next().unwrap();
+    assert!(tail.len()<=16384);assert!(tail.contains("recent owner task") && tail.contains("recent complete answer"));
+    let checkpoint=store.read_thread().unwrap().unwrap();assert_eq!(checkpoint["session_id"],"codex-session");assert_eq!(checkpoint["thread_id"],"fresh-thread");assert_eq!(checkpoint["permission_mode"],"default");
+    assert!(fs::read(store.transcript_path()).unwrap().starts_with(&original));
+    send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));claude_receive_until(&mut reader,|frame|frame["id"]==2);wait_until(||process.exited());
+}
