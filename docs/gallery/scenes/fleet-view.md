@@ -7,6 +7,6 @@
 
 A recorded fixture shows a worker waiting for a reviewed predecessor. No controller starts.
 
-[![Synthetic fleet status with a worker waiting for a reviewed predecessor](../../../assets/shots/rust-2.0.0-beta.48-fleet-view.png)](../../../assets/shots/rust-2.0.0-beta.48-fleet-view.png)
+[![Synthetic fleet status with a worker waiting for a reviewed predecessor](../../../assets/shots/rust-2.0.0-beta.49-fleet-view.png)](../../../assets/shots/rust-2.0.0-beta.49-fleet-view.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#fleet-view) · [Back to the README gallery](../../../README.md#gallery)

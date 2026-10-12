@@ -7,6 +7,6 @@
 
 Three engine tabs, a project rail, and a Markdown turn in the production Ratatui app.
 
-[![DOXA workspace with three engine tabs, a project rail, and a Markdown turn](../../../assets/shots/rust-2.0.0-beta.48-hero.png)](../../../assets/shots/rust-2.0.0-beta.48-hero.png)
+[![DOXA workspace with three engine tabs, a project rail, and a Markdown turn](../../../assets/shots/rust-2.0.0-beta.49-hero.png)](../../../assets/shots/rust-2.0.0-beta.49-hero.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#hero) · [Back to the README gallery](../../../README.md#gallery)

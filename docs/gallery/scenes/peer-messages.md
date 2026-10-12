@@ -7,6 +7,6 @@
 
 Received, sent, and queued peer activity appears with direction markers while message bodies stay collapsed by default.
 
-[![Collapsed received, sent, and queued peer messages with direction markers](../../../assets/shots/rust-2.0.0-beta.48-peer-messages.png)](../../../assets/shots/rust-2.0.0-beta.48-peer-messages.png)
+[![Collapsed received, sent, and queued peer messages with direction markers](../../../assets/shots/rust-2.0.0-beta.49-peer-messages.png)](../../../assets/shots/rust-2.0.0-beta.49-peer-messages.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#peer-messages) · [Back to the README gallery](../../../README.md#gallery)

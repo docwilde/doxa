@@ -90,12 +90,12 @@ monitor; cash balance and bundle remainder remain unknown.
 
 ## Gallery
 
-These beta.48 frames render the production Ratatui app with deterministic example events. The [capture record](docs/rust-gallery.md) explains each scene and how to reproduce it. Browser and Android screenshots have their [own gallery](docs/remote-gallery.md).
+These beta.49 screenshots capture the production Ratatui app in a real GTK/VTE terminal, using illustrative session data. The [capture record](docs/rust-gallery.md) explains each scene and how to reproduce it. Browser and Android screenshots have their [own gallery](docs/remote-gallery.md).
 
 <!-- gallery-carousel:start -->
 **Workspace** — Three engine tabs, a project rail, and a Markdown turn in the production Ratatui app.
 
-[![DOXA workspace with three engine tabs, a project rail, and a Markdown turn](assets/shots/rust-2.0.0-beta.48-hero.png)](assets/shots/rust-2.0.0-beta.48-hero.png)
+[![DOXA workspace with three engine tabs, a project rail, and a Markdown turn](assets/shots/rust-2.0.0-beta.49-hero.png)](assets/shots/rust-2.0.0-beta.49-hero.png)
 
 [← Code graph](docs/gallery/scenes/codegraph.md) · [Next: Jev Router settings →](docs/gallery/scenes/settings-router.md)
 <!-- gallery-carousel:end -->

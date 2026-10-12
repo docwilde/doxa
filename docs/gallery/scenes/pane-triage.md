@@ -7,6 +7,6 @@
 
 Grouped panes stay navigable while hidden-tab urgency remains visible.
 
-[![Grouped pane rail with hidden-tab urgency](../../../assets/shots/rust-2.0.0-beta.48-pane-triage.png)](../../../assets/shots/rust-2.0.0-beta.48-pane-triage.png)
+[![Grouped pane rail with hidden-tab urgency](../../../assets/shots/rust-2.0.0-beta.49-pane-triage.png)](../../../assets/shots/rust-2.0.0-beta.49-pane-triage.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#pane-triage) · [Back to the README gallery](../../../README.md#gallery)

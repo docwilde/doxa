@@ -7,6 +7,6 @@
 
 Router defaults are staged for review; the private config has not been checked or saved.
 
-[![Staged Jev Router default and private config path awaiting review](../../../assets/shots/rust-2.0.0-beta.48-settings-router.png)](../../../assets/shots/rust-2.0.0-beta.48-settings-router.png)
+[![Staged Jev Router default and private config path awaiting review](../../../assets/shots/rust-2.0.0-beta.49-settings-router.png)](../../../assets/shots/rust-2.0.0-beta.49-settings-router.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#settings-router) · [Back to the README gallery](../../../README.md#gallery)

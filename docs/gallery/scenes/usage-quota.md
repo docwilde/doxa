@@ -7,6 +7,6 @@
 
 Synthetic session and weekly quota snapshots include reset times and extra provider windows; no billing request is made.
 
-[![Synthetic session and weekly quota bars with reset times and provider window details](../../../assets/shots/rust-2.0.0-beta.48-usage-quota.png)](../../../assets/shots/rust-2.0.0-beta.48-usage-quota.png)
+[![Synthetic session and weekly quota bars with reset times and provider window details](../../../assets/shots/rust-2.0.0-beta.49-usage-quota.png)](../../../assets/shots/rust-2.0.0-beta.49-usage-quota.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#usage-quota) · [Back to the README gallery](../../../README.md#gallery)

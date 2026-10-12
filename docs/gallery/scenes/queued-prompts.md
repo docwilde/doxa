@@ -7,6 +7,6 @@
 
 A queued user prompt keeps its Markdown and user stripe while another turn is running.
 
-[![Queued prompt with Markdown formatting and a user stripe](../../../assets/shots/rust-2.0.0-beta.48-queued-prompts.png)](../../../assets/shots/rust-2.0.0-beta.48-queued-prompts.png)
+[![Queued prompt with Markdown formatting and a user stripe](../../../assets/shots/rust-2.0.0-beta.49-queued-prompts.png)](../../../assets/shots/rust-2.0.0-beta.49-queued-prompts.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#queued-prompts) · [Back to the README gallery](../../../README.md#gallery)

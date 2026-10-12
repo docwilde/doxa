@@ -7,6 +7,6 @@
 
 The owner-declared API bundle is shown while unknown cash balance and remaining allowance stay unknown.
 
-[![Owner-declared GLM usage bundle with unknown balance and remaining allowance](../../../assets/shots/rust-2.0.0-beta.48-glm-account.png)](../../../assets/shots/rust-2.0.0-beta.48-glm-account.png)
+[![Owner-declared GLM usage bundle with unknown balance and remaining allowance](../../../assets/shots/rust-2.0.0-beta.49-glm-account.png)](../../../assets/shots/rust-2.0.0-beta.49-glm-account.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#glm-account) · [Back to the README gallery](../../../README.md#gallery)

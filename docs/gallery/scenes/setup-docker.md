@@ -7,6 +7,6 @@
 
 Docker prerequisite, pinned image, and rootless socket setup controls appear without changing the host.
 
-[![Docker prerequisite, pinned image, and rootless socket setup controls](../../../assets/shots/rust-2.0.0-beta.48-setup-docker.png)](../../../assets/shots/rust-2.0.0-beta.48-setup-docker.png)
+[![Docker prerequisite, pinned image, and rootless socket setup controls](../../../assets/shots/rust-2.0.0-beta.49-setup-docker.png)](../../../assets/shots/rust-2.0.0-beta.49-setup-docker.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#setup-docker) · [Back to the README gallery](../../../README.md#gallery)

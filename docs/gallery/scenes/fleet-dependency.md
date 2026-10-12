@@ -7,6 +7,6 @@
 
 A synthetic fleet plan shows a dependency edge and explicit human release requirement.
 
-[![Synthetic fleet dependency plan with explicit human release](../../../assets/shots/rust-2.0.0-beta.48-fleet-dependency.png)](../../../assets/shots/rust-2.0.0-beta.48-fleet-dependency.png)
+[![Synthetic fleet dependency plan with explicit human release](../../../assets/shots/rust-2.0.0-beta.49-fleet-dependency.png)](../../../assets/shots/rust-2.0.0-beta.49-fleet-dependency.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#fleet-dependency) · [Back to the README gallery](../../../README.md#gallery)
