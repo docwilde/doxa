@@ -45,6 +45,10 @@ fn server(reply: String, status: u16) -> (String, std::thread::JoinHandle<Value>
             Err(err) if err.kind()==io::ErrorKind::WouldBlock && Instant::now()<deadline=>std::thread::sleep(Duration::from_millis(5)),
             Err(err)=>panic!("bounded synthetic server accept failed: {err}"),
         }};
+        // Darwin can inherit O_NONBLOCK from the listener, unlike Linux.
+        // Read/write timeouts do not turn a nonblocking socket into a blocking
+        // one: reset the accepted stream before bounded request reads.
+        stream.set_nonblocking(false).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         stream.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
         let mut bytes=Vec::new();
@@ -60,7 +64,11 @@ fn server(reply: String, status: u16) -> (String, std::thread::JoinHandle<Value>
                 }
             }
         };
-        write!(stream,"HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",reply.len()).unwrap();
+        // A non-success client returns after headers and may close immediately.
+        // Buffer the whole reply so fragmented formatting writes do not race
+        // that expected completion between the status line and body.
+        let wire=format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",reply.len());
+        stream.write_all(wire.as_bytes()).unwrap();
         request
     });
     (endpoint,thread)
@@ -145,6 +153,7 @@ fn jev_malformed_outage_and_unsupplied_citations_retain_unknown_reservations() {
         let reply=if case==9 {raw.to_string().replacen("\"model\":", "\"model\":\"jev-1.13.0\",\"model\":",1)} else {raw.to_string()};
         let (result,_)=evaluate_mock(&context,&body,reply,if case==10 {503} else {200});
         let error=result.unwrap_err();assert!(!error.to_string().contains("PRIVATE-INJECTED-SERVER"));
+        if case==10 {assert_eq!(error.to_string(),"independent review service refused","fixture must deliver the HTTP outage status");}
         let state=state(&context);assert!(state.accounting_unknown && state.paused,"case {case}");
         assert_eq!(state.calls,1);assert!(state.reserved_usd>0.0);assert_eq!(state.actual_estimated_usd,0.0);
         assert!(crate::resume_review(&context,&context.charter_sha256).is_err());
