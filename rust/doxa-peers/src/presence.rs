@@ -1,14 +1,30 @@
 //! Read-only, same-scope presence projection for daemon RPCs.
 //! No reaping or registry writes occur during this query.
 
-use crate::{pid_alive, read_one, safe_id, stale, MAX_REGISTRY_ENTRIES};
-use serde::Serialize;
+use crate::{pid_alive, safe_id, stale, PeerRecord, MAX_REGISTRY_ENTRIES};
+use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Component, Path};
 use std::time::Instant;
+
+/// A retained idle daemon is resumable history, not an active peer. Older
+/// records without a client count retain their legacy discovery behaviour.
+#[derive(Deserialize)]
+struct PresenceRecord {
+    #[serde(flatten)]
+    peer: PeerRecord,
+    #[serde(default)]
+    active: Option<bool>,
+}
+
+impl PresenceRecord {
+    fn active(&self) -> bool {
+        self.active.unwrap_or(self.peer.clients != Some(0))
+    }
+}
 
 pub const MAX_DISPLAY_PEERS: usize = 32;
 const MAX_TITLE_CHARS: usize = 64;
@@ -103,9 +119,10 @@ pub fn list_scoped_readonly_limit(runtime: &Path, scope: &str, self_id: &str, li
         if Instant::now() >= deadline {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "peer socket discovery timed out"));
         }
-        let Ok(peer) = read_one(&path, true) else {
-            continue;
-        };
+        let Ok(bytes) = doxa_state::read_registry_entry(&path, true) else { continue; };
+        let Ok(record) = serde_json::from_slice::<PresenceRecord>(&bytes) else { continue; };
+        if !record.active() { continue; }
+        let peer = record.peer;
         if path.file_stem() != Some(OsStr::new(&peer.session_id))
             || !safe_id(&peer.session_id)
             || peer.session_id == self_id

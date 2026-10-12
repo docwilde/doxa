@@ -493,12 +493,12 @@ impl Registry {
             parent_session_id: options.parent_session_id.clone(),
         })
     }
-    fn write(&mut self, clients: usize) -> io::Result<()> {
+    fn write(&mut self, clients: usize, active: bool) -> io::Result<()> {
         let entry = json!({"session_id":self.session_id,"pid":std::process::id(),
             "socket_path":self.socket,"daemon_socket":self.daemon_socket,"cwd":self.cwd,
             "repo_root":self.repo_root,"title":self.title,
             "started_at":self.started_at,"incarnation":self.incarnation,
-            "heartbeat_at":iso_now(),"clients":clients,
+            "heartbeat_at":iso_now(),"clients":clients,"active":active,
             "engine":self.engine.name(),"parent_session_id":self.parent_session_id});
         let tmp = self
             .path
@@ -786,7 +786,7 @@ fn run() -> io::Result<()> {
     let mut handle = Daemon::bind(&options.runtime, session, host)?.start();
     let inbox = Inbox::bind(&options.runtime, &options.session_id)?;
     let mut registry = Registry::new(&options, inbox.path(), handle.socket_path(), title, repo_root)?;
-    registry.write(0)?;
+    registry.write(0, false)?;
     drop(title_lock);
     let mut remote_bridge = match remote_bridge::Bootstrap::request(&options.runtime) {
         Ok(bootstrap) => bootstrap,
@@ -817,6 +817,7 @@ fn run() -> io::Result<()> {
     let mut empty_since = Instant::now();
     let mut last_beat = Instant::now();
     let mut previous_clients = 0;
+    let mut previous_active = false;
     let result = loop {
         if let Some(bootstrap) = remote_bridge.as_mut() {
             if let Some(ok) = bootstrap.poll() {
@@ -852,10 +853,12 @@ fn run() -> io::Result<()> {
             break Ok(());
         }
         let clients = handle.attached_clients();
+        let active_work = handle.has_active_work();
+        let active = clients > 0 || active_work;
         if clients > 0 {
             had_client = true;
             empty_since = Instant::now();
-        } else if previous_clients > 0 || handle.has_active_work() {
+        } else if previous_clients > 0 || active_work {
             // Detached work is still claimed. Give it a full idle interval
             // after completion, rather than canceling at a detach deadline.
             empty_since = Instant::now();
@@ -871,13 +874,14 @@ fn run() -> io::Result<()> {
             // owns the final decision under its admission lock.
             empty_since = Instant::now();
         }
-        if clients != previous_clients || last_beat.elapsed() >= Duration::from_secs(15) {
-            if let Err(error) = registry.write(clients) {
+        if clients != previous_clients || active != previous_active || last_beat.elapsed() >= Duration::from_secs(15) {
+            if let Err(error) = registry.write(clients, active) {
                 break Err(error);
             }
             last_beat = Instant::now();
         }
         previous_clients = clients;
+        previous_active = active;
         thread::sleep(Duration::from_millis(20));
     };
     peer_host.cancel_spawns(true);
