@@ -77,10 +77,11 @@ fn reviewed_python_snapshot_roundtrips_only_for_unchanged_source_worktree() {
     lore_core::codegraph_snapshot::store(&config, &request, &authority).unwrap();
     let before = std::fs::read_dir(config.root.join("codegraph-v1")).unwrap()
         .map(|entry| std::fs::read(entry.unwrap().path()).unwrap()).collect::<Vec<_>>();
-    let CodegraphSnapshot::Current(current) = client.codegraph_snapshot(cwd, "file", "service.py").unwrap()
+    let snapshot = client.codegraph_snapshot(cwd, "file", "service.py").unwrap();
+    let CodegraphSnapshot::Current(current) = &snapshot
         else { panic!("expected current Python snapshot") };
     assert_eq!(current.source_sha256, hash);
-    assert_eq!(current.to_value()["binding"], "unknown");
+    assert_eq!(snapshot.to_value()["binding"], "unknown");
     let after = std::fs::read_dir(config.root.join("codegraph-v1")).unwrap()
         .map(|entry| std::fs::read(entry.unwrap().path()).unwrap()).collect::<Vec<_>>();
     assert_eq!(before, after, "client read unexpectedly rewrote the reviewed snapshot");

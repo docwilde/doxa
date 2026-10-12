@@ -1831,9 +1831,10 @@ mod codegraph_snapshot_tests {
     fn python_snapshot_response_is_scoped_and_keeps_binding_unknown() {
         let cwd = "/owned/python-codegraph-fixture";
         let valid = python_response(cwd, "src/service.py");
-        let CodegraphSnapshot::Current(snapshot) = CodegraphSnapshot::parse(
-            valid.clone(), cwd, "file", "src/service.py").unwrap() else { panic!("missing") };
-        let rendered = snapshot.to_value();
+        let parsed = CodegraphSnapshot::parse(
+            valid.clone(), cwd, "file", "src/service.py").unwrap();
+        let CodegraphSnapshot::Current(_) = &parsed else { panic!("missing") };
+        let rendered = parsed.to_value();
         assert_eq!(rendered["path"], "src/service.py");
         assert_eq!(rendered["binding"], "unknown");
         assert_eq!(rendered["graph"]["rows"][0]["name"], "run");
