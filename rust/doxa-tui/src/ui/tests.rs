@@ -1112,6 +1112,11 @@ for line in sys.stdin:
                     column:width / 2,row:height / 2,modifiers:KeyModifiers::NONE}));
                 assert!(app.map_modal, "clicks inside the peer menu must keep it open");
             }
+            // A centered modal can cover the opening chip. Click that chip
+            // again where it remains visible, otherwise use an outside corner.
+            let (column, row) = if app.peer_map.contains(app.size, ratatui::layout::Position::new(column, row)) {
+                (0, 0)
+            } else { (column, row) };
             assert!(app.handle(Event::Mouse(MouseEvent {
                 kind:MouseEventKind::Down(MouseButton::Left),column,row,modifiers:KeyModifiers::NONE,
             })));
