@@ -10,7 +10,7 @@ and DOXA reviews. Automatic routing does not approve tools.
 Explicit [external MCP tools](vendor-mcp.md) are inherited by API turns only;
 Claude/Codex targets retain native MCP ownership. Every external MCP call
 requires a one-call review, including with native permission Auto. External
-server charges are unknown and excluded from the tracked Jev/API allowance;
+server charges are unknown and excluded from the tracked routing/API allowance;
 the cost chip shows `MCP ?`. Managed compaction has no tools and does not
 connect or list MCP servers.
 
@@ -231,7 +231,7 @@ Token-based estimates and conservative reservations are not billed tier or invoi
 
 A reviewed `cli_account` config explicitly excludes unknown CLI provider charges
 from that tracked allowance. Mixed-session telemetry labels the estimate
-`Jev/API · CLI ?` on CLI turns, later API turns and reattach: provider CLI charge
+`Router/API · CLI ?` on CLI turns, later API turns and reattach: provider CLI charge
 and total charge stay unknown, never zero. Complete observed CLI token usage is
 tracked separately. Interrupted, missing or inconsistent usage/model/source
 proof retains the pending worker binding and blocks future work/resume replay.

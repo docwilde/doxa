@@ -10,15 +10,15 @@
     },
     {
       "id": "settings-router",
-      "title": "Jev Router settings",
+      "title": "Model Router settings",
       "caption": "Configure Jev or SubQ Snap routing in the native Settings menu",
-      "alt": "Staged Jev Router default and private config path awaiting review",
+      "alt": "Staged SubQ Snap routing model and private candidate config awaiting review",
       "image": "../assets/shots/rust-2.0.0-beta.50-settings-router.png"
     },
     {
       "id": "routing-status",
       "title": "Routing status",
-      "caption": "A synthetic Auto decision shows the selected worker separately from Jev/API routing cost. No provider call is made.",
+      "caption": "A synthetic Auto decision shows the selected worker separately from decision/API routing cost. No provider call is made.",
       "alt": "Synthetic Auto routing decision with separate effective worker and routing cost",
       "image": "../assets/shots/rust-2.0.0-beta.50-routing-status.png"
     },
