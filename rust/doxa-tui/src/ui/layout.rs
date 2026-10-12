@@ -34,8 +34,8 @@ impl App {
 
     pub(super) fn rail_groups(&self) -> Vec<(RailGroupKey, Vec<RailRow>, u8)> {
         if self.preferences.value("rail_entries") == "panes" { return self.rail_pane_groups(); }
-        let mut groups = Vec::new();
         let mut seen = HashSet::new();
+        let mut groups = self.fleet_rail_groups(&mut seen);
         for (heading, item) in self.collections.iter().enumerate() {
             let mut rows = vec![RailRow::Heading(heading)];
             let mut urgency = 0;
@@ -70,8 +70,8 @@ impl App {
     /// Pane view has one navigable row per open pane. Detached live sessions
     /// remain individual rows, and hidden tabs only contribute to their pane.
     fn rail_pane_groups(&self) -> Vec<(RailGroupKey, Vec<RailRow>, u8)> {
-        let mut groups = Vec::new();
         let mut placed = HashSet::new();
+        let mut groups = self.fleet_rail_groups(&mut placed);
         for (heading, collection) in self.collections.iter().enumerate() {
             let mut rows = vec![RailRow::Heading(heading)];
             let mut urgency = 0;
@@ -278,7 +278,7 @@ impl App {
         true
     }
 
-    fn rail_session_visible(&self, index: usize) -> bool {
+    pub(super) fn rail_session_visible(&self, index: usize) -> bool {
         let id = &self.sessions[index].id;
         if self.groups.iter().any(|group| group.tabs.contains(id)) {
             return true;

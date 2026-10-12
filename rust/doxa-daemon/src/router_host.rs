@@ -156,6 +156,10 @@ pub struct RouterHost {
 }
 
 impl RouterHost {
+    fn cost_scope(&self) -> &'static str {
+        if self.config.decision()==doxa_router::DecisionModel::Jev {"jev_and_direct_api_only"}else{"decision_and_direct_api_only"}
+    }
+
     #[cfg(test)]
     pub fn new(config: Config, cwd: &Path, id: &str, resume: bool, ceiling: Option<f64>,
         #[cfg(feature = "local-test-server")] endpoint: Option<String>) -> Result<Self, String> {
@@ -403,7 +407,7 @@ impl RouterHost {
                 event["data"]["session_cost_usd"] = json!(state.estimated_spent().map(|sum|sum as f64/1_000_000.0));
                 event["data"]["cost_is_estimate"] = json!(true);
                 event["data"]["cost_basis"] = json!("aggregate_upper_rates");
-                event["data"]["cost_scope"] = json!("jev_and_direct_api_only");
+                event["data"]["cost_scope"] = json!(self.cost_scope());
                 if self.config.candidates.iter().any(|row|row.provider.is_cli()) {
                     event["data"]["total_cost_usd"] = Value::Null;
                     event["data"]["cli_provider_charge_usd"] = Value::Null;
@@ -435,7 +439,7 @@ impl RouterHost {
             state.pending_cli=Some(json!({"operation":"cli_turn","worker_id":worker_id,
                 "source_sha256":source_hash,"request_sha256":doxa_router::hash(&packet).map_err(|_|"CLI request identity unavailable")?,
                 "target_id":candidate.id,"provider":candidate.provider,"model":candidate.model,"effort":candidate.effort,
-                "billing":"cli_account","cost_scope":"jev_and_direct_api_only","provider_charge_usd":null,
+                "billing":"cli_account","cost_scope":self.cost_scope(),"provider_charge_usd":null,
                 "input_cap_bytes":cap,"output_cap_tokens":candidate.max_output_tokens,"permission":state.permission}));
             self.save(&mut state)?;state.permission.clone()
         };
@@ -542,7 +546,7 @@ impl RouterHost {
         event["data"]["total_cost_usd"]=Value::Null;
         event["data"]["cost_usd"]=json!(if state.unknown(){None}else{outcome.router_cost_usd_micros.map(|sum|sum as f64/1_000_000.0)});
         event["data"]["session_cost_usd"]=json!(state.estimated_spent().map(|sum|sum as f64/1_000_000.0));
-        event["data"]["cost_scope"]=json!("jev_and_direct_api_only");
+        event["data"]["cost_scope"]=json!(self.cost_scope());
         event["data"]["cost_basis"]=json!("aggregate_upper_rates");
         event["data"]["cost_is_estimate"]=json!(true);
         event["data"]["accounting_unknown"]=json!(state.unknown());
@@ -572,7 +576,7 @@ impl RouterHost {
         let prepared = doxa_router::prepare(&turn_config, &RoutingInput { summary, estimated_input_tokens: input_tokens,
             max_output_tokens: required_output, requires_tools: tools, allowed_candidate_ids: allowed })
             .map_err(|_| "Router input or configured fallback is ineligible")?;
-        let key = doxa_router::credential().ok();
+        let key = turn_config.decision().credential().ok();
         let reservation = {
             let mut state = self.state.lock().unwrap();
             state.turn = state.turn.checked_add(1).ok_or("Router turn count overflow")?;
@@ -607,7 +611,7 @@ impl RouterHost {
                 if !state.router.accounting_unknown { state.incomplete = false; self.save(&mut state)?; }
                 return Err("Router turn cancelled; admitted reservations retained".into());
             }
-            if state.router.accounting_unknown { return Err("Jev usage is unknown; worker execution withheld".into()); }
+            if state.router.accounting_unknown { return Err("Decision service usage is unknown; worker execution withheld".into()); }
         }
         let candidate = turn_config.candidate(&outcome.candidate_id)
             .filter(|candidate| prepared.eligible_ids.contains(&candidate.id)).ok_or("Router selected an ineligible target")?;
@@ -627,7 +631,7 @@ impl RouterHost {
             };
             let selection = json!({"turn":state.turn,"target_id":candidate.id,"engine":candidate.provider.engine_id(),
                 "model":candidate.model,"effort":candidate.effort,"billing":candidate.billing,
-                "cost_scope":"jev_and_direct_api_only","cli_provider_charge_usd":null,"route_mode":if pinned.is_some(){"pinned"}else{"auto"},
+                "cost_scope":self.cost_scope(),"cli_provider_charge_usd":null,"route_mode":if pinned.is_some(){"pinned"}else{"auto"},
                 "fallback_reason":if outcome.reason == Reason::Selected { Value::Null } else { serde_json::to_value(&outcome.reason).unwrap() },
                 "latency_ms":outcome.latency_ms,"cost_usd":outcome.router_cost_usd_micros.map(|cost|cost as f64 / 1_000_000.0),
                 "cost_is_estimate":true,"context_basis":"operator_request_byte_cap","provider_window":provider_window,
@@ -683,7 +687,7 @@ impl RouterHost {
                 event["data"]["session_cost_usd"] = json!(state.estimated_spent().map(|sum|sum as f64/1_000_000.0));
                 event["data"]["cost_is_estimate"] = json!(true);
                 event["data"]["cost_basis"] = json!("aggregate_upper_rates");
-                event["data"]["cost_scope"] = json!("jev_and_direct_api_only");
+                event["data"]["cost_scope"] = json!(self.cost_scope());
                 if self.config.candidates.iter().any(|row|row.provider.is_cli()) {
                     event["data"]["total_cost_usd"] = Value::Null;
                     event["data"]["cli_provider_charge_usd"] = Value::Null;
@@ -757,7 +761,7 @@ impl Host for RouterHost {
                 Ok(json!({"model":model,"effort":null}))
             }
             "set_effort" => Err("Router effort is configured per target; changing it requires a reviewed router config".into()),
-            "get_settings" => { let state = self.state.lock().unwrap(); Ok(json!({"model":state.pinned.as_deref().unwrap_or("auto"),"effort":null,"routing":state.selection,"permission_mode":state.permission,"cost_scope":"jev_and_direct_api_only"})) }
+            "get_settings" => { let state = self.state.lock().unwrap(); Ok(json!({"model":state.pinned.as_deref().unwrap_or("auto"),"effort":null,"routing":state.selection,"permission_mode":state.permission,"cost_scope":self.cost_scope()})) }
             "checkpoint_for_migration" => Err("Router handoffs are unavailable in the first slice".into()),
             _ => self.inner.call(method, params),
         }
@@ -787,7 +791,7 @@ impl Host for RouterHost {
     fn billing_snapshot(&self)->Option<Value> {
         let state = self.state.lock().ok()?;
         Some(json!({"mode":if self.config.candidates.iter().any(|row|row.provider.is_cli()){"mixed"}else{"api"},
-            "cost_scope":"jev_and_direct_api_only","cli_provider_charge_usd":null,
+            "cost_scope":self.cost_scope(),"cli_provider_charge_usd":null,
             "total_cost_usd":if self.inner.external_mcp().is_some() || self.config.candidates.iter().any(|row|row.provider.is_cli()) {Value::Null}else{json!(state.estimated_spent().map(|sum|sum as f64/1_000_000.0))},
             "external_mcp":self.inner.external_mcp(),
             "routing":state.selection,"compaction":state.compaction,"router_usage":state.router,"worker_usage":state.worker,
@@ -796,6 +800,6 @@ impl Host for RouterHost {
             "cost_is_estimate":true,"cost_basis":"aggregate_upper_rates",
             "budget":{"ceiling_usd":self.ceiling_micros.map(|sum|sum as f64/1_000_000.0),
                 "aggregate_held_usd":state.held().map(|sum|sum as f64/1_000_000.0),
-                "accounting_unknown":state.unknown(),"durable":true,"cost_scope":"jev_and_direct_api_only","cost_basis":"aggregate_upper_rates"}}))
+                "accounting_unknown":state.unknown(),"durable":true,"cost_scope":self.cost_scope(),"cost_basis":"aggregate_upper_rates"}}))
     }
 }

@@ -555,13 +555,14 @@ fn run(args: &[String]) -> io::Result<()> {
                 }
                 launch::Engine::Router => {
                     match launch::router_config(options.router_config.as_deref()) {
-                        Ok((_,config)) => println!("ok router config: {} configured targets (account availability unverified)",config.candidates.len()),
+                        Ok((_,config)) => {
+                            println!("ok router config: {} configured targets (account availability unverified)",config.candidates.len());
+                            if config.decision().credential().is_ok() { println!("ok {} decision credential: set",config.decision().label()); }
+                            else {println!("missing {} decision credential",config.decision().label());missing=true;}
+                        },
                         Err(_) => {println!("missing router config: explicit owner-private config required");missing=true;}
                     }
-                    if !std::env::var("TYPESAFE_API_KEY").is_ok_and(|value|!value.trim().is_empty()) {
-                        println!("missing TYPESAFE_API_KEY: unset");missing=true;
-                    } else {println!("ok TYPESAFE_API_KEY: set (environment)");}
-                    println!("router doctor is read-only; no Jev or worker request was sent");
+                    println!("router doctor is read-only; no decision or worker request was sent");
                 }
             }
             for (name, result) in checks {

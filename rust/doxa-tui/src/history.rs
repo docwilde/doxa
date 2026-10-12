@@ -372,7 +372,11 @@ fn discover_in(root: &Path, prefix: Option<&str>, query: Option<&str>) -> Vec<Of
 pub fn resume_plan(entry: &OfflineSession) -> Result<LaunchOptions, &'static str> {
     let root = projects_dir().ok_or("transcript root unavailable")?;
     let claude = claude_store_root().ok_or("DOXA home unavailable")?;
-    resume_plan_in(entry, &root, &claude, &|| LoreClient::open(Duration::from_secs(3)))
+    resume_plan_in(entry, &root, &claude, &|| LoreClient::open(Duration::from_secs(3)), &|| {
+        let (path,config)=crate::launch::router_config(None).map_err(|_|"Select the original private Router config in Settings before continuing")?;
+        let home=crate::operations::doxa_home().map_err(|_|"Router state directory unavailable")?;
+        Ok((path,config,home))
+    })
 }
 
 fn claude_store_root() -> Option<PathBuf> {
@@ -421,7 +425,7 @@ fn ready_resume_cwd(cwd: &Path, id: &str, missing: bool,
     Ok(canonical)
 }
 
-fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Path, open_lore: &impl Fn() -> Result<LoreClient, doxa_lore::LoreError>) -> Result<LaunchOptions, &'static str> {
+fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Path, open_lore: &impl Fn() -> Result<LoreClient, doxa_lore::LoreError>, router_context: &impl Fn() -> Result<(PathBuf,doxa_router::Config,PathBuf), &'static str>) -> Result<LaunchOptions, &'static str> {
     if !crate::discovery::valid_id(&entry.id) { return Err("invalid session ID"); }
     let cwd = entry.cwd.as_ref().ok_or("session directory was not recorded")?;
     let (cwd, missing) = match cwd.canonicalize() {
@@ -464,11 +468,6 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
         return Err("unsafe Codex thread record");
     }
     if let Some(mut record) = open_at(&dir, OsStr::new(&codex_name), libc::O_RDONLY | libc::O_NONBLOCK) {
-        let vendor_name = format!("{}.messages.json", entry.id);
-        if entry_present(&dir, OsStr::new(&vendor_name))
-            || claude_history_present(claude_root, &entry.id, uid) {
-            return Err("ambiguous session engine state");
-        }
         let meta = record.metadata().map_err(|_| "unreadable Codex thread record")?;
         if !meta.is_file() || meta.uid() != uid || meta.nlink() != 1
             || meta.len() == 0 || meta.len() > MAX_CODEX_METADATA_BYTES {
@@ -477,6 +476,22 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
         let mut bytes = Vec::new();
         record.read_to_end(&mut bytes).map_err(|_| "unreadable Codex thread record")?;
         let state: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid Codex thread record")?;
+        // Native Claude and Codex share TranscriptStore's thread sidecar.
+        // The filename is a storage convention, not the engine identity.
+        let engine = match state.get("engine") {
+            None | Some(Value::Null) => Engine::Codex,
+            Some(Value::String(engine)) if engine == "codex" => Engine::Codex,
+            Some(Value::String(engine)) if engine == "claude" => Engine::Claude,
+            _ => return Err("unsupported saved thread engine"),
+        };
+        let vendor_name = format!("{}.messages.json", entry.id);
+        let cli_history = claude_history_present(claude_root, &entry.id, uid);
+        if entry_present(&dir, OsStr::new(&vendor_name)) || engine == Engine::Codex && cli_history {
+            return Err("ambiguous session engine state");
+        }
+        if engine == Engine::Claude && !state["thread_id"].as_str().is_some_and(|thread|crate::discovery::valid_id(thread) && claude_history_present(claude_root,thread,uid)) {
+            return Err("saved Claude CLI history is unavailable");
+        }
         if state["session_id"].as_str() != Some(&entry.id)
             || state["cwd"].as_str() != cwd.to_str()
             || state.get("turn_incomplete") != Some(&Value::Bool(false))
@@ -490,7 +505,7 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
             _ => return Err("invalid Codex model in thread record"),
         };
         let cwd = ready_resume_cwd(&cwd, &entry.id, missing, expected_root, &entry.project, open_lore)?;
-        return Ok(LaunchOptions { engine: Engine::Codex, cwd: Some(cwd), model,
+        return Ok(LaunchOptions { engine, cwd: Some(cwd), model,
             resume: Some(entry.id.clone()), ..LaunchOptions::default() });
     }
     let name = format!("{}.messages.json", entry.id);
@@ -512,7 +527,7 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
     let engine = match state["engine"].as_str() {
         Some("deepseek") => Engine::DeepSeek,
         Some("glm") => Engine::Glm,
-        Some("router") => return Err("router resume needs doxa new --engine router --router-config PATH --resume ID; automatic config inheritance is unavailable"),
+        Some("router") => Engine::Router,
         _ => return Err("unsupported or unknown saved engine"),
     };
     if state.get("session_id").is_some_and(|id| id.as_str() != Some(&entry.id)) {
@@ -522,6 +537,20 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
         .ok_or("saved vendor model is unknown")?;
     if !state["messages"].is_array() { return Err("invalid replay state"); }
     let cwd = ready_resume_cwd(&cwd, &entry.id, missing, expected_root, &entry.project, open_lore)?;
+    if engine == Engine::Router {
+        let (path,config,home)=router_context()?;
+        let journal=doxa_router::read_private(&home.join("router").join(format!("{}.router.json",entry.id)),4*1024*1024)
+            .map_err(|_|"Router durable journal is unavailable or unsafe")?;
+        let journal:Value=serde_json::from_str(&journal).map_err(|_|"Invalid Router durable journal")?;
+        if journal["version"]!=1 || journal["identity"]["engine"]!="router" || journal["identity"]["session_id"]!=entry.id
+            || journal["identity"]["cwd"].as_str()!=cwd.to_str() || journal["identity"]["config_sha256"].as_str()!=config.hash().ok().as_deref()
+            || journal["incomplete"]!=false {return Err("Router config, identity or complete-turn boundary changed; select the original config");}
+        let selected=match journal.get("pinned") {
+            None|Some(Value::Null)=>"auto",Some(Value::String(id)) if config.candidate(id).is_some()=>id,
+            _=>return Err("Saved Router target is not in the original config"),
+        };
+        return Ok(LaunchOptions {engine,cwd:Some(cwd),model:Some(selected.into()),router_config:Some(path),resume:Some(entry.id.clone()),..LaunchOptions::default()});
+    }
     Ok(LaunchOptions { engine, cwd: Some(cwd), model: Some(model.to_owned()),
         resume: Some(entry.id.clone()), ..LaunchOptions::default() })
 }
@@ -812,7 +841,7 @@ mod tests {
     use std::process::Command;
 
     fn resume_fixture(entry: &OfflineSession, python: &Path, root: &Path, claude: &Path) -> Result<LaunchOptions, &'static str> {
-        resume_plan_in(entry, root, claude, &|| LoreClient::spawn(python, Duration::from_secs(3)))
+        resume_plan_in(entry, root, claude, &|| LoreClient::spawn(python, Duration::from_secs(3)), &||Err("Select the original private Router config in Settings before continuing"))
     }
 
     fn fake_lore(dir: &Path, root: &Path) -> PathBuf {
@@ -1064,7 +1093,7 @@ for line in sys.stdin:
         assert_eq!(plan.resume.as_deref(), Some("saved-1"));
         fs::write(&replay, br#"{"engine":"router","session_id":"saved-1","model":"router-conversation-v1","messages":[]}"#).unwrap();
         let error=resume_fixture(&entry,&script,&root,&temp.path().join("cli-projects")).unwrap_err();
-        assert!(error.contains("--router-config") && error.contains("inheritance is unavailable"));
+        assert!(error.contains("original private Router config"));
         let mut wrong = entry.clone();
         wrong.project = "another-project".into();
         assert!(resume_fixture(&wrong, &script, &root, &temp.path().join("cli-projects")).is_err());
@@ -1092,6 +1121,37 @@ for line in sys.stdin:
         assert_eq!(plan.engine, Engine::Claude);
         fs::write(root.join("project/saved-1.codex.json"), b"{}").unwrap();
         assert!(resume_fixture(&entry, &script, &root, &cli).unwrap_err().contains("ambiguous"));
+    }
+
+    #[test]
+    fn native_claude_thread_checkpoint_resumes_claude_with_its_own_cli_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        fs::create_dir_all(root.join("project")).unwrap();
+        let cwd = temp.path().join("checkout");
+        fs::create_dir(&cwd).unwrap();
+        let cli = temp.path().join("cli-projects");
+        fs::create_dir_all(cli.join("encoded-cwd")).unwrap();
+        let script = fake_lore(temp.path(), &root);
+        let entry = OfflineSession { id: "saved-1".into(), project: "project".into(),
+            markdown: String::new(), search_snippets: Vec::new(), cwd: Some(cwd.clone()) };
+        fs::write(root.join("project/saved-1.jsonl"), b"saved transcript\n").unwrap();
+        let state = serde_json::json!({"thread_id":"saved-1", "session_id":"saved-1",
+            "engine":"claude", "transport":"stream-json", "cwd":cwd,
+            "model":"claude-test", "turn_incomplete":false});
+        fs::write(root.join("project/saved-1.codex.json"), state.to_string()).unwrap();
+        assert_eq!(resume_fixture(&entry, &script, &root, &cli).unwrap_err(), "saved Claude CLI history is unavailable");
+        fs::write(cli.join("encoded-cwd/saved-1.jsonl"), b"saved CLI history\n").unwrap();
+        let plan = resume_fixture(&entry, &script, &root, &cli).unwrap();
+        assert_eq!(plan.engine, Engine::Claude);
+        assert_eq!(plan.resume.as_deref(), Some("saved-1"));
+        assert_eq!(plan.model.as_deref(), Some("claude-test"));
+        let checkpoint=root.join("project/saved-1.codex.json");
+        let mut state:Value=serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+        state["thread_id"]=serde_json::json!("fresh-provider");fs::write(&checkpoint,state.to_string()).unwrap();
+        fs::write(cli.join("encoded-cwd/fresh-provider.jsonl"),b"owned provider history\n").unwrap();
+        assert_eq!(resume_fixture(&entry,&script,&root,&cli).unwrap().engine,Engine::Claude);
+
     }
 
     #[test]

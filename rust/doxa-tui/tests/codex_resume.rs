@@ -8,7 +8,8 @@ fn codex_resume_passes_exact_session_and_explicit_resume_flag() {
     let daemon = dir.path().join("fake-daemon");
     let codex = dir.path().join("fake-codex");
     let capture = dir.path().join("argv.txt");
-    fs::write(&daemon, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DOXA_CAPTURE_ARGS\"\nexit 1\n").unwrap();
+    let migration = dir.path().join("migration.txt");
+    fs::write(&daemon, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DOXA_CAPTURE_ARGS\"\nprintf '%s' \"${DOXA_CODEX_MIGRATE_APPSERVER-unset}\" > \"$DOXA_CAPTURE_MODE\"\nexit 1\n").unwrap();
     fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&daemon, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
@@ -20,12 +21,15 @@ fn codex_resume_passes_exact_session_and_explicit_resume_flag() {
             ])
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
+        .env("DOXA_CAPTURE_MODE", &migration)
+        .env_remove("DOXA_CODEX_MIGRATE_APPSERVER")
         .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
         .env("DOXA_HOME", &home)
         .env("DOXA_MODEL", "environment-model")
         .current_dir(dir.path())
         .output().unwrap();
     assert!(!output.status.success());
+    assert_eq!(fs::read_to_string(migration).unwrap(),"1");
     let args: Vec<_> = fs::read_to_string(capture).unwrap().lines().map(str::to_owned).collect();
     assert!(args.windows(2).any(|w| w == ["--session-id", "saved-1"]));
     assert!(args.windows(2).any(|w| w == ["--engine", "codex"]));

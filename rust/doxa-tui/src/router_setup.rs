@@ -41,6 +41,7 @@ pub struct Review {
     pub targets: Vec<Target>,
     pub fallback_id: String,
     pub jev_key_present: bool,
+    pub decision_model: String,
 }
 
 impl Review {
@@ -50,33 +51,35 @@ impl Review {
     }
 
     pub fn current(&self, path: &Path) -> bool {
+        self.current_with_model(path, Some(&crate::settings::raw("router_model")))
+    }
+    pub fn current_with_model(&self, path: &Path, model: Option<&str>) -> bool {
         self.path == path && self.checked.elapsed() <= REVIEW_LIFETIME
-            && Config::load(path).and_then(|config| config.hash()).is_ok_and(|hash| hash == self.config_hash)
-            && self.jev_key_present == jev_key_present()
+            && Config::load_with_model(path, model).is_ok_and(|config| config.hash().is_ok_and(|hash| hash == self.config_hash)
+                && self.jev_key_present == config.decision().credential().is_ok())
     }
 
     pub fn summary(&self) -> String {
         let available = self.targets.iter().filter(|target| target.availability == Availability::Available).count();
         let unknown = self.targets.iter().filter(|target| matches!(target.availability, Availability::Unknown(_))).count();
-        let status = if !self.jev_key_present { "Jev key missing" }
+        let status = if !self.jev_key_present { "Decision service key missing" }
             else if self.ready() { "Ready for new sessions" } else { "Fallback unavailable or unverified" };
-        format!("{status} · {available}/{} targets available · {unknown} unknown", self.targets.len())
+        format!("{} · {status} · {available}/{} targets available · {unknown} unknown", self.decision_model, self.targets.len())
     }
 
     pub fn cost_scope(&self) -> &'static str {
         if self.targets.iter().any(|target| target.cli_account) {
-            "Allowance tracks Jev/API only; CLI account charges unknown and excluded."
-        } else { "Allowance tracks Jev/API estimates; turn context/tools/budget rechecked at launch." }
+            "Allowance tracks routing/API only; CLI account charges unknown and excluded."
+        } else { "Allowance tracks routing/API estimates; turn context/tools/budget rechecked at launch." }
     }
 }
 
-fn jev_key_present() -> bool {
-    doxa_router::credential().is_ok()
-}
-
 pub fn review(path: &Path, cwd: &Path) -> Result<Review, &'static str> {
-    let config = Config::load(path).map_err(|_| "Config missing, unsafe, or invalid; use an absolute owner-private JSON file")?;
-    review_with(path, &config, jev_key_present(), |provider| provider_catalog(provider, cwd))
+    review_with_model(path, cwd, Some(&crate::settings::raw("router_model")))
+}
+pub fn review_with_model(path: &Path, cwd: &Path, model: Option<&str>) -> Result<Review, &'static str> {
+    let config = Config::load_with_model(path, model).map_err(|_| "Config missing, unsafe, or invalid; use an absolute owner-private JSON file")?;
+    review_with(path, &config, config.decision().credential().is_ok(), |provider| provider_catalog(provider, cwd))
 }
 
 fn provider_catalog(provider: &str, cwd: &Path) -> Result<Value, Availability> {
@@ -123,7 +126,7 @@ pub(crate) fn review_with(path: &Path, config: &Config, jev_key_present: bool,
             effort:candidate.effort.clone(), cli_account, availability });
     }
     Ok(Review { path:path.into(), config_hash:config.hash().map_err(|_|"Config identity unavailable")?,
-        checked:Instant::now(),targets,fallback_id:config.fallback_id.clone(),jev_key_present })
+        checked:Instant::now(),targets,fallback_id:config.fallback_id.clone(),decision_model:config.jev_model.clone(),jev_key_present })
 }
 
 fn candidate_availability(candidate: &Value, catalog: &Value) -> Availability {

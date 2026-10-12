@@ -284,6 +284,43 @@ impl App {
         true
     }
 
+    /// Only a keyboard prompt or the local resume command starts this path.
+    /// Keep the draft until the verified daemon has accepted its attachment.
+    pub(super) fn resume_archive(&mut self, id: &str, group: usize, prompt: Option<String>) -> bool {
+        if self.resume_pending.is_some() || self.launching || self.resume_launch_prompt.is_some() {
+            self.notice = "Wait for the current session restore".into();
+            return false;
+        }
+        let Some(entry) = self.history_entries.get(id).cloned() else {
+            self.notice = "Saved conversation unavailable; transcript remains readable".into();
+            return false;
+        };
+        if prompt.is_some() { self.resume_launch_prompt = Some((group, id.to_owned(), prompt.unwrap())); }
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.resume_pending = Some((group, self.groups[group].active_id().map(str::to_owned), rx));
+        std::thread::spawn(move || { let result = history::resume_plan(&entry); let _ = tx.send((entry.id, result)); });
+        self.focus = Focus::Prompt;
+        self.notice = "Restoring saved conversation…".into();
+        true
+    }
+
+    pub(super) fn finish_archive_resume(&mut self, group: usize, id: Option<&str>, ok: bool) {
+        let Some((owner_group, owner, _)) = self.resume_launch_prompt.as_ref() else { return; };
+        if *owner_group != group { return; }
+        let ok = ok && id == Some(owner.as_str()) && !self.offline_ids.contains(owner)
+            && self.groups.get(group).is_some_and(|pane| pane.tabs.contains(owner));
+        let (group, owner, prompt) = self.resume_launch_prompt.take().unwrap();
+        if ok && self.pending_prompts.len() < super::MAX_PENDING_PROMPTS {
+            self.pending_prompts.push((owner.clone(), prompt.clone()));
+            self.input_drafts.remove(&(group, owner.clone()));
+            if self.active_group == group && self.groups[group].active_id() == Some(owner.as_str())
+                && self.input == prompt { self.input.clear(); self.input_cursor = 0; }
+        } else {
+            self.input_drafts.insert((group, owner), (prompt.clone(), prompt.len()));
+            if ok { self.notice = "Conversation restored; prompt retained because the queue is full".into(); }
+        }
+    }
+
     pub(super) fn local_resume(&mut self, args: &str) {
         let query = args.trim();
         if !query.is_empty() && !crate::discovery::valid_id(query) {
@@ -292,6 +329,12 @@ impl App {
         }
         self.input.clear();
         self.input_cursor = 0;
+        if self.offline_ids.contains(query) && self.history_entries.contains_key(query) {
+            let group = self.groups.iter().position(|pane| pane.tabs.iter().any(|id| id == query))
+                .unwrap_or(self.active_group);
+            self.resume_archive(query, group, None);
+            return;
+        }
         // A full ID naming a live daemon is immediately attachable even if
         // that daemon has not yet been indexed into transcript history.
         if !query.is_empty()
@@ -338,9 +381,9 @@ impl App {
             collection: safe_label(&entry.project),
             transcript: transcript_tail(&entry.markdown).to_owned(),
             status: if note.is_empty() {
-                "Archived · read-only".into()
+                "Saved · type to continue".into()
             } else {
-                format!("Archived · read-only · {}", safe_label(note))
+                format!("Saved · {}", safe_label(note))
             },
         };
         if let Some(old) = self.sessions.iter_mut().find(|old| old.id == entry.id) {
@@ -388,7 +431,7 @@ impl App {
                 title: entry.id,
                 collection: safe_label(&entry.project),
                 transcript: transcript_tail(&entry.markdown).to_owned(),
-                status: "Archived · read-only".into(),
+                status: "Saved · type to continue".into(),
             });
             changed = true;
         }
@@ -435,7 +478,7 @@ impl App {
                 title: entry.id,
                 collection: safe_label(&entry.project),
                 transcript: transcript_tail(&entry.markdown).to_owned(),
-                status: "Archived · read-only".into(),
+                status: "Saved · type to continue".into(),
             });
         }
     }
@@ -535,7 +578,8 @@ impl App {
                         if let Some(index) = group.tabs.iter().position(|tab| tab == &id) {
                             group.active = index;
                             self.active_group = group_index;
-                            self.notice = format!("Session already open · {}", safe_label(&id));
+                            if self.offline_ids.contains(&id) { self.resume_archive(&id, group_index, None); }
+                            else { self.notice = format!("Session already open · {}", safe_label(&id)); }
                             return;
                         }
                     }
@@ -596,7 +640,11 @@ impl App {
             Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => {
                 self.resume_pending = None;
-                return false;
+                if let Some((group, _, _)) = &self.resume_launch_prompt {
+                    self.finish_archive_resume(*group, None, false);
+                }
+                self.notice = "Restore worker stopped; draft and transcript retained".into();
+                return true;
             }
         };
         let (group, anchor, _) = self.resume_pending.take().unwrap();
@@ -606,6 +654,7 @@ impl App {
                 .as_ref()
                 .map_or(pane.tabs.is_empty(), |id| pane.tabs.contains(id))
         }) {
+            self.finish_archive_resume(group, Some(&id), false);
             self.notice = "Resume cancelled · original pane is no longer available".into();
             return true;
         }
@@ -616,17 +665,21 @@ impl App {
                 if crate::discovery::sessions()
                     .is_ok_and(|rows| rows.iter().any(|row| row.id == id))
                 {
-                    if self.groups.iter().any(|pane| pane.tabs.contains(&id)) {
+                    if self.groups.iter().any(|pane| pane.tabs.contains(&id)) && !self.offline_ids.contains(&id) {
                         self.notice = format!("Session already open · {}", safe_label(&id));
+                        self.finish_archive_resume(group, Some(&id), true);
                     } else if !self.attaching_ids.contains(&id)
                         && self.manual_tab_available_for(Some(&id))
                     {
                         self.attaching_ids.insert(id.clone());
                         self.pending_attaches.push((id.clone(), group));
                         self.notice = format!("Attaching · {}", safe_label(&id));
+                    } else {
+                        self.finish_archive_resume(group, Some(&id), false);
                     }
                 } else {
                     if !self.manual_tab_available_for(Some(&id)) {
+                        self.finish_archive_resume(group, Some(&id), false);
                         return true;
                     }
                     self.pending_launches.push((options, None, group));
@@ -634,9 +687,13 @@ impl App {
                     self.notice = format!("Resuming · {}", safe_label(&id));
                 }
             }
-            Ok(_) => self.notice = "Wait for the current session launch before resuming".into(),
+            Ok(_) => {
+                self.finish_archive_resume(group, Some(&id), false);
+                self.notice = "Wait for the current session launch before resuming".into();
+            },
             Err(reason) => {
-                self.notice = format!("Resume unavailable · {reason}; transcript remains readable")
+                self.finish_archive_resume(group, Some(&id), false);
+                self.notice = format!("Could not restore conversation · {reason}; draft and transcript retained")
             }
         }
         true

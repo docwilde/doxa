@@ -381,7 +381,7 @@ impl App {
                 launch::Engine::Claude => "claude",
                 launch::Engine::DeepSeek => "deepseek",
                 launch::Engine::Glm => "glm",
-                launch::Engine::Router => "Jev Router",
+                launch::Engine::Router => "Model Router",
                 launch::Engine::Fixture => "fixture",
             };
             if height < 8 && form.launch_error.is_some() {
@@ -744,7 +744,7 @@ impl App {
             footer
         } else if router_selected {
             let path=std::path::PathBuf::from(menu.effective_value("router_config"));
-            let mut footer=vec![Line::styled(" Ctrl+P: review Jev Router config/accounts/catalogs · no inference",
+            let mut footer=vec![Line::styled(" Ctrl+P: review Model Router config/accounts/catalogs · no inference",
                 Style::default().fg(theme::ACCENT))];
             let width=usize::from(area.width.saturating_sub(3)).max(1);
             footer.extend(self.router_review_lines(&path).into_iter().flat_map(|line|
@@ -2181,7 +2181,8 @@ impl App {
                         _ => "",
                     };
                     let badge = format!("{pane}{provenance}{queue}");
-                    let title_width = usize::from(area.width.saturating_sub(5))
+                    let fleet_prefix = self.fleet_rail_prefix(&session.id);
+                    let title_width = usize::from(area.width.saturating_sub(5)).saturating_sub(fleet_prefix.width())
                         .saturating_sub(badge.width());
                     let title = clipped_title(&session.title, title_width).0;
                     let style = if offline {
@@ -2206,7 +2207,7 @@ impl App {
                     } else {
                         style
                     };
-                    lines.push(Line::styled(format!("{mark} {title}{badge}"), style));
+                    lines.push(Line::styled(format!("{fleet_prefix}{mark} {title}{badge}"), style));
                 }
             }
         }

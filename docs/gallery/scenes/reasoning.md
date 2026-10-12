@@ -7,6 +7,6 @@
 
 A collapsed reasoning-progress section shows a synthetic token count.
 
-[![Collapsed reasoning progress section with a brain marker and synthetic token count](../../../assets/shots/rust-2.0.0-beta.49-reasoning.png)](../../../assets/shots/rust-2.0.0-beta.49-reasoning.png)
+[![Collapsed reasoning progress section with a brain marker and synthetic token count](../../../assets/shots/rust-2.0.0-beta.50-reasoning.png)](../../../assets/shots/rust-2.0.0-beta.50-reasoning.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#reasoning) · [Back to the README gallery](../../../README.md#gallery)

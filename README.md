@@ -58,15 +58,15 @@ The [Rust guide](rust/README.md) covers keys, session recovery, worktrees, setti
 | Codex | Protected private app server | Linux build and Codex sign-in. |
 | DeepSeek | Rust API client | Supply an API key. |
 | GLM | Rust API client | Supply a z.ai API key. |
-| Jev Router (opt-in) | Jev selects configured DeepSeek/GLM API or authenticated Claude/Codex CLI targets | Private candidate config, worker credentials and `TYPESAFE_API_KEY`. |
+| Model Router (opt-in) | Jev or SubQ Snap selects configured DeepSeek/GLM API or authenticated Claude/Codex CLI targets | Private candidate config, worker credentials and a private Jev/SubQ key. |
 
 [Engine capability matrix](docs/engine-capabilities.md) lists model, permission, cost, compaction, and platform support. The picker distinguishes sourced model facts from unknown context or thinking support. API budget admission uses a conservative documented price bound and refuses an unknown priced bound.
-The [Jev Router](docs/jev-router.md) keeps one canonical conversation while selecting an eligible configured worker at each turn. `/model auto` enables routing; a target ID pins it. Native Claude and protected Codex workers retain their tool and permission reviews. Their account charges remain unknown and are excluded from the tracked Jev/API allowance.
+The [Model Router](docs/jev-router.md) keeps one canonical conversation while selecting an eligible configured worker at each turn. `/model auto` enables routing; a target ID pins it. Native Claude and protected Codex workers retain their tool and permission reviews. Their account charges remain unknown and are excluded from the tracked routing/API allowance.
 
-Enable it in **`/settings` → Session → default engine → Jev Router**. Set the private candidate-config path, press **Ctrl+P** to review current authentication and catalogs, then **Ctrl+S** to save the default for new sessions. Selecting a fixed engine disables that default. New Session also offers the reviewed Router targets in its clickable model dropdown. [Settings walkthrough](docs/router-settings.md).
+Enable it in **`/settings` → Session → default engine → Model Router**. Choose **Jev 1.13.0** or **SubQ Snap Preview** as the routing decision model and enter its masked API key. Set the private candidate-config path, press **Ctrl+P** to review current authentication and catalogs, then **Ctrl+S** to save the default for new sessions. Selecting a fixed engine disables that default. New Session also offers the reviewed Router targets in its clickable model dropdown. [Settings walkthrough](docs/router-settings.md).
 `doxa model-facts ENGINE MODEL [--review-before YYYY-MM-DD]` prints exact sourced facts and flags operator-selected review candidates. Add `--check-catalog` for an explicit read-only OpenAI API listing check with `OPENAI_API_KEY`; it reports listed, unlisted, or unknown without changing model or budget admission.
 
-Fleets can run an acting coordinator and workers under a reviewed charter, typed host gates, and spending limits. A separately selected alignment supervisor, including pinned **Jev 1.13.0**, evaluates fleet scope and host evidence; a distinct fast LLM or Jev message judge reviews peer messages. Neither reviewer inherits worker authority or history. Dependent Docker-isolated workers wait for a host checkpoint, receiver read-back, sender agreement, and explicit human release; later turns and handoffs invalidate the review. `/fleet dependency-review` shows the evidence in the TUI. An owner-reviewed offline recipe can produce snapshot-bound test receipts; opt-in `--auto-test` runs it after host-observed turns. Receipts do not release dependencies. `doxa fleet debrief RUN --root PATH` summarizes bounded host evidence after a run without opening peer bodies or making model calls. A private scorer can evaluate consented, labeled real-message verdicts; no such corpus ships and evaluation does not change enforcement. [Fleet supervision](docs/fleet-supervision.md).
+Fleets can run an acting coordinator and workers under a reviewed charter, typed host gates, and spending limits. A separately selected alignment supervisor, including pinned **Jev 1.13.0** or **SubQ Snap Preview**, evaluates fleet scope and host evidence; a distinct fast LLM, Jev or Snap message judge reviews peer messages. Neither reviewer inherits worker authority or history. Dependent Docker-isolated workers wait for a host checkpoint, receiver read-back, sender agreement, and explicit human release; later turns and handoffs invalidate the review. `/fleet dependency-review` shows the evidence in the TUI. An owner-reviewed offline recipe can produce snapshot-bound test receipts; opt-in `--auto-test` runs it after host-observed turns. Receipts do not release dependencies. `doxa fleet debrief RUN --root PATH` summarizes bounded host evidence after a run without opening peer bodies or making model calls. A private scorer can evaluate consented, labeled real-message verdicts; no such corpus ships and evaluation does not change enforcement. [Fleet supervision](docs/fleet-supervision.md).
 
 ## Remote access
 
@@ -95,9 +95,9 @@ These beta.49 screenshots capture the production Ratatui app in a real GTK/VTE t
 <!-- gallery-carousel:start -->
 **Workspace** — Three engine tabs, a project rail, and a Markdown turn in the production Ratatui app.
 
-[![DOXA workspace with three engine tabs, a project rail, and a Markdown turn](assets/shots/rust-2.0.0-beta.49-hero.png)](assets/shots/rust-2.0.0-beta.49-hero.png)
+[![DOXA workspace with three engine tabs, a project rail, and a Markdown turn](assets/shots/rust-2.0.0-beta.50-hero.png)](assets/shots/rust-2.0.0-beta.50-hero.png)
 
-[← Code graph](docs/gallery/scenes/codegraph.md) · [Next: Jev Router settings →](docs/gallery/scenes/settings-router.md)
+[← Code graph](docs/gallery/scenes/codegraph.md) · [Next: Model Router settings →](docs/gallery/scenes/settings-router.md)
 <!-- gallery-carousel:end -->
 
 The [interactive gallery](https://docwilde.github.io/doxa/gallery/) has keyboard and on-page previous/next controls. GitHub's README view shows one static frame above; each [one-frame Markdown page](docs/gallery/scenes/settings-router.md) also has previous and next links.

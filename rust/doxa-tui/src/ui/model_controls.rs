@@ -467,7 +467,7 @@ impl App {
         if engine==launch::Engine::Router {
             let (path,config)=match launch::router_config(None) {
                 Ok(value)=>value,
-                Err(_)=>{self.notice="Jev Router: /settings → Session → Jev Router config; enter a private JSON path, Ctrl+P review, Ctrl+S save".into();return;}
+                Err(_)=>{self.notice="Model Router: /settings → Session → Model Router config; enter a private JSON path, Ctrl+P review, Ctrl+S save".into();return;}
             };
             let config_defaults=crate::settings::config_path().map(|path|doxa_state::load_config(&path)).unwrap_or_default();
             let (model,_)=new_session_preferences(engine,&config_defaults,None,None);
@@ -872,7 +872,7 @@ impl App {
                 }
                 if router && !form.router_config.as_deref().is_some_and(|path|self.router_review_result(path)
                     .is_some_and(|review|review.ready() && review.current(path))) {
-                    self.notice="Jev Router config/account/catalog unverified or expired; R reviews before Start".into();return true;
+                    self.notice="Model Router config/account/catalog unverified or expired; R reviews before Start".into();return true;
                 }
                 if vendor {
                     let allowed = form

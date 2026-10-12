@@ -5739,7 +5739,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn offline_history_opens_read_only_and_never_queues_prompt() {
+    fn offline_history_preserves_draft_until_verified_continuation() {
         let mut app = App::default();
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
@@ -5756,7 +5756,11 @@ for line in sys.stdin:
         app.input = "do not send".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.pending_prompts.is_empty());
-        assert_eq!(app.notice, "Archived transcript is read-only");
+        let deadline=Instant::now()+Duration::from_secs(2);
+        while app.resume_pending.is_some() && Instant::now()<deadline {app.poll_resume();std::thread::sleep(Duration::from_millis(5));}
+        assert!(app.resume_pending.is_none());assert!(app.notice.contains("Could not restore conversation"));
+        assert_eq!(app.input,"do not send");assert!(app.pending_prompts.is_empty());
+        assert_eq!(app.input_drafts[&(0,"saved-1".into())].0,"do not send");
     }
 
     #[test]
@@ -8567,3 +8571,40 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
         assert!(app.input_requests.is_empty()); assert!(app.take_answers().is_empty());
         assert!(!app.remote_review_incarnations.contains_key(id));
     }
+
+#[test]
+fn archive_prompt_is_dispatched_once_only_after_trusted_same_session_restore() {
+    for kind in ["launch_reply", "attach_reply"] {
+        let mut app = App::default();
+        app.groups[0].tabs.push("saved".into());
+        app.offline_ids.insert("saved".into());
+        app.input = "continue my task".into();
+        app.resume_launch_prompt = Some((0, "saved".into(), app.input.clone()));
+        if kind == "launch_reply" { app.launching = true; } else { app.attaching_ids.insert("saved".into()); }
+        let reply = json!({"type":kind,"ok":true,"session_id":"saved","group":0});
+        assert!(app.apply_daemon_frame(&reply));
+        assert_eq!(app.pending_prompts, [("saved".into(), "continue my task".into())]);
+        assert!(app.input.is_empty());
+        assert!(!app.offline_ids.contains("saved"));
+        assert!(app.resume_launch_prompt.is_none());
+        app.apply_daemon_frame(&reply);
+        assert_eq!(app.pending_prompts.len(), 1);
+    }
+}
+
+#[test]
+fn failed_archive_restore_preserves_prompt_and_never_sends_to_changed_target() {
+    for (ok, id) in [(false,"saved"),(true,"unexpected")] {
+        let mut app = App::default();
+        app.groups[0].tabs.push("saved".into());
+        app.offline_ids.insert("saved".into());
+        app.input = "continue my task".into();
+        app.resume_launch_prompt = Some((0,"saved".into(), app.input.clone()));
+        app.launching = true;
+        app.apply_daemon_frame(&json!({"type":"launch_reply","ok":ok,"session_id":id,"group":0,"message":"fixture failure"}));
+        assert!(app.pending_prompts.is_empty());
+        if !ok { assert_eq!(app.input,"continue my task"); }
+        assert_eq!(app.input_drafts[&(0,"saved".into())].0,"continue my task");
+        assert!(app.resume_launch_prompt.is_none());
+    }
+}

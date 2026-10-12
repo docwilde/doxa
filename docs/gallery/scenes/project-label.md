@@ -7,6 +7,6 @@
 
 An explicit label is shown on a verified project heading.
 
-[![Explicit label on a verified project heading](../../../assets/shots/rust-2.0.0-beta.49-project-label.png)](../../../assets/shots/rust-2.0.0-beta.49-project-label.png)
+[![Explicit label on a verified project heading](../../../assets/shots/rust-2.0.0-beta.50-project-label.png)](../../../assets/shots/rust-2.0.0-beta.50-project-label.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#project-label) · [Back to the README gallery](../../../README.md#gallery)

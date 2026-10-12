@@ -306,7 +306,12 @@ fn scene(name: &str) -> App {
                 key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
             }
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-            app.notice = "Fixture · staged Jev Router defaults · not reviewed or saved".into();
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            app.notice = "Fixture · staged SubQ Snap Router · not reviewed or saved".into();
         }
         "context" => {
             app.groups[0].tabs = vec!["demo-claude-02".into()];
@@ -502,6 +507,8 @@ fn scene(name: &str) -> App {
             app.notice="Fixture · fleet launch review · controller disabled".into();
         }
         "fleet-view" => {
+            app.rail_visible=true;
+            app.show_fleet_sidebar_fixture("parser-checks","demo-codex-01",&["demo-claude-02","demo-deepseek-03"]);
             app.groups[0].tabs=vec!["demo-codex-01".into()];
             app.sessions.iter_mut().for_each(|session|session.transcript.clear());
             app.show_fleet_view_fixture("parser-checks",&[
@@ -512,7 +519,7 @@ fn scene(name: &str) -> App {
                 "  slot 1 · worker · active · demo-claude-02",
                 "  slot 2 · worker · dependency_waiting",
                 "Dependency 2 after 1 · human review required · tests_verified: false",
-                "Independent supervisor: claude:claude-sonnet-5-5 · enforce",
+                "Independent supervisor: subq:subq-snap-preview · enforce",
                 "Fast message judge: jev:jev-1.13.0 · shadow",
                 "Native controller phase: monitoring",
                 "Total budget USD: 6.0",

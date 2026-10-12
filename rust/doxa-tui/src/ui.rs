@@ -9,6 +9,7 @@ mod diff_controller;
 mod fleet_dependency_review;
 pub(crate) mod fleet_menu;
 mod fleet_process;
+mod fleet_rail;
 mod history_controller;
 mod interaction;
 mod layout;
@@ -1474,6 +1475,7 @@ enum RailRow {
 enum RailGroupKey {
     Collection(String),
     Project(String),
+    Fleet(PathBuf, String),
 }
 
 #[derive(Debug)]
@@ -1605,6 +1607,7 @@ pub struct App {
     fleet_review: Option<fleet_process::Prepared>,
     fleet_dependency_review: Option<fleet_dependency_review::Prepared>,
     fleet_controller: Option<fleet_process::Controller>,
+    fleet_rail: fleet_rail::Cache,
     memory_menu_pending: Option<(
         String,
         String,
@@ -1760,6 +1763,7 @@ pub struct App {
         Option<String>,
         Receiver<(String, Result<launch::LaunchOptions, &'static str>)>,
     )>,
+    resume_launch_prompt: Option<(usize, String, String)>,
     offline_ids: HashSet<String>,
     queue_picker: Option<QueuePicker>,
     settings_menu: Option<SettingsMenu>,
@@ -1920,6 +1924,7 @@ impl Default for App {
             fleet_review: None,
             fleet_dependency_review: None,
             fleet_controller: None,
+            fleet_rail: fleet_rail::Cache::default(),
             repo_cache: HashMap::new(),
             project_roots: HashMap::new(),
             project_colours: triage::configured_colours(),
@@ -2056,6 +2061,7 @@ impl Default for App {
             history_scanned_matches: HashMap::new(),
             history_entries: HashMap::new(),
             resume_pending: None,
+            resume_launch_prompt: None,
             offline_ids: HashSet::new(),
             queue_picker: None,
             settings_menu: None,

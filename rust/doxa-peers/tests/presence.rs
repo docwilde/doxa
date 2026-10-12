@@ -17,7 +17,7 @@ fn record(id: &str, socket: &Path, scope: &str, title: &str) -> PeerRecord {
         incarnation: None,
         heartbeat_at: now(),
         daemon_socket: None,
-        clients: Some(0),
+        clients: Some(1),
         usage_tokens: None,
         provider: None,
         model: None,
@@ -221,4 +221,35 @@ fn full_backlogs_share_a_roster_deadline_without_reaping_live_records() {
     assert!(started.elapsed()<Duration::from_secs(4));
     assert_eq!(fs::read(registry.directory().join("blocked-00.json")).unwrap(),saved);
     drop(queued);drop(listeners);
+}
+
+#[test]
+fn idle_retained_daemons_are_absent_but_detached_work_and_attached_peers_remain() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("runtime");
+    let reg = Registry::open(&runtime).unwrap();
+    let mut listeners = Vec::new();
+    let mut snapshots = Vec::new();
+    for (id, clients, active) in [
+        ("idle", Some(0), None),
+        ("busy", Some(0), Some(true)),
+        ("attached", Some(1), None),
+        ("retired", Some(0), Some(false)),
+        ("legacy", None, None),
+    ] {
+        let socket = runtime.join(format!("{id}.sock"));
+        listeners.push(listening(&runtime, &format!("{id}.sock")));
+        let mut peer = record(id, &socket, "/scope", id);
+        peer.clients = clients;
+        let mut value = serde_json::to_value(peer).unwrap();
+        if let Some(active) = active { value["active"] = active.into(); }
+        let path = reg.directory().join(format!("{id}.json"));
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        snapshots.push((path.clone(), fs::read(path).unwrap()));
+    }
+    let rows = list_scoped_readonly(&runtime, "/scope", "self", |s| Ok(s.into())).unwrap();
+    let ids: std::collections::BTreeSet<_> = rows.iter().map(|row| row.session_id.as_str()).collect();
+    assert_eq!(ids, std::collections::BTreeSet::from(["attached", "busy", "legacy"]));
+    for (path, before) in snapshots { assert_eq!(fs::read(path).unwrap(), before); }
 }

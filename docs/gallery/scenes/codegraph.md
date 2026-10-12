@@ -7,6 +7,6 @@
 
 A synthetic read-only module query shows source freshness evidence and an unknown conditional edge.
 
-[![Read-only code graph query with source freshness evidence](../../../assets/shots/rust-2.0.0-beta.49-codegraph.png)](../../../assets/shots/rust-2.0.0-beta.49-codegraph.png)
+[![Read-only code graph query with source freshness evidence](../../../assets/shots/rust-2.0.0-beta.50-codegraph.png)](../../../assets/shots/rust-2.0.0-beta.50-codegraph.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#codegraph) · [Back to the README gallery](../../../README.md#gallery)

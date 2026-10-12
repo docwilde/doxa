@@ -2,13 +2,13 @@
 //! Settings draft, provider prompt, debug output or asynchronous result.
 use super::{App, credential_editor};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use doxa_vendors::credentials::{self, CredentialStatus, SearchProvider};
+use doxa_vendors::credentials::{self, CredentialStatus, ApiProvider};
 use sha2::{Digest, Sha256};
 use std::{path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}}, time::Duration};
 
 pub(super) struct SecretEdit {
     pub token: u64,
-    provider: SearchProvider,
+    provider: ApiProvider,
     owner: (usize, String),
     buffer: credential_editor::Buffer,
 }
@@ -29,7 +29,7 @@ mod tests {
         std::fs::set_permissions(directory.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut command=std::process::Command::new(std::env::current_exe().unwrap());
         command.args(["--exact",name,"--test-threads=1"]).env("DOXA_MCP_UI_FIXTURE",name).env("DOXA_HOME",directory.path());
-        for name in ["DEEPSEEK_API_KEY","ZAI_API_KEY","TYPESAFE_API_KEY","TAVILY_API_KEY","FIRECRAWL_API_KEY","EXA_API_KEY","BRAVE_API_KEY","DOXA_ENGINE","DOXA_MCP_ENABLED","DOXA_MCP_CONFIG"] {command.env_remove(name);}
+        for name in ["DEEPSEEK_API_KEY","ZAI_API_KEY","TYPESAFE_API_KEY","SUBQ_API_KEY","DOXA_ROUTER_MODEL","TAVILY_API_KEY","FIRECRAWL_API_KEY","EXA_API_KEY","BRAVE_API_KEY","DOXA_ENGINE","DOXA_MCP_ENABLED","DOXA_MCP_CONFIG"] {command.env_remove(name);}
         let output=command.output().unwrap();
         assert!(output.status.success(),"{} {}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
         false
@@ -53,6 +53,24 @@ mod tests {
         app
     }
     #[test]
+    fn decision_keys_and_routing_choice_are_configurable_in_session_settings() {
+        if !isolated("ui::mcp_settings::tests::decision_keys_and_routing_choice_are_configurable_in_session_settings") {return;}
+        let mut app=app();key(&mut app,KeyCode::Char('1'));
+        select(&mut app,"subq_api_key");key(&mut app,KeyCode::Enter);
+        let secret="fixture-subq-private-key";app.handle(Event::Paste(secret.into()));
+        assert!(paint(&app).contains('•'));assert!(!paint(&app).contains(secret));assert_eq!(app.input,"ordinary prompt");
+        key(&mut app,KeyCode::Enter);
+        assert_eq!(credentials::search_resolve(ApiProvider::Subq).unwrap().as_deref(),Some(secret));
+        assert!(!crate::operations::settings_report().unwrap().contains(secret));
+        select(&mut app,"router_model");key(&mut app,KeyCode::Enter);
+        key(&mut app,KeyCode::Down);key(&mut app,KeyCode::Down);key(&mut app,KeyCode::Enter);
+        assert_eq!(app.settings_menu.as_ref().unwrap().effective_value("router_model"),"subq-snap-preview");
+        key(&mut app,KeyCode::Char('2'));select(&mut app,"fleet_alignment_supervisor");key(&mut app,KeyCode::Enter);
+        key(&mut app,KeyCode::Down);key(&mut app,KeyCode::Down);key(&mut app,KeyCode::Enter);
+        assert_eq!(app.settings_menu.as_ref().unwrap().effective_value("fleet_alignment_supervisor"),"subq:subq-snap-preview");
+        assert!(app.pending_prompts.is_empty());assert!(app.pending_launches.is_empty());
+    }
+    #[test]
     fn mcp_settings_masks_private_keys_and_keeps_config_and_prompts_clean() {
         if !isolated("ui::mcp_settings::tests::mcp_settings_masks_private_keys_and_keeps_config_and_prompts_clean") {return;}
         let mut app=app();select(&mut app,"tavily_api_key");key(&mut app,KeyCode::Enter);
@@ -67,7 +85,7 @@ mod tests {
         assert!(!app.settings_menu.as_ref().unwrap().edits.contains_key("tavily_api_key"));
         key(&mut app,KeyCode::Enter);
         assert!(app.mcp_secret.is_none());
-        assert_eq!(credentials::search_resolve(SearchProvider::Tavily).unwrap().as_deref(),Some(secret));
+        assert_eq!(credentials::search_resolve(ApiProvider::Tavily).unwrap().as_deref(),Some(secret));
         assert!(!crate::operations::settings_report().unwrap().contains(secret));
         let config_path=crate::settings::config_path().unwrap();
         assert!(!std::fs::read_to_string(&config_path).unwrap_or_default().contains(secret));
@@ -79,7 +97,7 @@ mod tests {
         assert!(app.notice.contains("Environment"));
         assert!(!crate::operations::settings_report().unwrap().contains("fixture-environment-tavily"));
         std::env::remove_var("TAVILY_API_KEY");app.open_settings_menu();key(&mut app,KeyCode::Char('0'));select(&mut app,"tavily_api_key");
-        key(&mut app,KeyCode::Delete);assert_eq!(credentials::search_status(SearchProvider::Tavily).unwrap(),CredentialStatus::Missing);
+        key(&mut app,KeyCode::Delete);assert_eq!(credentials::search_status(ApiProvider::Tavily).unwrap(),CredentialStatus::Missing);
     }
     #[test]
     fn mcp_secret_owner_change_resize_and_late_clipboard_discard_input() {
@@ -97,7 +115,7 @@ mod tests {
         app.open_settings_menu();key(&mut app,KeyCode::Char('0'));select(&mut app,"exa_api_key");key(&mut app,KeyCode::Enter);
         app.handle(Event::Paste("fixture-resize-exa".into()));app.handle(Event::Resize(20,5));
         assert!(app.mcp_secret.is_none());assert!(app.settings_menu.is_none());
-        assert_eq!(credentials::search_status(SearchProvider::Exa).unwrap(),CredentialStatus::Missing);
+        assert_eq!(credentials::search_status(ApiProvider::Exa).unwrap(),CredentialStatus::Missing);
     }
     #[test]
     fn mcp_probe_results_are_bound_to_owner_and_path() {
@@ -282,8 +300,8 @@ impl App {
         self.mcp_secret.as_ref().is_some_and(|secret|secret.owner==self.prompt_owner()
             && !std::env::var_os(secret.provider.env_var()).is_some_and(|value|!value.is_empty())
             && self.settings_menu.as_ref().is_some_and(|menu|menu.rows.get(menu.selected)
-                .is_some_and(|row|SearchProvider::from_setting_key(row.setting.key)==Some(secret.provider)
-                    && crate::settings::CATEGORIES[menu.category]=="MCP")))
+                .is_some_and(|row|ApiProvider::from_setting_key(row.setting.key)==Some(secret.provider)
+                    && row.setting.category==crate::settings::CATEGORIES[menu.category])))
     }
     pub(super) fn retire_mcp_if_changed(&mut self) {
         if self.mcp_secret.is_some() && !self.mcp_secret_current() {self.mcp_secret=None;}
@@ -292,10 +310,10 @@ impl App {
             self.mcp_probe.as_ref().unwrap().cancel.store(true,Ordering::SeqCst);
         }
     }
-    pub(super) fn start_mcp_secret(&mut self, provider: SearchProvider) {
+    pub(super) fn start_mcp_secret(&mut self, provider: ApiProvider) {
         match credentials::search_status(provider) {
             Ok(CredentialStatus::Environment)=>{self.notice=format!("{} is environment-owned; unset {} to edit",provider.label(),provider.env_var());return;},
-            Err(_)=>{self.notice="Private search credential store unavailable".into();return;},
+            Err(_)=>{self.notice="Private API credential store unavailable".into();return;},
             _=>{},
         }
         self.mcp_secret=Some(SecretEdit {token:credential_editor::next_token(),provider,
@@ -303,10 +321,10 @@ impl App {
         self.choice_dropdown=None;
         self.notice="Masked key editor · Enter saves privately · Esc discards".into();
     }
-    pub(super) fn remove_mcp_secret(&mut self, provider: SearchProvider) {
+    pub(super) fn remove_mcp_secret(&mut self, provider: ApiProvider) {
         match credentials::search_remove(provider) {
-            Ok(())=>{self.refresh_search_rows();self.notice="Saved search key removed".into();},
-            Err(_)=>self.notice="Search key unchanged; environment ownership or private store prevents removal".into(),
+            Ok(())=>{self.refresh_search_rows();self.notice="Saved API key removed".into();},
+            Err(_)=>self.notice="API key unchanged; environment ownership or private store prevents removal".into(),
         }
     }
     fn refresh_search_rows(&mut self) {
@@ -321,7 +339,7 @@ impl App {
     }
     pub(super) fn mcp_secret_mask(&self,key:&str)->Option<String> {
         self.mcp_secret.as_ref().filter(|secret|self.mcp_secret_current()
-            && SearchProvider::from_setting_key(key)==Some(secret.provider)).map(|secret| {
+            && ApiProvider::from_setting_key(key)==Some(secret.provider)).map(|secret| {
                 let mask=secret.buffer.mask();if mask.is_empty() {"(enter key · masked)".into()} else {mask}
             })
     }

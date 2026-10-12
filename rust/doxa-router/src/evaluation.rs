@@ -1,5 +1,5 @@
 //! Reproducible recorded-response evaluation and explicitly opt-in synthetic smoke.
-use crate::{Config, Ledger, Outcome, Prepared, Reason, Reservation, RoutingInput, Usage, JEV_MODEL};
+use crate::{Config, Ledger, Outcome, Prepared, Reason, Reservation, RoutingInput, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::{BTreeMap, BTreeSet}, io, path::Path, sync::atomic::AtomicBool};
@@ -148,8 +148,8 @@ fn recorded(config: &Config, prepared: &Prepared, record: &Recording) -> io::Res
             let mut out=crate::fallback(config,prepared,reason.clone());out.attempted=record.attempted;out.latency_ms=record.latency_ms;
             out.usage=record.rejected_usage.clone();
             out.router_cost_usd_micros=if !record.attempted {Some(0)} else {out.usage.as_ref().and_then(|usage|
-                crate::token_cost(usage.input_tokens,0,crate::JEV_INPUT_USD_MICROS_PER_MILLION,0).ok())};
-            if out.usage.is_some() {out.model=Some(JEV_MODEL.into());}
+                crate::token_cost(usage.input_tokens,0,config.decision().input_usd_micros_per_million(),0).ok())};
+            if out.usage.is_some() {out.model=Some(config.jev_model.clone());}
             Ok(out)
         },
         _=>Err(invalid("recorded response must contain exactly one response or transport failure")),
@@ -212,7 +212,7 @@ pub fn evaluate_observed(config: &Config, text: &str, live: bool, key: Option<&s
             criteria_sha256:prepared.criteria_sha256.clone(),reservation,outcome});
     }
     let router_cost_usd_micros=if ledger.accounting_unknown {None}else{Some(ledger.actual_usd_micros)};
-    Ok(Report {version:1,mode:if live{"live_synthetic"}else{"offline_recorded"}.into(),model:JEV_MODEL.into(),
+    Ok(Report {version:1,mode:if live{"live_synthetic"}else{"offline_recorded"}.into(),model:config.jev_model.clone(),
         origin:cases[0].origin,label_source:cases[0].label_source.clone(),config_sha256:config.hash()?,input_sha256:format!("{:x}",sha2::Sha256::digest(text.as_bytes())),
         development:metrics(&results,Split::Development),holdout:metrics(&results,Split::Holdout),ledger,
         router_cost_usd_micros,worker_execution_cost_usd_micros:None,total_cost_usd_micros:None,
@@ -235,7 +235,7 @@ pub fn fixture_recordings(config: &Config, text: &str) -> io::Result<String> {
         let probabilities=prepared.eligible_ids.iter().map(|id|(id.clone(),json!(if id==&row.expected_candidate_id{1.0}else{0.0})))
             .collect::<serde_json::Map<_,_>>();
         row.recording=Some(Recording{config_sha256:prepared.config_sha256,criteria_sha256:prepared.criteria_sha256,
-            request_sha256:prepared.request_sha256,response:Some(json!({"model":JEV_MODEL,"answers":{"target":{"type":"choice", "choice":row.expected_candidate_id,"probabilities":probabilities,"confidence":1.0}},"usage":{"input_tokens":100,"output_tokens":20}})),
+            request_sha256:prepared.request_sha256,response:Some(json!({"model":config.jev_model,"answers":{"target":{"type":"choice", "choice":row.expected_candidate_id,"probabilities":probabilities,"confidence":1.0}},"usage":{"input_tokens":100,"output_tokens":if config.decision()==crate::DecisionModel::SubqSnap{0}else{20}}})),
             transport_error:None,latency_ms:10,attempted:true,rejected_usage:None});
         serde_json::to_string(&row).map_err(io::Error::other)
     }).collect::<io::Result<Vec<_>>>()?;

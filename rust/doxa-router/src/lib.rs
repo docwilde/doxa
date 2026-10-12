@@ -1,4 +1,4 @@
-//! Bounded opt-in Jev routing. The host owns durable admission and execution.
+//! Bounded opt-in typed decision routing. The host owns durable admission and execution.
 mod strict;
 pub mod evaluation;
 use serde::{Deserialize, Serialize};
@@ -6,6 +6,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fs, io::{self, Read}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::Path, sync::atomic::{AtomicBool, Ordering}, time::{Duration, Instant}};
 
+pub use doxa_vendors::decisions::DecisionModel;
+pub const SUBQ_MODEL: &str = "subq-snap-preview";
 pub const JEV_MODEL: &str = "jev-1.13.0";
 pub const JEV_INPUT_USD_MICROS_PER_MILLION: u64 = 42_000;
 pub const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
@@ -52,6 +54,7 @@ pub struct Candidate {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
+    #[serde(alias = "router_model", alias = "decision_model")]
     pub jev_model: String,
     pub criteria_version: String,
     pub candidates: Vec<Candidate>,
@@ -164,7 +167,8 @@ pub fn read_private(path: &Path, max: u64) -> io::Result<String> {
 fn bounded(text: &str, max: usize) -> bool { !text.trim().is_empty() && text.len() <= max && !text.chars().any(char::is_control) }
 fn identifier(text: &str) -> bool { !text.is_empty() && text.len() <= 48 && text.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) }
 fn contains_known_credential(text: &str) -> bool {
-    ["TYPESAFE_API_KEY","DEEPSEEK_API_KEY","ZAI_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY"]
+    doxa_vendors::credentials::redact(text).map_or(true, |clean| clean != text) ||
+    ["TYPESAFE_API_KEY","SUBQ_API_KEY","DEEPSEEK_API_KEY","ZAI_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY"]
         .iter().any(|name|std::env::var(name).ok().is_some_and(|key|key.len()>=8 && text.contains(&key)))
 }
 
@@ -176,11 +180,18 @@ impl Config {
         value.validate()?;
         Ok(value)
     }
+    pub fn load_with_model(path: &Path, model: Option<&str>) -> io::Result<Self> {
+        let mut config = Self::load(path)?;
+        if let Some(model) = model.filter(|model| !model.is_empty()) { config.jev_model = model.into(); }
+        config.validate()?;
+        Ok(config)
+    }
+    pub fn decision(&self) -> DecisionModel { DecisionModel::parse(&self.jev_model).expect("validated router model") }
     pub fn validate(&self) -> io::Result<()> {
         if contains_known_credential(&serde_json::to_string(self)?) {
             return Err(invalid("router configuration contains a known credential"));
         }
-        if self.version != 1 || self.jev_model != JEV_MODEL || !bounded(&self.criteria_version, 80)
+        if self.version != 1 || DecisionModel::parse(&self.jev_model).is_none() || !bounded(&self.criteria_version, 80)
             || !(2..=16).contains(&self.candidates.len()) || !self.confidence_threshold.is_finite()
             || !(0.0..=1.0).contains(&self.confidence_threshold) || !(1..=10_000).contains(&self.max_calls)
             || !(1..=1_000_000).contains(&self.max_spend_usd_micros)
@@ -247,7 +258,7 @@ pub fn prepare(config: &Config, input: &RoutingInput) -> io::Result<Prepared> {
     let criteria = eligible.iter().map(|row| (row.id.clone(), json!({
         "description":row.description,"provider":row.provider,"model":row.model,"effort":row.effort
     }))).collect::<serde_json::Map<_,_>>();
-    let body = json!({"model":JEV_MODEL,"state":{"task_summary":input.summary},
+    let body = json!({"model":config.jev_model,"state":{"task_summary":input.summary},
         "questions":{"target":{"type":"choice","instructions":INSTRUCTIONS,"criteria":criteria}}});
     let bytes = serde_json::to_vec(&body)?;
     if bytes.len() > config.max_input_bytes { return Err(invalid("router request exceeds owner input-byte limit")); }
@@ -257,7 +268,7 @@ pub fn prepare(config: &Config, input: &RoutingInput) -> io::Result<Prepared> {
     Ok(Prepared { request_sha256:hash(&body)?,config_sha256:config.hash()?,
         criteria_sha256:hash(&body["questions"]["target"])?,body,
         eligible_ids:eligible.iter().map(|row|row.id.clone()).collect(),fallback_id:config.fallback_id.clone(),
-        input_token_reservation,reservation_usd_micros:token_cost(input_token_reservation,0,JEV_INPUT_USD_MICROS_PER_MILLION,0)? })
+        input_token_reservation,reservation_usd_micros:token_cost(input_token_reservation,0,config.decision().input_usd_micros_per_million(),0)? })
 }
 
 fn validate_prepared(config: &Config, prepared: &Prepared) -> io::Result<()> {
@@ -267,9 +278,9 @@ fn validate_prepared(config: &Config, prepared: &Prepared) -> io::Result<()> {
         .ok_or_else(|| invalid("invalid prepared router request"))?;
     if prepared.config_sha256 != config.hash()? || prepared.request_sha256 != hash(&prepared.body)?
         || prepared.criteria_sha256 != hash(&prepared.body["questions"]["target"])?
-        || prepared.body["model"] != JEV_MODEL || bytes.len() > config.max_input_bytes
+        || prepared.body["model"] != config.jev_model || bytes.len() > config.max_input_bytes
         || prepared.input_token_reservation != bytes.len() as u64 + 1024
-        || prepared.reservation_usd_micros != token_cost(prepared.input_token_reservation,0,JEV_INPUT_USD_MICROS_PER_MILLION,0)?
+        || prepared.reservation_usd_micros != token_cost(prepared.input_token_reservation,0,config.decision().input_usd_micros_per_million(),0)?
         || prepared.fallback_id != config.fallback_id || !prepared.eligible_ids.contains(&prepared.fallback_id)
         || prepared.eligible_ids.len() != criteria.len() || prepared.eligible_ids.is_empty()
         || prepared.eligible_ids.iter().any(|id|config.candidate(id).is_none() || !criteria.contains_key(id)) {
@@ -298,35 +309,35 @@ pub fn fallback(_config: &Config, prepared: &Prepared, reason: Reason) -> Outcom
         router_cost_usd_micros:Some(0),attempted:false,verified_response:None }
 }
 
-pub fn credential() -> io::Result<String> {
-    std::env::var("TYPESAFE_API_KEY").ok().filter(|key| (8..=4096).contains(&key.len())
-        && key.bytes().all(|byte| byte.is_ascii_graphic()))
-        .ok_or_else(|| invalid("TypeSafe router credential unavailable"))
-}
+/// Legacy Jev entry point; new callers resolve the frozen selected model.
+pub fn credential() -> io::Result<String> { DecisionModel::Jev.credential() }
 
-fn reported_usage(value: &Value) -> Option<Usage> {
-    if value["model"] != JEV_MODEL { return None; }
+fn reported_usage(config: &Config, value: &Value) -> Option<Usage> {
+    if value["model"] != config.jev_model { return None; }
     let usage = value["usage"].as_object()?;
     if usage.len() != 2 { return None; }
     let input_tokens = usage.get("input_tokens")?.as_u64()?;
     if input_tokens == 0 { return None; }
-    Some(Usage { input_tokens,output_tokens:usage.get("output_tokens")?.as_u64()? })
+    let output_tokens = usage.get("output_tokens")?.as_u64()?;
+    if config.decision() == DecisionModel::SubqSnap && output_tokens != 0 { return None; }
+    Some(Usage { input_tokens,output_tokens })
 }
 
 /// Strict documented Choice answer. No aliases, invented targets, nonfinite
 /// scores, missing probabilities, inconsistent winner/confidence or extra fields.
 pub fn parse_response(config: &Config, prepared: &Prepared, value: &Value, latency_ms: u64) -> Outcome {
     let mut outcome = fallback(config,prepared,Reason::InvalidResponse);
+    if config.validate().is_err() { return outcome; }
     outcome.attempted = true;
     outcome.latency_ms = latency_ms;
     outcome.response_sha256 = hash(value).ok();
-    outcome.model = if value["model"] == JEV_MODEL {Some(JEV_MODEL.into())} else {None};
-    outcome.usage = reported_usage(value);
+    outcome.model = if value["model"] == config.jev_model {Some(config.jev_model.clone())} else {None};
+    outcome.usage = reported_usage(config, value);
     outcome.router_cost_usd_micros = outcome.usage.as_ref().and_then(|usage|
-        token_cost(usage.input_tokens,0,JEV_INPUT_USD_MICROS_PER_MILLION,0).ok());
+        token_cost(usage.input_tokens,0,config.decision().input_usd_micros_per_million(),0).ok());
     let validate = || -> io::Result<(String,f64)> {
         validate_prepared(config,prepared)?;
-        if value.as_object().is_none_or(|fields| fields.len()!=3) || value["model"] != JEV_MODEL || outcome.usage.is_none() {
+        if value.as_object().is_none_or(|fields| fields.len()!=3) || value["model"] != config.jev_model || outcome.usage.is_none() {
             return Err(invalid("invalid pinned Jev provenance or usage"));
         }
         let answers = value["answers"].as_object().filter(|rows|rows.len()==1).ok_or_else(||invalid("invalid router answer set"))?;
@@ -351,15 +362,16 @@ pub fn parse_response(config: &Config, prepared: &Prepared, value: &Value, laten
         let n = prepared.eligible_ids.len() as f64;
         let expected_confidence = if n == 1.0 {1.0} else {(maximum - 1.0/n)/(1.0-1.0/n)};
         if (sum-1.0).abs() > 0.0001 || (top-maximum).abs() > 0.000001
-            || (confidence-expected_confidence).abs() > 0.0001 {
+            || (config.decision() == DecisionModel::Jev && (confidence-expected_confidence).abs() > 0.0001) {
             return Err(invalid("inconsistent router winner or confidence"));
         }
-        Ok((choice.into(),confidence))
+        let tied=probabilities.values().filter_map(Value::as_f64).filter(|p|(*p-maximum).abs()<=0.000001).count()>1;
+        Ok((choice.into(),if tied {0.0}else{confidence}))
     };
     if let Ok((id, confidence)) = validate() {
         outcome.verified_response = Some(value.clone());
         outcome.confidence = Some(confidence);
-        if confidence >= config.confidence_threshold { outcome.candidate_id=id;outcome.reason=Reason::Selected; }
+        if confidence > 0.0 && confidence >= config.confidence_threshold { outcome.candidate_id=id;outcome.reason=Reason::Selected; }
         else { outcome.reason=Reason::LowConfidence; }
     }
     outcome
@@ -381,7 +393,8 @@ pub fn settle(ledger: &mut Ledger, reservation: &Reservation, outcome: &Outcome)
 }
 
 pub fn call(config: &Config, prepared: &Prepared, key: &str, cancel: &AtomicBool) -> Outcome {
-    call_inner(config,prepared,key,cancel,ENDPOINT)
+    if config.validate().is_err() { return fallback(config,prepared,Reason::Unavailable); }
+    call_inner(config,prepared,key,cancel,config.decision().endpoint())
 }
 
 #[cfg(feature = "test-transport")]

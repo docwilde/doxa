@@ -215,8 +215,9 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
             };
             let command = match command {
                 WorkerCommand::Attach(id, group) => {
-                    if routes.contains_key(&id) {
-                        let _ = router_frames.send(WorkerFrame::Attach { session_id: id, group, result: Ok(()) });
+                    if let Some((_, connected)) = routes.get(&id) {
+                        let result=if connected.load(Ordering::Acquire) {Ok(())} else {Err("Daemon reconnecting; draft retained, retry after connection restores".into())};
+                        let _ = router_frames.send(WorkerFrame::Attach { session_id: id, group, result });
                         continue;
                     }
                     if routes.len() >= crate::ui::panes::MAX_TABS {

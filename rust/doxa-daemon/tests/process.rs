@@ -659,7 +659,8 @@ fn registry_peer(runtime: &Path, id: &str, scope: &str, title: &str) -> (UnixLis
         incarnation: None,
         heartbeat_at: peer_now(),
         daemon_socket: None,
-        clients: Some(0),
+        // This listening fixture represents an attached peer session.
+        clients: Some(1),
         usage_tokens: None,
         provider: None,
         model: None,
@@ -5074,4 +5075,101 @@ for line in sys.stdin:
             }
         }
     }
+}
+
+#[test]
+fn long_claude_restore_keeps_logical_identity_original_turns_and_bounded_hook_context() {
+    let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
+    let slug:String=dir.path().to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();
+    let store=doxa_transcript::TranscriptStore::new(&dir.path().join("native-projects"),&slug,CLAUDE_SESSION).unwrap();
+    for (user,answer) in [("older task ".repeat(4000),"older answer ".repeat(4000)),("recent owner task".into(),"recent complete answer".into())] {
+        store.try_append(json!({"type":"user","message":{"role":"user","content":user}}),"claude",|s|Ok(s.into())).unwrap();
+        store.try_append(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":answer},{"type":"thinking","thinking":"PRIVATE_REASONING_EXCLUDED"}]}}),"claude",|s|Ok(s.into())).unwrap();
+    }
+    store.try_write_thread(json!({"thread_id":CLAUDE_SESSION,"session_id":CLAUDE_SESSION,"engine":"claude","cwd":dir.path(),"lore_enabled":true,"spawn_depth":0,"parent_session_id":null,"turn_incomplete":false,"model":"opus","effort":"high","permission_mode":"default"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
+    let original=fs::read(store.transcript_path()).unwrap();
+    let script=dir.path().join("claude-recovery.py");
+    claude_fixture(&script,&format!("assert '--resume' not in args\nassert session != '{}'",CLAUDE_SESSION),r#"if frame['type']=='user':
+  emit({'type':'control_request','request_id':'recovery-context','request':{'subtype':'hook_callback','callback_id':'doxa_prompt_context','input':{}}})
+ elif frame['type']=='control_response':
+  context=frame['response']['response']['hookSpecificOutput']['additionalContext']
+  assert 'recent owner task' in context and 'recent complete answer' in context
+  assert 'PRIVATE_REASONING_EXCLUDED' not in context
+  tail=context.split('[DOXA RESTORED CONVERSATION]\n')[1]
+  assert len(tail.encode()) <= 16384
+  Path(root/'recovery-proof.json').write_text(json.dumps({'provider_session':session,'context':tail}))
+  emit({'type':'assistant','session_id':session,'message':{'role':'assistant','content':[{'type':'text','text':'continued'}]}})
+  result()"#);
+    let mut child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id",CLAUDE_SESSION,"--engine","claude","--claude-bin",script.to_str().unwrap(),"--resume","true","--linger","10"]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry=dir.path().join("registry").join(format!("{CLAUDE_SESSION}.json"));wait_for_registry(&mut child,&registry);
+    let row:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    let mut process=Process {child,registry,socket:PathBuf::from(row["daemon_socket"].as_str().unwrap())};
+    let (mut reader,mut socket)=process.connect();let hello=receive(&mut reader);assert_eq!(hello["session_id"],CLAUDE_SESSION);
+    send(&mut socket,json!({"type":"attach","cursor":null}));
+    send(&mut socket,json!({"type":"prompt","id":1,"text":"continue"}));
+    let terminal=claude_receive_until(&mut reader,|frame|frame["event"]["type"]=="turn_done");assert_eq!(terminal["event"]["data"]["is_error"],false,"{terminal}");
+    let proof:Value=serde_json::from_slice(&fs::read(dir.path().join("recovery-proof.json")).unwrap()).unwrap();
+    let checkpoint=store.read_thread().unwrap().unwrap();
+    assert_eq!(checkpoint["session_id"],CLAUDE_SESSION);assert_eq!(checkpoint["thread_id"],proof["provider_session"]);assert_ne!(checkpoint["thread_id"],CLAUDE_SESSION);
+    assert!(fs::read(store.transcript_path()).unwrap().starts_with(&original));
+    assert_eq!(row["session_id"],CLAUDE_SESSION);
+    send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));
+    claude_receive_until(&mut reader,|frame|frame["id"]==2);wait_until(||process.exited());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn long_codex_restore_creates_bounded_thread_without_replacing_logical_history() {
+    let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
+    let slug:String=dir.path().to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();
+    let store=doxa_transcript::TranscriptStore::new(&dir.path().join("native-projects"),&slug,"codex-session").unwrap();
+    for (user,answer) in [("older task ".repeat(4000),"older answer ".repeat(4000)),("recent owner task".into(),"recent complete answer".into())] {
+        store.try_append(json!({"type":"user","message":{"role":"user","content":user}}),"codex",|s|Ok(s.into())).unwrap();
+        store.try_append(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":answer}]}}),"codex",|s|Ok(s.into())).unwrap();
+    }
+    store.try_write_thread(json!({"thread_id":"previous-thread","session_id":"codex-session","engine":"codex","transport":"app-server","cwd":dir.path(),"lore_enabled":true,"lore_tools":false,"peer_tools":false,"turn_incomplete":false,"model":"account-model","effort":"high","permission_mode":"on-request"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
+    let original=fs::read(store.transcript_path()).unwrap();
+    let codex=dir.path().join("codex-recovery");executable(&codex,include_str!("fixtures/codex_appserver.py"));
+    executable(&codex.with_extension("turn"),&format!(r#"#!/bin/sh
+cat > '{}'
+echo '{{"type":"thread.started","thread_id":"fresh-thread"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"continued"}}}}'
+"#,dir.path().join("provider-prompt.txt").display()));
+    let mut child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id","codex-session","--engine","codex","--codex-bin",codex.to_str().unwrap(),"--resume","true","--linger","10"]).env_remove("DOXA_CODEX_APPSERVER").stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry=dir.path().join("registry/codex-session.json");wait_for_registry(&mut child,&registry);
+    let row:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    let mut process=Process {child,registry,socket:PathBuf::from(row["daemon_socket"].as_str().unwrap())};
+    let (mut reader,mut socket)=process.connect();reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();assert_eq!(receive(&mut reader)["session_id"],"codex-session");
+    assert_eq!(fs::read(store.transcript_path()).unwrap(),original);
+    send(&mut socket,json!({"type":"attach","cursor":null}));send(&mut socket,json!({"type":"prompt","id":1,"text":"continue"}));
+    let terminal=claude_receive_until(&mut reader,|frame|frame["event"]["type"]=="turn_done");assert_eq!(terminal["event"]["data"]["is_error"],false,"{terminal}");
+    let prompt=fs::read_to_string(dir.path().join("provider-prompt.txt")).unwrap();
+    let tail=prompt.split("[DOXA RESTORED CONVERSATION]\n").nth(1).unwrap().split("\n[CURRENT USER REQUEST]").next().unwrap();
+    assert!(tail.len()<=16384);assert!(tail.contains("recent owner task") && tail.contains("recent complete answer"));
+    let checkpoint=store.read_thread().unwrap().unwrap();assert_eq!(checkpoint["session_id"],"codex-session");assert_eq!(checkpoint["thread_id"],"fresh-thread");assert_eq!(checkpoint["permission_mode"],"on-request");
+    assert!(fs::read(store.transcript_path()).unwrap().starts_with(&original));
+    send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));claude_receive_until(&mut reader,|frame|frame["id"]==2);wait_until(||process.exited());
+}
+
+#[test]
+fn native_peer_discovery_hides_retained_idle_daemons_until_a_client_attaches() {
+    let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
+    let script=dir.path().join("claude-idle-presence.py");claude_fixture(&script,"","if frame['type']=='user': result()");
+    let mut recipient=Process::start_claude(dir.path(),&script);
+    let mut observer=Process::start(dir.path(),"10");
+    let (mut reader,mut socket)=observer.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+    let row=recipient.entry();assert_eq!(row["clients"],0);assert_eq!(row["active"],false);
+    send(&mut socket,json!({"type":"call","id":1,"method":"peers","params":{}}));
+    let reply=claude_receive_until(&mut reader,|frame|frame["id"]==1);assert_eq!(reply["ok"],true);assert_eq!(reply["peers"],json!([]));
+    let (mut recipient_reader,mut recipient_socket)=recipient.connect();receive(&mut recipient_reader);
+    send(&mut recipient_socket,json!({"type":"attach","cursor":null}));
+    wait_until(||recipient.entry()["clients"]==1 && recipient.entry()["active"]==true);
+    send(&mut socket,json!({"type":"call","id":2,"method":"peers","params":{}}));
+    let reply=claude_receive_until(&mut reader,|frame|frame["id"]==2);assert_eq!(reply["peers"][0]["session_id"],CLAUDE_SESSION);
+    drop(recipient_reader);drop(recipient_socket);
+    wait_until(||recipient.entry()["clients"]==0 && recipient.entry()["active"]==false);
+    send(&mut socket,json!({"type":"call","id":3,"method":"peers","params":{}}));
+    let reply=claude_receive_until(&mut reader,|frame|frame["id"]==3);assert_eq!(reply["peers"],json!([]));
+    assert!(recipient.child.try_wait().unwrap().is_none(),"Hidden idle daemon should remain available for reattachment");
+    send(&mut socket,json!({"type":"call","id":4,"method":"stop","params":{}}));claude_receive_until(&mut reader,|frame|frame["id"]==4);wait_until(||observer.exited());
 }
