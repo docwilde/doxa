@@ -385,7 +385,11 @@ fn scene(name: &str) -> App {
                 "sent_at":"2026-10-11T13:26:00Z",
                 "body":"Received the handoff. I will verify reconnect before approving."}));
             event(&mut app,"demo-claude-02","prompt_queued",json!({"id":"q-peer","peer_started":true,
-                "peer_origin":format!("Parser reviewer ({sender})"),"timestamp":"2026-10-11T13:25:00Z",
+                "peer_origin":format!("Parser reviewer ({sender})"),
+                "peer_origin_data":{"sender_session_id":sender,"sender_title":"Parser reviewer",
+                    "message_id":"gallery-peer-queue","sent_at":"2026-10-11T13:25:00Z",
+                    "from_repo":"/demo/project","remote_origin":null,"source":"peer_message"},
+                "timestamp":"2026-10-11T13:25:00Z",
                 "text":"Run the **reconnect review** next.\n\nReport unresolved errors before release."}));
             if name == "peer-expanded" {
                 click_visible_text(&mut app, "Peer Parser reviewer");

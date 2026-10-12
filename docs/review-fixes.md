@@ -14,7 +14,7 @@ not announce a new release or an installed update.
 | IF-001: Mermaid paint stalls | Scan paragraphs once; cache parsed sources by transcript revision. | Transcript hashing remains bounded paint work; full-frame performance was not benchmarked. |
 | IF-002: Router paint I/O | Observe freshness in one background worker and paint cached status. | Save/Start recheck directly. Key availability is checked, replacement key/account identity is not. |
 | IF-003: catalog worker pressure | Own one worker, cancel/reap it before admitting the latest queued selection, discard obsolete generations. | Live authenticated provider discovery was not run. |
-| IF-004: stored Python graphs | Prepare upstream LORE source support and regression fixtures. | DOXA's Python storage gate remains closed until a reviewed LORE release is pinned. |
+| IF-004: stored Python graphs | Pin released LORE v0.62.21 and add scoped Python snapshot client/response fixtures. | Syntax bindings remain unknown; storage still requires explicit LORE human review. |
 | IF-005: unknown fleet spend | Document conservative retirement with the entire old review budget retained and independent replacement allocation. | No automatic settlement or cumulative hold enforcement across runs. |
 | F-REMOTE-001: root pages | Share route normalization; test authenticated retrieval and unauthenticated denial in both servers. | Live proxy/tailnet acceptance was not run. |
 | F-REMOTE-002: candidate CI privileges | Separate read-only candidate execution from a fresh publisher; independently resolve and compare the trusted lock. | Relies on GitHub runner/job isolation and protected review. |
@@ -52,7 +52,7 @@ Other completed checks:
   for full application compilation.
 - Upstream LORE's six codegraph snapshot tests passed, including Python
   round-trip, stale-source rejection, worktree isolation, and symlink denial.
-  That source patch remains separate from DOXA's released dependency pin.
+  Beta48 subsequently pins the released LORE v0.62.21 and matching client.
 - Identical optimized parser fixture: **10,694 ms before, 8 ms after**, for
   493,425 bytes and 31 fences. All eight parser cases produced expected
   results. This is one parser-only observation, not a TUI/renderer benchmark.

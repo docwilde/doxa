@@ -242,11 +242,10 @@ after a file's second read, or an edit restored between reads, can still escape
 detection; this is not an atomic repository snapshot. Omitted result rows and
 semantic bindings remain outside its claim.
 
-Python snapshot reads are a release-gated follow-up. The client branch accepts
-bounded `.py` paths, but must not be integrated against LORE 0.62.20, whose
-request validator still accepts `.rs` only. Root verifies the LORE 0.62.21 tag
-and updates the dependency pin and `Cargo.lock` before integration; root will
-replace this note with the exact released commit hash after that verification.
+Python snapshot reads use released **LORE v0.62.21**, commit
+`e398ea2b0d8b1a8c52614ee69fa483005c5e9c81`, pinned in the native dependency
+and lockfile. The client and service validate bounded `.rs` and `.py` paths;
+Python binding remains `unknown`. DOXA does not store snapshots automatically.
 
 To persist an export, an owner must inspect it and invoke LORE's explicit
 `codegraph_snapshot_store_v1` command with human-review authority and an

@@ -5,6 +5,7 @@ import os
 import hashlib
 import json
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -160,7 +161,7 @@ class LoreBumpTests(unittest.TestCase):
             self.assertEqual(checked.tag, 'v9.9.9')
             self.assertEqual(lore_bump.parse_native_pin(checked.native_manifest.decode()).ref, commit)
             lore_bump.require_candidate_lock_matches(checked.cargo_lock, generated_lock)
-            self.assertIn(b'760e739410d8c5d99e9a74ededd7e719aa47d5b4', old_lock)
+            self.assertIn(old_ref.encode(), old_lock)
 
     def test_publisher_rejects_artifact_that_widens_its_own_lore_closure(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as directory:
@@ -174,9 +175,10 @@ class LoreBumpTests(unittest.TestCase):
             forged = (forged[:start]
                       + lore_section.replace('"uuid",\n]', '"uuid",\n "doxa-router",\n]')
                       + forged[end:])
-            self.assertIn('name = "doxa-router"\nversion = "2.0.0-beta.47"', forged)
-            forged = forged.replace('name = "doxa-router"\nversion = "2.0.0-beta.47"',
-                                    'name = "doxa-router"\nversion = "2.0.0-beta.48"')
+            router_version = tomllib.loads((ROOT / 'rust/doxa-router/Cargo.toml').read_text())['package']['version']
+            router_entry = f'name = "doxa-router"\nversion = "{router_version}"'
+            self.assertEqual(forged.count(router_entry), 1)
+            forged = forged.replace(router_entry, 'name = "doxa-router"\nversion = "99.0.0"')
             (artifact / 'Cargo.lock').write_text(forged)
             metadata = json.loads((artifact / 'candidate.json').read_text())
             metadata['cargo_lock_sha256'] = hashlib.sha256(forged.encode()).hexdigest()

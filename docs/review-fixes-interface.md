@@ -43,22 +43,13 @@ process-group cleanup paths when cancellation is observed.
 
 ## Python snapshots and the pinned LORE service
 
-DOXA currently pins LORE revision
-`760e739410d8c5d99e9a74ededd7e719aa47d5b4`, also the current local LORE `main`
-at the time of this review. That released service validates requested paths as
-`.rs` only. A LORE 0.62.21 candidate adds bounded `.py` path support; its
-release tag and commit have not yet been verified here. This branch prepares
-the matching bounded `.rs`/`.py` client guard and adds parser, fake-sidecar, and
-native response fixtures for Python round trips, stale source, worktree scope,
-and invalid paths. Bindings remain `unknown`; syntax candidates do not prove
-semantic resolution, and DOXA still exposes no background store operation.
-
-This client change is a release-gated follow-up, not support against the
-currently pinned service. Do not integrate it until the root verifies the
-actual LORE 0.62.21 release tag and updates `rust/doxa-lore/Cargo.toml` plus
-`Cargo.lock` to that released commit. After verification, the root will replace
-this note with the exact release tag and commit hash; until then, the pin stays
-at the revision above.
+Beta48 pins the released **LORE v0.62.21**, commit
+`e398ea2b0d8b1a8c52614ee69fa483005c5e9c81`, in both the native manifest
+and lockfile. The matching client and service accept bounded `.rs` and `.py`
+paths. Parser, fake-sidecar and native response fixtures cover Python round
+trips, stale source, worktree scope and invalid paths. Bindings remain
+`unknown`; syntax candidates do not prove semantic resolution. DOXA exposes
+read-only snapshot queries and no background store operation.
 
 ## Retiring a fleet with unknown review spend
 

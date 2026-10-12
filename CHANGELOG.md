@@ -5,6 +5,34 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.48 — 2026-10-12
+
+**Interface**
+
+- Restore prompt focus after **Settings** dismissal and preserve drafts when selecting another pane. Move Router freshness and provider catalogs into bounded background workers.
+- Restore session context as **Last reported**; add portable context composition and subscription quota bars. Forward Codex belief counts and restore the **Peers** chip.
+- Preserve typed peer provenance through history and folded **🤖↓ / 🤖↑** cards. Copy through desktop clipboard helpers, with OSC52 fallback.
+
+**Jev and fleets**
+
+- Add pinned **Jev 1.13.0** as an independent fleet alignment supervisor using closed Choices and host checkpoint citations, separate from acting workers and message judging.
+- Freeze review settings and share bounded reservations, deadlines and conservative uncertainty handling. Permission and human dependency-release gates remain authoritative; live quality calibration is open.
+
+**Codegraph and rendering**
+
+- Pin released **LORE 0.62.21** for bounded, worktree-scoped Rust and Python snapshot reads; reject stale source and keep semantic bindings unknown. Storage requires explicit LORE human review.
+- Scan Mermaid paragraphs once and cache by transcript revision. One identical optimized parser fixture fell from **10,694 ms to 8 ms**; this is not a full-frame benchmark.
+
+**Security and remote clients**
+
+- Require explicit external plugin roots and atomic staging. Bind encrypted remote events to session incarnation across Rust, browser and Android; upgrade those clients together.
+- Bound Android exchanges and cancel stalled connections. Replace the optional JWT/RSA chain with direct signing; live push delivery remains unverified.
+- Pin actions and apt snapshots, update KaTeX to **0.18.2**, isolate LORE upgrade publisher checks, and support an independently supplied exact source SHA in the installer.
+
+**Gallery**
+
+- Replace the thumbnail scroller with one screenshot, caption and previous/next links. Publish an interactive button/keyboard carousel and **28** uniform **3068 × 1734** terminal scenes.
+
 ## 2.0.0-beta.47 — 2026-10-11
 
 **MCP and search**
