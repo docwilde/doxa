@@ -14,7 +14,7 @@ the stable 2.0 release has not been cut.
 
 **Sessions and peers**
 
-- Fix Claude checkpoint engine detection and continue verified saved conversations by typing a prompt. Retain drafts on failed restoration and verify Router config identity before resume.
+- Fix Claude checkpoint detection and continue saved conversations by typing. Use protected app-server for verified legacy Codex restores; retain drafts on failure and verify Router config identity.
 - Bound long restored conversation context to **16 KiB** or **25%** of the model window with a conservative byte/token bound. Preserve complete original transcripts, logical session IDs, permission policy and budget ledgers.
 - Exclude retained idle daemons with **0 attached clients** from active peer discovery; keep detached running or queued work discoverable.
 

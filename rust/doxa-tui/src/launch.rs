@@ -486,6 +486,12 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             command.args(["--engine", "codex", "--codex-bin"]).arg(codex).args(["--sandbox", sandbox]);
             if options.resume.is_some() {
                 command.args(["--resume", "true"]);
+                // Continuing a saved tab uses the protected transport, including
+                // verified older exec checkpoints. The host verifies the exact
+                // source/provider identity before admitting any turn.
+                if std::env::var("DOXA_CODEX_MIGRATE_APPSERVER").as_deref()!=Ok("0") {
+                    command.env("DOXA_CODEX_MIGRATE_APPSERVER","1");
+                }
             }
             if let Some(model) = &model {
                 command.arg("--model").arg(model);
