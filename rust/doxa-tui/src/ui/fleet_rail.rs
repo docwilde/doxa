@@ -2,7 +2,7 @@
 use super::{App, Session, RailGroupKey, RailRow, fleet_menu, panes};
 use crate::{discovery, fleet_control};
 use serde_json::Value;
-use std::{collections::HashSet, path::PathBuf, sync::mpsc::{self, Receiver, TryRecvError}, time::{Duration, Instant}};
+use std::{collections::{HashMap,HashSet}, path::PathBuf, sync::mpsc::{self, Receiver, TryRecvError}, time::{Duration, Instant}};
 
 #[derive(Clone, Debug)]
 pub(super) struct Group {
@@ -14,6 +14,9 @@ pub(super) struct Cache {
     fixture: bool,
     pub groups: Vec<Group>, sources: Vec<(PathBuf,String)>, next: Instant,
     pending: Option<Receiver<(Vec<Group>,Vec<discovery::Session>)>>,
+}
+impl Group {
+    fn heading(&self) -> String {format!("Fleet · {} · {}",self.id,super::safe_label(&self.root.to_string_lossy()))}
 }
 impl Default for Cache {
     fn default() -> Self { Self { fixture:false,groups:Vec::new(),sources:Vec::new(),next:Instant::now(),pending:None } }
@@ -84,13 +87,14 @@ impl App {
     }
     pub(super) fn fleet_rail_groups(&self, seen: &mut HashSet<usize>) -> Vec<(RailGroupKey,Vec<RailRow>,u8)> {
         let mut result=Vec::new();
+        let indices=self.sessions.iter().enumerate().map(|(index,session)|(session.id.as_str(),index)).collect::<HashMap<_,_>>();
         for group in &self.fleet_rail.groups {
-            let members=group.members.iter().filter_map(|id|self.sessions.iter().position(|session|&session.id==id))
+            let members=group.members.iter().filter_map(|id|indices.get(id.as_str()).copied())
                 .filter(|index|!self.offline_ids.contains(&self.sessions[*index].id) && self.rail_session_visible(*index) && !seen.contains(index)).collect::<Vec<_>>();
             if members.is_empty() {continue;}
             seen.extend(&members);
             let parent=group.supervisor.as_ref().and_then(|id|members.iter().find(|index|&self.sessions[**index].id==id)).copied();
-            let mut rows=match parent {Some(index)=>vec![RailRow::Session(index)],None=>vec![RailRow::ProjectHeading(format!("Fleet · {}",group.id))]};
+            let mut rows=match parent {Some(index)=>vec![RailRow::Session(index)],None=>vec![RailRow::ProjectHeading(group.heading())]};
             if !group.collapsed {rows.extend(members.iter().copied().filter(|index|Some(*index)!=parent).map(RailRow::Session));}
             let rank=members.iter().map(|index|self.rail_urgency(*index)).max().unwrap_or(0);
             result.push((RailGroupKey::Fleet(group.root.clone(),group.id.clone()),rows,rank));
@@ -109,7 +113,7 @@ impl App {
         self.rail_selected=self.rail_order().iter().position(|index|self.sessions[*index].id==id).unwrap_or(0);true
     }
     pub(super) fn open_fleet_heading(&mut self, heading: &str) -> bool {
-        let Some(group)=self.fleet_rail.groups.iter().find(|group|heading==format!("Fleet · {}",group.id)).cloned() else{return false;};
+        let Some(group)=self.fleet_rail.groups.iter().find(|group|heading==group.heading()).cloned() else{return false;};
         self.open_fleet(group.root,Some(group.id));true
     }
 }

@@ -1148,7 +1148,7 @@ for line in sys.stdin:
         assert_eq!(plan.model.as_deref(), Some("claude-test"));
         let checkpoint=root.join("project/saved-1.codex.json");
         let mut state:Value=serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
-        state["thread_id"]=json!("fresh-provider");fs::write(&checkpoint,state.to_string()).unwrap();
+        state["thread_id"]=serde_json::json!("fresh-provider");fs::write(&checkpoint,state.to_string()).unwrap();
         fs::write(cli.join("encoded-cwd/fresh-provider.jsonl"),b"owned provider history\n").unwrap();
         assert_eq!(resume_fixture(&entry,&script,&root,&cli).unwrap().engine,Engine::Claude);
 
