@@ -523,7 +523,7 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
     let engine = match state["engine"].as_str() {
         Some("deepseek") => Engine::DeepSeek,
         Some("glm") => Engine::Glm,
-        Some("router") => return Err("router resume needs doxa new --engine router --router-config PATH --resume ID; automatic config inheritance is unavailable"),
+        Some("router") => Engine::Router,
         _ => return Err("unsupported or unknown saved engine"),
     };
     if state.get("session_id").is_some_and(|id| id.as_str() != Some(&entry.id)) {
@@ -533,6 +533,21 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
         .ok_or("saved vendor model is unknown")?;
     if !state["messages"].is_array() { return Err("invalid replay state"); }
     let cwd = ready_resume_cwd(&cwd, &entry.id, missing, expected_root, &entry.project, open_lore)?;
+    if engine == Engine::Router {
+        let (path,config)=crate::launch::router_config(None).map_err(|_|"Select the original private Router config in Settings before continuing")?;
+        let home=crate::operations::doxa_home().map_err(|_|"Router state directory unavailable")?;
+        let journal=doxa_router::read_private(&home.join("router").join(format!("{}.router.json",entry.id)),4*1024*1024)
+            .map_err(|_|"Router durable journal is unavailable or unsafe")?;
+        let journal:Value=serde_json::from_str(&journal).map_err(|_|"Invalid Router durable journal")?;
+        if journal["version"]!=1 || journal["identity"]["engine"]!="router" || journal["identity"]["session_id"]!=entry.id
+            || journal["identity"]["cwd"].as_str()!=cwd.to_str() || journal["identity"]["config_sha256"].as_str()!=config.hash().ok().as_deref()
+            || journal["incomplete"]!=false {return Err("Router config, identity or complete-turn boundary changed; select the original config");}
+        let selected=match journal.get("pinned") {
+            None|Some(Value::Null)=>"auto",Some(Value::String(id)) if config.candidate(id).is_some()=>id,
+            _=>return Err("Saved Router target is not in the original config"),
+        };
+        return Ok(LaunchOptions {engine,cwd:Some(cwd),model:Some(selected.into()),router_config:Some(path),resume:Some(entry.id.clone()),..LaunchOptions::default()});
+    }
     Ok(LaunchOptions { engine, cwd: Some(cwd), model: Some(model.to_owned()),
         resume: Some(entry.id.clone()), ..LaunchOptions::default() })
 }
