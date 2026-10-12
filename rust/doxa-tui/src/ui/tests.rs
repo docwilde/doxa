@@ -5739,7 +5739,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn offline_history_opens_read_only_and_never_queues_prompt() {
+    fn offline_history_preserves_draft_until_verified_continuation() {
         let mut app = App::default();
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
@@ -5756,7 +5756,11 @@ for line in sys.stdin:
         app.input = "do not send".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.pending_prompts.is_empty());
-        assert_eq!(app.notice, "Archived transcript is read-only");
+        let deadline=Instant::now()+Duration::from_secs(2);
+        while app.resume_pending.is_some() && Instant::now()<deadline {app.poll_resume();std::thread::sleep(Duration::from_millis(5));}
+        assert!(app.resume_pending.is_none());assert!(app.notice.contains("Could not restore conversation"));
+        assert_eq!(app.input,"do not send");assert!(app.pending_prompts.is_empty());
+        assert_eq!(app.input_drafts[&(0,"saved-1".into())].0,"do not send");
     }
 
     #[test]

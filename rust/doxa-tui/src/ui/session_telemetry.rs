@@ -151,7 +151,7 @@ impl RoutingStatus {
             engine: engine.into(), model: identifier(data, "model", 128)?, effort: effort.into(),
             route_mode: mode.into(), fallback_reason: reason,
             latency_ms: data["latency_ms"].as_u64()?, cost_usd: cost,
-            tracked_cost_only: data["cost_scope"] == "jev_and_direct_api_only" || matches!(engine,"claude"|"codex"),
+            tracked_cost_only: matches!(data["cost_scope"].as_str(),Some("jev_and_direct_api_only"|"decision_and_direct_api_only")) || matches!(engine,"claude"|"codex"),
         })
     }
 
@@ -216,7 +216,7 @@ impl SessionTelemetry {
             && external["outcome_unknown"].is_boolean();
         // Once a session can use CLI account workers, later API-only turns or
         // incomplete status replies cannot turn the partial amount into a total.
-        self.tracked_cost_only |= data["cost_scope"] == "jev_and_direct_api_only"
+        self.tracked_cost_only |= matches!(data["cost_scope"].as_str(),Some("jev_and_direct_api_only"|"decision_and_direct_api_only"))
             || self.routing.as_ref().is_some_and(|routing|routing.tracked_cost_only);
         if self.tracked_cost_only {
             if let Some(routing)=self.routing.as_mut() {routing.tracked_cost_only=true;}
@@ -468,7 +468,7 @@ impl SessionTelemetry {
 
     pub(super) fn billing_label(&self, engine: Option<&str>) -> Option<String> {
         let label = match engine {
-            Some("router") if self.tracked_cost_only=>Some(format!("{} Jev/API · CLI ?",self.cost.clone().unwrap_or_else(||"$?".into()))),
+            Some("router") if self.tracked_cost_only=>Some(format!("{} Router/API · CLI ?",self.cost.clone().unwrap_or_else(||"$?".into()))),
             Some("deepseek" | "glm" | "router") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
             Some("codex" | "claude") => match self.billing_mode.as_deref() {
                 Some("api") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
@@ -526,13 +526,13 @@ mod tests {
         let mut telemetry=SessionTelemetry::default();
         telemetry.update_turn(&json!({"routing":routing,"cost_usd":0.01,"session_cost_usd":0.01,"cost_is_estimate":true,
             "cost_scope":"jev_and_direct_api_only","total_cost_usd":null}));
-        assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$0.0100 est Jev/API · CLI ?"));
+        assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$0.0100 est Router/API · CLI ?"));
         assert!(telemetry.routing.as_ref().unwrap().lines().join("\n").contains("total spend are unknown"));
         // Sticky scope also protects an incomplete older API-only frame.
         telemetry.update_turn(&json!({"routing":{"target_id":"api-target","engine":"glm","model":"glm-5.3-flash",
             "effort":"high","route_mode":"pinned","latency_ms":0,"cost_usd":0},
             "cost_usd":0.02,"session_cost_usd":0.03,"cost_is_estimate":true}));
-        assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$0.0300 est Jev/API · CLI ?"));
+        assert_eq!(telemetry.billing_label(Some("router")).as_deref(),Some("$0.0300 est Router/API · CLI ?"));
         assert!(telemetry.routing.as_ref().unwrap().lines().join("\n").contains("total spend are unknown"));
         let mut restored=SessionTelemetry::default();
         restored.update_status(&json!({"routing":routing,"total_cost_usd":null,"billing":{
@@ -540,7 +540,7 @@ mod tests {
             "cost_scope":"jev_and_direct_api_only","total_cost_usd":null,"cli_provider_charge_usd":null}}));
         assert_eq!(restored.billing_label(Some("router")),telemetry.billing_label(Some("router")));
         restored.update_turn(&json!({"cost_usd":null,"session_cost_usd":null,"cost_is_estimate":true}));
-        assert_eq!(restored.billing_label(Some("router")).as_deref(),Some("$? Jev/API · CLI ?"));
+        assert_eq!(restored.billing_label(Some("router")).as_deref(),Some("$? Router/API · CLI ?"));
         assert!(restored.session_cost.is_none());
     }
 

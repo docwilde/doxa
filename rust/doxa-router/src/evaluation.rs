@@ -148,7 +148,7 @@ fn recorded(config: &Config, prepared: &Prepared, record: &Recording) -> io::Res
             let mut out=crate::fallback(config,prepared,reason.clone());out.attempted=record.attempted;out.latency_ms=record.latency_ms;
             out.usage=record.rejected_usage.clone();
             out.router_cost_usd_micros=if !record.attempted {Some(0)} else {out.usage.as_ref().and_then(|usage|
-                crate::token_cost(usage.input_tokens,0,crate::JEV_INPUT_USD_MICROS_PER_MILLION,0).ok())};
+                crate::token_cost(usage.input_tokens,0,config.decision().input_usd_micros_per_million(),0).ok())};
             if out.usage.is_some() {out.model=Some(config.jev_model.clone());}
             Ok(out)
         },

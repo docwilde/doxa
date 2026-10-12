@@ -218,3 +218,18 @@ fn snap_supervision_uses_frozen_choice_evidence_and_budget_with_local_http() {
     assert_eq!(body["questions"]["evidence"]["criteria"].as_object().unwrap().len(),2);
     assert!(Model::parse("subq:subq-preview").is_err());
 }
+
+#[test]
+fn snap_outages_keep_reserved_spend_and_enforced_review_pause() {
+    for status in [401,402,429,503] {
+        let (_dir,mut context,snapshot)=fixture(Mode::Enforce);
+        context.review.supervisor=Some(Model::parse("subq:subq-snap-preview").unwrap());
+        let body=supervisor_request(&context,&snapshot);
+        let (endpoint,thread)=server(json!({"detail":{"error_type":"fixture_error","message":"untrusted provider text"}}).to_string(),status);
+        assert!(evaluate_request_at(&context,context.review.supervisor.as_ref().unwrap(),&body,&endpoint,"fixture-key").is_err());
+        assert_eq!(thread.join().unwrap(),body);
+        let state=crate::read_private::<State>(&context.state_path,crate::MAX_STATE).unwrap();
+        assert!(state.reserved_usd>0.0);assert_eq!(state.calls,1);assert!(state.accounting_unknown && state.paused);
+        assert!(!serde_json::to_string(&state).unwrap().contains("untrusted provider text"));
+    }
+}

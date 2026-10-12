@@ -1146,7 +1146,7 @@ impl App {
             }
             lines.push(format!(
                 "{} {}",
-                if telemetry.is_some_and(|value|value.tracked_cost_only) {"Jev/API tracked"} else {"cost    "},
+                if telemetry.is_some_and(|value|value.tracked_cost_only) {"Router/API tracked"} else {"cost    "},
                 telemetry
                     .and_then(|value| value.session_cost.as_deref())
                     .unwrap_or("not reported by this engine")

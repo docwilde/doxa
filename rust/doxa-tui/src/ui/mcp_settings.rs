@@ -53,6 +53,24 @@ mod tests {
         app
     }
     #[test]
+    fn decision_keys_and_routing_choice_are_configurable_in_session_settings() {
+        if !isolated("ui::mcp_settings::tests::decision_keys_and_routing_choice_are_configurable_in_session_settings") {return;}
+        let mut app=app();key(&mut app,KeyCode::Char('1'));
+        select(&mut app,"subq_api_key");key(&mut app,KeyCode::Enter);
+        let secret="fixture-subq-private-key";app.handle(Event::Paste(secret.into()));
+        assert!(paint(&app).contains('•'));assert!(!paint(&app).contains(secret));assert_eq!(app.input,"ordinary prompt");
+        key(&mut app,KeyCode::Enter);
+        assert_eq!(credentials::search_resolve(ApiProvider::Subq).unwrap().as_deref(),Some(secret));
+        assert!(!crate::operations::settings_report().unwrap().contains(secret));
+        select(&mut app,"router_model");key(&mut app,KeyCode::Enter);
+        key(&mut app,KeyCode::Down);key(&mut app,KeyCode::Down);key(&mut app,KeyCode::Enter);
+        assert_eq!(app.settings_menu.as_ref().unwrap().effective_value("router_model"),"subq-snap-preview");
+        key(&mut app,KeyCode::Char('2'));select(&mut app,"fleet_alignment_supervisor");key(&mut app,KeyCode::Enter);
+        key(&mut app,KeyCode::Down);key(&mut app,KeyCode::Down);key(&mut app,KeyCode::Enter);
+        assert_eq!(app.settings_menu.as_ref().unwrap().effective_value("fleet_alignment_supervisor"),"subq:subq-snap-preview");
+        assert!(app.pending_prompts.is_empty());assert!(app.pending_launches.is_empty());
+    }
+    #[test]
     fn mcp_settings_masks_private_keys_and_keeps_config_and_prompts_clean() {
         if !isolated("ui::mcp_settings::tests::mcp_settings_masks_private_keys_and_keeps_config_and_prompts_clean") {return;}
         let mut app=app();select(&mut app,"tavily_api_key");key(&mut app,KeyCode::Enter);
