@@ -61,7 +61,7 @@ def capture(binary: Path, scene: str, destination: Path, version: str, env: dict
         "glm-account": ("GLM account reporting", "owner-declared", "Cash balance: unknown", "bundle remainder: unknown"),
         "setup-docker": ("Check Docker prerequisites", "Edit Docker worker image digest", "Edit rootless Docker socket", "Show rootless Engine and image build steps"),
         "context": ("21.0% in use", "42000 / 200000 tokens", "Conversation", "Available"),
-        "usage-quota": ("Session quota · 5h · 42% used", "Weekly quota · week · 75% used", "Reset at", "No billing request"),
+        "usage-quota": ("Session quota · 5h · 42% used", "Weekly quota · week · 75% used", "Reset at", "no billing request"),
         "routing-status": ("Route auto", "ds-fast", "$0.000004 est", "session cost includes worker calls"),
         "queued-prompts": ("Queued · q-next", "parser API stable"),
         "peer-messages": ("🤖 ↓", "🤖 ↑", "Peer Parser reviewer", "q-peer", "12345678-1234-1234-1234-123456789abc"),
