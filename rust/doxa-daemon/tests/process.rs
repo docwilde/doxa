@@ -5125,7 +5125,7 @@ fn long_codex_restore_creates_bounded_thread_without_replacing_logical_history()
         store.try_append(json!({"type":"user","message":{"role":"user","content":user}}),"codex",|s|Ok(s.into())).unwrap();
         store.try_append(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":answer}]}}),"codex",|s|Ok(s.into())).unwrap();
     }
-    store.try_write_thread(json!({"thread_id":"previous-thread","session_id":"codex-session","engine":"codex","transport":"app-server","cwd":dir.path(),"lore_enabled":true,"lore_tools":false,"peer_tools":false,"turn_incomplete":false,"model":"account-model","effort":"high","permission_mode":"default"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
+    store.try_write_thread(json!({"thread_id":"previous-thread","session_id":"codex-session","engine":"codex","transport":"app-server","cwd":dir.path(),"lore_enabled":true,"lore_tools":false,"peer_tools":false,"turn_incomplete":false,"model":"account-model","effort":"high","permission_mode":"on-request"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
     let original=fs::read(store.transcript_path()).unwrap();
     let codex=dir.path().join("codex-recovery");executable(&codex,include_str!("fixtures/codex_appserver.py"));
     executable(&codex.with_extension("turn"),&format!(r#"#!/bin/sh
@@ -5144,7 +5144,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"continue
     let prompt=fs::read_to_string(dir.path().join("provider-prompt.txt")).unwrap();
     let tail=prompt.split("[DOXA RESTORED CONVERSATION]\n").nth(1).unwrap().split("\n[CURRENT USER REQUEST]").next().unwrap();
     assert!(tail.len()<=16384);assert!(tail.contains("recent owner task") && tail.contains("recent complete answer"));
-    let checkpoint=store.read_thread().unwrap().unwrap();assert_eq!(checkpoint["session_id"],"codex-session");assert_eq!(checkpoint["thread_id"],"fresh-thread");assert_eq!(checkpoint["permission_mode"],"default");
+    let checkpoint=store.read_thread().unwrap().unwrap();assert_eq!(checkpoint["session_id"],"codex-session");assert_eq!(checkpoint["thread_id"],"fresh-thread");assert_eq!(checkpoint["permission_mode"],"on-request");
     assert!(fs::read(store.transcript_path()).unwrap().starts_with(&original));
     send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));claude_receive_until(&mut reader,|frame|frame["id"]==2);wait_until(||process.exited());
 }

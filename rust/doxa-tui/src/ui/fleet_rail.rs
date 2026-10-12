@@ -11,11 +11,12 @@ pub(super) struct Group {
 }
 #[derive(Debug)]
 pub(super) struct Cache {
+    fixture: bool,
     pub groups: Vec<Group>, sources: Vec<(PathBuf,String)>, next: Instant,
     pending: Option<Receiver<(Vec<Group>,Vec<discovery::Session>)>>,
 }
 impl Default for Cache {
-    fn default() -> Self { Self { groups:Vec::new(),sources:Vec::new(),next:Instant::now(),pending:None } }
+    fn default() -> Self { Self { fixture:false,groups:Vec::new(),sources:Vec::new(),next:Instant::now(),pending:None } }
 }
 fn group(root: PathBuf, id: String, value: &Value, live: &HashSet<String>) -> Option<Group> {
     if value["native_version"] != 1 || value["run_id"] != id { return None; }
@@ -35,8 +36,15 @@ fn group(root: PathBuf, id: String, value: &Value, live: &HashSet<String>) -> Op
     Some(Group {root,id,supervisor,members,collapsed:false})
 }
 impl App {
+    /// Render-only illustrative membership; never reads or persists a run.
+    #[doc(hidden)]
+    pub fn show_fleet_sidebar_fixture(&mut self, id: &str, supervisor: &str, workers: &[&str]) {
+        let members=std::iter::once(supervisor).chain(workers.iter().copied()).map(str::to_owned).collect();
+        self.fleet_rail.fixture=true;
+        self.fleet_rail.groups=vec![Group {root:PathBuf::from("/demo/fleet"),id:id.into(),supervisor:Some(supervisor.into()),members,collapsed:false}];
+    }
     pub(super) fn poll_fleet_rail(&mut self, now: Instant) -> bool {
-        if self.remote_mode { return false; }
+        if self.remote_mode || self.fleet_rail.fixture { return false; }
         if let Some(receiver)=self.fleet_rail.pending.as_ref() {
             let (mut groups,live)=match receiver.try_recv() {
                 Ok(rows)=>rows, Err(TryRecvError::Empty)=>return false,
