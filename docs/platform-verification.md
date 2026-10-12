@@ -14,18 +14,35 @@ Linux-only by design. Fixture Python is resolved through `PATH`; macOS CI
 already installs `python3`.
 
 The exploratory [2026-10-04 macOS run](https://github.com/docwilde/doxa/actions/runs/37165658097)
-passed 45 of 72 process tests. Of its 27 failures, 24 entered the unsupported
-protected Codex path; the authoritative refusal case now asserts the macOS
-failure rather than expecting a Linux build-version check. The three remaining
-macOS cases remain visibly ignored under
-[issue #197](https://github.com/docwilde/doxa/issues/197): two fake peer socket
-receivers saw `EINVAL` during full-stream reads, and native vendor finalization
-indexed zero messages where four were expected. Beta.15 keeps production peer
-senders connected until the receiver reads the frame and samples its PID;
-the fleet process fixture now uses that sender and passes macOS CI. The SQLite
-probe reports query errors instead of treating all errors as zero. A green
-macOS job covers this portable process path, but not the three ignored
-interactions, an authenticated live fleet or authenticated provider sessions.
+passed 45 of 72 process tests. Most failures entered the unsupported protected
+Codex path. Those turn-success cases are now Linux-only; macOS still checks
+the authoritative protected-startup refusal before any provider execution.
+
+The four remaining cases tracked by
+[issue #197](https://github.com/docwilde/doxa/issues/197) are now enabled on
+macOS: direct peer delivery, broadcast and reply-history filtering, Claude MCP
+peer sends, and native vendor memory refresh and finalization indexing. Peer
+fixtures use a bounded poll and the complete one-line protocol, including empty
+discovery probes. This avoids setting `SO_RCVTIMEO` on an accepted connection
+whose peer already closed it: [Darwin rejects socket options after full shutdown](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/uipc_socket.c).
+It also handles accepted sockets inheriting a nonblocking listener's mode.
+Production peer senders retain the connection until the receiver reads the
+frame and samples its PID.
+
+The old memory-index probe hardcoded `/usr/bin/python3` and converted every
+SQLite query error to zero, so its result did not establish that indexing had
+failed. The current probe resolves Python through `PATH`, opens the private
+fixture database read-only, and reports query errors. With native LORE
+0.62.21, the unchanged finalization test verifies zero indexed messages before
+shutdown, four after shutdown when memory is enabled, and zero when disabled.
+
+The [2026-10-12 macOS job](https://github.com/docwilde/doxa/actions/runs/38257543111/job/114839395634)
+passed all **58 portable process tests with zero ignored**, including all four
+restored cases and the protected Codex refusal. The same source passed all
+**93 Linux process tests with zero ignored**. The macOS job also passed the
+portable workspace, focused daemon suites and local SSE lifecycle checks.
+These credential-free results do not verify an authenticated live fleet or
+provider account.
 
 Bounded authenticated Claude, DeepSeek and GLM start, turn, stop/resume and
 usage checks passed on Linux with alpha.68; see
