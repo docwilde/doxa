@@ -5,6 +5,24 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.50 — 2026-10-12
+
+**Routing and supervision**
+
+- Add pinned **SubQ Snap Preview** alongside **Jev 1.13.0** for turn routing, independent fleet alignment and message judging. Keep host permissions, evidence and release gates authoritative.
+- Configure the routing model and masked **Jev / SubQ API keys** in **Settings → Session**; select independent reviewer presets or custom models under **Fleet**. Preserve failed-call reservations and frozen budgets.
+
+**Sessions and peers**
+
+- Fix Claude checkpoint engine detection and continue verified saved conversations by typing a prompt. Retain drafts on failed restoration and verify Router config identity before resume.
+- Bound long restored conversation context to **16 KiB** or **25%** of the model window with a conservative byte/token bound. Preserve complete original transcripts, logical session IDs, permission policy and budget ledgers.
+- Exclude retained idle daemons with **0 attached clients** from active peer discovery; keep detached running or queued work discoverable.
+
+**Fleet interface and gallery**
+
+- Group manifest-verified live workers beneath their supervisor in the session sidebar; click its arrow or use **Left / Right** to collapse or expand. Pool runs use a fleet heading.
+- Refresh **28** native **GTK/VTE** screenshots at **3068 × 1734**, including Snap configuration and fleet grouping. Scene data remain isolated illustrative fixtures.
+
 ## 2.0.0-beta.49 — 2026-10-12
 
 **Peers**

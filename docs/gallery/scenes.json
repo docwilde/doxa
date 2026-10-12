@@ -6,196 +6,196 @@
       "title": "Workspace",
       "caption": "Three engine tabs, a project rail, and a Markdown turn in the production Ratatui app.",
       "alt": "DOXA workspace with three engine tabs, a project rail, and a Markdown turn",
-      "image": "../assets/shots/rust-2.0.0-beta.49-hero.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-hero.png"
     },
     {
       "id": "settings-router",
       "title": "Jev Router settings",
-      "caption": "Router defaults are staged for review; the private config has not been checked or saved.",
+      "caption": "Configure Jev or SubQ Snap routing in the native Settings menu",
       "alt": "Staged Jev Router default and private config path awaiting review",
-      "image": "../assets/shots/rust-2.0.0-beta.49-settings-router.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-settings-router.png"
     },
     {
       "id": "routing-status",
       "title": "Routing status",
       "caption": "A synthetic Auto decision shows the selected worker separately from Jev/API routing cost. No provider call is made.",
       "alt": "Synthetic Auto routing decision with separate effective worker and routing cost",
-      "image": "../assets/shots/rust-2.0.0-beta.49-routing-status.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-routing-status.png"
     },
     {
       "id": "fleet-review",
       "title": "Fleet review",
       "caption": "A synthetic launch review shows the acting coordinator, independent alignment supervisor, message judge, and bounded review budget. Launch is disabled.",
       "alt": "Synthetic fleet plan with independent alignment supervisor and message judge; launch disabled",
-      "image": "../assets/shots/rust-2.0.0-beta.49-fleet-review.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-fleet-review.png"
     },
     {
       "id": "fleet-dependency",
       "title": "Dependency plan",
       "caption": "A synthetic fleet plan shows a dependency edge and explicit human release requirement.",
       "alt": "Synthetic fleet dependency plan with explicit human release",
-      "image": "../assets/shots/rust-2.0.0-beta.49-fleet-dependency.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-fleet-dependency.png"
     },
     {
       "id": "fleet-release-review",
       "title": "Dependency release review",
       "caption": "Synthetic checkpoint and handoff evidence appear in the production review modal; release is disabled.",
       "alt": "Synthetic checkpoint and handoff evidence in the dependency release modal; release disabled",
-      "image": "../assets/shots/rust-2.0.0-beta.49-fleet-release-review.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-fleet-release-review.png"
     },
     {
       "id": "fleet-view",
       "title": "Fleet status",
-      "caption": "A recorded fixture shows a worker waiting for a reviewed predecessor. No controller starts.",
+      "caption": "Review fleet status with workers grouped beneath their supervisor",
       "alt": "Synthetic fleet status with a worker waiting for a reviewed predecessor",
-      "image": "../assets/shots/rust-2.0.0-beta.49-fleet-view.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-fleet-view.png"
     },
     {
       "id": "context",
       "title": "Context usage",
       "caption": "Synthetic provider totals and reported categories are shown separately from LORE memory character caps.",
       "alt": "Context bar with synthetic reported totals and categories",
-      "image": "../assets/shots/rust-2.0.0-beta.49-context.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-context.png"
     },
     {
       "id": "usage-quota",
       "title": "Subscription quota",
       "caption": "Synthetic session and weekly quota snapshots include reset times and extra provider windows; no billing request is made.",
       "alt": "Synthetic session and weekly quota bars with reset times and provider window details",
-      "image": "../assets/shots/rust-2.0.0-beta.49-usage-quota.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-usage-quota.png"
     },
     {
       "id": "peer-messages",
       "title": "Peer messages",
       "caption": "Received, sent, and queued peer activity appears with direction markers while message bodies stay collapsed by default.",
       "alt": "Collapsed received, sent, and queued peer messages with direction markers",
-      "image": "../assets/shots/rust-2.0.0-beta.49-peer-messages.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-peer-messages.png"
     },
     {
       "id": "peer-expanded",
       "title": "Peer details",
       "caption": "The fixture expands received and sent messages with their session addresses and direction markers.",
       "alt": "Expanded received and sent peer messages with session addresses",
-      "image": "../assets/shots/rust-2.0.0-beta.49-peer-expanded.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-peer-expanded.png"
     },
     {
       "id": "queued-prompts",
       "title": "Queued prompts",
       "caption": "A queued user prompt keeps its Markdown and user stripe while another turn is running.",
       "alt": "Queued prompt with Markdown formatting and a user stripe",
-      "image": "../assets/shots/rust-2.0.0-beta.49-queued-prompts.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-queued-prompts.png"
     },
     {
       "id": "settings",
       "title": "Settings",
       "caption": "Settings categories appear on the submenu title bar; changes remain unsaved.",
       "alt": "Settings categories on the submenu title bar",
-      "image": "../assets/shots/rust-2.0.0-beta.49-settings.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-settings.png"
     },
     {
       "id": "settings-mcp",
       "title": "MCP and search settings",
       "caption": "API worker MCP controls and masked search-key fields are shown without connections or tool calls.",
       "alt": "MCP controls and masked search provider key fields",
-      "image": "../assets/shots/rust-2.0.0-beta.49-settings-mcp.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-settings-mcp.png"
     },
     {
       "id": "glm-account",
       "title": "GLM reporting",
       "caption": "The owner-declared API bundle is shown while unknown cash balance and remaining allowance stay unknown.",
       "alt": "Owner-declared GLM usage bundle with unknown balance and remaining allowance",
-      "image": "../assets/shots/rust-2.0.0-beta.49-glm-account.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-glm-account.png"
     },
     {
       "id": "setup-docker",
       "title": "Docker setup",
       "caption": "Docker prerequisite, pinned image, and rootless socket setup controls appear without changing the host.",
       "alt": "Docker prerequisite, pinned image, and rootless socket setup controls",
-      "image": "../assets/shots/rust-2.0.0-beta.49-setup-docker.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-setup-docker.png"
     },
     {
       "id": "triage",
       "title": "Project triage",
       "caption": "The project rail points to a hidden tab that needs input.",
       "alt": "Project rail showing a hidden tab that needs input",
-      "image": "../assets/shots/rust-2.0.0-beta.49-triage.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-triage.png"
     },
     {
       "id": "pane-triage",
       "title": "Pane rail",
       "caption": "Grouped panes stay navigable while hidden-tab urgency remains visible.",
       "alt": "Grouped pane rail with hidden-tab urgency",
-      "image": "../assets/shots/rust-2.0.0-beta.49-pane-triage.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-pane-triage.png"
     },
     {
       "id": "project-label",
       "title": "Project label",
       "caption": "An explicit label is shown on a verified project heading.",
       "alt": "Explicit label on a verified project heading",
-      "image": "../assets/shots/rust-2.0.0-beta.49-project-label.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-project-label.png"
     },
     {
       "id": "image-preview",
       "title": "Image preview",
       "caption": "A local Markdown image appears inline in the transcript using the halfblock fallback.",
       "alt": "Local Markdown image preview in the transcript",
-      "image": "../assets/shots/rust-2.0.0-beta.49-image-preview.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-image-preview.png"
     },
     {
       "id": "isolation",
       "title": "Session isolation",
       "caption": "A synthetic worker report shows Docker isolation policy details; no container launches.",
       "alt": "Docker isolation details from a synthetic worker report",
-      "image": "../assets/shots/rust-2.0.0-beta.49-isolation.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-isolation.png"
     },
     {
       "id": "beliefs",
       "title": "Beliefs",
       "caption": "Belief selection and review controls are shown with writes disabled.",
       "alt": "Belief selection and review controls",
-      "image": "../assets/shots/rust-2.0.0-beta.49-beliefs.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-beliefs.png"
     },
     {
       "id": "tool-entries",
       "title": "Tool details",
       "caption": "Expanded tool input and output use a synthetic event in the production renderer.",
       "alt": "Expanded tool input and output",
-      "image": "../assets/shots/rust-2.0.0-beta.49-tool-entries.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-tool-entries.png"
     },
     {
       "id": "memory-management",
       "title": "Memory",
       "caption": "Curated project-memory controls are shown with writes disabled.",
       "alt": "Curated project memory controls",
-      "image": "../assets/shots/rust-2.0.0-beta.49-memory-management.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-memory-management.png"
     },
     {
       "id": "commands",
       "title": "Commands",
       "caption": "Slash-command completion appears in the prompt.",
       "alt": "Slash-command completion",
-      "image": "../assets/shots/rust-2.0.0-beta.49-commands.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-commands.png"
     },
     {
       "id": "help",
       "title": "Help",
       "caption": "Built-in command help is open in the workspace.",
       "alt": "Built-in command help",
-      "image": "../assets/shots/rust-2.0.0-beta.49-help.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-help.png"
     },
     {
       "id": "reasoning",
       "title": "Thinking",
       "caption": "A collapsed reasoning-progress section shows a synthetic token count.",
       "alt": "Collapsed reasoning progress section with a brain marker and synthetic token count",
-      "image": "../assets/shots/rust-2.0.0-beta.49-reasoning.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-reasoning.png"
     },
     {
       "id": "codegraph",
       "title": "Code graph",
       "caption": "A synthetic read-only module query shows source freshness evidence and an unknown conditional edge.",
       "alt": "Read-only code graph query with source freshness evidence",
-      "image": "../assets/shots/rust-2.0.0-beta.49-codegraph.png"
+      "image": "../assets/shots/rust-2.0.0-beta.50-codegraph.png"
     }
   ]
 }
