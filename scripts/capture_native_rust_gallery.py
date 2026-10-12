@@ -65,6 +65,9 @@ def main():
         window = Gtk.Window()
         window.set_decorated(False)
         window.set_default_size(*SIZE)
+        css = Gtk.CssProvider()
+        css.load_from_data(b"window { background-color: #171512; } vte-terminal { padding: 0; border: none; }")
+        Gtk.StyleContext.add_provider_for_screen(window.get_screen(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         container = Gtk.Fixed()
         window.add(container)
         terminal = Vte.Terminal()
@@ -93,7 +96,9 @@ def main():
             if active["index"] == 0:
                 frame = json.loads(subprocess.check_output([str(binary), name], cwd=ROOT, env=env, timeout=30))
                 if frame["version"] != version:
-                    raise RuntimeError("Capture binary does not match the frontend version")
+                    failure.append("Capture binary does not match the frontend version")
+                    Gtk.main_quit()
+                    return False
             active.update(captured=False, last=None, stable=0, start=time.monotonic())
             def spawned(_terminal, pid, error, _data=None):
                 if error:
