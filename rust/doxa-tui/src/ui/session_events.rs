@@ -719,8 +719,9 @@ impl App {
                         *revision = revision.wrapping_add(1);
                     }
                     self.peer_map.event(&id, event_type, data);
-                    if self.map_modal && matches!(event_type, "peer_message" | "peer_sent")
-                        && self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                    if self.map_modal && matches!(event_type, "peer_message" | "peer_sent" | "peer_joined" | "peer_left")
+                        && self.groups[self.active_group].active_id() == Some(id.as_str())
+                        && self.peer_map.request_refresh(&id, Instant::now(), true) {
                         self.pending_peer_refresh = Some(id.clone());
                     }
                 }

@@ -27,11 +27,11 @@ Provider tool features depend on the installed CLI, model, and account. `/model`
 
 Codex `on-request` reviews protected commands, file changes, and permission profiles inline. `auto` retains its sandbox; `full-access` removes that sandbox. In beta.47, authoritative Codex `full-access` also admits the exact registered built-in peer list, send and history tools without a second DOXA approval. Exact session IDs, scope, credential scrubbing, rate and fleet checks still apply. `on-request` and `auto` retain peer review; changing to Auto during a turn leaves a pending peer review actionable. LORE, child-session and external MCP review gates remain active. DeepSeek and GLM have no provider permission mode; their peer and LORE calls are individually reviewed. Optional vendor workspace reads are off by default. Explicit external MCP tools are available to API workers, with mandatory one-call review, server-qualified names and scrubbed bounded results; native CLI workers retain their own MCP ownership. See [external API MCP tools](vendor-mcp.md). External MCP charges are unknown and outside the model allowance.
 
-Incoming direct peer messages can start a model turn when Settings → Session →
+Incoming direct and broadcast peer messages can start a model turn when Settings → Session →
 **Wake on peer messages** is enabled. A busy receiver queues the message after
 its current turn. The saved setting is checked when the message arrives;
 an explicit process/fleet environment override takes precedence. Wake remains
-off by default, and broadcasts do not start turns.
+off by default. Every recipient retains its own permission and budget checks.
 
 Router Auto is a target-selection choice, separate from permission mode. It does
 not grant permissions. API workers keep their narrower tool surface; native

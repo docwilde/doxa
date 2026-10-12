@@ -1083,6 +1083,28 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn peer_chip_menu_dismisses_on_outside_click_and_restores_prompt_draft() {
+        for (width, height) in [(160, 40), (80, 24), (20, 5)] {
+            let mut app = App::default();
+            app.rail_visible = false;
+            app.handle(Event::Resize(width, height));
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"owner","engine":"codex"}));
+            app.input = "kept draft".into();
+            app.input_cursor = app.input.len();
+            app.open_peer_map(0);
+            assert!(app.map_modal);
+            assert!(app.handle(Event::Mouse(MouseEvent {
+                kind:MouseEventKind::Down(MouseButton::Left),column:0,row:0,modifiers:KeyModifiers::NONE,
+            })));
+            assert!(!app.map_modal);
+            assert_eq!(app.focus, Focus::Prompt);
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char('!'),KeyModifiers::NONE)));
+            assert_eq!(app.input, "kept draft!");
+            assert!(app.pending_prompts.is_empty());
+        }
+    }
+
+    #[test]
     fn belief_and_peer_chips_follow_engine_status_and_exact_session_owner() {
         let sessions = [
             ("claude-owner", "claude", 3),

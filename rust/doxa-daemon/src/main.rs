@@ -828,13 +828,11 @@ fn run() -> io::Result<()> {
             handle.publish(event);
         }
         if let Ok(Some(frame)) = inbox.poll_receive(&|s: &str| s.to_owned()) {
-            let broadcast = frame.kind.as_deref() == Some("broadcast");
             if let Ok(mut event) = peer_host.inbound_event(frame) {
                 let wake_enabled = options.engine != Engine::Fixture && inbound_policy.enabled();
-                event["data"]["wake_policy"] = json!(if broadcast { "broadcast" }
-                    else if wake_enabled { "enabled" } else { "disabled" });
+                event["data"]["wake_policy"] = json!(if wake_enabled { "enabled" } else { "disabled" });
                 handle.publish(event.clone());
-                let accepted = if wake_enabled && !broadcast {
+                let accepted = if wake_enabled {
                     match PeerHost::peer_prompt(&event) {
                         Some((prompt, origin)) => match handle.enqueue_peer_prompt_with_origin(prompt, origin) {
                             Ok(ExternalPrompt::Started | ExternalPrompt::Queued) => true,

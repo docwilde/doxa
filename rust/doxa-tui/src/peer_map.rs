@@ -48,6 +48,8 @@ struct Hover {
 struct Scope {
     peers: Vec<Peer>,
     reported_count: Option<usize>,
+    refresh_pending: bool,
+    refreshed_at: Option<Instant>,
     observations: VecDeque<(String, bool)>,
     available: bool,
     reason: String,
@@ -121,6 +123,23 @@ fn tooltip_rect(rects: MapRects) -> Rect {
         width, height)
 }
 impl PeerMap {
+    /// Only one discovery request per owner may be outstanding. Native daemon
+    /// discovery checks live PID, heartbeat and socket; history is not presence.
+    pub fn request_refresh(&mut self, owner: &str, now: Instant, force: bool) -> bool {
+        if !safe_id(owner) { return false; }
+        let scope = self.scopes.entry(owner.to_owned()).or_default();
+        if scope.refresh_pending || !force && scope.refreshed_at.is_some_and(|at|
+            now.saturating_duration_since(at) < Duration::from_secs(3)) { return false; }
+        scope.refresh_pending = true;
+        true
+    }
+
+    pub fn contains(&self, area: Rect, point: Position) -> bool {
+        map_rects(area).is_some_and(|rects| rects.modal.contains(point)
+            || self.hover.as_ref().is_some_and(|hover| hover.visible && tooltip_rect(rects).contains(point)))
+    }
+
+    pub fn dismiss_hover(&mut self) { self.hover = None; }
     /// Return the last complete roster size for this exact session owner.
     /// Event-derived observations are not a complete roster and stay unknown.
     pub fn reported_count(&self, owner: &str) -> Option<usize> {
@@ -168,6 +187,8 @@ impl PeerMap {
             return false;
         }
         let scope = self.scopes.entry(owner.to_owned()).or_default();
+        scope.refresh_pending = false;
+        scope.refreshed_at = Some(Instant::now());
         if frame.get("ok").and_then(Value::as_bool) != Some(true) {
             scope.available = false;
             scope.reason = "Peer discovery unavailable on this daemon".into();
@@ -214,8 +235,8 @@ impl PeerMap {
             peers.push(Peer {
                 id: id.into(),
                 title,
-                sent: old.map_or(0, |p| p.sent),
-                received: old.map_or(0, |p| p.received),
+                sent: old.map_or_else(|| scope.observations.iter().filter(|(peer, sent)| peer == id && *sent).count() as u32, |p| p.sent),
+                received: old.map_or_else(|| scope.observations.iter().filter(|(peer, sent)| peer == id && !*sent).count() as u32, |p| p.received),
             });
         }
         let reported_count = (rejected == 0).then_some(peers.len());
@@ -258,16 +279,9 @@ impl PeerMap {
                         peer.title = title;
                         true
                     }
-                } else if scope.peers.len() >= MAX_PEERS {
-                    false
                 } else {
-                    scope.peers.push(Peer {
-                        id: id.into(),
-                        title,
-                        sent: 0,
-                        received: 0,
-                    });
-                    scope.available = true;
+                    // A join event can be replayed. Confirm membership through
+                    // the next live discovery response before showing a row.
                     true
                 }
             }
@@ -292,13 +306,7 @@ impl PeerMap {
                 else {
                     return false;
                 };
-                let title = data
-                    .get("from_title")
-                    .and_then(Value::as_str)
-                    .map(label)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| id.chars().take(12).collect());
-                observe(scope, id, &title, false)
+                observe(scope, id, false)
             }
             "peer_sent" => {
                 let Some(ids) = data.get("to").and_then(Value::as_array) else {
@@ -312,13 +320,13 @@ impl PeerMap {
                     .filter(|id| safe_id(id) && *id != owner && seen.insert(*id))
                     .take(MAX_PEERS)
                 {
-                    changed |= observe(scope, id, id, true);
+                    changed |= observe(scope, id, true);
                 }
                 changed
             }
             _ => false,
         };
-        if changed {
+        if changed && matches!(kind, "peer_joined" | "peer_left") {
             scope.reported_count = None;
         }
         changed
@@ -534,33 +542,17 @@ impl PeerMap {
 
 }
 
-fn observe(scope: &mut Scope, id: &str, title: &str, outbound: bool) -> bool {
-    let index = scope.peers.iter().position(|peer| peer.id == id);
-    let index = match index {
-        Some(index) => index,
-        None if scope.peers.len() < MAX_PEERS => {
-            let title = label(title);
-            let title = if title.is_empty() { id.chars().take(12).collect() } else { title };
-            scope.peers.push(Peer {
-                id: id.into(),
-                title,
-                sent: 0,
-                received: 0,
-            });
-            scope.peers.len() - 1
-        }
-        None => return false,
-    };
-    if outbound {
-        scope.peers[index].sent = scope.peers[index].sent.saturating_add(1);
-    } else {
-        scope.peers[index].received = scope.peers[index].received.saturating_add(1);
+fn observe(scope: &mut Scope, id: &str, outbound: bool) -> bool {
+    // A restored receipt or sent-message row can name an exited/saved peer.
+    // Preserve bounded observations, but never invent live roster membership.
+    if let Some(peer) = scope.peers.iter_mut().find(|peer| peer.id == id) {
+        if outbound { peer.sent = peer.sent.saturating_add(1); }
+        else { peer.received = peer.received.saturating_add(1); }
     }
     if scope.observations.len() == MAX_OBSERVATIONS {
         scope.observations.pop_front();
     }
     scope.observations.push_back((id.into(), outbound));
-    scope.available = true;
     true
 }
 
@@ -619,6 +611,42 @@ mod interaction_tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
     use serde_json::json;
+
+    #[test]
+    fn historical_receipts_and_replayed_joins_do_not_restore_dead_roster_members() {
+        let mut map = PeerMap::default();
+        map.roster("owner", &json!({"ok":true,"peers":[{"session_id":"live","title":"Live"}]}));
+        map.event("owner", "peer_message", &json!({"from_id":"saved","from_title":"Saved"}));
+        map.event("owner", "peer_sent", &json!({"to":["saved","live"]}));
+        assert_eq!(map.scopes["owner"].peers.iter().map(|peer|peer.id.as_str()).collect::<Vec<_>>(), vec!["live"]);
+        assert_eq!(map.reported_count("owner"), Some(1));
+        assert_eq!(map.scopes["owner"].peers[0].sent, 1);
+        map.roster("owner", &json!({"ok":true,"peers":[]}));
+        map.event("owner", "peer_joined", &json!({"session_id":"saved"}));
+        map.event("owner", "peer_message", &json!({"from_id":"saved","from_title":"Saved"}));
+        assert!(map.scopes["owner"].peers.is_empty());
+        // Historical observations are available if a later live roster actually
+        // confirms that exact session, but they never prove presence alone.
+        map.roster("owner", &json!({"ok":true,"peers":[{"session_id":"saved"}]}));
+        assert_eq!(map.scopes["owner"].peers[0].received, 2);
+    }
+
+    #[test]
+    fn live_roster_refresh_is_periodic_owner_scoped_and_single_inflight() {
+        let mut map = PeerMap::default();
+        let now = Instant::now();
+        assert!(map.request_refresh("owner", now, true));
+        assert!(!map.request_refresh("owner", now + Duration::from_secs(30), true));
+        assert!(map.request_refresh("other", now, true));
+        map.roster("owner", &json!({"ok":true,"peers":[]}));
+        let replied = map.scopes["owner"].refreshed_at.unwrap();
+        assert!(!map.request_refresh("owner", replied + Duration::from_secs(2), false));
+        assert!(map.request_refresh("owner", replied + Duration::from_secs(3), false));
+        assert!(!map.request_refresh("owner", replied + Duration::from_secs(60), false));
+        map.roster("owner", &json!({"ok":false}));
+        assert_eq!(map.reported_count("owner"), None);
+        assert!(!map.scopes["owner"].refresh_pending);
+    }
 
     #[test]
     fn complete_roster_counts_are_owner_scoped_and_incomplete_counts_stay_unknown() {

@@ -996,7 +996,9 @@ impl App {
         self.active_group = group;
         self.map_modal = true;
         self.peer_map.selected = 0;
-        self.pending_peer_refresh = Some(owner);
+        if self.peer_map.request_refresh(&owner, Instant::now(), true) {
+            self.pending_peer_refresh = Some(owner);
+        }
     }
 
     pub(super) fn chip_window(&self, index: usize, width: usize) -> Vec<(&'static str, String)> {

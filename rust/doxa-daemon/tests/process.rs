@@ -2221,6 +2221,82 @@ mod vendor_process {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn claude_mcp_broadcast_wakes_idle_deepseek_and_codex_with_recipient_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        doxa_state::save_config(&dir.path().join("home/config.toml"),
+            &"peer_inbound_turns = true\nagent_peer_send = true".parse().unwrap()).unwrap();
+        let codex = dir.path().join("codex-fixture");
+        let captured = dir.path().join("captured-broadcast-prompt");
+        executable(&codex, &format!(r#"#!/bin/sh
+cat > '{}'
+echo '{{"type":"thread.started","thread_id":"thread-1"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+"#, captured.display()));
+        let mut codex_process = Process::start_codex(dir.path(), &codex, Path::new("python3"));
+        let (mut codex_reader, mut codex_socket) = codex_process.connect();
+        codex_reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+        receive(&mut codex_reader);
+        send(&mut codex_socket, json!({"type":"attach","cursor":null}));
+        let (endpoint, server) = fake_vendor(1, "broadcast acknowledged");
+        let mut deepseek = start_vendor(dir.path(), "deepseek", &endpoint, Path::new("python3"));
+        let (mut vendor_reader, mut vendor_socket) = deepseek.connect();
+        receive(&mut vendor_reader);
+        send(&mut vendor_socket, json!({"type":"attach","cursor":null}));
+        let script = dir.path().join("claude-broadcast.py");
+        claude_fixture(&script, "", r#"if frame['type']=='user':
+  emit({'type':'control_request','request_id':'broadcast','request':{'subtype':'mcp_message','server_name':'doxa','message':{'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'peer_send','arguments':{'broadcast':True,'message':'sk-ownedCanonicalFixtureSecret1234567890 public status'}}}}})
+ elif frame['type']=='control_response':
+  response=frame['response'];assert response['subtype']=='success'
+  value=response['response']['mcp_response']['result'];assert not value.get('isError',False),value
+  delivery=json.loads(value['content'][0]['text'])
+  assert sorted(delivery['delivered_to'])==['codex-session','vendor-session'] and delivery['failed']==[],delivery
+  root.joinpath('broadcast-delivery.json').write_text(json.dumps(delivery));result()
+"#);
+        let mut sender = Process::start_claude(dir.path(), &script);
+        let (mut sender_reader, mut sender_socket) = sender.connect();
+        receive(&mut sender_reader);
+        send(&mut sender_socket, json!({"type":"attach","cursor":null}));
+        send(&mut sender_socket, json!({"type":"call","id":1,"method":"set_permission_mode","params":{"mode":"auto"}}));
+        assert_eq!(claude_receive_until(&mut sender_reader, |row|row["id"]==1)["ok"], true);
+        send(&mut sender_socket, json!({"type":"prompt","id":2,"text":"Exercise the canonical broadcast tool."}));
+        let done = claude_receive_until(&mut sender_reader, |row|row["event"]["type"]=="turn_done");
+        assert_eq!(done["event"]["data"]["is_error"], false, "{done}");
+        assert!(dir.path().join("broadcast-delivery.json").exists());
+        for reader in [&mut codex_reader, &mut vendor_reader] {
+            let receipt = receive(reader);
+            assert_eq!(receipt["event"]["type"], "peer_message");
+            assert_eq!(receipt["event"]["data"]["from_id"], CLAUDE_SESSION);
+            assert_eq!(receipt["event"]["data"]["kind"], "broadcast");
+            assert_eq!(receipt["event"]["data"]["wake_policy"], "enabled");
+            let started = receive(reader);
+            assert_eq!(started["event"]["type"], "turn_started");
+            assert_eq!(started["event"]["data"]["peer_started"], true);
+            assert!(started["turn"].as_str().unwrap().starts_with("peer-"));
+            assert!(started["event"]["data"]["peer_origin"].as_str().unwrap().contains(CLAUDE_SESSION));
+            assert!(started["event"]["data"]["prompt"].as_str().unwrap().contains("[REDACTED:api-key] public status"));
+            let done = claude_receive_until(reader, |row|row["event"]["type"]=="turn_done");
+            assert_ne!(done["event"]["data"]["is_error"], true, "{done}");
+        }
+        let provider_prompt = fs::read_to_string(captured).unwrap();
+        assert!(provider_prompt.contains("[PEER-STARTED TURN]") && provider_prompt.contains(CLAUDE_SESSION));
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        let messages = requests[0]["messages"].to_string();
+        assert!(messages.contains("[PEER-STARTED TURN]") && messages.contains(CLAUDE_SESSION));
+        for prompt in [provider_prompt, messages] {
+            assert!(prompt.contains("[PEER MESSAGES -- UNTRUSTED]") && prompt.contains("[REDACTED:api-key] public status"));
+            assert!(!prompt.contains("sk-ownedCanonicalFixtureSecret1234567890"));
+        }
+        for (process, reader, socket) in [(&mut sender, &mut sender_reader, &mut sender_socket),
+            (&mut codex_process, &mut codex_reader, &mut codex_socket), (&mut deepseek, &mut vendor_reader, &mut vendor_socket)] {
+            send(socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+            assert_eq!(claude_receive_until(reader, |row|row["id"]==3)["ok"], true);
+            wait_until(||process.exited());
+        }
+    }
+
+    #[test]
     fn priced_vendor_budget_blocks_the_next_socket_prompt() {
         let dir = tempfile::tempdir().unwrap();
         let body = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"answer\"}}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000}}\n\ndata: [DONE]\n\n";
@@ -2296,6 +2372,7 @@ mod vendor_process {
             .env("ZAI_API_KEY", "test-key-1234")
             .env_remove("DOXA_LORE")
             .env("DOXA_AGENT_PEER_SEND", "1")
+            .env_remove("DOXA_PEER_INBOUND_TURNS")
             .env("DOXA_VENDOR_TOOLS", if tools { "workspace-read" } else { "" })
             .env("DOXA_HOME", runtime.join("home"))
             .stdout(Stdio::null())
@@ -3378,71 +3455,64 @@ fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_bef
 
 #[test]
 #[cfg(target_os = "linux")]
-fn saved_inbound_direct_peer_starts_scrubbed_codex_turn_but_broadcast_does_not() {
-    let dir = tempfile::tempdir().unwrap();
-    let codex = dir.path().join("codex-fixture");
-    let python = Path::new("python3");
-    let captured = dir.path().join("captured-prompt");
-    executable(&codex, &format!(r#"#!/bin/sh
-cat >> '{}'
-echo '{{"type":"thread.started","thread_id":"thread-1"}}'
-echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
-"#, captured.display()));
-    let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
-    doxa_state::save_config(&dir.path().join("home/config.toml"), &"peer_inbound_turns = true".parse().unwrap()).unwrap();
-    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, false);
-    let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
-    let (mut reader, mut socket) = process.connect();
-    receive(&mut reader);
-    send(&mut socket, json!({"type":"attach","cursor":null}));
-    let frame = |kind, body: &str| doxa_peers::delivery::PeerFrame {
-            authenticated_pid: None,
-        from_id: "sender".into(), from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
-        sent_at: peer_now(), body: body.into(),
-        from_repo: Some(dir.path().display().to_string()), kind,
-    };
-    doxa_peers::delivery::send(&peer_socket, &frame(Some("broadcast".into()), "broadcast note")).unwrap();
-    let broadcast = receive(&mut reader);
-    assert_eq!(broadcast["event"]["type"], "peer_message");
-    assert_eq!(broadcast["event"]["data"]["wake_policy"], "broadcast");
-    send(&mut socket, json!({"type":"call","id":1,"method":"status","params":{}}));
-    let status = receive(&mut reader);
-    assert_eq!(status["status"]["running"], false);
-    assert_eq!(status["status"]["queued"], 0);
-    doxa_peers::delivery::send(&peer_socket, &frame(Some("direct".into()), "sk-ownedCanonicalFixtureSecret1234567890 body")).unwrap();
-    let direct = receive(&mut reader);
-    assert_eq!(direct["event"]["type"], "peer_message");
-    assert_eq!(direct["event"]["data"]["wake_policy"], "enabled");
-    let mut started = false;
-    loop {
-        let event = receive(&mut reader);
-        assert!(event["turn"].as_str().unwrap_or("").starts_with("peer-"));
-        if event["event"]["type"] == "turn_started" {
-            started = true;
-            assert_eq!(event["event"]["data"]["peer_started"], true);
-            assert!(event["event"]["data"]["peer_origin"].as_str().unwrap().contains("sender"));
-            let prompt = event["event"]["data"]["prompt"].as_str().unwrap();
-            assert!(prompt.starts_with("[PEER-STARTED TURN]"));
-            assert!(prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
-            assert!(prompt.contains("[REDACTED:api-key] body"));
-            assert!(!prompt.contains("sk-ownedCanonicalFixtureSecret1234567890"));
+fn saved_inbound_direct_and_broadcast_peers_start_scrubbed_codex_turns() {
+    for kind in ["direct", "broadcast"] {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("codex-fixture");
+        let python = Path::new("python3");
+        let captured = dir.path().join("captured-prompt");
+        executable(&codex, &format!(r#"#!/bin/sh
+    cat >> '{}'
+    echo '{{"type":"thread.started","thread_id":"thread-1"}}'
+    echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+    "#, captured.display()));
+        let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
+        doxa_state::save_config(&dir.path().join("home/config.toml"), &"peer_inbound_turns = true".parse().unwrap()).unwrap();
+        let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, false);
+        let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+        let (mut reader, mut socket) = process.connect();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        let frame = |kind, body: &str| doxa_peers::delivery::PeerFrame {
+                authenticated_pid: None,
+            from_id: "sender".into(), from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
+            sent_at: peer_now(), body: body.into(),
+            from_repo: Some(dir.path().display().to_string()), kind,
+        };
+        doxa_peers::delivery::send(&peer_socket, &frame(Some(kind.into()), "sk-ownedCanonicalFixtureSecret1234567890 body")).unwrap();
+        let direct = receive(&mut reader);
+        assert_eq!(direct["event"]["type"], "peer_message");
+        assert_eq!(direct["event"]["data"]["wake_policy"], "enabled");
+        let mut started = false;
+        loop {
+            let event = receive(&mut reader);
+            assert!(event["turn"].as_str().unwrap_or("").starts_with("peer-"));
+            if event["event"]["type"] == "turn_started" {
+                started = true;
+                assert_eq!(event["event"]["data"]["peer_started"], true);
+                assert!(event["event"]["data"]["peer_origin"].as_str().unwrap().contains("sender"));
+                let prompt = event["event"]["data"]["prompt"].as_str().unwrap();
+                assert!(prompt.starts_with("[PEER-STARTED TURN]"));
+                assert!(prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
+                assert!(prompt.contains("[REDACTED:api-key] body"));
+                assert!(!prompt.contains("sk-ownedCanonicalFixtureSecret1234567890"));
+            }
+            if event["event"]["type"] == "turn_done" { break; }
         }
-        if event["event"]["type"] == "turn_done" { break; }
+        assert!(started);
+        let provider_prompt = fs::read_to_string(captured).unwrap();
+        assert!(provider_prompt.contains("[PEER-STARTED TURN]"));
+        assert!(provider_prompt.contains("[REDACTED:api-key] body"));
+        assert!(!provider_prompt.contains("sk-ownedCanonicalFixtureSecret1234567890"));
+        send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        wait_until(|| process.exited());
     }
-    assert!(started);
-    let provider_prompt = fs::read_to_string(captured).unwrap();
-    assert!(provider_prompt.contains("[PEER-STARTED TURN]"));
-    assert!(provider_prompt.contains("[REDACTED:api-key] body"));
-    assert!(provider_prompt.contains("broadcast note"));
-    assert!(!provider_prompt.contains("sk-ownedCanonicalFixtureSecret1234567890"));
-    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
-    assert_eq!(receive(&mut reader)["ok"], true);
-    wait_until(|| process.exited());
 }
 
 #[test]
 #[cfg(target_os = "linux")]
-fn saved_inbound_peer_uses_typed_codex_prompt_queue_while_turn_runs() {
+fn saved_inbound_broadcast_uses_typed_codex_prompt_queue_while_turn_runs() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("python3");
@@ -3468,7 +3538,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     doxa_peers::delivery::send(&peer_socket, &doxa_peers::delivery::PeerFrame {
             authenticated_pid: None,
         from_id: "sender".into(), from_title: "sender".into(), sent_at: peer_now(),
-        body: "peer task".into(), from_repo: None, kind: Some("direct".into()),
+        body: "peer task".into(), from_repo: None, kind: Some("broadcast".into()),
     }).unwrap();
     assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
     let queued = receive(&mut reader);
@@ -3497,7 +3567,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
 
 #[test]
 #[cfg(target_os = "linux")]
-fn saved_peer_wake_refreshes_running_codex_without_overriding_explicit_off() {
+fn saved_broadcast_wake_refreshes_running_codex_without_overriding_explicit_off() {
     for explicit_off in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let codex = dir.path().join("codex-fixture");
@@ -3521,7 +3591,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         send(&mut socket, json!({"type":"attach","cursor":null}));
         let deliver = |body: &str| doxa_peers::delivery::send(&peer_socket, &doxa_peers::delivery::PeerFrame {
             authenticated_pid: None, from_id: sender.into(), from_title: "Claude teammate".into(),
-            sent_at: peer_now(), body: body.into(), from_repo: None, kind: Some("direct".into()),
+            sent_at: peer_now(), body: body.into(), from_repo: None, kind: Some("broadcast".into()),
         }).unwrap();
         deliver("first retained task");
         let first = receive(&mut reader);
@@ -3531,7 +3601,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         assert_eq!(receive(&mut reader)["status"]["running"], false);
         assert!(!captured.exists());
         save(true);
-        deliver("second direct task");
+        deliver("second broadcast task");
         let second = receive(&mut reader);
         assert_eq!(second["event"]["type"], "peer_message");
         assert_eq!(second["event"]["data"]["from_id"], sender);
@@ -3563,7 +3633,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         }
         assert!(started);
         let prompt = fs::read_to_string(&captured).unwrap();
-        assert!(prompt.contains("first retained task") && prompt.contains("second direct task"));
+        assert!(prompt.contains("first retained task") && prompt.contains("second broadcast task"));
         assert!(prompt.contains(sender) && prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
         save(false);
         deliver("third retained task");

@@ -652,6 +652,13 @@ fn run_loop_with_remote(
         changed |= app.tick_chip_hover(Instant::now());
         changed |= app.tick_belief_preview(Instant::now());
         changed |= app.peer_map.tick(Instant::now());
+        if app.map_modal && app.pending_peer_refresh.is_none() {
+            if let Some(owner) = app.groups[app.active_group].active_id().map(str::to_owned) {
+                if app.peer_map.request_refresh(&owner, Instant::now(), false) {
+                    app.pending_peer_refresh = Some(owner);
+                }
+            }
+        }
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
