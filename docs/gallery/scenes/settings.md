@@ -7,6 +7,6 @@
 
 Settings categories appear on the submenu title bar; changes remain unsaved.
 
-[![Settings categories on the submenu title bar](../../../assets/shots/rust-2.0.0-beta.48-settings.png)](../../../assets/shots/rust-2.0.0-beta.48-settings.png)
+[![Settings categories on the submenu title bar](../../../assets/shots/rust-2.0.0-beta.49-settings.png)](../../../assets/shots/rust-2.0.0-beta.49-settings.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#settings) · [Back to the README gallery](../../../README.md#gallery)

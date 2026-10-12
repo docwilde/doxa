@@ -1,0 +1,207 @@
+{
+  "version": "2.0.0-beta.49",
+  "method": "native production App in GTK3/VTE on private Xvfb; ffmpeg x11grab",
+  "scene_data": "isolated illustrative fixtures; no providers, owner sessions or owner memory",
+  "size": [
+    3068,
+    1734
+  ],
+  "captures": [
+    {
+      "scene": "hero",
+      "image": "rust-2.0.0-beta.49-hero.png",
+      "sha256": "b69d17e53cf7348e31d502e8f25c588356e8bc660763a9165947c8e5b465fda3",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "settings-router",
+      "image": "rust-2.0.0-beta.49-settings-router.png",
+      "sha256": "eafaef85121d27906a71f963c22bf3c0b88caa1fd69b69704b53fb0d672ff631",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "routing-status",
+      "image": "rust-2.0.0-beta.49-routing-status.png",
+      "sha256": "55d7e113f004bf90b33268885755ed35853e0253c55a9330777a03adfa98ea57",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "fleet-review",
+      "image": "rust-2.0.0-beta.49-fleet-review.png",
+      "sha256": "dd74028a8ffac471c99b328100991a50a8c83e8692bc7d60e3d7e2249226dab3",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "fleet-dependency",
+      "image": "rust-2.0.0-beta.49-fleet-dependency.png",
+      "sha256": "760b3b1f7f615131b5b619eb4ba101873213a0cfe684bfd739445eb7554cf933",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "fleet-release-review",
+      "image": "rust-2.0.0-beta.49-fleet-release-review.png",
+      "sha256": "9eaca191f36449a404de31bd0de5231d606c0f3d59a633e246d58d160267251a",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "fleet-view",
+      "image": "rust-2.0.0-beta.49-fleet-view.png",
+      "sha256": "158165f5d539ffd49d6f05000a1d8ce52137e92f9f5685b1253555c17d36cf48",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "context",
+      "image": "rust-2.0.0-beta.49-context.png",
+      "sha256": "f2d7d2789aba1b2376f859b504e7c23a3f02b97cf5c8c53f556ec125edcc05ba",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "usage-quota",
+      "image": "rust-2.0.0-beta.49-usage-quota.png",
+      "sha256": "1bfc6d046573e98c99b3a544bb52aaa6ee2364920c0cc18f2585a582c97a70e9",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "peer-messages",
+      "image": "rust-2.0.0-beta.49-peer-messages.png",
+      "sha256": "0a06511cba794a6a573d4bf5b8758b1d59602d15b30d9805114b58e85f1bdc78",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "peer-expanded",
+      "image": "rust-2.0.0-beta.49-peer-expanded.png",
+      "sha256": "83ff21be86c58f5ad846a4b4b30a3b2c998c46f5decb8cf6fe8d626149887c8f",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "queued-prompts",
+      "image": "rust-2.0.0-beta.49-queued-prompts.png",
+      "sha256": "ac60c6ac087992f9d09ea16283962169ca5a5c242fab38f4894d495276552306",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "settings",
+      "image": "rust-2.0.0-beta.49-settings.png",
+      "sha256": "dd0b9da8dfb033f1ceb3f213064848bbef27f02432bd46cc45cc4c0d42061903",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "settings-mcp",
+      "image": "rust-2.0.0-beta.49-settings-mcp.png",
+      "sha256": "f8c1c24bb5b75321339b0c54fda73634ebaf90a32632c74256776a9249a9133d",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "glm-account",
+      "image": "rust-2.0.0-beta.49-glm-account.png",
+      "sha256": "c529dbd48aa0401e1c5978d29d0f72645bf20f39c4d913054cf79c9663da36c9",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "setup-docker",
+      "image": "rust-2.0.0-beta.49-setup-docker.png",
+      "sha256": "ff9759af6d49ce3bb37797ba36c7c13081ced7c9f914258ad62f42ab316a3a4a",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "triage",
+      "image": "rust-2.0.0-beta.49-triage.png",
+      "sha256": "667a287fbb55b8e9679c0befec6c88da6ae0d4c5a010dc74d7f634922b337ad9",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "pane-triage",
+      "image": "rust-2.0.0-beta.49-pane-triage.png",
+      "sha256": "0696297492faf21dd024eb746fab428474d50e49ecc0736014a99fdadc68a395",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "project-label",
+      "image": "rust-2.0.0-beta.49-project-label.png",
+      "sha256": "12e12a051ad9dbc1194e54bd4bd1aa6efe9e233900751ed104bb66db4f339658",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "image-preview",
+      "image": "rust-2.0.0-beta.49-image-preview.png",
+      "sha256": "fba47eb8e1817c45f11ab0c7b47aacf2269a0da8a20d5c95ddb9d529c59fda3f",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "isolation",
+      "image": "rust-2.0.0-beta.49-isolation.png",
+      "sha256": "4226e7a7c2b1cfaa806bb335adf6864a89cd9a12714066a492e5bf07fd65290a",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "beliefs",
+      "image": "rust-2.0.0-beta.49-beliefs.png",
+      "sha256": "0f4004f2867657fb83ba471511a21104d242118381cb37e9d26e695658d927f2",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "tool-entries",
+      "image": "rust-2.0.0-beta.49-tool-entries.png",
+      "sha256": "052de00f8d4933f19a0f135068ee52e9bf698556cbcc5b0cbe583ffabeffca3d",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "memory-management",
+      "image": "rust-2.0.0-beta.49-memory-management.png",
+      "sha256": "ed6a8031dd92b7b09ec70b61f2ba32b227174087c7bcc483685326d2cd867634",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "commands",
+      "image": "rust-2.0.0-beta.49-commands.png",
+      "sha256": "132168935c5373b30aab73595c447c2d0d8a37daece1fe9c945ebe0b87693bb4",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "help",
+      "image": "rust-2.0.0-beta.49-help.png",
+      "sha256": "7c726419518b49abb9fc2b29dbb0b322a95832f1f3d172308a394415f12326b3",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "reasoning",
+      "image": "rust-2.0.0-beta.49-reasoning.png",
+      "sha256": "e6560eb5f05a5327e6d73d37a832fa04d9d9787df4c37e3cfe53079e163c5a0b",
+      "columns": 125,
+      "rows": 30
+    },
+    {
+      "scene": "codegraph",
+      "image": "rust-2.0.0-beta.49-codegraph.png",
+      "sha256": "6a74728e45d68b8cf4130375a6f0e806286043f5944d42f57d3a32acf016371b",
+      "columns": 125,
+      "rows": 30
+    }
+  ]
+}

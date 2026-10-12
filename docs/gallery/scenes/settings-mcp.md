@@ -7,6 +7,6 @@
 
 API worker MCP controls and masked search-key fields are shown without connections or tool calls.
 
-[![MCP controls and masked search provider key fields](../../../assets/shots/rust-2.0.0-beta.48-settings-mcp.png)](../../../assets/shots/rust-2.0.0-beta.48-settings-mcp.png)
+[![MCP controls and masked search provider key fields](../../../assets/shots/rust-2.0.0-beta.49-settings-mcp.png)](../../../assets/shots/rust-2.0.0-beta.49-settings-mcp.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#settings-mcp) · [Back to the README gallery](../../../README.md#gallery)

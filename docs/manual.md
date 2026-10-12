@@ -1424,6 +1424,9 @@ file, heartbeat, dead entries reaped by any reader). `/peers` lists them;
 `/msg <session_prefix> <text>` delivers one line-JSON message over the
 target's own `0600` socket. Every received field is scrubbed before
 display and reaches the model only behind an untrusted-peer preamble.
+The Peers chip opens a live roster, refreshed every three seconds while
+open. Saved message history does not add sessions to this roster. Press
+Esc or click outside the menu to close it and return to your prompt draft.
 
 **The model can message peers too, and it is off by default.** Until this
 release the manual said the model had no send tool and that every peer
@@ -1477,9 +1480,9 @@ automatic wake is disabled. Saved file-backed changes apply to the next
 arrival in running native sessions. An explicit inherited environment or
 fleet grant stays fixed and takes precedence over Settings. Accepting messages
 and being woken by them are different grants, which is why they are
-different switches. A **broadcast never starts a turn** at any setting: at
-thirty-two sessions one broadcast would otherwise wake the whole fleet in
-a single step. A turn a peer started says so in its own first line, mounts
+different switches. **Direct and broadcast messages follow the receiving
+session's wake setting.** Each recipient uses its own permission grants,
+bounded queue and model allowance. A turn a peer started says so in its own first line, mounts
 a block above itself naming the sender, and carries a `peer-` turn id into
 the ledger — so spend that began with an inbound message has a traceable
 cause.

@@ -141,8 +141,10 @@ bill scaling with N.
 **Broadcast needs a hard fan-out cap or it is unusable at this N.** One
 broadcast is 31 deliveries; a full reply-broadcast round is 992 messages,
 ~4.5 MB of ledger at the measured mean. Ten rounds is 45 MB per run. The rate
-limit must count deliveries, not calls, and **a broadcast must never start a
-turn** — only queue — or one message wakes the entire fleet at once.
+limit must count deliveries, not calls. The original plan kept broadcasts
+from starting turns. The implementation now follows each recipient's explicit
+**Wake on peer messages** grant for both direct and broadcast delivery, with
+that recipient's bounded queue, permission checks and model allowance.
 
 ## What the ledger must record, decided now because it cannot be backfilled
 

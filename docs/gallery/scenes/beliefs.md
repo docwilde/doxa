@@ -7,6 +7,6 @@
 
 Belief selection and review controls are shown with writes disabled.
 
-[![Belief selection and review controls](../../../assets/shots/rust-2.0.0-beta.48-beliefs.png)](../../../assets/shots/rust-2.0.0-beta.48-beliefs.png)
+[![Belief selection and review controls](../../../assets/shots/rust-2.0.0-beta.49-beliefs.png)](../../../assets/shots/rust-2.0.0-beta.49-beliefs.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#beliefs) · [Back to the README gallery](../../../README.md#gallery)

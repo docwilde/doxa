@@ -1083,6 +1083,52 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn peer_chip_menu_dismisses_on_outside_click_and_restores_prompt_draft() {
+        for (width, height) in [(160, 40), (80, 24), (20, 5)] {
+            let mut app = App::default();
+            app.rail_visible = false;
+            app.handle(Event::Resize(width, height));
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"owner","engine":"codex"}));
+            app.input = "kept draft".into();
+            app.input_cursor = app.input.len();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame|app.draw(frame)).unwrap();
+            let chip = app.rendered_chip_hits.borrow().as_ref()
+                .and_then(|hits|hits.iter().find(|hit|hit.kind == "peers").cloned());
+            let (column, row) = if let Some(chip) = chip {
+                let point = (chip.rect.x + chip.rect.width / 2, chip.rect.y);
+                app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Down(MouseButton::Left),
+                    column:point.0,row:point.1,modifiers:KeyModifiers::NONE}));
+                point
+            } else {
+                // Tiny terminals can clip chips; keyboard opening must still
+                // allow outside-click dismissal without losing the draft.
+                app.open_peer_map(0);
+                (0, 0)
+            };
+            assert!(app.map_modal);
+            if width >= 80 {
+                app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Down(MouseButton::Left),
+                    column:width / 2,row:height / 2,modifiers:KeyModifiers::NONE}));
+                assert!(app.map_modal, "clicks inside the peer menu must keep it open");
+            }
+            // A centered modal can cover the opening chip. Click that chip
+            // again where it remains visible, otherwise use an outside corner.
+            let (column, row) = if app.peer_map.contains(app.size, ratatui::layout::Position::new(column, row)) {
+                (0, 0)
+            } else { (column, row) };
+            assert!(app.handle(Event::Mouse(MouseEvent {
+                kind:MouseEventKind::Down(MouseButton::Left),column,row,modifiers:KeyModifiers::NONE,
+            })));
+            assert!(!app.map_modal);
+            assert_eq!(app.focus, Focus::Prompt);
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char('!'),KeyModifiers::NONE)));
+            assert_eq!(app.input, "kept draft!");
+            assert!(app.pending_prompts.is_empty());
+        }
+    }
+
+    #[test]
     fn belief_and_peer_chips_follow_engine_status_and_exact_session_owner() {
         let sessions = [
             ("claude-owner", "claude", 3),

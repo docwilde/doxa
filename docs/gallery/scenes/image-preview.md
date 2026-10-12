@@ -7,6 +7,6 @@
 
 A local Markdown image appears inline in the transcript using the halfblock fallback.
 
-[![Local Markdown image preview in the transcript](../../../assets/shots/rust-2.0.0-beta.48-image-preview.png)](../../../assets/shots/rust-2.0.0-beta.48-image-preview.png)
+[![Local Markdown image preview in the transcript](../../../assets/shots/rust-2.0.0-beta.49-image-preview.png)](../../../assets/shots/rust-2.0.0-beta.49-image-preview.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#image-preview) · [Back to the README gallery](../../../README.md#gallery)

@@ -7,6 +7,6 @@
 
 Synthetic provider totals and reported categories are shown separately from LORE memory character caps.
 
-[![Context bar with synthetic reported totals and categories](../../../assets/shots/rust-2.0.0-beta.48-context.png)](../../../assets/shots/rust-2.0.0-beta.48-context.png)
+[![Context bar with synthetic reported totals and categories](../../../assets/shots/rust-2.0.0-beta.49-context.png)](../../../assets/shots/rust-2.0.0-beta.49-context.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#context) · [Back to the README gallery](../../../README.md#gallery)

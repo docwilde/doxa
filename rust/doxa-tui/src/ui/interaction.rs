@@ -1039,6 +1039,8 @@ impl App {
             return match key.code {
                 _ if key.code == KeyCode::Esc || self.keybindings.matches(KeyAction::PeerMap, key) => {
                     self.map_modal = false;
+                    self.peer_map.dismiss_hover();
+                    self.focus = Focus::Prompt;
                     true
                 }
                 KeyCode::Up => {
@@ -1055,7 +1057,9 @@ impl App {
                 KeyCode::PageUp => { self.peer_map.scroll_messages(&owner, 5); true }
                 KeyCode::PageDown => { self.peer_map.scroll_messages(&owner, -5); true }
                 KeyCode::Char('r' | 'R') => {
-                    self.pending_peer_refresh = Some(owner);
+                    if self.peer_map.request_refresh(&owner, Instant::now(), true) {
+                        self.pending_peer_refresh = Some(owner);
+                    }
                     true
                 }
                 _ => false,
@@ -2310,6 +2314,13 @@ impl App {
             self.rail_hover = rail_hover;
         }
         if self.map_modal {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && !self.peer_map.contains(self.size, ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                self.map_modal = false;
+                self.peer_map.dismiss_hover();
+                self.focus = Focus::Prompt;
+                return true;
+            }
             let owner = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
             return self.peer_map.mouse(self.size, &owner, mouse.column, mouse.row,
                 mouse.kind, Instant::now()) || rail_hover_changed;

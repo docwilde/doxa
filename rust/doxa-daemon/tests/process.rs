@@ -87,6 +87,44 @@ except sqlite3.OperationalError as exc:
 fn native_db_rows(runtime:&Path)->usize {
     native_db_rows_maybe_busy(runtime).expect("SQLite index remains locked")
 }
+// A discovery probe may already be closed when accept returns. Darwin can
+// reject SO_RCVTIMEO on that socket, and accepted streams can inherit the
+// listener's nonblocking mode. Read the same bounded one-line peer protocol
+// with poll instead of setting a socket timeout or waiting for sender EOF.
+fn read_peer_fixture(mut stream: UnixStream) -> String {
+    stream.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut bytes = Vec::new();
+    loop {
+        assert!(Instant::now() < deadline, "peer fixture frame timed out");
+        let mut buf = [0u8; 4096];
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&buf[..n]);
+                assert!(bytes.len() <= doxa_peers::delivery::MAX_FRAME_BYTES, "peer fixture frame exceeded protocol bound");
+                if bytes.contains(&b'\n') { break; }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let mut fd = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                let ready = unsafe { libc::poll(&mut fd, 1, remaining.as_millis().max(1) as i32) };
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted { panic!("peer fixture poll failed: {error}"); }
+                }
+            }
+            Err(error) => panic!("peer fixture read failed: {error}"),
+        }
+    }
+    if !bytes.is_empty() {
+        assert_eq!(bytes.last(), Some(&b'\n'), "incomplete peer fixture frame");
+        assert!(!bytes[..bytes.len()-1].contains(&b'\n'), "multiple peer fixture frames");
+    }
+    String::from_utf8(bytes).unwrap()
+}
+
 struct NativeWriterLock(Child);
 impl NativeWriterLock {
     fn acquire(runtime:&Path)->Self {
@@ -2221,6 +2259,82 @@ mod vendor_process {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn claude_mcp_broadcast_wakes_idle_deepseek_and_codex_with_recipient_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        doxa_state::save_config(&dir.path().join("home/config.toml"),
+            &"peer_inbound_turns = true\nagent_peer_send = true".parse().unwrap()).unwrap();
+        let codex = dir.path().join("codex-fixture");
+        let captured = dir.path().join("captured-broadcast-prompt");
+        executable(&codex, &format!(r#"#!/bin/sh
+cat > '{}'
+echo '{{"type":"thread.started","thread_id":"thread-1"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+"#, captured.display()));
+        let mut codex_process = Process::start_codex(dir.path(), &codex, Path::new("python3"));
+        let (mut codex_reader, mut codex_socket) = codex_process.connect();
+        codex_reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+        receive(&mut codex_reader);
+        send(&mut codex_socket, json!({"type":"attach","cursor":null}));
+        let (endpoint, server) = fake_vendor(1, "broadcast acknowledged");
+        let mut deepseek = start_vendor(dir.path(), "deepseek", &endpoint, Path::new("python3"));
+        let (mut vendor_reader, mut vendor_socket) = deepseek.connect();
+        receive(&mut vendor_reader);
+        send(&mut vendor_socket, json!({"type":"attach","cursor":null}));
+        let script = dir.path().join("claude-broadcast.py");
+        claude_fixture(&script, "", r#"if frame['type']=='user':
+  emit({'type':'control_request','request_id':'broadcast','request':{'subtype':'mcp_message','server_name':'doxa','message':{'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'peer_send','arguments':{'broadcast':True,'message':'sk-ownedCanonicalFixtureSecret1234567890 public status'}}}}})
+ elif frame['type']=='control_response':
+  response=frame['response'];assert response['subtype']=='success'
+  value=response['response']['mcp_response']['result'];assert not value.get('isError',False),value
+  delivery=json.loads(value['content'][0]['text'])
+  assert sorted(delivery['delivered_to'])==['codex-session','vendor-session'] and delivery['failed']==[],delivery
+  root.joinpath('broadcast-delivery.json').write_text(json.dumps(delivery));result()
+"#);
+        let mut sender = Process::start_claude(dir.path(), &script);
+        let (mut sender_reader, mut sender_socket) = sender.connect();
+        receive(&mut sender_reader);
+        send(&mut sender_socket, json!({"type":"attach","cursor":null}));
+        send(&mut sender_socket, json!({"type":"call","id":1,"method":"set_permission_mode","params":{"mode":"auto"}}));
+        assert_eq!(claude_receive_until(&mut sender_reader, |row|row["id"]==1)["ok"], true);
+        send(&mut sender_socket, json!({"type":"prompt","id":2,"text":"Exercise the canonical broadcast tool."}));
+        let done = claude_receive_until(&mut sender_reader, |row|row["event"]["type"]=="turn_done");
+        assert_eq!(done["event"]["data"]["is_error"], false, "{done}");
+        assert!(dir.path().join("broadcast-delivery.json").exists());
+        for reader in [&mut codex_reader, &mut vendor_reader] {
+            let receipt = receive(reader);
+            assert_eq!(receipt["event"]["type"], "peer_message");
+            assert_eq!(receipt["event"]["data"]["from_id"], CLAUDE_SESSION);
+            assert_eq!(receipt["event"]["data"]["kind"], "broadcast");
+            assert_eq!(receipt["event"]["data"]["wake_policy"], "enabled");
+            let started = receive(reader);
+            assert_eq!(started["event"]["type"], "turn_started");
+            assert_eq!(started["event"]["data"]["peer_started"], true);
+            assert!(started["turn"].as_str().unwrap().starts_with("peer-"));
+            assert!(started["event"]["data"]["peer_origin"].as_str().unwrap().contains(CLAUDE_SESSION));
+            assert!(started["event"]["data"]["prompt"].as_str().unwrap().contains("[REDACTED:api-key] public status"));
+            let done = claude_receive_until(reader, |row|row["event"]["type"]=="turn_done");
+            assert_ne!(done["event"]["data"]["is_error"], true, "{done}");
+        }
+        let provider_prompt = fs::read_to_string(captured).unwrap();
+        assert!(provider_prompt.contains("[PEER-STARTED TURN]") && provider_prompt.contains(CLAUDE_SESSION));
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        let messages = requests[0]["messages"].to_string();
+        assert!(messages.contains("[PEER-STARTED TURN]") && messages.contains(CLAUDE_SESSION));
+        for prompt in [provider_prompt, messages] {
+            assert!(prompt.contains("[PEER MESSAGES -- UNTRUSTED]") && prompt.contains("[REDACTED:api-key] public status"));
+            assert!(!prompt.contains("sk-ownedCanonicalFixtureSecret1234567890"));
+        }
+        for (process, reader, socket) in [(&mut sender, &mut sender_reader, &mut sender_socket),
+            (&mut codex_process, &mut codex_reader, &mut codex_socket), (&mut deepseek, &mut vendor_reader, &mut vendor_socket)] {
+            send(socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+            assert_eq!(claude_receive_until(reader, |row|row["id"]==3)["ok"], true);
+            wait_until(||process.exited());
+        }
+    }
+
+    #[test]
     fn priced_vendor_budget_blocks_the_next_socket_prompt() {
         let dir = tempfile::tempdir().unwrap();
         let body = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"answer\"}}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000}}\n\ndata: [DONE]\n\n";
@@ -2296,6 +2410,7 @@ mod vendor_process {
             .env("ZAI_API_KEY", "test-key-1234")
             .env_remove("DOXA_LORE")
             .env("DOXA_AGENT_PEER_SEND", "1")
+            .env_remove("DOXA_PEER_INBOUND_TURNS")
             .env("DOXA_VENDOR_TOOLS", if tools { "workspace-read" } else { "" })
             .env("DOXA_HOME", runtime.join("home"))
             .stdout(Stdio::null())
@@ -2323,7 +2438,6 @@ mod vendor_process {
     }
 
     #[test]
-    #[cfg_attr(target_os = "macos", ignore = "issue #197: macOS native LORE finalization reported zero indexed rows; isolate the carrier failure")]
     fn native_vendor_refreshes_private_system_memory_and_indexes_only_on_finalization() {
         for enabled in [true, false] {
             let dir = tempfile::tempdir().unwrap();
@@ -3196,7 +3310,6 @@ fn peers_rpc_fails_closed_when_native_configuration_is_invalid() {
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "issue #197: macOS fixture peer socket read returned EINVAL; delivery still needs isolation")]
 fn native_msg_sends_scrubbed_frame_records_ledger_and_denies_other_scope() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
@@ -3223,12 +3336,8 @@ fn native_msg_sends_scrubbed_frame_records_ledger_and_denies_other_scope() {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             match same_listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream
-                        .set_read_timeout(Some(Duration::from_millis(500)))
-                        .unwrap();
-                    let mut body = String::new();
-                    stream.read_to_string(&mut body).unwrap();
+                Ok((stream, _)) => {
+                    let body = read_peer_fixture(stream);
                     if !body.is_empty() {
                         return body;
                     }
@@ -3378,71 +3487,64 @@ fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_bef
 
 #[test]
 #[cfg(target_os = "linux")]
-fn saved_inbound_direct_peer_starts_scrubbed_codex_turn_but_broadcast_does_not() {
-    let dir = tempfile::tempdir().unwrap();
-    let codex = dir.path().join("codex-fixture");
-    let python = Path::new("python3");
-    let captured = dir.path().join("captured-prompt");
-    executable(&codex, &format!(r#"#!/bin/sh
-cat >> '{}'
-echo '{{"type":"thread.started","thread_id":"thread-1"}}'
-echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
-"#, captured.display()));
-    let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
-    doxa_state::save_config(&dir.path().join("home/config.toml"), &"peer_inbound_turns = true".parse().unwrap()).unwrap();
-    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, false);
-    let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
-    let (mut reader, mut socket) = process.connect();
-    receive(&mut reader);
-    send(&mut socket, json!({"type":"attach","cursor":null}));
-    let frame = |kind, body: &str| doxa_peers::delivery::PeerFrame {
-            authenticated_pid: None,
-        from_id: "sender".into(), from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
-        sent_at: peer_now(), body: body.into(),
-        from_repo: Some(dir.path().display().to_string()), kind,
-    };
-    doxa_peers::delivery::send(&peer_socket, &frame(Some("broadcast".into()), "broadcast note")).unwrap();
-    let broadcast = receive(&mut reader);
-    assert_eq!(broadcast["event"]["type"], "peer_message");
-    assert_eq!(broadcast["event"]["data"]["wake_policy"], "broadcast");
-    send(&mut socket, json!({"type":"call","id":1,"method":"status","params":{}}));
-    let status = receive(&mut reader);
-    assert_eq!(status["status"]["running"], false);
-    assert_eq!(status["status"]["queued"], 0);
-    doxa_peers::delivery::send(&peer_socket, &frame(Some("direct".into()), "sk-ownedCanonicalFixtureSecret1234567890 body")).unwrap();
-    let direct = receive(&mut reader);
-    assert_eq!(direct["event"]["type"], "peer_message");
-    assert_eq!(direct["event"]["data"]["wake_policy"], "enabled");
-    let mut started = false;
-    loop {
-        let event = receive(&mut reader);
-        assert!(event["turn"].as_str().unwrap_or("").starts_with("peer-"));
-        if event["event"]["type"] == "turn_started" {
-            started = true;
-            assert_eq!(event["event"]["data"]["peer_started"], true);
-            assert!(event["event"]["data"]["peer_origin"].as_str().unwrap().contains("sender"));
-            let prompt = event["event"]["data"]["prompt"].as_str().unwrap();
-            assert!(prompt.starts_with("[PEER-STARTED TURN]"));
-            assert!(prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
-            assert!(prompt.contains("[REDACTED:api-key] body"));
-            assert!(!prompt.contains("sk-ownedCanonicalFixtureSecret1234567890"));
+fn saved_inbound_direct_and_broadcast_peers_start_scrubbed_codex_turns() {
+    for kind in ["direct", "broadcast"] {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("codex-fixture");
+        let python = Path::new("python3");
+        let captured = dir.path().join("captured-prompt");
+        executable(&codex, &format!(r#"#!/bin/sh
+    cat >> '{}'
+    echo '{{"type":"thread.started","thread_id":"thread-1"}}'
+    echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+    "#, captured.display()));
+        let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
+        doxa_state::save_config(&dir.path().join("home/config.toml"), &"peer_inbound_turns = true".parse().unwrap()).unwrap();
+        let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, false);
+        let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+        let (mut reader, mut socket) = process.connect();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        let frame = |kind, body: &str| doxa_peers::delivery::PeerFrame {
+                authenticated_pid: None,
+            from_id: "sender".into(), from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
+            sent_at: peer_now(), body: body.into(),
+            from_repo: Some(dir.path().display().to_string()), kind,
+        };
+        doxa_peers::delivery::send(&peer_socket, &frame(Some(kind.into()), "sk-ownedCanonicalFixtureSecret1234567890 body")).unwrap();
+        let direct = receive(&mut reader);
+        assert_eq!(direct["event"]["type"], "peer_message");
+        assert_eq!(direct["event"]["data"]["wake_policy"], "enabled");
+        let mut started = false;
+        loop {
+            let event = receive(&mut reader);
+            assert!(event["turn"].as_str().unwrap_or("").starts_with("peer-"));
+            if event["event"]["type"] == "turn_started" {
+                started = true;
+                assert_eq!(event["event"]["data"]["peer_started"], true);
+                assert!(event["event"]["data"]["peer_origin"].as_str().unwrap().contains("sender"));
+                let prompt = event["event"]["data"]["prompt"].as_str().unwrap();
+                assert!(prompt.starts_with("[PEER-STARTED TURN]"));
+                assert!(prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
+                assert!(prompt.contains("[REDACTED:api-key] body"));
+                assert!(!prompt.contains("sk-ownedCanonicalFixtureSecret1234567890"));
+            }
+            if event["event"]["type"] == "turn_done" { break; }
         }
-        if event["event"]["type"] == "turn_done" { break; }
+        assert!(started);
+        let provider_prompt = fs::read_to_string(captured).unwrap();
+        assert!(provider_prompt.contains("[PEER-STARTED TURN]"));
+        assert!(provider_prompt.contains("[REDACTED:api-key] body"));
+        assert!(!provider_prompt.contains("sk-ownedCanonicalFixtureSecret1234567890"));
+        send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        wait_until(|| process.exited());
     }
-    assert!(started);
-    let provider_prompt = fs::read_to_string(captured).unwrap();
-    assert!(provider_prompt.contains("[PEER-STARTED TURN]"));
-    assert!(provider_prompt.contains("[REDACTED:api-key] body"));
-    assert!(provider_prompt.contains("broadcast note"));
-    assert!(!provider_prompt.contains("sk-ownedCanonicalFixtureSecret1234567890"));
-    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
-    assert_eq!(receive(&mut reader)["ok"], true);
-    wait_until(|| process.exited());
 }
 
 #[test]
 #[cfg(target_os = "linux")]
-fn saved_inbound_peer_uses_typed_codex_prompt_queue_while_turn_runs() {
+fn saved_inbound_broadcast_uses_typed_codex_prompt_queue_while_turn_runs() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("python3");
@@ -3468,7 +3570,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     doxa_peers::delivery::send(&peer_socket, &doxa_peers::delivery::PeerFrame {
             authenticated_pid: None,
         from_id: "sender".into(), from_title: "sender".into(), sent_at: peer_now(),
-        body: "peer task".into(), from_repo: None, kind: Some("direct".into()),
+        body: "peer task".into(), from_repo: None, kind: Some("broadcast".into()),
     }).unwrap();
     assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
     let queued = receive(&mut reader);
@@ -3497,7 +3599,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
 
 #[test]
 #[cfg(target_os = "linux")]
-fn saved_peer_wake_refreshes_running_codex_without_overriding_explicit_off() {
+fn saved_broadcast_wake_refreshes_running_codex_without_overriding_explicit_off() {
     for explicit_off in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let codex = dir.path().join("codex-fixture");
@@ -3521,7 +3623,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         send(&mut socket, json!({"type":"attach","cursor":null}));
         let deliver = |body: &str| doxa_peers::delivery::send(&peer_socket, &doxa_peers::delivery::PeerFrame {
             authenticated_pid: None, from_id: sender.into(), from_title: "Claude teammate".into(),
-            sent_at: peer_now(), body: body.into(), from_repo: None, kind: Some("direct".into()),
+            sent_at: peer_now(), body: body.into(), from_repo: None, kind: Some("broadcast".into()),
         }).unwrap();
         deliver("first retained task");
         let first = receive(&mut reader);
@@ -3531,7 +3633,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         assert_eq!(receive(&mut reader)["status"]["running"], false);
         assert!(!captured.exists());
         save(true);
-        deliver("second direct task");
+        deliver("second broadcast task");
         let second = receive(&mut reader);
         assert_eq!(second["event"]["type"], "peer_message");
         assert_eq!(second["event"]["data"]["from_id"], sender);
@@ -3563,7 +3665,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         }
         assert!(started);
         let prompt = fs::read_to_string(&captured).unwrap();
-        assert!(prompt.contains("first retained task") && prompt.contains("second direct task"));
+        assert!(prompt.contains("first retained task") && prompt.contains("second broadcast task"));
         assert!(prompt.contains(sender) && prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
         save(false);
         deliver("third retained task");
@@ -4319,7 +4421,6 @@ fn native_child_keeps_parent_identity_and_starts_task_without_an_attachment() {
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "issue #197: macOS fixture peer socket read returned EINVAL; delivery still needs isolation")]
 fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
     let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");let python = Path::new("python3");executable(&codex,"#!/bin/sh\nexit 0\n");
     let (first,_)=registry_peer(dir.path(),"first",dir.path().to_str().unwrap(),"first teammate");
@@ -4329,7 +4430,7 @@ fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
         listener.set_nonblocking(true).unwrap();let deadline=Instant::now()+Duration::from_secs(5);
         loop {
             match listener.accept() {
-                Ok((mut stream,_))=>{stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();let mut body=String::new();stream.read_to_string(&mut body).unwrap();if !body.is_empty() { return serde_json::from_str::<Value>(&body).unwrap(); }},
+                Ok((stream,_))=>{let body=read_peer_fixture(stream);if !body.is_empty() { return serde_json::from_str::<Value>(&body).unwrap(); }},
                 Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(5));},
                 Err(error)=>panic!("{error}"),
             }
@@ -4357,8 +4458,8 @@ fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
     }
     assert_eq!(fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap().lines().count(),1);
     foreign.set_nonblocking(true).unwrap();
-    while let Ok((mut stream,_))=foreign.accept() {
-        stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();let mut body=String::new();stream.read_to_string(&mut body).unwrap();
+    while let Ok((stream,_))=foreign.accept() {
+        let body=read_peer_fixture(stream);
         assert!(body.is_empty(),"foreign scope received a message rather than an empty discovery probe");
     }
     send(&mut socket,json!({"type":"call","id":6,"method":"stop","params":{}}));
@@ -4366,7 +4467,6 @@ fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
 }
 
 #[test]
-#[cfg_attr(target_os = "macos", ignore = "issue #197: macOS fixture peer socket read returned EINVAL; delivery still needs isolation")]
 fn claude_sdk_mcp_peer_send_uses_full_scoped_ids_and_can_reply_to_received_context() {
     const PEER: &str = "a1234567-89ab-4cde-8123-0123456789ab";
     const SAME_PREFIX: &str = "a1234567-fedc-4ba9-8321-abcdef012345";
@@ -4385,9 +4485,8 @@ fn claude_sdk_mcp_peer_send_uses_full_scoped_ids_and_can_reply_to_received_conte
         while frames.len() < 2 {
             assert!(Instant::now() < deadline, "Claude SDK peer delivery deadline");
             match recipient.accept() {
-                Ok((mut socket, _)) => {
-                    socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-                    let mut body = String::new(); socket.read_to_string(&mut body).unwrap();
+                Ok((socket, _)) => {
+                    let body = read_peer_fixture(socket);
                     if !body.is_empty() { frames.push(serde_json::from_str::<Value>(&body).unwrap()); }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(5)),
@@ -4485,8 +4584,8 @@ def next_peer_call():
     for (path, before) in originals {assert_eq!(fs::read(path).unwrap(), before, "tool query changed another registry owner");}
     for listener in [other, foreign] {
         listener.set_nonblocking(true).unwrap();
-        while let Ok((mut socket, _)) = listener.accept() {
-            socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();let mut body=String::new();socket.read_to_string(&mut body).unwrap();
+        while let Ok((socket, _)) = listener.accept() {
+            let body=read_peer_fixture(socket);
             assert!(body.is_empty(), "prefix/name/foreign target delivered to another peer");
         }
     }
@@ -4816,7 +4915,7 @@ mod engine_known_key_redaction {
     fn codex_fragmented_known_key_item_is_scrubbed_before_display_storage_and_prompt() {
         let dir=tempfile::tempdir().unwrap();private_keys(dir.path());
         let cli=dir.path().join("codex-known-key");
-        executable(&cli,&format!("#!/usr/bin/python3\nimport json,sys\ntext=sys.stdin.read()\nassert all(key not in text for key in [{SAVED:?},{INHERITED:?},{JEV:?}])\nprint(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'safe '+{SAVED:?}+' '+{INHERITED:?}+' '+{JEV:?}}}}}))\n"));
+        executable(&cli,&format!("#!/usr/bin/env python3\nimport json,sys\ntext=sys.stdin.read()\nassert all(key not in text for key in [{SAVED:?},{INHERITED:?},{JEV:?}])\nprint(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'safe '+{SAVED:?}+' '+{INHERITED:?}+' '+{JEV:?}}}}}))\n"));
         let server=codex_appserver_fixture(&cli);
         let source=fs::read_to_string(&server).unwrap();
         let old="                send({'method': 'item/completed', 'params': {'threadId': thread_id, 'turnId': turn_id,\n                      'item': {'type': 'agentMessage', 'id': 'answer-' + str(turn_number), 'text': event['item']['text']}}})";
@@ -4907,7 +5006,7 @@ fn router_stop_and_interrupt_reap_stalled_discovery_and_protected_setup_groups()
             let cwd=dir.path().join("workspace");fs::create_dir(&cwd).unwrap();
             let home=dir.path().join("home");fs::create_dir(&home).unwrap();fs::set_permissions(&home,fs::Permissions::from_mode(0o700)).unwrap();
             let cli=dir.path().join("stalled-cli.py");
-            executable(&cli,&format!(r#"#!/usr/bin/python3
+            executable(&cli,&format!(r#"#!/usr/bin/env python3
 import json,os,pathlib,subprocess,sys,time
 root=pathlib.Path(__file__).parent
 provider={provider:?}

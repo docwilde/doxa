@@ -5,6 +5,19 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.49 — 2026-10-12
+
+**Peers**
+
+- Let direct and broadcast messages follow the recipient's **Wake on peer messages** setting, with existing grants, bounded queues and model allowances.
+- Keep **`PeerMap`** membership tied to live discovery; restored receipts and replayed joins cannot add saved sessions. Refresh an open roster every **3 seconds**.
+- Close the **Peers** menu on outside clicks, restore prompt focus and preserve the draft.
+
+**macOS and gallery**
+
+- Enable all **4** skipped **#197** process cases with bounded peer-fixture reads and portable Python selection. Retain protected Codex refusals and native memory-index assertions.
+- Capture **28** native TUI scenes in a real **GTK/VTE** terminal at **3068 × 1734**. Scene data are illustrative fixtures; no authenticated providers or owner state are used.
+
 ## 2.0.0-beta.48 — 2026-10-12
 
 **Interface**
