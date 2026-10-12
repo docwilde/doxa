@@ -5075,3 +5075,43 @@ for line in sys.stdin:
         }
     }
 }
+
+#[test]
+fn long_claude_restore_keeps_logical_identity_original_turns_and_bounded_hook_context() {
+    let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
+    let slug:String=dir.path().to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();
+    let store=doxa_transcript::TranscriptStore::new(&dir.path().join("native-projects"),&slug,CLAUDE_SESSION).unwrap();
+    for (user,answer) in [("older task ".repeat(4000),"older answer ".repeat(4000)),("recent owner task".into(),"recent complete answer".into())] {
+        store.try_append(json!({"type":"user","message":{"role":"user","content":user}}),"claude",|s|Ok(s.into())).unwrap();
+        store.try_append(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":answer},{"type":"thinking","thinking":"PRIVATE_REASONING_EXCLUDED"}]}}),"claude",|s|Ok(s.into())).unwrap();
+    }
+    store.try_write_thread(json!({"thread_id":CLAUDE_SESSION,"engine":"claude","cwd":dir.path(),"lore_enabled":true,"spawn_depth":0,"parent_session_id":null,"turn_incomplete":false,"model":"opus","effort":"high","permission_mode":"default"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
+    let original=fs::read(store.transcript_path()).unwrap();
+    let script=dir.path().join("claude-recovery.py");
+    claude_fixture(&script,&format!("assert '--resume' not in args\nassert session != '{}'",CLAUDE_SESSION),r#"if frame['type']=='user':
+  emit({'type':'control_request','request_id':'recovery-context','request':{'subtype':'hook_callback','callback_id':'doxa_prompt_context','input':{}}})
+ elif frame['type']=='control_response':
+  context=frame['response']['response']['hookSpecificOutput']['additionalContext']
+  assert 'recent owner task' in context and 'recent complete answer' in context
+  assert 'PRIVATE_REASONING_EXCLUDED' not in context
+  tail=context.split('[DOXA RESTORED CONVERSATION]\n')[1]
+  assert len(tail.encode()) <= 16384
+  Path(root/'recovery-proof.json').write_text(json.dumps({'provider_session':session,'context':tail}))
+  emit({'type':'assistant','session_id':session,'message':{'role':'assistant','content':[{'type':'text','text':'continued'}]}})
+  result()"#);
+    let mut child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id",CLAUDE_SESSION,"--engine","claude","--claude-bin",script.to_str().unwrap(),"--resume","true","--linger","10"]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry=dir.path().join("registry").join(format!("{CLAUDE_SESSION}.json"));wait_for_registry(&mut child,&registry);
+    let row:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    let mut process=Process {child,registry,socket:PathBuf::from(row["daemon_socket"].as_str().unwrap())};
+    let (mut reader,mut socket)=process.connect();let hello=receive(&mut reader);assert_eq!(hello["session_id"],CLAUDE_SESSION);
+    send(&mut socket,json!({"type":"attach","cursor":null}));
+    send(&mut socket,json!({"type":"prompt","id":1,"text":"continue"}));
+    let terminal=claude_receive_until(&mut reader,|frame|frame["event"]["type"]=="turn_done");assert_eq!(terminal["event"]["data"]["is_error"],false,"{terminal}");
+    let proof:Value=serde_json::from_slice(&fs::read(dir.path().join("recovery-proof.json")).unwrap()).unwrap();
+    let checkpoint=store.read_thread().unwrap().unwrap();
+    assert_eq!(checkpoint["session_id"],CLAUDE_SESSION);assert_eq!(checkpoint["thread_id"],proof["provider_session"]);assert_ne!(checkpoint["thread_id"],CLAUDE_SESSION);
+    assert!(fs::read(store.transcript_path()).unwrap().starts_with(&original));
+    assert_eq!(row["session_id"],CLAUDE_SESSION);
+    send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));
+    claude_receive_until(&mut reader,|frame|frame["id"]==2);wait_until(||process.exited());
+}

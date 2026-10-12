@@ -372,7 +372,11 @@ fn discover_in(root: &Path, prefix: Option<&str>, query: Option<&str>) -> Vec<Of
 pub fn resume_plan(entry: &OfflineSession) -> Result<LaunchOptions, &'static str> {
     let root = projects_dir().ok_or("transcript root unavailable")?;
     let claude = claude_store_root().ok_or("DOXA home unavailable")?;
-    resume_plan_in(entry, &root, &claude, &|| LoreClient::open(Duration::from_secs(3)))
+    resume_plan_in(entry, &root, &claude, &|| LoreClient::open(Duration::from_secs(3)), &|| {
+        let (path,config)=crate::launch::router_config(None).map_err(|_|"Select the original private Router config in Settings before continuing")?;
+        let home=crate::operations::doxa_home().map_err(|_|"Router state directory unavailable")?;
+        Ok((path,config,home))
+    })
 }
 
 fn claude_store_root() -> Option<PathBuf> {
@@ -421,7 +425,7 @@ fn ready_resume_cwd(cwd: &Path, id: &str, missing: bool,
     Ok(canonical)
 }
 
-fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Path, open_lore: &impl Fn() -> Result<LoreClient, doxa_lore::LoreError>) -> Result<LaunchOptions, &'static str> {
+fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Path, open_lore: &impl Fn() -> Result<LoreClient, doxa_lore::LoreError>, router_context: &impl Fn() -> Result<(PathBuf,doxa_router::Config,PathBuf), &'static str>) -> Result<LaunchOptions, &'static str> {
     if !crate::discovery::valid_id(&entry.id) { return Err("invalid session ID"); }
     let cwd = entry.cwd.as_ref().ok_or("session directory was not recorded")?;
     let (cwd, missing) = match cwd.canonicalize() {
@@ -534,8 +538,7 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
     if !state["messages"].is_array() { return Err("invalid replay state"); }
     let cwd = ready_resume_cwd(&cwd, &entry.id, missing, expected_root, &entry.project, open_lore)?;
     if engine == Engine::Router {
-        let (path,config)=crate::launch::router_config(None).map_err(|_|"Select the original private Router config in Settings before continuing")?;
-        let home=crate::operations::doxa_home().map_err(|_|"Router state directory unavailable")?;
+        let (path,config,home)=router_context()?;
         let journal=doxa_router::read_private(&home.join("router").join(format!("{}.router.json",entry.id)),4*1024*1024)
             .map_err(|_|"Router durable journal is unavailable or unsafe")?;
         let journal:Value=serde_json::from_str(&journal).map_err(|_|"Invalid Router durable journal")?;
@@ -838,7 +841,7 @@ mod tests {
     use std::process::Command;
 
     fn resume_fixture(entry: &OfflineSession, python: &Path, root: &Path, claude: &Path) -> Result<LaunchOptions, &'static str> {
-        resume_plan_in(entry, root, claude, &|| LoreClient::spawn(python, Duration::from_secs(3)))
+        resume_plan_in(entry, root, claude, &|| LoreClient::spawn(python, Duration::from_secs(3)), &||Err("Select the original private Router config in Settings before continuing"))
     }
 
     fn fake_lore(dir: &Path, root: &Path) -> PathBuf {
@@ -1090,7 +1093,7 @@ for line in sys.stdin:
         assert_eq!(plan.resume.as_deref(), Some("saved-1"));
         fs::write(&replay, br#"{"engine":"router","session_id":"saved-1","model":"router-conversation-v1","messages":[]}"#).unwrap();
         let error=resume_fixture(&entry,&script,&root,&temp.path().join("cli-projects")).unwrap_err();
-        assert!(error.contains("--router-config") && error.contains("inheritance is unavailable"));
+        assert!(error.contains("original private Router config"));
         let mut wrong = entry.clone();
         wrong.project = "another-project".into();
         assert!(resume_fixture(&wrong, &script, &root, &temp.path().join("cli-projects")).is_err());
