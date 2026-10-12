@@ -338,7 +338,7 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.groups[1].tabs.push("vendor".into());
     let unknown = screen(&app, 300, 24);
     assert!(!unknown.contains("Plan ?") && !unknown.contains("quota ?"), "{unknown}");
-    assert!(unknown.contains("Beliefs ▾   $?"), "{unknown}");
+    assert!(unknown.contains("Beliefs ▾   Peers   $?"), "{unknown}");
     app.apply_daemon_frame(&json!({"type":"event","session_id":"codex","event":{"type":"turn_done","data":{
         "input_tokens":120,"output_tokens":30,"usage_scope":"session","usage_source":"codex_cli_turn_completed",
         "ctx_percentage":null,"session_cost_usd":null
@@ -362,7 +362,7 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
         "ctx_percentage":null,"cost_usd":null,"session_cost_usd":null
     }}}));
-    assert!(screen(&app, 300, 24).contains("Ctx ?   p 0%/u 40%   Beliefs ▾   $?"));
+    assert!(screen(&app, 300, 24).contains("Ctx ?   p 0%/u 40%   Beliefs ▾   Peers   $?"));
 }
 
 #[test]
