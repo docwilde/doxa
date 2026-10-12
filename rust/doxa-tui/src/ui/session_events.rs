@@ -440,9 +440,14 @@ impl App {
                             .position(|tab| tab == id)
                             .unwrap_or(group.active);
                         self.active_group = target;
+                        self.offline_ids.remove(id);
                         self.notice = format!("Attached · {}", safe_label(id));
+                        self.finish_archive_resume(target, Some(id), true);
                     }
                 } else {
+                    if let Some((group, id, _)) = &self.resume_launch_prompt {
+                        if id == reply_id { self.finish_archive_resume(*group, Some(reply_id), false); }
+                    }
                     self.notice = format!(
                         "Attach failed · {}",
                         safe_label(frame["message"].as_str().unwrap_or("unknown error"))
@@ -565,6 +570,10 @@ impl App {
                         safe_label(frame["message"].as_str().unwrap_or("unknown error"))
                     )
                 };
+                if let Some((group, _, _)) = &self.resume_launch_prompt {
+                    let group = *group;
+                    self.finish_archive_resume(group, frame["session_id"].as_str(), frame["ok"] == true);
+                }
                 if frame["ok"] == true {
                     self.cancel_new_session_catalog();
                     self.new_session = None;

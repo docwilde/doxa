@@ -8567,3 +8567,40 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
         assert!(app.input_requests.is_empty()); assert!(app.take_answers().is_empty());
         assert!(!app.remote_review_incarnations.contains_key(id));
     }
+
+#[test]
+fn archive_prompt_is_dispatched_once_only_after_trusted_same_session_restore() {
+    for kind in ["launch_reply", "attach_reply"] {
+        let mut app = App::default();
+        app.groups[0].tabs.push("saved".into());
+        app.offline_ids.insert("saved".into());
+        app.input = "continue my task".into();
+        app.resume_launch_prompt = Some((0, "saved".into(), app.input.clone()));
+        if kind == "launch_reply" { app.launching = true; } else { app.attaching_ids.insert("saved".into()); }
+        let reply = json!({"type":kind,"ok":true,"session_id":"saved","group":0});
+        assert!(app.apply_daemon_frame(&reply));
+        assert_eq!(app.pending_prompts, [("saved".into(), "continue my task".into())]);
+        assert!(app.input.is_empty());
+        assert!(!app.offline_ids.contains("saved"));
+        assert!(app.resume_launch_prompt.is_none());
+        app.apply_daemon_frame(&reply);
+        assert_eq!(app.pending_prompts.len(), 1);
+    }
+}
+
+#[test]
+fn failed_archive_restore_preserves_prompt_and_never_sends_to_changed_target() {
+    for (ok, id) in [(false,"saved"),(true,"unexpected")] {
+        let mut app = App::default();
+        app.groups[0].tabs.push("saved".into());
+        app.offline_ids.insert("saved".into());
+        app.input = "continue my task".into();
+        app.resume_launch_prompt = Some((0,"saved".into(), app.input.clone()));
+        app.launching = true;
+        app.apply_daemon_frame(&json!({"type":"launch_reply","ok":ok,"session_id":id,"group":0,"message":"fixture failure"}));
+        assert!(app.pending_prompts.is_empty());
+        if !ok { assert_eq!(app.input,"continue my task"); }
+        assert_eq!(app.input_drafts[&(0,"saved".into())].0,"continue my task");
+        assert!(app.resume_launch_prompt.is_none());
+    }
+}

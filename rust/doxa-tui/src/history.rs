@@ -464,11 +464,6 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
         return Err("unsafe Codex thread record");
     }
     if let Some(mut record) = open_at(&dir, OsStr::new(&codex_name), libc::O_RDONLY | libc::O_NONBLOCK) {
-        let vendor_name = format!("{}.messages.json", entry.id);
-        if entry_present(&dir, OsStr::new(&vendor_name))
-            || claude_history_present(claude_root, &entry.id, uid) {
-            return Err("ambiguous session engine state");
-        }
         let meta = record.metadata().map_err(|_| "unreadable Codex thread record")?;
         if !meta.is_file() || meta.uid() != uid || meta.nlink() != 1
             || meta.len() == 0 || meta.len() > MAX_CODEX_METADATA_BYTES {
@@ -477,6 +472,22 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
         let mut bytes = Vec::new();
         record.read_to_end(&mut bytes).map_err(|_| "unreadable Codex thread record")?;
         let state: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid Codex thread record")?;
+        // Native Claude and Codex share TranscriptStore's thread sidecar.
+        // The filename is a storage convention, not the engine identity.
+        let engine = match state.get("engine") {
+            None | Some(Value::Null) => Engine::Codex,
+            Some(Value::String(engine)) if engine == "codex" => Engine::Codex,
+            Some(Value::String(engine)) if engine == "claude" => Engine::Claude,
+            _ => return Err("unsupported saved thread engine"),
+        };
+        let vendor_name = format!("{}.messages.json", entry.id);
+        let cli_history = claude_history_present(claude_root, &entry.id, uid);
+        if entry_present(&dir, OsStr::new(&vendor_name)) || engine == Engine::Codex && cli_history {
+            return Err("ambiguous session engine state");
+        }
+        if engine == Engine::Claude && !cli_history {
+            return Err("saved Claude CLI history is unavailable");
+        }
         if state["session_id"].as_str() != Some(&entry.id)
             || state["cwd"].as_str() != cwd.to_str()
             || state.get("turn_incomplete") != Some(&Value::Bool(false))
@@ -490,7 +501,7 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
             _ => return Err("invalid Codex model in thread record"),
         };
         let cwd = ready_resume_cwd(&cwd, &entry.id, missing, expected_root, &entry.project, open_lore)?;
-        return Ok(LaunchOptions { engine: Engine::Codex, cwd: Some(cwd), model,
+        return Ok(LaunchOptions { engine, cwd: Some(cwd), model,
             resume: Some(entry.id.clone()), ..LaunchOptions::default() });
     }
     let name = format!("{}.messages.json", entry.id);
@@ -1092,6 +1103,31 @@ for line in sys.stdin:
         assert_eq!(plan.engine, Engine::Claude);
         fs::write(root.join("project/saved-1.codex.json"), b"{}").unwrap();
         assert!(resume_fixture(&entry, &script, &root, &cli).unwrap_err().contains("ambiguous"));
+    }
+
+    #[test]
+    fn native_claude_thread_checkpoint_resumes_claude_with_its_own_cli_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        fs::create_dir_all(root.join("project")).unwrap();
+        let cwd = temp.path().join("checkout");
+        fs::create_dir(&cwd).unwrap();
+        let cli = temp.path().join("cli-projects");
+        fs::create_dir_all(cli.join("encoded-cwd")).unwrap();
+        let script = fake_lore(temp.path(), &root);
+        let entry = OfflineSession { id: "saved-1".into(), project: "project".into(),
+            markdown: String::new(), search_snippets: Vec::new(), cwd: Some(cwd.clone()) };
+        fs::write(root.join("project/saved-1.jsonl"), b"saved transcript\n").unwrap();
+        let state = serde_json::json!({"thread_id":"saved-1", "session_id":"saved-1",
+            "engine":"claude", "transport":"stream-json", "cwd":cwd,
+            "model":"claude-test", "turn_incomplete":false});
+        fs::write(root.join("project/saved-1.codex.json"), state.to_string()).unwrap();
+        assert_eq!(resume_fixture(&entry, &script, &root, &cli).unwrap_err(), "saved Claude CLI history is unavailable");
+        fs::write(cli.join("encoded-cwd/saved-1.jsonl"), b"saved CLI history\n").unwrap();
+        let plan = resume_fixture(&entry, &script, &root, &cli).unwrap();
+        assert_eq!(plan.engine, Engine::Claude);
+        assert_eq!(plan.resume.as_deref(), Some("saved-1"));
+        assert_eq!(plan.model.as_deref(), Some("claude-test"));
     }
 
     #[test]

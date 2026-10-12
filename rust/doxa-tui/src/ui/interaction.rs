@@ -1424,7 +1424,8 @@ impl App {
                     }
                     if let Some(id) = self.groups[self.active_group].active_id() {
                         if self.offline_ids.contains(id) {
-                            self.notice = "Archived transcript is read-only".into();
+                            let id = id.to_owned();
+                            self.resume_archive(&id, self.active_group, Some(self.input.clone()));
                         } else if self.active_remote() && (self.input == "/peers" || self.input == "/mesh" || self.input == "/msg" || self.input.starts_with("/msg ")) {
                             self.notice = "Peer controls are available on the session host".into();
                         } else if self.input == "/peers" || self.input == "/mesh" {

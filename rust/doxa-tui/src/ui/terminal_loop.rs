@@ -665,6 +665,9 @@ fn run_loop_with_remote(
             }
             if !app.pending_launches.is_empty() {
                 app.pending_launches.clear();
+                if let Some((group, _, _)) = &app.resume_launch_prompt {
+                    app.finish_archive_resume(*group, None, false);
+                }
                 app.launching = false;
                 app.clear_pending = None;
                 app.notice = "Session launch unavailable · daemon connection closed".into();
@@ -673,6 +676,9 @@ fn run_loop_with_remote(
             }
             if !app.pending_attaches.is_empty() {
                 app.pending_attaches.clear();
+                if let Some((group, _, _)) = &app.resume_launch_prompt {
+                    app.finish_archive_resume(*group, None, false);
+                }
                 app.attaching_ids.clear();
                 app.notice = "Session attach unavailable · daemon connection closed".into();
                 changed = true;
