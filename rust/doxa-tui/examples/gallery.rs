@@ -322,6 +322,25 @@ fn scene(name: &str) -> App {
                         {"name":"Free space","tokens":158000}]}}));
             app.notice = "Fixture · reported context tokens · LORE character caps stay separate".into();
         }
+        "usage-quota" => {
+            let id = "demo-claude-02";
+            app.groups[0].tabs = vec![id.into()];
+            event(&mut app, id, "billing", json!({
+                "mode":"subscription", "type":"Max",
+                "quota":"5h:42% week:75% opus:55% sonnet:34% included:21% extra:9%",
+                "quota_limits":{
+                    "five_hour":{"percent":42,"resets_at":1800000000},
+                    "seven_day":{"percent":75,"resets_at":1900000000},
+                    "seven_day_opus":{"percent":55},
+                    "seven_day_sonnet":{"percent":34},
+                    "seven_day_overage_included":{"percent":21},
+                    "overage":{"percent":9}
+                }
+            }));
+            app.input = "/usage".into();
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            app.notice = "Fixture · synthetic provider quota snapshot · no billing request".into();
+        }
         "routing-status" => {
             let id = "demo-router-04";
             app.apply_daemon_frame(&json!({"type":"hello","session_id":id,"engine":"router",
@@ -566,7 +585,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "settings-router" | "settings-mcp" | "glm-account" | "setup-docker" | "context" | "routing-status" | "queued-prompts" | "peer-messages" | "peer-expanded" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
+        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "settings-router" | "settings-mcp" | "glm-account" | "setup-docker" | "context" | "usage-quota" | "routing-status" | "queued-prompts" | "peer-messages" | "peer-expanded" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
