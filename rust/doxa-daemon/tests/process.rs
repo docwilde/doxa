@@ -659,7 +659,8 @@ fn registry_peer(runtime: &Path, id: &str, scope: &str, title: &str) -> (UnixLis
         incarnation: None,
         heartbeat_at: peer_now(),
         daemon_socket: None,
-        clients: Some(0),
+        // This listening fixture represents an attached peer session.
+        clients: Some(1),
         usage_tokens: None,
         provider: None,
         model: None,
@@ -5117,6 +5118,7 @@ fn long_claude_restore_keeps_logical_identity_original_turns_and_bounded_hook_co
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn long_codex_restore_creates_bounded_thread_without_replacing_logical_history() {
     let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
     let slug:String=dir.path().to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();
@@ -5147,4 +5149,27 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"continue
     let checkpoint=store.read_thread().unwrap().unwrap();assert_eq!(checkpoint["session_id"],"codex-session");assert_eq!(checkpoint["thread_id"],"fresh-thread");assert_eq!(checkpoint["permission_mode"],"on-request");
     assert!(fs::read(store.transcript_path()).unwrap().starts_with(&original));
     send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));claude_receive_until(&mut reader,|frame|frame["id"]==2);wait_until(||process.exited());
+}
+
+#[test]
+fn native_peer_discovery_hides_retained_idle_daemons_until_a_client_attaches() {
+    let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
+    let script=dir.path().join("claude-idle-presence.py");claude_fixture(&script,"","if frame['type']=='user': result()");
+    let mut recipient=Process::start_claude(dir.path(),&script);
+    let mut observer=Process::start(dir.path(),"10");
+    let (mut reader,mut socket)=observer.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+    let row=recipient.entry();assert_eq!(row["clients"],0);assert_eq!(row["active"],false);
+    send(&mut socket,json!({"type":"call","id":1,"method":"peers","params":{}}));
+    let reply=claude_receive_until(&mut reader,|frame|frame["id"]==1);assert_eq!(reply["ok"],true);assert_eq!(reply["peers"],json!([]));
+    let (mut recipient_reader,mut recipient_socket)=recipient.connect();receive(&mut recipient_reader);
+    send(&mut recipient_socket,json!({"type":"attach","cursor":null}));
+    wait_until(||recipient.entry()["clients"]==1 && recipient.entry()["active"]==true);
+    send(&mut socket,json!({"type":"call","id":2,"method":"peers","params":{}}));
+    let reply=claude_receive_until(&mut reader,|frame|frame["id"]==2);assert_eq!(reply["peers"][0]["session_id"],CLAUDE_SESSION);
+    drop(recipient_reader);drop(recipient_socket);
+    wait_until(||recipient.entry()["clients"]==0 && recipient.entry()["active"]==false);
+    send(&mut socket,json!({"type":"call","id":3,"method":"peers","params":{}}));
+    let reply=claude_receive_until(&mut reader,|frame|frame["id"]==3);assert_eq!(reply["peers"],json!([]));
+    assert!(recipient.child.try_wait().unwrap().is_none(),"Hidden idle daemon should remain available for reattachment");
+    send(&mut socket,json!({"type":"call","id":4,"method":"stop","params":{}}));claude_receive_until(&mut reader,|frame|frame["id"]==4);wait_until(||observer.exited());
 }
