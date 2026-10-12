@@ -58,23 +58,44 @@ pub(super) fn restore(store: &TranscriptStore, engine: &str, model: Option<&str>
         if record["router_worker"]==true || record["parent_tool_use_id"].as_str().is_some() {continue;}
         match record["type"].as_str() {
             Some("user")=>{
-                if let Some(previous)=user.take() {if !assistant.is_empty(){turns.push(json!({"user":previous,"assistant":assistant,"origin":if peer{"peer"}else{"user"}}));}}
+                // Claude encodes tool results as user-role rows. They are not a
+                // new owner prompt and must not split its surrounding turn.
+                let body=&record["message"]["content"];
+                if body.as_array().is_some_and(|blocks|blocks.iter().any(|block|block["type"]=="tool_result")) {continue;}
+                let content=text(body);
+                if content.is_empty() {continue;}
+                if let Some(previous)=user.take() {turns.push(json!({"user":previous,"assistant":assistant,"origin":if peer{"peer"}else{"user"}}));}
                 assistant.clear();
-                let content=text(&record["message"]["content"]);
-                user=(!content.is_empty()).then_some(content);
+                user=Some(content);
                 peer=record.get("doxa_peer_origin").is_some();
             },
             Some("assistant") if user.is_some()=>{let content=text(&record["message"]["content"]);if !content.is_empty(){if !assistant.is_empty(){assistant.push('\n');}assistant.push_str(&content);}},
             _=>{},
         }
     }
-    if let Some(user)=user {if !assistant.is_empty(){turns.push(json!({"user":user,"assistant":assistant,"origin":if peer{"peer"}else{"user"}}));}}
+    if let Some(user)=user {turns.push(json!({"user":user,"assistant":assistant,"origin":if peer{"peer"}else{"user"}}));}
     pack(&turns,budget(engine,model),source_bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_tool_results_do_not_split_the_completed_conversation_turn() {
+        let dir=tempfile::tempdir().unwrap();
+        let store=TranscriptStore::new(dir.path(),"project","fixture").unwrap();
+        for record in [
+            json!({"type":"user","message":{"content":"run the parser checks"}}),
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"cargo test"}},{"type":"thinking","thinking":"PRIVATE_REASONING_EXCLUDED"}]}}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"untrusted tool output ".repeat(2000)}]}}),
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":"Parser checks passed after tool execution."}]}}),
+        ] {store.try_append(record,"claude",|value|Ok(value.to_owned())).unwrap();}
+        let original=std::fs::read(store.transcript_path()).unwrap();
+        let context=restore(&store,"claude",Some("opus")).unwrap().unwrap();
+        assert!(context.contains("run the parser checks"));assert!(context.contains("Parser checks passed after tool execution."));
+        assert!(!context.contains("PRIVATE_REASONING_EXCLUDED"));assert!(!context.contains("untrusted tool output"));
+        assert!(context.len()<=MAX_BYTES);assert_eq!(std::fs::read(store.transcript_path()).unwrap(),original);
+    }
     #[test]
     fn restoration_bounds_escaped_unicode_keeps_recent_turns_and_marks_omissions() {
         let turns=(0..100).map(|index|json!({"user":format!("turn-{index} {}","文\n\"".repeat(200)),"assistant":"answer".repeat(200),"origin":"user"})).collect::<Vec<_>>();
