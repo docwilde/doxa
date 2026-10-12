@@ -96,6 +96,21 @@ input path with an opportunity to fold at a model-loop boundary. DOXA does not
 yet expose either as a steering control. See the
 [feasibility and implementation plan](mid-turn-steering.md).
 
+## Beta48 release candidate verification
+
+The release candidate pins published **LORE v0.62.21**, commit
+`e398ea2b0d8b1a8c52614ee69fa483005c5e9c81`. The matching DOXA client passed
+14 library, 12 native and 19 sidecar tests, including scoped Python reads and
+stale-source rejection. The final TUI library suite passed **827 tests**, with
+six intentionally ignored tests. Jev fleet supervision passed 27 unit and
+12 policy tests; no paid Jev supervisor call or real-task calibration was run.
+
+All **28** beta48 gallery PNGs were regenerated at **3068 × 1734** with
+private fixture state. Browser checks exercised every image and caption,
+previous/next wrapping, arrow keys, history, deep links, invalid hashes and
+mobile width. The hosted site uses the same manifest as the README's
+one-frame pages. Protected Linux and macOS CI remain the merge gates.
+
 ## Detailed records
 
 - [Backend changes](review-fixes-backend.md)
