@@ -278,7 +278,7 @@ impl App {
         true
     }
 
-    fn rail_session_visible(&self, index: usize) -> bool {
+    pub(super) fn rail_session_visible(&self, index: usize) -> bool {
         let id = &self.sessions[index].id;
         if self.groups.iter().any(|group| group.tabs.contains(id)) {
             return true;

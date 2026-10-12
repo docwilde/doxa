@@ -58,7 +58,7 @@ impl App {
             if let Some(id)=selected {self.rail_selected=self.rail_order().iter().position(|index|self.sessions[*index].id==id).unwrap_or(0);}
             return true;
         }
-        let mut sources=self.fleet_views.iter().filter_map(|view|view.run_id.as_ref().map(|id|(view.root.clone(),id.clone()))).collect::<Vec<_>>();
+        let mut sources=self.fleet_views.iter().map(|view|(view.root.clone(),view.run_id.clone())).collect::<Vec<_>>();
         if let Some(controller)=&self.fleet_controller {sources.push((controller.root.clone(),controller.id.clone()));}
         sources.sort();sources.dedup();sources.truncate(fleet_menu::MAX_SAVED_VIEWS);
         if sources.is_empty() {if self.fleet_rail.groups.is_empty(){return false;}self.fleet_rail.groups.clear();return true;}

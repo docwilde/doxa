@@ -61,6 +61,7 @@ pub struct CodexHost {
     index_worker: Mutex<Option<thread::JoinHandle<()>>>,
     store: TranscriptStore,
     session_id: String,
+    recovery_context: Option<String>,
     cwd: String,
     selection: Mutex<(Option<String>, Option<String>)>,
     permission: Mutex<CodexPermission>,
@@ -216,6 +217,8 @@ impl CodexHost {
             }
             None
         };
+        let restoring = previous.is_some();
+        let recovery_context = if resume {crate::recovery_context::restore(&store,"codex",options.model.as_deref()).map_err(|_|"Codex saved context could not be verified")?}else{None};
         if let Some(id) = previous {
             options.resume_thread = Some(id);
             options.require_resume = true;
@@ -231,14 +234,14 @@ impl CodexHost {
         if doxa_isolation::active().map_err(|e| e.to_string())?.is_some() && transport != "app-server" {
             return Err("Docker Codex requires the protected app-server transport; legacy exec cannot preserve its host compaction boundary".into());
         }
-        let agent_tools = if transport == "app-server" && (options.resume_thread.is_none() || saved_lore_tools) {
+        let agent_tools = if transport == "app-server" && (!restoring || saved_lore_tools) {
             routed_agent.unwrap_or_else(|| crate::agent_tools::AgentTools::new(&cwd, session_id, "codex", lore_enabled))
         } else { None };
         if saved_lore_tools && agent_tools.is_none() {
             return Err("Codex saved LORE tools are unavailable; refusing to resume the thread".into());
         }
         if transport == "exec" { options.config_overrides = crate::agent_tools::mcp_overrides(&cwd, session_id, lore_enabled); }
-        let peer_tools_allowed = transport == "app-server" && (options.resume_thread.is_none() || saved_peer_tools);
+        let peer_tools_allowed = transport == "app-server" && (!restoring || saved_peer_tools);
         let selection = (options.model.clone(), options.effort.clone());
         let permission = saved_permission.unwrap_or(CodexPermission::OnRequest);
         let catalog_options = AppServerOptions { executable: options.executable.clone(), cwd: options.cwd.clone(),
@@ -292,6 +295,7 @@ impl CodexHost {
                 }
             }
         };
+        if recovery_context.is_some() {options.resume_thread=None;options.require_resume=false;rollout_path=None;}
         let driver = if transport == "app-server" {
             CodexTransport::AppServer {
                 options: AppServerOptions { executable: options.executable.clone(), cwd: options.cwd.clone(),
@@ -316,6 +320,7 @@ impl CodexHost {
             index_worker: Mutex::new(Some(index_worker)),
             store,
             session_id: session_id.to_owned(),
+            recovery_context,
             cwd,
             selection: Mutex::new(selection),
             permission: Mutex::new(permission),
@@ -472,17 +477,12 @@ impl CodexHost {
     /// provider thread; an existing thread already contains its first turn.
     /// Snapshot failure is a memory-less turn, as in Python CodexEngine.
     fn first_turn_prompt(&self, text: &str) -> String {
-        if !self.lore_enabled { return format!("[DOXA MEMORY OFF] This session has memory disabled. Do not use LORE memory tools.\n\n{text}"); }
-        let snapshot = self
-            .lore
-            .lock()
-            .unwrap()
-            .snapshot(&self.cwd, "all")
-            .unwrap_or_default();
-        if snapshot.is_empty() || snapshot.len() > MAX_CONTEXT_BYTES {
-            return text.to_owned();
-        }
-        format!("{MEMORY_HEADER}\n\n{snapshot}\n{MEMORY_FOOTER}\n\n{text}")
+        let mut context=if self.lore_enabled {
+            let snapshot=self.lore.lock().unwrap().snapshot(&self.cwd,"all").unwrap_or_default();
+            if snapshot.is_empty() || snapshot.len()>MAX_CONTEXT_BYTES {String::new()} else {format!("{MEMORY_HEADER}\n\n{snapshot}\n{MEMORY_FOOTER}\n\n")}
+        } else {"[DOXA MEMORY OFF] This session has memory disabled. Do not use LORE memory tools.\n\n".into()};
+        if let Some(recovery)=&self.recovery_context {context.push_str("[DOXA RESTORED CONVERSATION]\n");context.push_str(recovery);context.push_str("\n[CURRENT USER REQUEST]\n");}
+        context.push_str(text);context
     }
 
     /// Give the driver time to reap its child process group before the daemon

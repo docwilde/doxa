@@ -26,6 +26,8 @@ enum Command {
 }
 struct Shared {
     session: String,
+    provider_session: String,
+    recovery_context: Mutex<Option<String>>,
     cwd: String,
     lore: Mutex<LoreClient>,
     store: TranscriptStore,
@@ -115,7 +117,7 @@ impl Shared {
     }
     fn checkpoint(&self, incomplete: bool) -> Result<(), String> {
         let s = self.selection.lock().unwrap();
-        let fields = json!({"thread_id":self.session,"session_id":self.session,"engine":"claude","transport":"stream-json","cwd":self.cwd,"model":s.0,"effort":s.1,"permission_mode":s.2,"lore_enabled":self.enabled,"lore_tools":self.agent.is_some(),"spawn_depth":self.depth,"parent_session_id":self.parent,"turn_incomplete":incomplete,"router_worker":self.routed,"recorded":crate::iso_now()});
+        let fields = json!({"thread_id":self.provider_session,"session_id":self.session,"engine":"claude","transport":"stream-json","cwd":self.cwd,"model":s.0,"effort":s.1,"permission_mode":s.2,"lore_enabled":self.enabled,"lore_tools":self.agent.is_some(),"spawn_depth":self.depth,"parent_session_id":self.parent,"turn_incomplete":incomplete,"router_worker":self.routed,"recorded":crate::iso_now()});
         self.store
             .try_write_thread(fields.as_object().unwrap().clone(), |s| {
                 self.scrub(s).map_err(io::Error::other)
@@ -326,6 +328,7 @@ impl ClaudeHost {
         let mut requested_model = model.map(str::to_owned);
         let mut requested_effort = effort.map(str::to_owned);
         let mut mode = "default".to_owned();
+        let mut provider_session = session_id.to_owned();
         if resume {
             let old = match store
                 .read_thread()
@@ -356,7 +359,8 @@ impl ClaudeHost {
                 }
             };
             if old["engine"] != "claude"
-                || old["thread_id"] != session_id
+                || old["session_id"] != session_id
+                || !old["thread_id"].as_str().is_some_and(doxa_claude::cli::canonical_session_id)
                 || old["cwd"] != cwd
                 || old["lore_enabled"] != enabled
                 || old["spawn_depth"] != depth
@@ -368,6 +372,7 @@ impl ClaudeHost {
             store
                 .verify_thread_checkpoint(&old)
                 .map_err(|_| "Claude durable transcript boundary changed")?;
+            provider_session = old["thread_id"].as_str().unwrap().to_owned();
             if requested_model.is_none() {
                 requested_model = old["model"].as_str().map(str::to_owned)
             }
@@ -379,6 +384,9 @@ impl ClaudeHost {
                 .unwrap_or("default")
                 .to_owned();
         }
+        let recovery_context = if resume { crate::recovery_context::restore(&store,"claude",requested_model.as_deref()).map_err(|_|"Claude saved context could not be verified")? } else {None};
+        let provider_resume = resume && recovery_context.is_none();
+        if recovery_context.is_some() {provider_session=uuid::Uuid::new_v4().to_string();}
         let home = doxa_claude::isolation::prepare()
             .map_err(|_| "Claude private configuration unavailable")?;
         let plugins = doxa_claude::isolation::adopted_plugins()
@@ -401,6 +409,8 @@ impl ClaudeHost {
             );
         let shared = Arc::new(Shared {
             session: session_id.into(),
+            provider_session: provider_session.clone(),
+            recovery_context: Mutex::new(recovery_context),
             cwd: cwd.clone(),
             lore: Mutex::new(lore),
             store,
@@ -409,7 +419,7 @@ impl ClaudeHost {
             active: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
-            resume_identity_pending: AtomicBool::new(resume),
+            resume_identity_pending: AtomicBool::new(provider_resume),
             selection: Mutex::new((
                 requested_model.clone(),
                 requested_effort.clone(),
@@ -430,8 +440,8 @@ impl ClaudeHost {
         let mut cli = Cli::spawn(CliOptions {
             executable,
             cwd: &workspace,
-            session_id,
-            resume,
+            session_id: &provider_session,
+            resume: provider_resume,
             model: requested_model.as_deref(),
             effort: requested_effort.as_deref(),
             permission_mode: if mode == "default" { "manual" } else { &mode },
@@ -1225,7 +1235,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         else { shared.persist(record)?; }
                         shared.checkpoint(true)?;
                         let public_prompt = shared.scrub(&text)?;
-                        cli.prompt(&text, &shared.session)
+                        cli.prompt(&text, &shared.provider_session)
                             .map_err(|_| "Claude prompt write failed".to_owned())?;
                         Ok::<_, String>(public_prompt)
                     })();
@@ -1372,7 +1382,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
             }
         };
         if let Some(session) = frame["session_id"].as_str() {
-            if session != shared.session {
+            if session != shared.provider_session {
                 send_event(
                     &events,
                     done("Claude provider session identity changed; turn terminated"),
@@ -1383,7 +1393,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
         if shared.resume_identity_pending.load(Ordering::Acquire) {
             if frame["type"] == "system"
                 && frame["subtype"] == "init"
-                && frame["session_id"] == shared.session
+                && frame["session_id"] == shared.provider_session
             {
                 shared
                     .resume_identity_pending
@@ -1645,7 +1655,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                                 let _ = tx.send((id, value));
                             });
                         } else if request["callback_id"] == "doxa_prompt_context" {
-                            let context = if shared.enabled {
+                            let mut context = if shared.enabled {
                                 shared
                                     .lore
                                     .lock()
@@ -1655,6 +1665,9 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                             } else {
                                 "[DOXA MEMORY OFF] This session has memory disabled. Do not use LORE memory tools.".into()
                             };
+                            if let Some(recovery)=shared.recovery_context.lock().unwrap().take() {
+                                context.push_str("\n\n[DOXA RESTORED CONVERSATION]\n");context.push_str(&recovery);
+                            }
                             let value = json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":context}});
                             let _ = cli.respond(&id, Ok(value));
                         } else {
@@ -2063,6 +2076,8 @@ for line in sys.stdin:
         let store = TranscriptStore::new(dir.path(), "project", SESSION).unwrap();
         let shared = Arc::new(Shared {
             session: SESSION.into(),
+            provider_session: SESSION.into(),
+            recovery_context: Mutex::new(None),
             cwd: dir.path().to_string_lossy().into_owned(),
             lore: Mutex::new(LoreClient::open(Duration::from_secs(3)).unwrap()),
             store,

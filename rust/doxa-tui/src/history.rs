@@ -485,7 +485,7 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
         if entry_present(&dir, OsStr::new(&vendor_name)) || engine == Engine::Codex && cli_history {
             return Err("ambiguous session engine state");
         }
-        if engine == Engine::Claude && !cli_history {
+        if engine == Engine::Claude && !state["thread_id"].as_str().is_some_and(|thread|crate::discovery::valid_id(thread) && claude_history_present(claude_root,thread,uid)) {
             return Err("saved Claude CLI history is unavailable");
         }
         if state["session_id"].as_str() != Some(&entry.id)

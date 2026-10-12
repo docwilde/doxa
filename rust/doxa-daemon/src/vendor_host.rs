@@ -246,7 +246,8 @@ impl VendorHost {
         let lore_enabled = doxa_state::lore_enabled_default();
         let agent_tools = crate::agent_tools::AgentTools::new(&cwd, session_id, storage_engine, lore_enabled);
         // Invalid optimization state falls back to complete durable originals.
-        let compact_context = store.read_vendor_context(storage_engine, &history).ok().flatten();
+        let recovered = if resume {crate::recovery_context::restore(&store,storage_engine,Some(&model)).map_err(|_|"Saved vendor context could not be verified")?}else{None};
+        let compact_context = recovered.map(|context|(history.len(),context)).or_else(||store.read_vendor_context(storage_engine, &history).ok().flatten());
         let restored_turns = if routed { history.len() as u64 / 2 } else { 0 };
         let host = Self {
             vendor: Mutex::new(vendor), routed, route: Mutex::new(None), limits: Mutex::new(None),
