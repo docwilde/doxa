@@ -167,6 +167,7 @@ pub fn read_private(path: &Path, max: u64) -> io::Result<String> {
 fn bounded(text: &str, max: usize) -> bool { !text.trim().is_empty() && text.len() <= max && !text.chars().any(char::is_control) }
 fn identifier(text: &str) -> bool { !text.is_empty() && text.len() <= 48 && text.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) }
 fn contains_known_credential(text: &str) -> bool {
+    doxa_vendors::credentials::redact(text).map_or(true, |clean| clean != text) ||
     ["TYPESAFE_API_KEY","SUBQ_API_KEY","DEEPSEEK_API_KEY","ZAI_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY"]
         .iter().any(|name|std::env::var(name).ok().is_some_and(|key|key.len()>=8 && text.contains(&key)))
 }
@@ -364,12 +365,13 @@ pub fn parse_response(config: &Config, prepared: &Prepared, value: &Value, laten
             || (config.decision() == DecisionModel::Jev && (confidence-expected_confidence).abs() > 0.0001) {
             return Err(invalid("inconsistent router winner or confidence"));
         }
-        Ok((choice.into(),confidence))
+        let tied=probabilities.values().filter_map(Value::as_f64).filter(|p|(*p-maximum).abs()<=0.000001).count()>1;
+        Ok((choice.into(),if tied {0.0}else{confidence}))
     };
     if let Ok((id, confidence)) = validate() {
         outcome.verified_response = Some(value.clone());
         outcome.confidence = Some(confidence);
-        if confidence >= config.confidence_threshold { outcome.candidate_id=id;outcome.reason=Reason::Selected; }
+        if confidence > 0.0 && confidence >= config.confidence_threshold { outcome.candidate_id=id;outcome.reason=Reason::Selected; }
         else { outcome.reason=Reason::LowConfidence; }
     }
     outcome

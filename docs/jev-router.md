@@ -1,4 +1,4 @@
-# Jev turn router
+# Jev / SubQ Snap turn router
 
 The opt-in `router` engine selects a configured DeepSeek/GLM API target or an
 authenticated Claude/protected Codex CLI target at the start of a turn. It keeps
@@ -18,6 +18,29 @@ Candidate descriptions express the operator's routing policy. They are not
 measured quality claims. Jev Choice confidence describes its returned choice
 distribution; it is not a probability that the worker will complete the task.
 
+## Decision service
+
+The router accepts pinned `jev-1.13.0` or `subq-snap-preview`. Use the
+`router_model` JSON field (legacy `jev_model` remains compatible), or select
+**routing decision model** in `/settings` → Session. `DOXA_ROUTER_MODEL` is an
+explicit environment override for new sessions. Changing the decision model
+changes the frozen config digest; resuming requires the original selection.
+
+Snap uses [SubQ's typed Decisions API](https://docs.subq.ai/endpoints/decisions-api/)
+at `https://api.subq.ai/v1/systemone`, with a private saved SubQ key or
+`SUBQ_API_KEY`. The API pins `subq-snap-preview`; other SubQ models are refused.
+[Published pricing](https://subq.ai/#pricing) is $0.05/M input tokens and free
+output. DOXA validates exact model/usage, eligible choices, complete normalized
+probabilities and finite confidence. Snap's reported confidence is checked
+against the frozen guard; Jev additionally uses its documented distribution
+formula. Ties fall back. Neither score certifies worker quality.
+
+Both services share bounded requests, deadlines, durable reservations and the
+configured fallback. Unreported usage retains its reservation and prevents
+worker execution until accounting is reconciled. There is no automatic paid
+retry or service switch. Coverage uses local HTTP fixtures; live comparative
+quality and latency evaluation remains open.
+
 ## Start and control a session
 
 Use an absolute path to a reviewed, owner-owned JSON file with private file
@@ -32,7 +55,7 @@ doxa doctor --engine router --router-config /home/you/.doxa/router-candidates.js
 
 `DOXA_ROUTER_CONFIG` or the `router_config` setting can explicitly supply the
 path. DOXA does not invent a default config, candidate list, or target. Selecting
-Jev Router in `/settings` → Session or the new-session form requires that
+Model Router in `/settings` → Session or the new-session form requires that
 setting. Ctrl+P on the default-engine/config row reviews the private config and
 current authenticated catalogs; Ctrl+S saves only after a ready review. The
 review checks Jev credential shape/presence without authenticating it over HTTP. The

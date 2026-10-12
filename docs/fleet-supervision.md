@@ -72,6 +72,25 @@ no live Jev supervisor or consented quality corpus has been evaluated. TypeSafe
 adversarial text, indirection and large irrelevant state. Human-labeled drift,
 false-completion, false-alert, latency and cost validation remains open.
 
+## SubQ Snap as an independent reviewer
+
+Select `subq:subq-snap-preview` for `--alignment-supervisor` or
+`--message-judge`, independently, or use the corresponding dropdowns under
+`/settings` → **Fleet**. Set the masked **SubQ API key** under **Session**;
+`SUBQ_API_KEY` overrides a saved key. Keep an explicit review budget.
+
+Snap uses the same host-issued checkpoint Choices and separate five-question
+Noul message contract. It cannot approve tools, change assignments, certify
+completion, release dependencies or clear a pause. Missing citations,
+unsupported choices, ties or low confidence remain uncertain. Outages retain
+reserved spend and enforced holds; no automatic retry or provider switch runs.
+
+The [typed Decisions API](https://docs.subq.ai/endpoints/decisions-api/) requires
+`subq-snap-preview` and input-only usage. The [published rate](https://subq.ai/#pricing)
+is $0.05/M input tokens, with free output. Existing conservative snapshot limits
+remain in force. Local HTTP fixtures cover successful citations, unsupported
+evidence, and 401/402/429/503 failures; live quality calibration remains open.
+
 ## Other independent reviewer providers
 
 For an OpenAI API reviewer, the exact GPT-6 Astra selectors are
