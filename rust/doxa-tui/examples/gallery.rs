@@ -3,7 +3,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, Mous
 use doxa_tui::ui::{App, Focus};
 use doxa_tui::{history, transport::TranscriptSnapshot};
 use doxa_worktrees::RepoStatus;
-use ratatui::{backend::TestBackend, style::Color, Terminal};
+use ratatui::{backend::{CrosstermBackend, TestBackend}, style::Color, Terminal};
 use serde_json::{json, Value};
 use unicode_width::UnicodeWidthStr;
 
@@ -585,6 +585,47 @@ fn rgb(color: Color) -> [u8; 3] {
     }
 }
 
+fn welcome(frame: &mut ratatui::Frame) {
+    use ratatui::{style::Style,widgets::{Block,Borders,Paragraph}};
+    let block=Block::default().borders(Borders::ALL).title(" ΔΟΞΑ · opening view ")
+        .style(Style::default().fg(doxa_tui::theme::SECONDARY).bg(doxa_tui::theme::BASE));
+    let inner=block.inner(frame.area());
+    frame.render_widget(block,frame.area());
+    let lines=doxa_tui::welcome::lines(doxa_tui::welcome::State::Ready {engine:Some("claude"),model:Some("opus")},true,inner.width,inner.height);
+    frame.render_widget(Paragraph::new(lines).style(Style::default().bg(doxa_tui::theme::BASE)),inner);
+}
+
+/// Display the production App in a real terminal. Scene data remains an
+/// isolated illustration; no daemon, provider, or owner memory is contacted.
+fn terminal_preview(name: &str) -> std::io::Result<()> {
+    use crossterm::{cursor::{Hide,Show},event::{DisableMouseCapture,EnableMouseCapture},
+        execute,terminal::{disable_raw_mode,enable_raw_mode,EnterAlternateScreen,LeaveAlternateScreen}};
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _=execute!(std::io::stdout(),LeaveAlternateScreen,DisableMouseCapture,Show);
+            let _=disable_raw_mode();
+        }
+    }
+    enable_raw_mode()?;
+    let _restore=Restore;
+    execute!(std::io::stdout(),EnterAlternateScreen,EnableMouseCapture,Hide)?;
+    let mut terminal=Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    if name == "image-preview" { std::env::set_var("DOXA_IMAGE_MODE","halfblock"); }
+    if name == "pane-triage" { std::env::set_var("DOXA_RAIL_ENTRIES","panes"); }
+    let mut app=(name!="welcome").then(||scene(name));
+    if let Some(app)=app.as_ref().filter(|_|name=="image-preview") { app.configure_terminal_images("halfblock"); }
+    loop {
+        terminal.draw(|frame|if let Some(app)=&app { app.draw(frame); } else { welcome(frame); })?;
+        if let Some(app)=&app { app.poll_terminal_images(); }
+        if crossterm::event::poll(std::time::Duration::from_millis(100))? {
+            let input=crossterm::event::read()?;
+            if matches!(input,Event::Key(key) if key.code==KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) { return Ok(()); }
+            if let Some(app)=app.as_mut() { app.handle(input); }
+        }
+    }
+}
+
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
@@ -592,18 +633,14 @@ fn main() {
         "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "settings-router" | "settings-mcp" | "glm-account" | "setup-docker" | "context" | "usage-quota" | "routing-status" | "queued-prompts" | "peer-messages" | "peer-expanded" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
         _ => panic!("unknown scene"),
     };
+    if std::env::args().nth(2).as_deref()==Some("--terminal") {
+        terminal_preview(&name).expect("native terminal scene");
+        return;
+    }
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
     if name=="welcome" {
         // The same native opening renderer used by App, with no provider call.
-        use ratatui::{style::Style,widgets::{Block,Borders,Paragraph}};
-        terminal.draw(|frame| {
-            let block=Block::default().borders(Borders::ALL).title(" ΔΟΞΑ · opening view ")
-                .style(Style::default().fg(doxa_tui::theme::SECONDARY).bg(doxa_tui::theme::BASE));
-            let inner=block.inner(frame.area());
-            frame.render_widget(block,frame.area());
-            let lines=doxa_tui::welcome::lines(doxa_tui::welcome::State::Ready {engine:Some("claude"),model:Some("opus")},true,inner.width,inner.height);
-            frame.render_widget(Paragraph::new(lines).style(Style::default().bg(doxa_tui::theme::BASE)),inner);
-        }).unwrap();
+        terminal.draw(welcome).unwrap();
     } else {
         if name == "image-preview" { std::env::set_var("DOXA_IMAGE_MODE", "halfblock"); }
         if name == "pane-triage" { std::env::set_var("DOXA_RAIL_ENTRIES", "panes"); }
