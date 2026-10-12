@@ -21,13 +21,13 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Prepare private test directory
         run: |
           mkdir -p "$HOME/.t"
           chmod 700 "$HOME/.t"
           echo "TMPDIR=$HOME/.t" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Check native macOS build
         run: cargo check --locked --workspace
       - name: Build daemon and native LORE carrier for interaction tests
@@ -59,8 +59,8 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
       - name: Verify packaged remote browser client
@@ -75,7 +75,7 @@ jobs:
           mkdir -p "$TMPDIR"
           chmod 700 "$TMPDIR"
           rustup toolchain install stable --profile minimal
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build native runtime and LORE carrier
         run: |
           cargo +stable build --locked
@@ -84,6 +84,8 @@ jobs:
         run: cargo +stable test --locked --workspace --features doxa-daemon/local-test-server,doxa-vendors/local-test-server
       - name: Check task, quota fixture and release installer
         run: |
+          python3 scripts/check_workflow_action_pins.py
+          python3 scripts/build_gallery_site.py --output "$RUNNER_TEMP/doxa-gallery-site"
           sh -n scripts/install.sh task
           ./task help
           # Stdlib-only checks for the protected provider's build tooling.
@@ -95,6 +97,10 @@ jobs:
             -s scripts/tests -p test_codex_code_mode_proof.py -v
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_lore_bump.py -v
+          python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_workflow_action_pins.py -v
+          python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_mermaid_validation_lock.py -v
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_claude_auto_permissions_verifier.py -v
           python3 -W error::ResourceWarning -m unittest discover \

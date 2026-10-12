@@ -1,5 +1,5 @@
 //! In-process canonical backend fixtures, entirely under owned roots.
-use doxa_lore::{CodegraphSnapshot, LoreClient};
+use doxa_lore::{CodegraphSnapshot, LoreClient, LoreError};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
@@ -47,6 +47,62 @@ fn reviewed_codegraph_read_is_scoped_and_rejects_stale_source() {
     std::fs::write(&file, "mod changed;\n").unwrap();
     assert!(client.codegraph_snapshot(cwd, "modules", "lib.rs").is_err());
     assert!(client.codegraph_snapshot(cwd, "symbol", "lib.rs").is_err());
+}
+
+#[test]
+fn reviewed_python_snapshot_roundtrips_only_for_unchanged_source_worktree() {
+    let owned = tempfile::tempdir().unwrap();
+    let source = owned.path().join("python-worktree");
+    std::fs::create_dir(&source).unwrap();
+    assert!(std::process::Command::new("git").args(["init", "-q"])
+        .arg(&source).status().unwrap().success());
+    let file = source.join("service.py");
+    let source_bytes = b"def service():\n    return 1\n";
+    std::fs::write(&file, source_bytes).unwrap();
+    let cwd = source.to_str().unwrap();
+    let graph = serde_json::to_value(doxa_codegraph::query(&source,
+        doxa_codegraph::Query::File("service.py".into())).unwrap()).unwrap();
+    let hash = graph["requested_source_sha256"].as_str().unwrap().to_owned();
+    let config = lore_core::config::Config::for_root(owned.path().join("store"));
+    let mut client = LoreClient::open_config(config.clone(), Duration::from_secs(2)).unwrap();
+    assert!(client.can_read_codegraph_snapshot());
+    assert_eq!(client.codegraph_snapshot(cwd, "file", "service.py").unwrap(), CodegraphSnapshot::Missing);
+
+    let request = serde_json::json!({"cwd":cwd,"query":"file","path":"service.py","expected_revision":0,
+        "snapshot":{"schema_version":1,"storage":"export_only_not_persisted","graph_binding":"unknown",
+            "curated_purpose":{"project_key":lore_core::config::project_slug(&source)},"graph":graph}});
+    let authority = lore_core::gate::Authority::HumanReview {
+        agent: "fixture".into(), engine: "human".into(),
+    };
+    lore_core::codegraph_snapshot::store(&config, &request, &authority).unwrap();
+    let before = std::fs::read_dir(config.root.join("codegraph-v1")).unwrap()
+        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap()).collect::<Vec<_>>();
+    let snapshot = client.codegraph_snapshot(cwd, "file", "service.py").unwrap();
+    let CodegraphSnapshot::Current(current) = &snapshot
+        else { panic!("expected current Python snapshot") };
+    assert_eq!(current.source_sha256, hash);
+    assert_eq!(snapshot.to_value()["binding"], "unknown");
+    let after = std::fs::read_dir(config.root.join("codegraph-v1")).unwrap()
+        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap()).collect::<Vec<_>>();
+    assert_eq!(before, after, "client read unexpectedly rewrote the reviewed snapshot");
+
+    std::fs::write(&file, b"def service():\n    return 2\n").unwrap();
+    assert!(client.codegraph_snapshot(cwd, "file", "service.py").is_err(),
+        "a stale requested source must be refused");
+
+    let other = owned.path().join("other-worktree");
+    std::fs::create_dir(&other).unwrap();
+    assert!(std::process::Command::new("git").args(["init", "-q"])
+        .arg(&other).status().unwrap().success());
+    std::fs::write(other.join("service.py"), source_bytes).unwrap();
+    assert_eq!(client.codegraph_snapshot(other.to_str().unwrap(), "file", "service.py").unwrap(),
+        CodegraphSnapshot::Missing, "a second worktree cannot reuse the first worktree's snapshot");
+
+    for path in ["../service.py", "src/../service.py", "/workspace/service.py", "service.js"] {
+        assert!(matches!(client.codegraph_snapshot(cwd, "file", path), Err(LoreError::InvalidFrame)),
+            "accepted invalid snapshot path {path}");
+    }
+    assert!(matches!(client.codegraph_snapshot(cwd, "file", &"a".repeat(4097)), Err(LoreError::InvalidFrame)));
 }
 
 #[test]

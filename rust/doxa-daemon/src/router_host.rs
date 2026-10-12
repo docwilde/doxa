@@ -2,7 +2,7 @@
 use crate::vendor_host::VendorHost;
 use doxa_router::{Billing, Candidate, Config, Ledger, Provider, Reason, RoutingInput};
 use crate::router_cli::{CliOptions,Worker};
-use doxa_runtime::Host;
+use doxa_runtime::{Host, PeerTurnOrigin};
 use doxa_vendors::{TurnLimits, Vendor};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -422,7 +422,7 @@ impl RouterHost {
     }
 
     fn run_cli(&self,text:&str,candidate:&Candidate,selection:&Value,outcome:&doxa_router::Outcome,
-        emit:&mut dyn FnMut(Value)) -> Result<(),String> {
+        peer_origin: Option<&PeerTurnOrigin>, emit:&mut dyn FnMut(Value)) -> Result<(),String> {
         let cap=candidate.context_tokens.checked_sub(candidate.max_output_tokens).ok_or("CLI context cap invalid")?;
         let prepared=self.inner.cli_context(text,cap);
         let (packet,source_hash)=match prepared {
@@ -511,7 +511,7 @@ impl RouterHost {
             && data["is_error"] == false && data["usage_complete"] == true
             && data["model_consistent"] == true && data["model"] == candidate.model && !overflow
             && !self.cancel.load(Ordering::Acquire) && !self.closing.load(Ordering::Acquire));
-        let committed=usage.is_some() && self.inner.commit_cli_turn(text,&output,&source_hash,selection).is_ok();
+        let committed=usage.is_some() && self.inner.commit_cli_turn(text,&output,&source_hash,selection,peer_origin).is_ok();
         let mut state=self.state.lock().unwrap();
         let pending=state.pending_cli.clone();
         if committed {
@@ -550,7 +550,7 @@ impl RouterHost {
         emit(event);Ok(())
     }
 
-    fn route(&self, text: &str, emit: &mut dyn FnMut(Value)) -> Result<(), String> {
+    fn route(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) -> Result<(), String> {
         if text.split_whitespace().next() == Some("/compact") {
             if text.trim() != "/compact" { return Err("Use /compact without arguments".into()); }
             return self.compact(emit);
@@ -638,7 +638,7 @@ impl RouterHost {
             selection
         };
         if candidate.provider.is_cli() {
-            return self.run_cli(text,candidate,&selection,&outcome,emit);
+            return self.run_cli(text,candidate,&selection,&outcome,peer_origin,emit);
         }
         if let Err(error) = self.inner.select_route(vendor(candidate.provider), &candidate.model, &candidate.effort, selection.clone(),
             TurnLimits { input_bytes: usize::try_from(candidate.context_tokens-candidate.max_output_tokens).map_err(|_| "Worker context cap overflow")?,
@@ -649,7 +649,7 @@ impl RouterHost {
         }
         emit(json!({"type":"routing_selected","data":selection}));
         let mut completed = None;
-        self.inner.prompt(text, &mut |mut event| {
+        self.inner.prompt_with_peer_origin(text, peer_origin, &mut |mut event| {
             if self.cancel.load(Ordering::Acquire) && event["type"] == "turn_started" { let _ = self.inner.call("interrupt", &json!({})); }
             if event["type"] == "turn_done" {
                 let mut state = self.state.lock().unwrap();
@@ -699,10 +699,12 @@ impl RouterHost {
         }
         Ok(())
     }
-}
 
-impl Host for RouterHost {
-    fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+    fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
+            emit(json!({"type":"turn_refused","data":{"reason":"routing","message":"Invalid host peer provenance"}}));
+            return;
+        }
         let Ok(_turn) = self.turn_lock.try_lock() else {
             emit(json!({"type":"turn_refused","data":{"reason":"routing","message":"Router turn already running"}})); return;
         };
@@ -712,9 +714,18 @@ impl Host for RouterHost {
         impl Drop for Active<'_> { fn drop(&mut self) { self.0.store(false, Ordering::Release); } }
         let _active = Active(&self.active);
         let mut emit_mcp = |mut event| { self.inner.decorate_mcp(&mut event); emit(event); };
-        if let Err(message) = self.route(text, &mut emit_mcp) {
+        if let Err(message) = self.route(text, peer_origin, &mut emit_mcp) {
             emit_mcp(json!({"type":"turn_refused","data":{"reason":"routing","message":message}}));
         }
+    }
+}
+
+impl Host for RouterHost {
+    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, origin, emit);
+    }
+    fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, None, emit);
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {

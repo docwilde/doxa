@@ -344,7 +344,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         eventJob = scope.launch {
             while (isActive && mine == generation) {
                 try {
-                    client.events(session.id, session.encrypted, cursor) { frame ->
+                    client.events(session.id, session.encrypted, session.incarnation, cursor) { frame ->
                         withContext(Dispatchers.Main.immediate) {
                             if (mine == generation) handle(frame)
                         }

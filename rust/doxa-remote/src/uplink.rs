@@ -350,13 +350,16 @@ async fn forward_events(app:&Arc<App>,http:&Client,base:&Url,host:&str,lease:&st
         for mut frame in frames{
             let Some(seq)=frame["seq"].as_u64() else{continue};
             if scrub_data(&mut frame["event"]["data"],&app.lore).is_err(){return;}
+            let incarnation=remote_incarnation(&entry).to_owned();
+            frame["incarnation"]=json!(incarnation);
             if let Some(key)=key {
                 if serde_json::to_vec(&frame["event"]["data"]).is_ok_and(|bytes|bytes.len()>38_000){
                     frame["event"]["type"]=json!("remote_event_omitted");
                     frame["event"]["data"]=json!({"reason":"event exceeds encrypted transport bound; reload transcript"});
                 }
                 let event_type=frame["event"]["type"].as_str().unwrap_or("").to_owned();
-                let context=format!("{host}~{}|event|{seq}|{event_type}",entry.session_id);
+                let target=format!("{host}~{}",entry.session_id);
+                let context=match wire::event_context(&target,&incarnation,seq,&event_type){Ok(context)=>context,Err(_)=>return};
                 let data=frame["event"]["data"].clone();
                 let sealed=match wire::seal(key,&context,&data){Ok(sealed)=>sealed,Err(_)=>return};
                 frame["event"]["data"]=json!({"sealed":sealed});

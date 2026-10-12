@@ -1,5 +1,9 @@
 //! Stateless, no-tools HTTP adapters. Inputs/outputs are bounded and provider
 //! errors never become model instructions or policy authority.
+mod jev_supervisor;
+mod strict;
+#[cfg(test)]
+mod jev_supervisor_tests;
 use crate::{hash, invalid, transaction, Context, SemanticVerdict, SupervisorVerdict, MAX_BODY};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -19,6 +23,13 @@ impl Model {
         Ok(Self{provider:provider.into(),model:model.into()})
     }
     pub fn display(&self)->String{format!("{}:{}",self.provider,self.model)}
+    pub fn validate_supervisor(&self)->io::Result<()> {
+        if Self::parse(&self.display())? != *self { return Err(invalid("invalid independent supervisor model")); }
+        if self.provider=="jev" && self.model!=jev_supervisor::MODEL {
+            return Err(invalid("Jev alignment supervision requires pinned jev:jev-1.13.0"));
+        }
+        Ok(())
+    }
     fn service(&self)->(&'static str,&'static str){match self.provider.as_str(){
         "claude"=>("https://api.anthropic.com/v1/messages","ANTHROPIC_API_KEY"),
         "codex"=>("https://api.openai.com/v1/responses","OPENAI_API_KEY"),
@@ -40,6 +51,12 @@ const NOUL_FIELDS:[(&str,&str);5]=[
     ("needs_human_review","Does this message require a human decision because of scope creep, conflicting evidence, ambiguity or misalignment?"),
 ];
 pub fn request(model:&Model,instructions:&str,input:&Value)->io::Result<Value>{
+    request_with_threshold(model,instructions,input,0.5)
+}
+fn request_with_threshold(model:&Model,instructions:&str,input:&Value,threshold:f64)->io::Result<Value>{
+    if model.provider=="jev" && jev_supervisor::selected(instructions) {
+        return jev_supervisor::request(model,input,threshold);
+    }
     if serde_json::to_vec(input)?.len()>MAX_INPUT{return Err(invalid("review input exceeds bound"));}
     let text=serde_json::to_string(input)?;
     Ok(match model.provider.as_str(){
@@ -75,10 +92,13 @@ fn credential(model: &Model) -> io::Result<String> {
         .ok_or_else(|| invalid("independent review credential unavailable"))
 }
 pub fn evaluate(context:&Context,model:&Model,instructions:&str,input:&Value)->io::Result<Response>{
-    let body=request(model,instructions,input)?;
+    let body=request_with_threshold(model,instructions,input,context.review.risk_threshold)?;
     let (endpoint,_)=model.service();let key=credential(model)?;
-    let (reserved,input_rate,output_rate)=reserve(context,model,&body)?;
-    let response=call_at(model,endpoint,&key,&body);
+    evaluate_request_at(context,model,&body,endpoint,&key)
+}
+fn evaluate_request_at(context:&Context,model:&Model,body:&Value,endpoint:&str,key:&str)->io::Result<Response>{
+    let (reserved,input_rate,output_rate)=reserve(context,model,body)?;
+    let response=call_at(model,endpoint,key,body);
     settle(context,model,reserved,input_rate,output_rate,&response)?;
     response
 }
@@ -118,13 +138,21 @@ fn call_at(model:&Model,endpoint:&str,key:&str,body:&Value)->io::Result<Response
         if !response.status().is_success(){return Err(invalid("independent review service refused"));}
         if response.content_length().is_some_and(|n|n>MAX_OUTPUT as u64){return Err(invalid("review response exceeds bound"));}
         let mut raw=Vec::new();while let Some(chunk)=response.chunk().await.map_err(|_|invalid("invalid review response"))?{raw.extend_from_slice(&chunk);if raw.len()>MAX_OUTPUT{return Err(invalid("review response exceeds bound"));}}
-        serde_json::from_slice(&raw).map_err(|_|invalid("invalid review response JSON"))
+        if model.provider=="jev" && jev_supervisor::is_request(body) {
+            strict::parse(&raw).map_err(|_|invalid("invalid or duplicate Jev supervisor JSON"))
+        } else { serde_json::from_slice(&raw).map_err(|_|invalid("invalid review response JSON")) }
     })?;
-    parse_response(model,&value,started.elapsed().as_millis())
+    parse_response_for_request(model,&value,started.elapsed().as_millis(),Some(body))
 }
 pub fn parse_response(model:&Model,value:&Value,latency_ms:u128)->io::Result<Response>{
+    parse_response_for_request(model,value,latency_ms,None)
+}
+fn parse_response_for_request(model:&Model,value:&Value,latency_ms:u128,request:Option<&Value>)->io::Result<Response>{
     let usage=&value["usage"];
     let (result,input_tokens,output_tokens)=match model.provider.as_str(){
+        "jev" if request.is_some_and(jev_supervisor::is_request)=>{
+            (jev_supervisor::result(model,value,request.unwrap())?,usage["input_tokens"].as_u64(),usage["output_tokens"].as_u64())
+        },
         "jev"=>{
             let answers=value["answers"].as_object().filter(|rows|rows.len()==5).ok_or_else(||invalid("invalid Jev answer set"))?;
             let mut result=serde_json::Map::new();for (name,_) in NOUL_FIELDS{let row=answers.get(name).ok_or_else(||invalid("missing Jev answer"))?;if row["type"]!="noul"||row.as_object().is_none_or(|fields|fields.len()!=2){return Err(invalid("invalid Jev answer type"));}let score=row["noul"].as_f64().filter(|score|score.is_finite()&&(0.0..=1.0).contains(score)).ok_or_else(||invalid("invalid Jev probability"))?;result.insert(name.into(),json!(score));}
@@ -148,7 +176,18 @@ pub fn semantic(context:&Context,input:&Value)->Result<SemanticVerdict,String>{
     let result=(||{let model=context.review.message_judge.as_ref().ok_or_else(||invalid("message judge not selected"))?;let response=evaluate(context,model,SEMANTIC_INSTRUCTIONS,input)?;let verdict:SemanticVerdict=serde_json::from_value(response.result).map_err(|_|invalid("invalid semantic verdict schema"))?;verdict.validate()?;Ok(verdict)})();result.map_err(|err:io::Error|err.to_string())
 }
 pub fn supervise(context:&Context,input:&Value)->Result<SupervisorVerdict,String>{
-    let result=(||{let model=context.review.supervisor.as_ref().ok_or_else(||invalid("alignment supervisor not selected"))?;let response=evaluate(context,model,SUPERVISOR_INSTRUCTIONS,input)?;serde_json::from_value(response.result).map_err(|_|invalid("invalid supervisor verdict schema"))})();result.map_err(|err|err.to_string())
+    let result=(||{
+        let model=context.review.supervisor.as_ref().ok_or_else(||invalid("alignment supervisor not selected"))?;
+        model.validate_supervisor()?;
+        if model.provider=="jev" {
+            let ids=jev_supervisor::evidence_ids(input)?;
+            transaction(context,|state| if ids.iter().any(|id|!state.artifacts.contains_key(id)) {
+                Err(invalid("supervisor snapshot contains non-host evidence"))
+            } else {Ok(())})?;
+        }
+        let response=evaluate(context,model,SUPERVISOR_INSTRUCTIONS,input)?;
+        serde_json::from_value(response.result).map_err(|_|invalid("invalid supervisor verdict schema"))
+    })();result.map_err(|err:io::Error|err.to_string())
 }
 
 #[cfg(test)]

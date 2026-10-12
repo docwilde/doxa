@@ -2,7 +2,10 @@
 """Offline checks for the native LORE upgrade proposer."""
 from pathlib import Path
 import os
+import hashlib
+import json
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -84,15 +87,144 @@ class LoreBumpTests(unittest.TestCase):
 
     def test_workflow_tracks_native_manifest_and_lock(self):
         workflow = (ROOT / '.github/workflows/lore-bump.yml').read_text()
-        self.assertIn('cargo +stable check --package doxa-lore', workflow)
+        update_command = 'cargo +stable update --manifest-path rust/doxa-lore/Cargo.toml --package lore-core'
+        self.assertEqual(workflow.count(update_command), 2)
+        self.assertIn('cargo +stable check --locked --package doxa-lore', workflow)
+        self.assertIn('--compare-candidate-lock candidate/Cargo.lock Cargo.lock', workflow)
         self.assertIn('git add rust/doxa-lore/Cargo.toml Cargo.lock', workflow)
         self.assertIn('test --locked --workspace --all-features', workflow)
+        self.assertNotIn('cp candidate/Cargo.lock Cargo.lock', workflow)
+        self.assertIn('--body-file "$body_file"', workflow)
+        self.assertNotIn('--body "$body"', workflow)
         self.assertNotIn('uv.lock', workflow)
         top, _, jobs = workflow.partition('\njobs:')
         self.assertIn('contents: read', top)
         self.assertNotIn('contents: write', top)
         self.assertIn('contents: write', jobs)
         self.assertIn('pull-requests: write', jobs)
+
+    def test_candidate_job_is_read_only_and_publisher_is_fresh(self):
+        workflow = (ROOT / '.github/workflows/lore-bump.yml').read_text()
+        verify = workflow.split('  verify:\n', 1)[1].split('\n  publish:\n', 1)[0]
+        publish = workflow.split('\n  publish:\n', 1)[1]
+        self.assertIn('contents: read', verify)
+        self.assertIn('persist-credentials: false', verify)
+        self.assertNotIn('GH_TOKEN', verify)
+        self.assertNotIn('GITHUB_TOKEN', verify)
+        self.assertNotIn('contents: write', verify)
+        self.assertIn('needs: verify', publish)
+        self.assertIn('persist-credentials: false', publish)
+        self.assertIn('--validate-candidate-artifact', publish)
+        self.assertLess(publish.index('Validate candidate identity'), publish.index('GH_TOKEN:'))
+        self.assertLess(publish.index('--compare-candidate-lock'), publish.index('GH_TOKEN:'))
+        self.assertLess(publish.index('cargo +stable update'), publish.index('GH_TOKEN:'))
+        self.assertIn('actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683', publish)
+
+    def _artifact(self, directory, *, extra=()):
+        original_manifest = (ROOT / 'rust/doxa-lore/Cargo.toml').read_text()
+        old = lore_bump.parse_native_pin(original_manifest).ref
+        commit = 'b' * 40
+        new_manifest = lore_bump.rewrite_native_pin(original_manifest, commit).encode()
+        old_lock = (ROOT / 'Cargo.lock').read_bytes()
+        source_old = f'git+https://github.com/docwilde/LORE?rev={old}#{old}'.encode()
+        source_new = f'git+https://github.com/docwilde/LORE?rev={commit}#{commit}'.encode()
+        new_lock = old_lock.replace(source_old, source_new)
+        self.assertNotEqual(old_lock, new_lock)
+        (directory / 'native-Cargo.toml').write_bytes(new_manifest)
+        (directory / 'Cargo.lock').write_bytes(new_lock)
+        metadata = {
+            'schema': 1,
+            'base_sha': 'a' * 40,
+            'tag': 'v9.9.9',
+            'commit': commit,
+            'native_manifest_sha256': hashlib.sha256(new_manifest).hexdigest(),
+            'cargo_lock_sha256': hashlib.sha256(new_lock).hexdigest(),
+        }
+        (directory / 'candidate.json').write_text(json.dumps(metadata))
+        for name, contents in extra:
+            (directory / name).write_bytes(contents)
+        return original_manifest, old_lock, commit, new_lock
+
+    def test_publisher_accepts_exact_pin_and_trusted_resolution(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as directory:
+            artifact = Path(directory)
+            original, old_lock, commit, generated_lock = self._artifact(artifact)
+            old_ref = lore_bump.parse_native_pin(original).ref
+            with patch.object(lore_bump, 'fetch_commit', return_value=commit), \
+                 patch.object(lore_bump, 'fetch_native_state', side_effect=lambda _slug, ref:
+                              lore_bump.RefState(True, '0.62.20' if ref == old_ref else '9.9.9')), \
+                 patch.object(lore_bump, 'fetch_tags', return_value=['v9.9.9']):
+                checked = lore_bump.validate_candidate_artifact(
+                    artifact, expected_base='a' * 40,
+                    native_manifest_path=ROOT / 'rust/doxa-lore/Cargo.toml')
+            self.assertEqual(checked.commit, commit)
+            self.assertEqual(checked.tag, 'v9.9.9')
+            self.assertEqual(lore_bump.parse_native_pin(checked.native_manifest.decode()).ref, commit)
+            lore_bump.require_candidate_lock_matches(checked.cargo_lock, generated_lock)
+            self.assertIn(old_ref.encode(), old_lock)
+
+    def test_publisher_rejects_artifact_that_widens_its_own_lore_closure(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as directory:
+            artifact = Path(directory)
+            original, _, commit, generated_lock = self._artifact(artifact)
+            forged = (artifact / 'Cargo.lock').read_bytes().decode()
+            start = forged.index('[[package]]\nname = "lore-core"')
+            end = forged.index('[[package]]', start + len('[[package]]'))
+            lore_section = forged[start:end]
+            self.assertIn('"uuid",\n]', lore_section)
+            forged = (forged[:start]
+                      + lore_section.replace('"uuid",\n]', '"uuid",\n "doxa-router",\n]')
+                      + forged[end:])
+            router_version = tomllib.loads((ROOT / 'rust/doxa-router/Cargo.toml').read_text())['package']['version']
+            router_entry = f'name = "doxa-router"\nversion = "{router_version}"'
+            self.assertEqual(forged.count(router_entry), 1)
+            forged = forged.replace(router_entry, 'name = "doxa-router"\nversion = "99.0.0"')
+            (artifact / 'Cargo.lock').write_text(forged)
+            metadata = json.loads((artifact / 'candidate.json').read_text())
+            metadata['cargo_lock_sha256'] = hashlib.sha256(forged.encode()).hexdigest()
+            (artifact / 'candidate.json').write_text(json.dumps(metadata))
+
+            old_ref = lore_bump.parse_native_pin(original).ref
+            with patch.object(lore_bump, 'fetch_commit', return_value=commit), \
+                 patch.object(lore_bump, 'fetch_native_state', side_effect=lambda _slug, ref:
+                              lore_bump.RefState(True, '0.62.20' if ref == old_ref else '9.9.9')), \
+                 patch.object(lore_bump, 'fetch_tags', return_value=['v9.9.9']):
+                candidate = lore_bump.validate_candidate_artifact(
+                    artifact, expected_base='a' * 40,
+                    native_manifest_path=ROOT / 'rust/doxa-lore/Cargo.toml')
+            # This self-issued, correct artifact digest is not a trust signal.
+            # The old closure-based validator would have let the forged edge
+            # authorize the otherwise unrelated workspace package change.
+            with self.assertRaisesRegex(SystemExit, 'differs from the trusted publisher resolution'):
+                lore_bump.require_candidate_lock_matches(candidate.cargo_lock, generated_lock)
+
+    def test_publisher_rejects_canary_files_symlinks_and_bad_digests(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as directory:
+            artifact = Path(directory)
+            self._artifact(artifact, extra=(('post-checkout', b'run this'),))
+            with self.assertRaisesRegex(SystemExit, 'unexpected file set'):
+                lore_bump.validate_candidate_artifact(
+                    artifact, expected_base='a' * 40,
+                    native_manifest_path=ROOT / 'rust/doxa-lore/Cargo.toml')
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as directory:
+            artifact = Path(directory)
+            self._artifact(artifact)
+            (artifact / 'Cargo.lock').unlink()
+            (artifact / 'Cargo.lock').symlink_to(ROOT / 'Cargo.lock')
+            with self.assertRaisesRegex(SystemExit, 'unsafe file Cargo.lock'):
+                lore_bump.validate_candidate_artifact(
+                    artifact, expected_base='a' * 40,
+                    native_manifest_path=ROOT / 'rust/doxa-lore/Cargo.toml')
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as directory:
+            artifact = Path(directory)
+            self._artifact(artifact)
+            metadata = json.loads((artifact / 'candidate.json').read_text())
+            metadata['cargo_lock_sha256'] = '0' * 64
+            (artifact / 'candidate.json').write_text(json.dumps(metadata))
+            with self.assertRaisesRegex(SystemExit, 'digest mismatch'):
+                lore_bump.validate_candidate_artifact(
+                    artifact, expected_base='a' * 40,
+                    native_manifest_path=ROOT / 'rust/doxa-lore/Cargo.toml')
 
 
 if __name__ == '__main__':

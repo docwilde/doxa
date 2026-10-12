@@ -1,6 +1,5 @@
 //! A session-start spend ceiling for hosts that report actual USD costs.
-use doxa_runtime::Host;
-use crate::peer_host::PEER_TURN_MARKER;
+use doxa_runtime::{Host, PeerTurnOrigin};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 use std::fs;
@@ -109,22 +108,16 @@ impl BudgetHost {
     }
 }
 
-impl Host for BudgetHost {
-    fn isolation_status(&self) -> Option<Value> { self.inner.isolation_status() }
-    fn has_active_work(&self) -> bool { self.inner.has_active_work() }
-    fn peer_tools_ready(&self) -> bool { self.inner.peer_tools_ready() }
-    fn set_session_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool { self.inner.set_session_tool_handler(handler) }
-    fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool { self.inner.set_peer_tool_handler(handler) }
-    fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }
-    fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
-        // The runtime serializes prompt execution, but this mutex also keeps
-        // observation and the next admission on one state boundary.
+impl BudgetHost {
+    fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
+            emit(json!({"type":"turn_refused","data":{"reason":"budget","message":"Invalid host peer provenance"}}));
+            return;
+        }
+        // Hold the accounting state across admission and provider completion so
+        // concurrent host calls cannot overspend the ceiling.
         let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
         if state.unknown || state.spent >= self.ceiling {
-            let peer_started = text.starts_with(PEER_TURN_MARKER);
-            let peer_origin = if peer_started {
-                text.lines().find(|line| line.starts_with("--- peer message "))
-            } else { None };
             let message = if state.unknown {
                 "Session spend is unknown; further turns are withheld until cost accounting is available"
             } else {
@@ -132,7 +125,9 @@ impl Host for BudgetHost {
             };
             emit(json!({"type":"turn_refused","data":{
                 "reason":"budget","message":message,"spent_usd":if state.unknown { None } else { Some(state.spent) },
-                "ceiling_usd":self.ceiling,"peer_started":peer_started,"peer_origin":peer_origin,"prompt":null
+                "ceiling_usd":self.ceiling,"peer_started":peer_origin.is_some(),
+                "peer_origin":peer_origin.map(PeerTurnOrigin::display_label),
+                "peer_origin_data":peer_origin.map(PeerTurnOrigin::to_value),"prompt":null
             }}));
             return;
         }
@@ -154,7 +149,7 @@ impl Host for BudgetHost {
         // panics, and a caught panic must not reopen the allowance in process.
         state.unknown = true;
         let mut terminal_seen = false;
-        self.inner.prompt(text, &mut |mut event| {
+        self.inner.prompt_with_peer_origin(text, peer_origin, &mut |mut event| {
             if event["type"] == "turn_done" {
                 terminal_seen = true;
                 let cost = match self.pricing {
@@ -203,6 +198,22 @@ impl Host for BudgetHost {
             emit(event);
         });
         if !terminal_seen { state.unknown = true; }
+
+    }
+}
+
+impl Host for BudgetHost {
+    fn isolation_status(&self) -> Option<Value> { self.inner.isolation_status() }
+    fn has_active_work(&self) -> bool { self.inner.has_active_work() }
+    fn peer_tools_ready(&self) -> bool { self.inner.peer_tools_ready() }
+    fn set_session_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool { self.inner.set_session_tool_handler(handler) }
+    fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool { self.inner.set_peer_tool_handler(handler) }
+    fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }
+    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, origin, emit);
+    }
+    fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, None, emit);
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         if self.pricing.is_some() && method == "set_model" {
@@ -213,6 +224,7 @@ impl Host for BudgetHost {
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
     fn initial_permission_mode(&self) -> String { self.inner.initial_permission_mode() }
     fn can_set_model(&self) -> bool { self.pricing.is_none() && self.inner.can_set_model() }
+    fn model_change_requires_idle(&self) -> bool { self.inner.model_change_requires_idle() }
     fn can_set_permission_mode(&self) -> bool { self.inner.can_set_permission_mode() }
     fn permission_change_requires_idle(&self) -> bool { self.inner.permission_change_requires_idle() }
     fn can_set_permission_mode_while_running(&self, mode: &str) -> bool { self.inner.can_set_permission_mode_while_running(mode) }
@@ -482,3 +494,7 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+#[path = "budget_host_queue_tests.rs"]
+mod queue_tests;

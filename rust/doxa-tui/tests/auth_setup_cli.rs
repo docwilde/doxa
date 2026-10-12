@@ -105,7 +105,7 @@ fn direct_docker_setup_reports_requirements_without_authentication_or_engine_cal
     let output=fixture.command(&["setup","docker"]).stdin(Stdio::null()).output().unwrap();
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     let stdout=String::from_utf8_lossy(&output.stdout);
-    for expected in ["Docker prerequisites","Image digest missing","Rootless socket missing","build-session-image.py","cgroup v2"] { assert!(stdout.contains(expected)); }
+    for expected in ["Docker prerequisites","Image digest missing","Rootless socket missing","build-session-image.py","--base-family debian-bookworm","ubuntu-noble","cgroup v2"] { assert!(stdout.contains(expected)); }
     assert!(!fixture.root.path().join("calls").exists());
     assert!(!fixture.root.path().join("doxa").exists());
 }
@@ -129,7 +129,7 @@ fn terminal_setup_configures_reviewed_docker_fields_without_starting_an_engine()
     let output=wait_bounded(child);
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     let stdout=String::from_utf8_lossy(&output.stdout);
-    for expected in ["Docker prerequisites","rootful Docker socket is forbidden","Docker image must be pinned","build-session-image.py","Rootless socket missing","setup complete"] { assert!(stdout.contains(expected),"missing {expected}"); }
+    for expected in ["Docker prerequisites","rootful Docker socket is forbidden","Docker image must be pinned","build-session-image.py","--base-family debian-bookworm","Rootless socket missing","setup complete"] { assert!(stdout.contains(expected),"missing {expected}"); }
     let home=fixture.root.path().join("doxa");
     let config:toml::Value=fs::read_to_string(home.join("config.toml")).unwrap().parse().unwrap();
     assert_eq!(config["docker_image"].as_str(),Some(digest.as_str()));

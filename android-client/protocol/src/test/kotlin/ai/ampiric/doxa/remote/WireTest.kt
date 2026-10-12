@@ -3,8 +3,39 @@ package ai.ampiric.doxa.remote
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
+import java.net.URL
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class WireTest {
+    private class BlockingInputStream(private val entered: CountDownLatch) : InputStream() {
+        private val released = CountDownLatch(1)
+        override fun read(): Int {
+            entered.countDown()
+            released.await()
+            return -1
+        }
+        fun release() { released.countDown() }
+    }
+
+    private class StubConnection(url: URL, private val body: InputStream) : HttpURLConnection(url) {
+        @Volatile var wasDisconnected = false
+        override fun disconnect() { wasDisconnected = true; (body as? BlockingInputStream)?.release() }
+        override fun usingProxy() = false
+        override fun connect() {}
+        override fun getResponseCode() = 200
+        override fun getInputStream() = body
+    }
+
     @Test fun privateOriginAndTargetAreStrict() {
         assertEquals("https://owner.tailnet.ts.net/", Wire.origin("https://owner.tailnet.ts.net/"))
         assertTrue(Wire.target("host-1~session-2"))
@@ -33,6 +64,63 @@ class WireTest {
         val actual = Wire.open(Wire.key(fixture.getString("key")), fixture.getString("context"),
             fixture.getJSONObject("envelope"))
         assertTrue(fixture.getJSONObject("value").similar(actual))
+    }
+
+    @Test fun sharedEventVectorIsIncarnationBound() {
+        val fixture = JSONObject(javaClass.getResource("/remote-event-v2.json")!!.readText())
+        val target = fixture.getString("target")
+        val incarnation = fixture.getString("incarnation")
+        val context = Wire.eventContext(target, incarnation, fixture.getLong("seq"), fixture.getString("event_type"))
+        assertEquals(fixture.getString("context"), context)
+        val key = Wire.key(fixture.getString("key"))
+        assertTrue(fixture.getJSONObject("value").similar(
+            Wire.open(key, context, fixture.getJSONObject("envelope"))))
+
+        val replay = JSONObject().put("type", "event").put("incarnation", incarnation)
+            .put("seq", fixture.getLong("seq")).put("event", JSONObject()
+                .put("type", fixture.getString("event_type")).put("data", JSONObject()
+                    .put("sealed", fixture.getJSONObject("envelope"))))
+        assertThrows(IllegalArgumentException::class.java) {
+            decryptEvent(target, "fedcba9876543210fedcba9876543210", key, replay)
+        }
+        replay.put("incarnation", "fedcba9876543210fedcba9876543210")
+        assertThrows(IllegalStateException::class.java) {
+            decryptEvent(target, replay.getString("incarnation"), key, replay)
+        }
+    }
+
+    @Test fun eventContextRejectsSeparatorsAndLegacyContext() {
+        assertEquals("host~session|event-v2|incarnation-1|7|text_delta",
+            Wire.eventContext("host~session", "incarnation-1", 7, "text_delta"))
+        assertThrows(IllegalArgumentException::class.java) {
+            Wire.eventContext("host~session", "bad|incarnation", 7, "text_delta")
+        }
+    }
+
+    @Test fun finiteHttpOperationHasWallClockDeadlineAndCancellationClosesSse() {
+        val deadlineEntered = CountDownLatch(1)
+        lateinit var deadlineConnection: StubConnection
+        val finite = HubApi("https://owner.tailnet.ts.net/", null, 100) { url ->
+            StubConnection(url, BlockingInputStream(deadlineEntered)).also { deadlineConnection = it }
+        }
+        assertThrows(SocketTimeoutException::class.java) { runBlocking { finite.sessions() } }
+        assertTrue(deadlineEntered.await(1, TimeUnit.SECONDS))
+        assertTrue(deadlineConnection.wasDisconnected)
+
+        val streamEntered = CountDownLatch(1)
+        lateinit var streamConnection: StubConnection
+        val streaming = HubApi("https://owner.tailnet.ts.net/", null, 5_000) { url ->
+            StubConnection(url, BlockingInputStream(streamEntered)).also { streamConnection = it }
+        }
+        runBlocking {
+            val parent = SupervisorJob()
+            val scope = CoroutineScope(parent + Dispatchers.Default)
+            val job = scope.launch { streaming.events("host~session", false, "incarnation-1", 0) {} }
+            assertTrue(streamEntered.await(1, TimeUnit.SECONDS))
+            job.cancelAndJoin()
+            parent.cancel()
+        }
+        assertTrue("cancelled SSE socket must be closed immediately", streamConnection.wasDisconnected)
     }
 
     @Test fun retriesKeepTheExactRequestAndId() {

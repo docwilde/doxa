@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {importKey, open, seal} from '../crypto.mjs';
-import {DoxaRemoteClient, hubOrigin, validTarget} from '../client.mjs';
+import {DoxaRemoteClient, eventContext, hubOrigin, validTarget} from '../client.mjs';
 
 const fixture = name => JSON.parse(readFileSync(new URL(name, import.meta.url), 'utf8'));
 const keyText = 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc';
@@ -62,12 +62,45 @@ test('prompt and result stay sealed across the hub', async () => {
 test('live event content is authenticated before delivery', async () => {
   const key = await importKey(keyText);
   const client = new DoxaRemoteClient('https://machine.tailnet.ts.net/', key);
-  const sealed = await seal(key, 'host~session|event|5|text_delta', {text:'private delta'});
-  const frame = {type:'event',seq:5,event:{type:'text_delta',data:{sealed}}};
+  const incarnation = '0123456789abcdef0123456789abcdef';
+  const sealed = await seal(key, eventContext('host~session', incarnation, 5, 'text_delta'), {text:'private delta'});
+  const frame = {type:'event',incarnation,seq:5,event:{type:'text_delta',data:{sealed}}};
   const original = globalThis.fetch;
-  globalThis.fetch = async () => new Response(`data: ${JSON.stringify(frame)}\n\n`, {status:200});
+  globalThis.fetch = async () => new Response(`data: ${JSON.stringify({type:'hello',incarnation})}\n\ndata: ${JSON.stringify(frame)}\n\n`, {status:200});
   const received = [];
-  try { await client.events('host~session', 5, AbortSignal.timeout(1000), frame => received.push(frame)); }
+  try { await client.events('host~session', incarnation, 5, AbortSignal.timeout(1000), frame => received.push(frame)); }
   finally { globalThis.fetch = original; }
-  assert.deepEqual(received[0].event.data, {text:'private delta'});
+  assert.deepEqual(received[1].event.data, {text:'private delta'});
+});
+
+test('captured event from an old incarnation is rejected after a restart', async () => {
+  const key = await importKey(keyText);
+  const client = new DoxaRemoteClient('https://machine.tailnet.ts.net/', key);
+  const target = 'host~session';
+  const incarnationA = '0123456789abcdef0123456789abcdef';
+  const incarnationB = 'fedcba9876543210fedcba9876543210';
+  const captured = await seal(key, eventContext(target, incarnationA, 5, 'text_delta'),
+    {text:'stale incarnation-A event'});
+  // Public metadata can be edited by the broker; force verification to rely
+  // on the expected B context rather than trusting this envelope field.
+  const replay = {type:'event',incarnation:incarnationB,seq:5,
+    event:{type:'text_delta',data:{sealed:captured}}};
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    `data: ${JSON.stringify({type:'hello',incarnation:incarnationB})}\n\ndata: ${JSON.stringify(replay)}\n\n`,
+    {status:200});
+  const received = [];
+  try {
+    await assert.rejects(client.events(target, incarnationB, 5, AbortSignal.timeout(1000), frame => received.push(frame)));
+  } finally { globalThis.fetch = original; }
+  assert.equal(received.some(frame => frame.type === 'event'), false);
+});
+
+test('shared event vector uses the versioned incarnation context', async () => {
+  const sample = fixture('../../test-vectors/remote-event-v2.json');
+  const key = await importKey(sample.key);
+  assert.equal(eventContext(sample.target, sample.incarnation, sample.seq, sample.event_type), sample.context);
+  assert.deepEqual(await open(key, sample.context, sample.envelope), sample.value);
+  await assert.rejects(open(key, eventContext(sample.target,
+    'fedcba9876543210fedcba9876543210', sample.seq, sample.event_type), sample.envelope));
 });

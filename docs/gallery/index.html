@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>DOXA gallery</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #17141b;
+      --panel: #211c25;
+      --ink: #f2e9dd;
+      --muted: #c1b5aa;
+      --accent: #f08c36;
+      --line: #51414e;
+      font: 16px/1.55 system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--page);
+      color: var(--ink);
+    }
+    main {
+      width: min(100% - 2rem, 76rem);
+      margin: 0 auto;
+      padding: 2rem 0 3rem;
+    }
+    h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 2.7rem); }
+    .intro { color: var(--muted); margin: .5rem 0 1.5rem; }
+    .frame {
+      padding: clamp(.75rem, 2vw, 1.5rem);
+      border: 1px solid var(--line);
+      border-radius: 1rem;
+      background: var(--panel);
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    button {
+      min-height: 2.75rem;
+      border: 1px solid var(--line);
+      border-radius: .55rem;
+      padding: .45rem .9rem;
+      background: #302633;
+      color: var(--ink);
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    button:focus-visible, a:focus-visible {
+      outline: 3px solid var(--accent);
+      outline-offset: 3px;
+    }
+    #position { color: var(--muted); text-align: center; }
+    figure { margin: 0; }
+    .image-link { display: block; text-align: center; }
+    #scene-image {
+      display: block;
+      width: 100%;
+      max-height: min(70vh, 52rem);
+      object-fit: contain;
+      margin: 0 auto;
+      border-radius: .4rem;
+      background: #0f0d11;
+    }
+    figcaption { padding: 1rem .15rem .25rem; }
+    #scene-title { margin: 0; font-size: 1.35rem; }
+    #scene-caption { margin: .35rem 0 0; color: var(--muted); }
+    .footer { margin: 1rem .15rem 0; color: var(--muted); font-size: .95rem; }
+    a { color: #ffbd83; }
+    .error { color: #ffd0c7; }
+    @media (max-width: 38rem) {
+      main { width: min(100% - 1rem, 76rem); padding-top: 1rem; }
+      .frame { padding: .65rem; }
+      button { padding: .35rem .55rem; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>DOXA gallery</h1>
+    <p class="intro">Deterministic interface scenes from the production Ratatui app. The synthetic fixtures do not verify live providers, containers, or fleet runs.</p>
+    <section class="frame" aria-label="Screenshot carousel">
+      <nav class="controls" aria-label="Gallery controls">
+        <button id="previous" type="button" aria-label="Previous screenshot">← Previous</button>
+        <span id="position" aria-live="polite">Loading gallery…</span>
+        <button id="next" type="button" aria-label="Next screenshot">Next →</button>
+      </nav>
+      <figure>
+        <a class="image-link" id="full-size-link" target="_blank" rel="noopener" aria-label="Open the full-size screenshot in a new tab">
+          <img id="scene-image" alt="" fetchpriority="high">
+        </a>
+        <figcaption aria-live="polite">
+          <h2 id="scene-title"></h2>
+          <p id="scene-caption"></p>
+        </figcaption>
+      </figure>
+    </section>
+    <p class="footer">Use the previous and next buttons or the ← and → keys. The selected scene is saved in the URL hash. <a href="https://github.com/docwilde/doxa/blob/main/docs/rust-gallery.md">Capture notes and scene details</a>.</p>
+    <p id="error" class="error" role="status" hidden></p>
+  </main>
+  <script>
+    "use strict";
+    const manifestUrl = new URL("./scenes.json", window.location.href);
+    const byId = id => scenes.findIndex(scene => scene.id === id);
+    let scenes = [];
+    let selected = 0;
+    let defaultScene = "hero";
+
+    const image = document.getElementById("scene-image");
+    const imageLink = document.getElementById("full-size-link");
+    const title = document.getElementById("scene-title");
+    const caption = document.getElementById("scene-caption");
+    const position = document.getElementById("position");
+    const error = document.getElementById("error");
+
+    function render() {
+      const scene = scenes[selected];
+      image.src = scene.image;
+      image.alt = scene.alt;
+      imageLink.href = scene.image;
+      imageLink.setAttribute("aria-label", `Open full-size screenshot: ${scene.title}`);
+      title.textContent = scene.title;
+      caption.textContent = scene.caption;
+      position.textContent = `Scene ${selected + 1} of ${scenes.length}`;
+      document.title = `${scene.title} · DOXA gallery`;
+    }
+
+    function select(index, updateHash = true, replace = false) {
+      selected = (index + scenes.length) % scenes.length;
+      render();
+      const hash = `#${scenes[selected].id}`;
+      if (updateHash && window.location.hash !== hash) {
+        const method = replace ? "replaceState" : "pushState";
+        window.history[method](null, "", hash);
+      }
+    }
+
+    function move(amount) {
+      if (scenes.length) select(selected + amount);
+    }
+
+    function selectFromHash() {
+      if (!scenes.length) return;
+      let hashId = window.location.hash.slice(1);
+      try { hashId = decodeURIComponent(hashId); }
+      catch { hashId = ""; }
+      const index = byId(hashId);
+      if (index >= 0) {
+        selected = index;
+        render();
+      } else {
+        const fallback = byId(defaultScene);
+        if (fallback < 0) throw new Error("Gallery manifest default is not a listed scene");
+        select(fallback, true, true);
+      }
+    }
+
+    document.getElementById("previous").addEventListener("click", () => move(-1));
+    document.getElementById("next").addEventListener("click", () => move(1));
+    document.addEventListener("keydown", event => {
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || target.matches("input, textarea, select"))) return;
+      if (event.key === "ArrowLeft") { event.preventDefault(); move(-1); }
+      else if (event.key === "ArrowRight") { event.preventDefault(); move(1); }
+    });
+    window.addEventListener("hashchange", selectFromHash);
+    window.addEventListener("popstate", selectFromHash);
+
+    fetch(manifestUrl)
+      .then(response => {
+        if (!response.ok) throw new Error(`Gallery manifest unavailable (${response.status})`);
+        return response.json();
+      })
+      .then(manifest => {
+        if (!Array.isArray(manifest.scenes) || manifest.scenes.length === 0) throw new Error("Gallery manifest contains no scenes");
+        scenes = manifest.scenes;
+        defaultScene = manifest.default;
+        if (!scenes.every(scene => typeof scene.id === "string" && typeof scene.title === "string"
+            && typeof scene.caption === "string" && typeof scene.alt === "string"
+            && typeof scene.image === "string" && scene.image.startsWith("../assets/shots/"))) {
+          throw new Error("Gallery manifest has an invalid scene");
+        }
+        selectFromHash();
+      })
+      .catch(reason => {
+        error.hidden = false;
+        error.textContent = reason instanceof Error ? reason.message : "Gallery could not be loaded";
+        position.textContent = "Gallery unavailable";
+      });
+  </script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 //! Native Claude Code host: one CLI owner, immediate stream events, exact control replies.
 use doxa_claude::{Cli, CliOptions, Error};
 use doxa_lore::{stream::StreamScrubber, LoreClient};
-use doxa_runtime::{Host, PeerToolHandler};
+use doxa_runtime::{Host, PeerToolHandler, PeerTurnOrigin};
 use doxa_transcript::TranscriptStore;
 use serde_json::{json, Value};
 use std::{
@@ -20,7 +20,7 @@ const POLL: Duration = Duration::from_millis(20);
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 type Reply = Sender<Result<Value, String>>;
 enum Command {
-    Prompt(String, SyncSender<Value>, Reply),
+    Prompt(String, Option<PeerTurnOrigin>, SyncSender<Value>, Reply),
     Rpc(String, Value, Reply),
     Close,
 }
@@ -83,13 +83,32 @@ impl Shared {
             v => Ok(v.clone()),
         }
     }
-    fn persist(&self, mut record: Value) -> Result<(), String> {
+    fn persist(&self, record: Value) -> Result<(), String> {
+        self.persist_with_peer_origin(record, None)
+    }
+    fn persist_peer(&self, record: Value, origin: &PeerTurnOrigin) -> Result<(), String> {
+        origin.validate().map_err(|_| "Invalid host peer provenance")?;
+        self.persist_with_peer_origin(record, Some(origin))
+    }
+    fn persist_with_peer_origin(
+        &self,
+        mut record: Value,
+        peer_origin: Option<&PeerTurnOrigin>,
+    ) -> Result<(), String> {
         if self.routed {record["router_worker"]=json!(true);}
-        self.store
-            .try_append(record, "claude", |s| {
-                self.scrub(s).map_err(io::Error::other)
-            })
-            .map_err(|_| {
+        if let Some(origin) = peer_origin {
+            if record["type"] != "user" {
+                return Err("Only admitted user rows can carry peer provenance".into());
+            }
+            record["doxa_peer_origin"] = origin.to_value();
+        } else if let Some(fields) = record.as_object_mut() {
+            fields.remove("doxa_peer_origin");
+        }
+        let mut scrub = |text: &str| self.scrub(text).map_err(io::Error::other);
+        let result = if let Some(origin) = peer_origin {
+            self.store.try_append_with_peer_origin(record, "claude", &origin.to_value(), &mut scrub)
+        } else { self.store.try_append(record, "claude", &mut scrub) };
+        result.map_err(|_| {
                 self.failed.store(true, Ordering::Release);
                 "Claude transcript write failed".into()
             })
@@ -491,6 +510,81 @@ impl ClaudeHost {
         indexed && !self.shared.failed.load(Ordering::Acquire)
     }
 }
+impl ClaudeHost {
+    fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
+            emit(done("Invalid host peer provenance"));
+            return;
+        }
+        let text = match doxa_vendors::credentials::redact(text) {
+            Ok(text) => text,
+            Err(_) => {
+                self.shared.failed.store(true, Ordering::Release);
+                emit(done("Claude credential scrub failed; prompt withheld"));
+                return;
+            }
+        };
+        let text = text.as_str();
+        let (tx, rx) = mpsc::sync_channel(256);
+        let (ack, answer) = mpsc::channel();
+        {
+            let _guard = self.admission.lock().unwrap();
+            if self.shared.closing.load(Ordering::Acquire)
+                || self.shared.failed.load(Ordering::Acquire)
+            {
+                emit(done("Claude session unavailable"));
+                return;
+            }
+            if self.shared.active.swap(true, Ordering::AcqRel) {
+                emit(done("Claude turn already running"));
+                return;
+            }
+            self.shared.cancelled.store(false, Ordering::Release);
+        }
+        if text.trim_start().starts_with("/compact")
+            && (text.trim() != "/compact" || !self.shared.review(true))
+        {
+            self.shared.active.store(false, Ordering::Release);
+            emit(done(
+                "LORE review failed or is disabled; compaction refused",
+            ));
+            return;
+        }
+        {
+            let _guard = self.admission.lock().unwrap();
+            if self.shared.cancelled.load(Ordering::Acquire)
+                || self.shared.closing.load(Ordering::Acquire)
+            {
+                self.shared.active.store(false, Ordering::Release);
+                emit(done("Claude turn interrupted"));
+                return;
+            }
+            if self
+                .commands
+                .send(Command::Prompt(text.into(), peer_origin.cloned(), tx, ack))
+                .is_err()
+            {
+                self.shared.active.store(false, Ordering::Release);
+                emit(done("Claude CLI closed"));
+                return;
+            }
+        }
+        if !matches!(answer.recv_timeout(RPC_TIMEOUT), Ok(Ok(_))) {
+            emit(done("Claude refused prompt"));
+            return;
+        }
+        while let Ok(event) = rx.recv() {
+            let terminal = matches!(event["type"].as_str(), Some("turn_done" | "turn_refused"));
+            emit(event);
+            if terminal {
+                return;
+            }
+        }
+        emit(done("Claude CLI event stream closed"));
+
+    }
+}
+
 impl Host for ClaudeHost {
     fn has_active_work(&self) -> bool {
         self.shared.active.load(Ordering::Acquire)
@@ -538,6 +632,9 @@ impl Host for ClaudeHost {
     fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
         self.shared.store.transcript_snapshot()
     }
+    fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, origin, emit);
+    }
     fn peer_tools_ready(&self) -> bool {
         self.shared.peer_allowed && self.shared.peer.lock().unwrap().is_some()
     }
@@ -565,71 +662,7 @@ impl Host for ClaudeHost {
         true
     }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
-        let text = match doxa_vendors::credentials::redact(text) {
-            Ok(text) => text,
-            Err(_) => {
-                self.shared.failed.store(true, Ordering::Release);
-                emit(done("Claude credential scrub failed; prompt withheld"));
-                return;
-            }
-        };
-        let text = text.as_str();
-        let (tx, rx) = mpsc::sync_channel(256);
-        let (ack, answer) = mpsc::channel();
-        {
-            let _guard = self.admission.lock().unwrap();
-            if self.shared.closing.load(Ordering::Acquire)
-                || self.shared.failed.load(Ordering::Acquire)
-            {
-                emit(done("Claude session unavailable"));
-                return;
-            }
-            if self.shared.active.swap(true, Ordering::AcqRel) {
-                emit(done("Claude turn already running"));
-                return;
-            }
-            self.shared.cancelled.store(false, Ordering::Release);
-        }
-        if text.trim_start().starts_with("/compact")
-            && (text.trim() != "/compact" || !self.shared.review(true))
-        {
-            self.shared.active.store(false, Ordering::Release);
-            emit(done(
-                "LORE review failed or is disabled; compaction refused",
-            ));
-            return;
-        }
-        {
-            let _guard = self.admission.lock().unwrap();
-            if self.shared.cancelled.load(Ordering::Acquire)
-                || self.shared.closing.load(Ordering::Acquire)
-            {
-                self.shared.active.store(false, Ordering::Release);
-                emit(done("Claude turn interrupted"));
-                return;
-            }
-            if self
-                .commands
-                .send(Command::Prompt(text.into(), tx, ack))
-                .is_err()
-            {
-                self.shared.active.store(false, Ordering::Release);
-                emit(done("Claude CLI closed"));
-                return;
-            }
-        }
-        if !matches!(answer.recv_timeout(RPC_TIMEOUT), Ok(Ok(_))) {
-            emit(done("Claude refused prompt"));
-            return;
-        }
-        while let Ok(event) = rx.recv() {
-            let terminal = matches!(event["type"].as_str(), Some("turn_done" | "turn_refused"));
-            emit(event);
-            if terminal {
-                return;
-            }
-        }
-        emit(done("Claude CLI event stream closed"));
+        self.prompt_impl(text, None, emit);
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
@@ -1172,7 +1205,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         return;
                     }
                 }
-                Command::Prompt(text, sink, reply) => {
+                Command::Prompt(text, peer_origin, sink, reply) => {
                     streams.clear();
                     reasoning_progress = ReasoningProgress::default();
                     durable = DurableTurn::default();
@@ -1187,7 +1220,9 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         if !ready {
                             return Err("Claude prompt cancelled before admission".into());
                         }
-                        shared.persist(json!({"type":"user","message":{"role":"user","content":text},"cwd":shared.cwd,"sessionId":shared.session,"timestamp":crate::iso_now()}))?;
+                        let record = json!({"type":"user","message":{"role":"user","content":text},"cwd":shared.cwd,"sessionId":shared.session,"timestamp":crate::iso_now()});
+                        if let Some(origin) = &peer_origin { shared.persist_peer(record, origin)?; }
+                        else { shared.persist(record)?; }
                         shared.checkpoint(true)?;
                         let public_prompt = shared.scrub(&text)?;
                         cli.prompt(&text, &shared.session)
@@ -2146,6 +2181,7 @@ for line in sys.stdin:
         let restored = doxa_tui::history::render(&doxa_tui::transport::TranscriptSnapshot {
             bytes,
             earlier_bytes_omitted: false,
+            ..Default::default()
         });
         assert!(restored.contains("I will read."), "{restored}");
         assert!(restored.contains("The result is correct."), "{restored}");
@@ -2197,6 +2233,7 @@ for line in sys.stdin:
         let restored = doxa_tui::history::render(&doxa_tui::transport::TranscriptSnapshot {
             bytes: bytes.clone(),
             earlier_bytes_omitted: false,
+            ..Default::default()
         });
         for public in [String::from_utf8(bytes).unwrap(), restored] {
             for secret in ["abcdefgh", "long ", "secret ", "phrase'", "fixturePrivate"] {

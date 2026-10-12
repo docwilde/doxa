@@ -24,11 +24,8 @@ SIZE = (3068, 1734)
 GRID = (126, 31)
 CELL = (24, 54)
 ORIGIN = ((SIZE[0] - GRID[0] * CELL[0]) // 2, (SIZE[1] - GRID[1] * CELL[1]) // 2)
-SCENES = (
-    "hero", "triage", "pane-triage", "project-label", "image-preview", "isolation", "fleet-review", "fleet-dependency", "fleet-release-review", "fleet-view",
-    "beliefs", "tool-entries", "memory-management", "commands", "help", "codegraph",
-    "settings", "context", "queued-prompts", "peer-messages", "peer-expanded", "reasoning", "routing-status", "settings-router", "settings-mcp", "glm-account", "setup-docker",
-)
+GALLERY_MANIFEST = json.loads((ROOT / "docs/gallery/scenes.json").read_text(encoding="utf-8"))
+SCENES = tuple(scene["id"] for scene in GALLERY_MANIFEST["scenes"])
 FONT = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
 FONT_BOLD = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf")
 FONT_EMOJI = Path("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf")
@@ -64,6 +61,7 @@ def capture(binary: Path, scene: str, destination: Path, version: str, env: dict
         "glm-account": ("GLM account reporting", "owner-declared", "Cash balance: unknown", "bundle remainder: unknown"),
         "setup-docker": ("Check Docker prerequisites", "Edit Docker worker image digest", "Edit rootless Docker socket", "Show rootless Engine and image build steps"),
         "context": ("21.0% in use", "42000 / 200000 tokens", "Conversation", "Available"),
+        "usage-quota": ("Session quota · 5h · 42% used", "Weekly quota · week · 75% used", "Reset at", "no billing request"),
         "routing-status": ("Route auto", "ds-fast", "$0.000004 est", "session cost includes worker calls"),
         "queued-prompts": ("Queued · q-next", "parser API stable"),
         "peer-messages": ("🤖 ↓", "🤖 ↑", "Peer Parser reviewer", "q-peer", "12345678-1234-1234-1234-123456789abc"),
@@ -134,6 +132,10 @@ def main() -> None:
     if not binary.is_file():
         parser.error(f"gallery executable missing: {binary}")
     version = tomllib.loads((ROOT / "rust/doxa-tui/Cargo.toml").read_text())["package"]["version"]
+    for scene in GALLERY_MANIFEST["scenes"]:
+        expected = f"rust-{version}-{scene['id']}.png"
+        if Path(scene["image"]).name != expected:
+            parser.error(f"manifest asset for {scene['id']} must be {expected}")
     scratch = os.environ.get("TMPDIR")
     if not scratch or not Path(scratch).is_dir():
         parser.error("set TMPDIR to an existing real-disk scratch directory")

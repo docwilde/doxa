@@ -123,6 +123,25 @@ entire dividing line, and it holds regardless of which plugin is asking.
 
 ### The mechanism: a sanitized copy, never the CLI's own plugin loader
 
+**Rust implementation policy after the beta47 review:** plugin symlinks may
+resolve inside the installed plugin. External targets require an explicit
+per-plugin directory grant in DOXA's owner-controlled `config.toml`:
+
+```toml
+[plugin_external_roots]
+"example@marketplace" = ["/home/you/approved-plugin-assets"]
+```
+
+Each grant must be an absolute directory owned by the current user and not
+writable by group or others; at most 16 directories can be granted per plugin.
+Command discovery applies the same containment check before reading metadata.
+A snapshot containing an unapproved external target is omitted from adoption;
+a failed replacement preserves the previously published snapshot. These are
+resolved-path checks, not protection against a compromised same-user account
+changing directory ancestors during copying. Personal skills retain their
+existing one-direction snapshot behavior. The older Python design below is
+historical context.
+
 Adoption does **not** ask the isolated CLI to load anything as a plugin —
 that channel (`installed_plugins.json`, `enabledPlugins`) is exactly what
 item AA closed, and using it would silently bring hooks back with

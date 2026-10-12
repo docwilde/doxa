@@ -10,6 +10,10 @@ kotlin {
     compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
 
+sourceSets {
+    test { resources.srcDir("../../test-vectors") }
+}
+
 dependencies {
     compileOnly("org.json:json:20240303")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")

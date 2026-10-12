@@ -2,6 +2,76 @@
 
 use super::safe_label;
 
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct QuotaWindow {
+    pub(super) percent: f64,
+    pub(super) duration: String,
+    pub(super) resets_at: Option<u64>,
+    pub(super) stale: bool,
+}
+
+impl QuotaWindow {
+    fn from_value(
+        value: &serde_json::Value,
+        default_duration: &str,
+        expected_minutes: Option<u64>,
+        reject_weekly_duration: bool,
+        duration_required: bool,
+        stale: bool,
+    ) -> Option<Self> {
+        let percent = value["percent"].as_u64().map(|n| n as f64)
+            .or_else(|| value["percent"].as_f64())
+            .filter(|n| n.is_finite() && (0.0..=100.0).contains(n))?;
+        let duration = match value.get("window_minutes") {
+            Some(value) => {
+                let minutes = value.as_u64().filter(|n| *n > 0 && *n <= 10_080)?;
+                if expected_minutes.is_some_and(|expected| expected != minutes) { return None; }
+                if reject_weekly_duration && minutes == 10_080 { return None; }
+                duration_label(minutes)
+            }
+            None if duration_required => return None,
+            None => default_duration.to_owned(),
+        };
+        let resets_at = value["resets_at"].as_u64().filter(|n| *n <= 253_402_300_799);
+        Some(Self { percent, duration, resets_at, stale })
+    }
+
+    fn from_text(quota: &str, label: &str, duration: &str, stale: bool) -> Option<Self> {
+        let percent = legacy_quota_percent(quota, label)?;
+        Some(Self { percent, duration: duration.to_owned(), resets_at: None, stale })
+    }
+}
+
+fn duration_label(minutes: u64) -> String {
+    if minutes == 10_080 { "7d".into() }
+    else if minutes % 60 == 0 { format!("{}h", minutes / 60) }
+    else { format!("{minutes}m") }
+}
+
+fn legacy_quota_percent(quota: &str, wanted: &str) -> Option<f64> {
+    let mut waiting_for_value = false;
+    let mut found = None;
+    for part in quota.split(|c: char| c.is_whitespace() || matches!(c, '·' | ',' | ';')) {
+        if part.is_empty() { continue; }
+        let value = if let Some((label, value)) = part.split_once(':') {
+            if label == wanted { Some(value) } else { None }
+        } else if part == wanted {
+            waiting_for_value = true;
+            continue;
+        } else if waiting_for_value {
+            waiting_for_value = false;
+            Some(part)
+        } else {
+            None
+        };
+        let Some(value) = value else { continue; };
+        let value = value.strip_suffix('~').unwrap_or(value).strip_suffix('%')?.parse::<f64>().ok()
+            .filter(|n| n.is_finite() && (0.0..=100.0).contains(n))?;
+        if found.replace(value).is_some() { return None; }
+    }
+    found
+}
+
 fn identifier(data: &serde_json::Value, key: &str, limit: usize) -> Option<String> {
     let value = data[key].as_str()?;
     (!value.is_empty() && value.len() <= limit
@@ -115,6 +185,8 @@ pub(super) struct SessionTelemetry {
     pub(super) context_percent: Option<f64>,
     pub(super) context_tokens: Option<u64>,
     pub(super) context_limit: Option<u64>,
+    pub(super) context_last_reported: bool,
+    pub(super) context_snapshot_dirty: bool,
     pub(super) turns: Option<u64>,
     pub(super) input_tokens: Option<u64>,
     pub(super) output_tokens: Option<u64>,
@@ -127,6 +199,8 @@ pub(super) struct SessionTelemetry {
     pub(super) billing_mode: Option<String>,
     pub(super) subscription_type: Option<String>,
     pub(super) quota: Option<String>,
+    pub(super) session_quota: Option<QuotaWindow>,
+    pub(super) weekly_quota: Option<QuotaWindow>,
     pub(super) balance: Option<String>,
     pub(super) glm_account: Option<super::glm_account::GlmAccount>,
     pub(super) lore: Option<String>,
@@ -148,22 +222,42 @@ impl SessionTelemetry {
             if let Some(routing)=self.routing.as_mut() {routing.tracked_cost_only=true;}
         }
     }
-    fn store_context(&mut self, context: super::context_usage::ContextUsage) {
+    pub(super) fn store_context(&mut self, context: super::context_usage::ContextUsage, last_reported: bool, dirty: bool) {
         self.context = context.chip_label();
-        self.context_percent = context.percentage;
+        self.context_percent = context.fill_percentage();
         self.context_tokens = context.used;
         self.context_limit = context.capacity;
         self.context_usage = context;
+        self.context_last_reported = last_reported;
+        self.context_snapshot_dirty = dirty;
     }
 
-    fn update_context(&mut self, report: &serde_json::Value) {
-        if ["ctx_percentage", "ctx_tokens", "ctx_max_tokens"].iter().any(|key| report.get(key).is_some()) {
-            self.store_context(super::context_usage::ContextUsage::reported(report, "ctx_tokens", "ctx_max_tokens", "ctx_percentage"));
+    fn update_context_status(&mut self, report: &serde_json::Value) {
+        let keys = ["ctx_percentage", "ctx_tokens", "ctx_max_tokens"];
+        if keys.iter().any(|key| report.get(key).is_some_and(|value| !value.is_null())) {
+            self.store_context(super::context_usage::ContextUsage::reported(report, "ctx_tokens", "ctx_max_tokens", "ctx_percentage"), false, true);
         }
     }
 
+    fn update_context_turn(&mut self, report: &serde_json::Value) {
+        self.store_context(super::context_usage::ContextUsage::reported(report, "ctx_tokens", "ctx_max_tokens", "ctx_percentage"), false, true);
+    }
+
     pub(super) fn update_context_detail(&mut self, detail: &serde_json::Value) {
-        self.store_context(self.context_usage.detail(detail));
+        let has_totals = ["total_tokens", "max_tokens", "percentage"]
+            .iter()
+            .any(|key| detail.get(key).is_some_and(|value| !value.is_null()));
+        let has_categories = detail["categories"].is_array();
+        if !has_totals && !has_categories {
+            self.store_context(super::context_usage::ContextUsage::default(), false, true);
+            return;
+        }
+        let base = if self.context_last_reported {
+            super::context_usage::ContextUsage::default()
+        } else {
+            self.context_usage.clone()
+        };
+        self.store_context(base.detail(detail), false, true);
     }
 
     /// The most consumed reported window determines the subscription warning.
@@ -201,10 +295,14 @@ impl SessionTelemetry {
     }
 
     pub(super) fn update_turn(&mut self, data: &serde_json::Value) {
+        self.update_turn_inner(data, true);
+    }
+
+    fn update_turn_inner(&mut self, data: &serde_json::Value, authoritative_context: bool) {
         if let Some(compaction) = data.get("compaction") { self.compaction = CompactionStatus::from_value(compaction); }
         if let Some(routing) = data.get("routing") { self.routing = RoutingStatus::from_value(routing); }
         self.update_cost_scope(data);
-        self.update_context(data);
+        if authoritative_context { self.update_context_turn(data); }
         if data["usage_scope"] == "session" {
             self.turns = data["num_turns"].as_u64().or(self.turns);
             self.input_tokens = data["input_tokens"].as_u64().or(self.input_tokens);
@@ -240,8 +338,9 @@ impl SessionTelemetry {
         if let Some(routing) = billing.get("routing") { self.routing = RoutingStatus::from_value(routing); }
         self.update_cost_scope(billing);
         if billing.get("session_cost_usd").is_some() || billing.get("cost_usd").is_some() {
-            self.update_turn(billing);
+            self.update_turn_inner(billing, false);
         }
+        self.update_context_status(billing);
         self.billing_mode = match billing["mode"].as_str() {
             Some("api") => Some("api".into()),
             Some("subscription") => Some("subscription".into()),
@@ -259,6 +358,39 @@ impl SessionTelemetry {
                 !quota.is_empty() && quota.len() <= 120 && !quota.chars().any(char::is_control)
             })
             .map(safe_label);
+        let stale = billing["quota_stale"] == true
+            || billing["quota"].as_str().is_some_and(|quota| quota.trim_end().ends_with('~'));
+        let structured = billing.get("quota_windows").filter(|value| value.is_object())
+            .or_else(|| billing.get("quota_limits").filter(|value| value.is_object()));
+        if let Some(windows) = structured {
+            let codex_windows = billing.get("quota_windows").is_some_and(serde_json::Value::is_object);
+            let session = if codex_windows { windows.get("session") } else { windows.get("five_hour") };
+            let weekly = if codex_windows { windows.get("weekly") } else { windows.get("seven_day") };
+            self.session_quota = session
+                .and_then(|value| QuotaWindow::from_value(
+                    value,
+                    "5h",
+                    if codex_windows { None } else { Some(300) },
+                    codex_windows,
+                    codex_windows,
+                    stale,
+                ));
+            self.weekly_quota = weekly
+                .and_then(|value| QuotaWindow::from_value(
+                    value,
+                    "week",
+                    Some(10_080),
+                    false,
+                    codex_windows,
+                    stale,
+                ));
+        } else if let Some(quota) = billing["quota"].as_str() {
+            self.session_quota = QuotaWindow::from_text(quota, "5h", "5h", stale);
+            self.weekly_quota = QuotaWindow::from_text(quota, "week", "week", stale);
+        } else {
+            self.session_quota = None;
+            self.weekly_quota = None;
+        }
         self.balance = billing["balance"]
             .as_str()
             .filter(|balance| {
@@ -293,7 +425,7 @@ impl SessionTelemetry {
         if let Some(billing) = status.get("billing") {
             self.update_billing(billing);
         }
-        self.update_context(status);
+        self.update_context_status(status);
         if let Some(usage) = status.get("usage") {
             self.turns = usage["num_turns"].as_u64();
             self.input_tokens = usage["input_tokens"].as_u64();
@@ -505,5 +637,65 @@ mod tests {
         assert_eq!(telemetry.quota_color(), None);
         telemetry.update_billing(&json!({"mode":"subscription","type":"Max"}));
         assert_eq!(telemetry.quota_color(), None);
+    }
+
+    #[test]
+    fn quota_window_bars_use_only_recognized_provider_windows() {
+        let mut telemetry = SessionTelemetry::default();
+        telemetry.update_billing(&json!({"mode":"subscription","quota":"5h:42% week:75%",
+            "quota_limits":{"five_hour":{"percent":42,"resets_at":1_800_000_000},
+                "seven_day":{"percent":75}}}));
+        let session = telemetry.session_quota.as_ref().unwrap();
+        assert_eq!(session.percent, 42.0);
+        assert_eq!(session.duration, "5h");
+        assert_eq!(session.resets_at, Some(1_800_000_000));
+        assert_eq!(telemetry.weekly_quota.as_ref().unwrap().percent, 75.0);
+        assert_eq!(telemetry.weekly_quota.as_ref().unwrap().duration, "week");
+
+        telemetry.update_billing(&json!({"mode":"subscription","quota":"1h:33% · week:100%",
+            "quota_windows":{"session":{"percent":33.5,"window_minutes":60},
+                "weekly":{"percent":100,"window_minutes":10080}}}));
+        assert_eq!(telemetry.session_quota.as_ref().unwrap().duration, "1h");
+        assert_eq!(telemetry.session_quota.as_ref().unwrap().percent, 33.5);
+        assert_eq!(telemetry.weekly_quota.as_ref().unwrap().duration, "7d");
+        assert_eq!(telemetry.weekly_quota.as_ref().unwrap().percent, 100.0);
+
+        telemetry.update_billing(&json!({"mode":"subscription","quota":"5h 42% · week 25%~"}));
+        assert_eq!(telemetry.session_quota.as_ref().unwrap().percent, 42.0);
+        assert!(telemetry.weekly_quota.as_ref().unwrap().stale);
+        telemetry.update_billing(&json!({"mode":"subscription","quota":"opus:55%"}));
+        assert!(telemetry.session_quota.is_none());
+        assert!(telemetry.weekly_quota.is_none());
+        telemetry.update_billing(&json!({"mode":"subscription"}));
+        assert!(telemetry.session_quota.is_none());
+        assert!(telemetry.weekly_quota.is_none());
+    }
+
+    #[test]
+    fn explicit_quota_window_durations_must_be_valid_for_their_slot() {
+        for invalid in [json!(0), json!(10_081), json!("300"), json!(null)] {
+            let mut telemetry = SessionTelemetry::default();
+            telemetry.update_billing(&json!({"mode":"subscription","quota":"5h:42%",
+                "quota_windows":{"session":{"percent":42,"window_minutes":invalid}}}));
+            assert!(telemetry.session_quota.is_none(), "invalid duration must not use the 5h default: {invalid}");
+        }
+        let mut telemetry = SessionTelemetry::default();
+        telemetry.update_billing(&json!({"mode":"subscription","quota_windows":{
+            "session":{"percent":42},"weekly":{"percent":75,"window_minutes":300}}}));
+        assert!(telemetry.session_quota.is_none(), "typed Codex windows require duration metadata");
+        assert!(telemetry.weekly_quota.is_none(), "weekly slot must carry a seven-day duration");
+        telemetry.update_billing(&json!({"mode":"subscription","quota_windows":{
+            "session":{"percent":42,"window_minutes":10_080}}}));
+        assert!(telemetry.session_quota.is_none(), "a seven-day window must not be described as the session window");
+
+        telemetry.update_billing(&json!({"mode":"subscription","quota_limits":{
+            "five_hour":{"percent":42,"window_minutes":10_080},"seven_day":{"percent":75,"window_minutes":300}}}));
+        assert!(telemetry.session_quota.is_none());
+        assert!(telemetry.weekly_quota.is_none());
+
+        telemetry.update_billing(&json!({"mode":"subscription","quota_limits":{
+            "five_hour":{"percent":42},"seven_day":{"percent":75}}}));
+        assert_eq!(telemetry.session_quota.as_ref().unwrap().duration, "5h");
+        assert_eq!(telemetry.weekly_quota.as_ref().unwrap().duration, "week");
     }
 }

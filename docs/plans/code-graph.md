@@ -220,7 +220,7 @@ unparseable source, or oversized export fails closed.
 
 `doxa codegraph --stored [--root WORKTREE] file|imports|calls|modules PATH`
 returns a validated LORE `current` snapshot or `{"status":"missing"}`. DOXA
-pins `lore-core` 0.62.20 and calls only `codegraph_snapshot_read_v1`; it checks
+currently pins `lore-core` 0.62.20 and calls only `codegraph_snapshot_read_v1`; it checks
 the exact project, canonical worktree, query, path, revision, source hash,
 graph digest, and `unknown` binding claim. LORE checks Git worktree identity
 and rehashes the requested file on each read. A source edit or checkout
@@ -241,6 +241,11 @@ second pass makes the inventory unknown instead of falsely verified. Edits
 after a file's second read, or an edit restored between reads, can still escape
 detection; this is not an atomic repository snapshot. Omitted result rows and
 semantic bindings remain outside its claim.
+
+Python snapshot reads use released **LORE v0.62.21**, commit
+`e398ea2b0d8b1a8c52614ee69fa483005c5e9c81`, pinned in the native dependency
+and lockfile. The client and service validate bounded `.rs` and `.py` paths;
+Python binding remains `unknown`. DOXA does not store snapshots automatically.
 
 To persist an export, an owner must inspect it and invoke LORE's explicit
 `codegraph_snapshot_store_v1` command with human-review authority and an

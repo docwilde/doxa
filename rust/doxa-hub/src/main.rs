@@ -107,6 +107,12 @@ async fn forward_stream(state:Arc<Mutex<Hub>>,sender:mpsc::Sender<Bytes>,owner:S
             // or answering a request from a different state.
             break;
         }
+        if identity.1==true && batch["events"].as_array().is_some_and(|events|
+            events.iter().any(|frame|frame["incarnation"]!=identity.0)) {
+            let gap=json!({"type":"event","seq":cursor,"turn":null,"event":{"type":"replay_gap","data":{}}});
+            let _=sender.send(sse(&gap,None)).await;
+            break;
+        }
         for frame in batch["events"].as_array().into_iter().flatten(){
             let seq=frame["seq"].as_u64();
             if sender.send(sse(frame,seq)).await.is_err(){return;}
@@ -143,7 +149,7 @@ async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool,pu
 async fn handle_inner(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool,push:Option<Arc<push::Runtime>>,fcm:Option<Arc<fcm::Runtime>>)->Response<Body>{
     let method=request.method().clone();
     let path=request.uri().path().to_owned();
-    let parts=path.trim_matches('/').split('/').collect::<Vec<_>>();
+    let parts=policy::route_segments(&path);
     let kind=match (method.clone(),parts.as_slice()){
         (Method::GET,["api","sessions"]|["api","push","config"]|[]|["remote.js"]|["remote.css"]|["remote-sw.js"])=>"read_status",
         (Method::POST|Method::DELETE,["api","push","subscriptions"]|["api","push","android"])=>"read_status",
@@ -370,6 +376,27 @@ async fn main()->io::Result<()> {
         assert_eq!(extension_origin_with_allowlist(&headers,&approved),None);
         headers.insert(header::ORIGIN,"https://hub.ts.net".parse().unwrap());
         assert_eq!(extension_origin_with_allowlist(&headers,"https://hub.ts.net"),None);
+    }
+    #[tokio::test]async fn root_page_is_denied_without_identity_and_retrievable_by_attested_owner(){
+        let _guard=ENV.lock().unwrap();
+        let home=tempfile::tempdir().unwrap();
+        let vars=["DOXA_HOME","DOXA_REMOTE_ENABLED","DOXA_REMOTE_ALLOWED_LOGINS"];
+        let old=vars.map(std::env::var_os);
+        std::env::set_var("DOXA_HOME",home.path());
+        std::env::set_var("DOXA_REMOTE_ENABLED","1");
+        std::env::set_var("DOXA_REMOTE_ALLOWED_LOGINS","owner@example.com");
+        let state=Arc::new(Mutex::new(Hub::new()));
+        let anonymous=wire(state.clone(),true,"GET / HTTP/1.1\r\nHost: hub.test\r\n\r\n".into()).await;
+        assert!(anonymous.starts_with("HTTP/1.1 403"),"{anonymous}");
+        let unattested=wire(state.clone(),false,"GET / HTTP/1.1\r\nHost: hub.test\r\nTailscale-User-Login: owner@example.com\r\n\r\n".into()).await;
+        assert!(unattested.starts_with("HTTP/1.1 403"),"{unattested}");
+        let page=wire(state,true,"GET / HTTP/1.1\r\nHost: hub.test\r\nTailscale-User-Login: owner@example.com\r\n\r\n".into()).await;
+        assert!(page.starts_with("HTTP/1.1 200"),"{page}");
+        assert!(page.contains("text/html; charset=utf-8"));
+        assert!(page.contains("DOXA remote"));
+        for (name,value) in vars.into_iter().zip(old){
+            if let Some(value)=value{std::env::set_var(name,value)}else{std::env::remove_var(name)}
+        }
     }
     async fn wire(state:Arc<Mutex<Hub>>,attested:bool,raw:String)->String{
         let (server,mut client)=UnixStream::pair().unwrap();

@@ -172,6 +172,7 @@ fn codex_billing(reply: &Value) -> Option<Value> {
         .or_else(|| reply.get("rateLimits"))?;
     if bucket["limitId"] != "codex" { return None; }
     let mut windows = Vec::new();
+    let mut quota_windows = serde_json::Map::new();
     for name in ["primary", "secondary"] {
         let row = &bucket[name];
         let Some(used) = row["usedPercent"].as_f64()
@@ -184,13 +185,22 @@ fn codex_billing(reply: &Value) -> Option<Value> {
             n => format!("{n}m"),
         };
         windows.push(format!("{window}:{used}%"));
+        let slot = if minutes == 10_080 { Some("weekly") }
+            else if name == "primary" { Some("session") }
+            else { None };
+        if let Some(slot) = slot {
+            let resets_at = row["resetsAt"].as_u64().filter(|stamp| *stamp <= 253_402_300_799);
+            let mut window = json!({"percent":used,"window_minutes":minutes});
+            if let Some(resets_at) = resets_at { window["resets_at"] = json!(resets_at); }
+            quota_windows.insert(slot.into(), window);
+        }
     }
     if windows.is_empty() { return None; }
     let plan = bucket["planType"].as_str()
         .or_else(|| reply["planType"].as_str())
         .filter(|plan| !plan.is_empty() && plan.len() <= 32
             && plan.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
-    Some(json!({"mode":"subscription","type":plan,"quota":windows.join(" · ")}))
+    Some(json!({"mode":"subscription","type":plan,"quota":windows.join(" · "),"quota_windows":quota_windows}))
 }
 
 impl AppServerDriver {
@@ -414,6 +424,19 @@ impl AppServerDriver {
     pub async fn discover_models(options: AppServerOptions) -> Result<Vec<Value>, AppServerError> {
         let mut driver = Self::initialize(options, str::to_owned).await?;
         let result = driver.list_models().await;
+        driver.shutdown().await;
+        result
+    }
+
+    /// Cancellation includes process initialization and model listing. The
+    /// owned discovery process group is killed and reaped before returning.
+    pub async fn discover_models_cancellable(options: AppServerOptions,
+        cancel: &AtomicBool) -> Result<Vec<Value>, AppServerError> {
+        let mut driver = Self::initialize_with_gate_cancel(options, str::to_owned, None, Some(cancel)).await?;
+        let result = tokio::select! { biased;
+            _ = wait_cancelled(cancel) => Err(AppServerError::Cancelled),
+            result = driver.list_models() => result,
+        };
         driver.shutdown().await;
         result
     }
@@ -1035,12 +1058,55 @@ mod web_item_tests {
     #[test]
     fn billing_uses_only_measured_codex_windows() {
         let reply = json!({"rateLimitsByLimitId":{"codex":{"limitId":"codex",
-            "planType":"plus","primary":{"usedPercent":67.2,"windowDurationMins":300},
-            "secondary":{"usedPercent":91,"windowDurationMins":10080}},
+            "planType":"plus","primary":{"usedPercent":67.2,"windowDurationMins":300,"resetsAt":1_800_000_000},
+            "secondary":{"usedPercent":91,"windowDurationMins":10080,"resetsAt":1_900_000_000}},
             "codex_other":{"limitId":"codex_other","primary":{"usedPercent":100,"windowDurationMins":60}}}});
-        assert_eq!(codex_billing(&reply), Some(json!({"mode":"subscription","type":"plus","quota":"5h:67.2% · week:91%"})));
+        assert_eq!(codex_billing(&reply), Some(json!({"mode":"subscription","type":"plus","quota":"5h:67.2% · week:91%",
+            "quota_windows":{"session":{"percent":67.2,"window_minutes":300,"resets_at":1_800_000_000},
+                "weekly":{"percent":91.0,"window_minutes":10080,"resets_at":1_900_000_000}}})));
+        let invalid_reset = codex_billing(&json!({"rateLimits":{"limitId":"codex",
+            "primary":{"usedPercent":50,"windowDurationMins":300,"resetsAt":253_402_300_800_u64}}})).unwrap();
+        assert!(invalid_reset["quota_windows"]["session"].get("resets_at").is_none(),
+            "an out-of-range timestamp must not be forwarded to the UI");
         assert_eq!(codex_billing(&json!({"rateLimits":{"limitId":"codex_other","primary":{"usedPercent":20,"windowDurationMins":300}}})), None);
         assert_eq!(codex_billing(&json!({"rateLimits":{"limitId":"codex","primary":{"usedPercent":101,"windowDurationMins":300}}})), None);
+    }
+
+    #[tokio::test]
+    async fn cancelled_catalog_discovery_kills_and_reaps_its_provider_process() {
+        if std::env::var_os(doxa_isolation::ACTIVE_MANIFEST).is_some() { return; }
+        use std::{fs, os::unix::fs::PermissionsExt, sync::Arc, thread};
+        let root=tempfile::tempdir().unwrap();
+        let executable=root.path().join("codex-fixture");
+        fs::write(&executable,r#"#!/usr/bin/env python3
+import json, os, pathlib, sys, time
+for line in sys.stdin:
+    request = json.loads(line)
+    if request['method'] == 'initialize':
+        pathlib.Path('catalog.pid').write_text(str(os.getpid()))
+        time.sleep(60)
+"#).unwrap();
+        fs::set_permissions(&executable,fs::Permissions::from_mode(0o700)).unwrap();
+        let cancel=Arc::new(AtomicBool::new(false));
+        let worker_cancel=cancel.clone();
+        let pidfile=root.path().join("catalog.pid");
+        let watcher=thread::spawn(move || {
+            let deadline=std::time::Instant::now()+Duration::from_secs(3);
+            while std::time::Instant::now()<deadline {
+                if pidfile.exists() { worker_cancel.store(true,Ordering::Release); return true; }
+                thread::sleep(Duration::from_millis(10));
+            }
+            false
+        });
+        let options=AppServerOptions { executable,cwd:root.path().to_owned(),model:None,
+            sandbox:SandboxMode::ReadOnly,permission:CodexPermission::OnRequest,
+            resume_thread:None,turn_timeout:Duration::from_secs(5) };
+        let result=timeout(Duration::from_secs(6),
+            AppServerDriver::discover_models_cancellable(options,&cancel)).await;
+        assert!(watcher.join().unwrap(),"provider fixture did not start");
+        assert!(matches!(result,Ok(Err(AppServerError::Cancelled))),"{result:?}");
+        let pid=fs::read_to_string(root.path().join("catalog.pid")).unwrap().parse::<i32>().unwrap();
+        assert_eq!(unsafe { libc::kill(pid,0) },-1,"cancelled app-server child was not reaped");
     }
 
     #[test]

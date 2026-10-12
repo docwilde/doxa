@@ -27,6 +27,18 @@ pub fn command_is_fresh(body:&Value)->bool {
     issued<=now.saturating_add(30) && now.saturating_sub(issued)<=120
 }
 
+/// Bind an encrypted event to the selected session lifetime. The explicit
+/// `event-v2` label prevents old v1 ciphertext from being reinterpreted.
+pub fn event_context(target: &str, incarnation: &str, seq: u64, event_type: &str) -> io::Result<String> {
+    let safe_component = |value: &str, max: usize| !value.is_empty() && value.len() <= max
+        && !value.contains('|') && !value.chars().any(char::is_control);
+    if !safe_component(target, 257) || !safe_component(incarnation, 128)
+        || !safe_component(event_type, 128) {
+        return Err(invalid("invalid remote event context"));
+    }
+    Ok(format!("{target}|event-v2|{incarnation}|{seq}|{event_type}"))
+}
+
 /// A copied, owner-only key file is deliberately outside the hub protocol.
 pub fn key_from_file(path: &Path) -> io::Result<[u8; 32]> {
     if !path.is_absolute() { return Err(invalid("remote key path must be absolute")); }
@@ -152,6 +164,28 @@ pub fn open(key: &[u8; 32], context: &str, envelope: &Value) -> io::Result<Value
         assert!(open(&key, "other~session|result|transcript", &sealed).is_err());
         let mut altered = sealed.clone(); altered["data"] = json!("AAAA");
         assert!(open(&key, "host~session|result|transcript", &altered).is_err());
+    }
+    #[test] fn event_context_is_versioned_and_incarnation_bound() {
+        let context = event_context("host~session", "0123456789abcdef0123456789abcdef", 42, "text_delta").unwrap();
+        assert_eq!(context, "host~session|event-v2|0123456789abcdef0123456789abcdef|42|text_delta");
+        let key = [7u8; 32];
+        let value = json!({"text":"restart fixture"});
+        let sealed = seal(&key, &context, &value).unwrap();
+        assert_eq!(open(&key, &context, &sealed).unwrap(), value);
+        assert!(open(&key, &event_context("host~session", "fedcba9876543210fedcba9876543210", 42, "text_delta").unwrap(), &sealed).is_err());
+        assert!(open(&key, "host~session|event|42|text_delta", &sealed).is_err());
+        assert!(event_context("host~session", "bad|incarnation", 42, "text_delta").is_err());
+    }
+    #[test] fn shared_event_vector_opens_with_rust_wire() {
+        let fixture: Value = serde_json::from_str(include_str!("../../../test-vectors/remote-event-v2.json")).unwrap();
+        let target=fixture["target"].as_str().unwrap();
+        let incarnation=fixture["incarnation"].as_str().unwrap();
+        let seq=fixture["seq"].as_u64().unwrap();
+        let event_type=fixture["event_type"].as_str().unwrap();
+        let context=event_context(target,incarnation,seq,event_type).unwrap();
+        assert_eq!(context,fixture["context"].as_str().unwrap());
+        let key=[7u8;32];
+        assert_eq!(open(&key,&context,&fixture["envelope"]).unwrap(),fixture["value"]);
     }
     #[test] fn key_file_is_private_and_never_replaced() {
         let root=tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();

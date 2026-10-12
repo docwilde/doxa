@@ -1,144 +1,63 @@
 name: LORE bump
 
-# Proposes an immutable native LORE upgrade for human review. Cargo is the
-# runtime pin. This workflow never merges a proposal.
-
+# Candidate source is built in an unprivileged job. A separate fresh runner
+# validates its small artifact before the narrowly scoped publication step.
 on:
   schedule:
-    # Mondays, 04:17 UTC. Weekly matches LORE's release pace -- daily would
-    # re-ask a question whose answer changes a few times a month. Monday so
-    # a proposal is already waiting at the start of the week rather than
-    # landing mid-Friday. 04:17 rather than 04:00 because GitHub's scheduled
-    # queue is heavily oversubscribed on the hour and on-the-hour crons are
-    # the ones that get delayed; 04:xx UTC is the middle of the night in the
-    # Americas and pre-dawn in Europe, so the ~12 runner-minutes an actual
-    # bump costs never compete with a human waiting on PR CI. Cron is UTC
-    # and does not observe DST, so this does not wander with the clocks.
     - cron: "17 4 * * 1"
-  # The whole thing is runnable on demand, which is the difference between
-  # this workflow and ci.yml: it can be exercised for real, once, from the
-  # Actions tab the moment it lands on main, instead of waiting a week to
-  # find out whether it works.
   workflow_dispatch:
 
-# Read-only by default. The one job that needs to write says so itself.
 permissions:
   contents: read
 
 concurrency:
-  # Never cancel: two runs must not race to force-push the same proposal
-  # branch, and a run that is already nine minutes into the suite has more
-  # value than the one that would replace it.
   group: lore-bump
   cancel-in-progress: false
 
 env:
-  # One machine-owned branch, reused. See "Idempotency" on the push step.
   BUMP_BRANCH: automation/lore-bump
 
 jobs:
-  propose:
-    name: Propose a LORE upgrade
+  verify:
+    name: Verify candidate without write credentials
     runs-on: ubuntu-latest
-    # Native builds and the workspace fixtures run only for a new release.
     timeout-minutes: 45
-
     permissions:
-      # Push the proposal branch...
-      contents: write
-      # ...and open or update the PR that carries it. Nothing else, and
-      # nothing at all on any other job.
-      pull-requests: write
-
-    env:
-      # `gh` is preinstalled on the runner and reads this. Using it instead of
-      # a third-party create-pull-request action keeps the supply chain of a
-      # workflow that opens PRs against this repo down to two actions, both
-      # first-party-ish and both pinned to a tag that was verified to exist.
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+      contents: read
+    outputs:
+      action: ${{ steps.decide.outputs.action }}
+      suite: ${{ steps.suite.outcome }}
     steps:
-      - name: Check out doxa
-        uses: actions/checkout@v7
+      - name: Check out the base revision without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      # Runs on the runner's system python3 with stdlib only,
-      # so the ordinary "nothing to do" answer costs no dependency sync.
-      # --write rewrites the Cargo pin only when the answer is
-      # `propose`; on `none` it changes nothing at all.
+      # Public GitHub API reads use Python's stdlib; this job has no token in
+      # its environment and executes candidate build scripts only after the
+      # decision has been made.
       - name: Decide whether a newer LORE tag exists
         id: decide
         run: python3 scripts/lore_bump.py --write
 
       - name: Nothing to propose
         if: steps.decide.outputs.action != 'propose'
-        # Through env, not `${{ }}` inside the shell: every value this
-        # workflow interpolates ultimately derives from a tag name in another
-        # repository, and none of them should ever reach a shell as syntax.
-        env:
-          REASON: ${{ steps.decide.outputs.reason }}
-        run: echo "::notice::$REASON"
+        run: echo "::notice::No newer installable LORE release is available."
 
       - name: Select stable Rust
         if: steps.decide.outputs.action == 'propose'
         run: rustup toolchain install stable --profile minimal
 
-      - name: Re-lock against the proposed LORE tag
+      - name: Re-lock against the immutable LORE commit
         if: steps.decide.outputs.action == 'propose'
         run: |
           set -euo pipefail
-          # The changed immutable rev must resolve and compile before a PR
-          # can be opened. Cargo updates the lock to that exact source.
-          cargo +stable check --package doxa-lore
-          git --no-pager diff --stat -- rust/doxa-lore/Cargo.toml Cargo.lock
-
-      # Idempotency, part one: has a human already said no to this exact
-      # proposal? A closed (not merged) PR with this tag's title is a
-      # decision, and re-opening it every Monday would be nagging.
-      - name: Look for an existing proposal
-        if: steps.decide.outputs.action == 'propose'
-        id: existing
-        env:
-          TITLE: "chore(deps): bump lore-core to ${{ steps.decide.outputs.tag }}"
-        run: |
-          set -euo pipefail
-          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
-
-          declined=$(gh pr list --head "$BUMP_BRANCH" --state all --limit 30 \
-            --json number,title,state \
-            --jq '[.[] | select(.state == "CLOSED" and .title == env.TITLE)] | first | .number // empty')
-          if [ -n "$declined" ]; then
-            echo "::notice::PR #$declined already proposed this exact bump and was closed unmerged; not re-opening it."
-            echo "skip=declined" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          open_pr=$(gh pr list --head "$BUMP_BRANCH" --state open --limit 5 \
-            --json number --jq 'first | .number // empty')
-          echo "pr=$open_pr" >> "$GITHUB_OUTPUT"
-
-          # Idempotency, part two: is the branch already carrying exactly
-          # this native manifest and lock? Then the suite has already run
-          # against it and its verdict is already in the PR body. Re-running
-          # nine minutes of tests to reach the same answer is the cost this
-          # check exists to avoid -- and it is checked BEFORE the suite, not
-          # after.
-          # Explicit refspec: actions/checkout narrows `remote.origin.fetch`
-          # to the checked-out branch, so a bare `git fetch origin <branch>`
-          # would move FETCH_HEAD and leave no origin/<branch> to diff against.
-          # Braced deliberately: `$BUMP_BRANCH:refs/...` unbraced is a
-          # word-modifier to some shells, which silently rewrites the refspec
-          # into nonsense rather than failing loudly.
-          git fetch --no-tags origin \
-            "+refs/heads/${BUMP_BRANCH}:refs/remotes/origin/${BUMP_BRANCH}" || true
-          if git rev-parse --verify -q "origin/$BUMP_BRANCH" >/dev/null \
-             && git diff --quiet "origin/$BUMP_BRANCH" -- rust/doxa-lore/Cargo.toml Cargo.lock \
-             && [ -n "$open_pr" ]; then
-            echo "::notice::PR #$open_pr already proposes exactly this change; nothing to do."
-            echo "skip=unchanged" >> "$GITHUB_OUTPUT"
-          fi
+          cargo +stable update --manifest-path rust/doxa-lore/Cargo.toml --package lore-core
+          cargo +stable check --locked --package doxa-lore
 
       - name: Test native runtime against the proposed pin
-        if: steps.decide.outputs.action == 'propose' && steps.existing.outputs.skip == ''
+        if: steps.decide.outputs.action == 'propose'
         id: suite
         continue-on-error: true
         env:
@@ -155,106 +74,163 @@ jobs:
           HOME="$native_tests/home" "$DOXA_LORE_RS" memory show
           cargo +stable test --locked --workspace --all-features 2>&1 | tee native-tests.log
 
-
-      - name: Open or update the proposal
-        if: steps.decide.outputs.action == 'propose' && steps.existing.outputs.skip == ''
+      # The artifact is untrusted input. Only these three bounded files cross
+      # the job boundary; the publisher independently rechecks their contents.
+      - name: Prepare candidate artifact
+        if: steps.decide.outputs.action == 'propose'
         env:
+          BASE_SHA: ${{ github.sha }}
           TAG: ${{ steps.decide.outputs.tag }}
-          SLUG: ${{ steps.decide.outputs.slug }}
-          OLD_REF: ${{ steps.decide.outputs.pinned_ref }}
-          REASON: ${{ steps.decide.outputs.reason }}
-          TITLE: ${{ steps.existing.outputs.title }}
-          OPEN_PR: ${{ steps.existing.outputs.pr }}
-          SUITE: ${{ steps.suite.outcome }}
+          COMMIT: ${{ steps.decide.outputs.commit }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+
+          directory = Path("candidate-artifact")
+          directory.mkdir(mode=0o700)
+          native = Path("rust/doxa-lore/Cargo.toml").read_bytes()
+          lock = Path("Cargo.lock").read_bytes()
+          (directory / "native-Cargo.toml").write_bytes(native)
+          (directory / "Cargo.lock").write_bytes(lock)
+          metadata = {
+              "schema": 1,
+              "base_sha": os.environ["BASE_SHA"],
+              "tag": os.environ["TAG"],
+              "commit": os.environ["COMMIT"],
+              "native_manifest_sha256": hashlib.sha256(native).hexdigest(),
+              "cargo_lock_sha256": hashlib.sha256(lock).hexdigest(),
+          }
+          (directory / "candidate.json").write_text(json.dumps(metadata, sort_keys=True) + "\n")
+          PY
+
+      - name: Upload candidate artifact
+        if: steps.decide.outputs.action == 'propose'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lore-bump-candidate
+          path: |
+            candidate-artifact/candidate.json
+            candidate-artifact/native-Cargo.toml
+            candidate-artifact/Cargo.lock
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Validate and publish proposal
+    needs: verify
+    if: github.ref == 'refs/heads/main' && needs.verify.outputs.action == 'propose'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out a clean base revision without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download candidate artifact into a fresh workspace
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: lore-bump-candidate
+          path: candidate
+
+      # This is trusted base-branch Python. It does not import, build, or
+      # execute anything from the candidate artifact.
+      - name: Validate candidate identity and bounded changes
+        id: validate
+        env:
+          EXPECTED_BASE: ${{ github.sha }}
         run: |
           set -euo pipefail
+          python3 scripts/lore_bump.py --validate-candidate-artifact candidate \
+            --expected-base "$EXPECTED_BASE" \
+            --native-manifest-baseline rust/doxa-lore/Cargo.toml
+          cp candidate/native-Cargo.toml rust/doxa-lore/Cargo.toml
+          git fetch --no-tags origin main
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_BASE"
 
-          if [ "$SUITE" = "success" ]; then
-            verdict="**Native workspace gates pass on this pin.**"
-            tally="$(awk '/^test result:/ {passed += $4; failed += $6} END {print passed+0 " passed; " failed+0 " failed"}' native-tests.log)"
+      # Cargo resolves the lockfile from the trusted baseline lock and the
+      # independently checked immutable manifest pin, using the same targeted
+      # update as the verifier. This command only resolves package metadata;
+      # it does not build, run tests, or execute candidate build scripts. The
+      # untrusted artifact lock is comparison input only and cannot define its
+      # own allowed dependency closure.
+      - name: Resolve and compare the lock with trusted Cargo
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          cargo +stable update --manifest-path rust/doxa-lore/Cargo.toml --package lore-core
+          python3 scripts/lore_bump.py --compare-candidate-lock candidate/Cargo.lock Cargo.lock
+
+      - name: Check exact publication diff
+        run: |
+          set -euo pipefail
+          actual=$(git diff --name-only | LC_ALL=C sort)
+          expected=$(printf '%s\n' Cargo.lock rust/doxa-lore/Cargo.toml | LC_ALL=C sort)
+          test "$actual" = "$expected"
+          git diff --check
+
+      # Credentials appear only in this final, fixed-command publication step.
+      # Git receives an in-memory config value for this push; no remote auth is
+      # written into the checkout or a persistent credential store.
+      - name: Open or update the proposal
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.validate.outputs.tag }}
+          PINNED_REF: ${{ steps.validate.outputs.pinned_ref }}
+          SUITE: ${{ needs.verify.outputs.suite }}
+        run: |
+          set -euo pipefail
+          title="chore(deps): bump lore-core to $TAG"
+          if [ "$SUITE" = success ]; then
+            verdict="Native workspace gates passed in the unprivileged verification job."
           else
-            verdict="**The native upgrade gates do NOT pass on this pin.** LORE moved in a way DOXA cannot take yet -- do not merge until that is understood."
-            tally="$(tail -n 1 native-tests.log 2>/dev/null || echo 'the suite did not get far enough to report a tally')"
+            verdict="Native workspace gates failed in the unprivileged verification job; review before merging."
           fi
+          body_file="$RUNNER_TEMP/lore-bump-pr-body.md"
+          cat > "$body_file" <<EOF
+          Automated proposal for immutable LORE release \`$TAG\`.
 
-          {
-            echo "$REASON"
-            echo
-            echo "| | |"
-            echo "|---|---|"
-            echo "| was | \`$OLD_REF\` |"
-            echo "| now | \`$TAG\` |"
-            echo "| suite | $tally |"
-            echo
-            echo "$verdict"
-            if [ -f native-tests.log ] && grep -q 'FAILED' native-tests.log; then
-              echo
-              echo "#### Failed native tests"
-              echo
-              grep 'FAILED' native-tests.log
-            fi
-            echo
-            echo "Diff in LORE: https://github.com/$SLUG/compare/$OLD_REF...$TAG"
-            echo
-            echo "---"
-            echo
-            echo "The native Cargo pin uses the immutable release commit."
-            echo
-            echo 'These gates were run by the proposal workflow. GITHUB_TOKEN PRs do not trigger additional rust-ci.yml runs; a maintainer push triggers normal PR CI.'
-            echo
-            echo "Opened by \`.github/workflows/lore-bump.yml\`. It never merges anything."
-          } > pr-body.md
+          $verdict
 
-          # Force-push, and no rebase dance: this branch is machine-owned and
-          # its only content is the CURRENT proposal, rebuilt from the tip of
-          # main on every run. There is nothing human on it to lose.
-          #
-          # Idempotency, part three: one branch and therefore at most one open
-          # LORE-bump PR, ever. A newer tag SUPERSEDES the previous proposal
-          # in place rather than opening a second PR beside it -- nobody
-          # should have to work out which of three bump PRs is the one to
-          # take. The trade is that a PR under review can change tag beneath
-          # the reviewer; the title and the table above always name the tag
-          # currently proposed.
+          Compare: https://github.com/docwilde/LORE/compare/$PINNED_REF...$TAG
+
+          This PR was published from a fresh checkout after artifact validation. It is never merged automatically.
+          EOF
+
+          export TITLE="$title"
+          declined=$(gh pr list --head "$BUMP_BRANCH" --state all --limit 30 \
+            --json number,title,state \
+            --jq '[.[] | select(.state == "CLOSED" and .title == env.TITLE)] | first | .number // empty')
+          if [ -n "$declined" ]; then
+            echo "::notice::PR #$declined already proposed this exact bump and was closed unmerged."
+            exit 0
+          fi
+          open_pr=$(gh pr list --head "$BUMP_BRANCH" --state open --limit 5 --json number --jq 'first | .number // empty')
           git checkout -b "$BUMP_BRANCH"
           git add rust/doxa-lore/Cargo.toml Cargo.lock
-          # Identity passed per-command rather than written into the repo's
-          # git config -- nothing here should outlive the step.
           git -c user.name="github-actions[bot]" \
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -m "$TITLE" -m "$REASON"
-          # --force, not --force-with-lease: the only writer that could lose
-          # the race is another run of this same workflow, and the
-          # `lore-bump` concurrency group already serializes those. A lease
-          # would additionally fail whenever the remote-tracking ref was not
-          # fetched -- e.g. the first run, when the branch does not exist.
-          git push --force origin "$BUMP_BRANCH"
-
-          if [ -n "$OPEN_PR" ]; then
-            gh pr edit "$OPEN_PR" --title "$TITLE" --body-file pr-body.md
-            echo "::notice::updated PR #$OPEN_PR to propose $TAG"
-          elif ! gh pr create --base main --head "$BUMP_BRANCH" \
-                 --title "$TITLE" --body-file pr-body.md; then
-            # One repo setting decides whether this line can ever work:
-            # Settings -> Actions -> General -> Workflow permissions ->
-            # "Allow GitHub Actions to create and approve pull requests".
-            # It is OFF by default (repos/<owner>/<repo>/actions/permissions/
-            # workflow reports it as can_approve_pull_request_reviews), and
-            # with it off GITHUB_TOKEN pushes branches fine and is refused at
-            # `pr create`. The branch above is already pushed and already
-            # tested, so say exactly that and where to click, rather than
-            # leaving a maintainer to read a 403 out of a log.
-            echo "::error::could not open the pull request. Enable Settings -> Actions -> General -> \"Allow GitHub Actions to create and approve pull requests\". The proposal branch is pushed and tested; open it by hand meanwhile: https://github.com/${GITHUB_REPOSITORY}/compare/main...${BUMP_BRANCH}?expand=1"
-            exit 1
+              commit -m "$title" -m "Proposed after isolated candidate verification."
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+          GIT_CONFIG_VALUE_0="$auth_header" \
+            git push --force "https://github.com/${GITHUB_REPOSITORY}.git" "$BUMP_BRANCH"
+          if [ -n "$open_pr" ]; then
+            gh pr edit "$open_pr" --title "$title" --body-file "$body_file"
+          else
+            gh pr create --base main --head "$BUMP_BRANCH" --title "$title" --body-file "$body_file"
           fi
+          cat "$body_file" >> "$GITHUB_STEP_SUMMARY"
 
-          cat pr-body.md >> "$GITHUB_STEP_SUMMARY"
-
-      # The PR exists either way -- a red one is the point. But the scheduled
-      # run itself should also go red so it lands in the Actions mail rather
-      # than waiting to be noticed.
-      - name: Fail the run if the proposed pin does not pass
-        if: steps.decide.outputs.action == 'propose' && steps.existing.outputs.skip == '' && steps.suite.outcome != 'success'
+      - name: Fail the run if the proposed pin did not pass
+        if: needs.verify.outputs.suite != 'success'
         run: |
-          echo "::error::the proposed LORE bump does not pass the suite; the PR is open and red on purpose"
+          echo "::error::The proposed LORE pin failed its unprivileged verification suite."
           exit 1

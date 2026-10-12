@@ -18,6 +18,62 @@ doxa fleet start --pool deepseek:deepseek-flash -n 2 \
   --message-review shadow --message-judge jev:jev-1.13.0 --dry-run
 ```
 
+## Jev as the independent alignment supervisor
+
+Select `--alignment-supervisor jev:jev-1.13.0`, or save that exact selector in
+Settings → Fleet → independent supervisor model. This role reviews the
+LORE-scrubbed charter, immutable assignments and current host checkpoint before
+initial dispatch and at subsequent checkpoints. It is separate from the acting
+`--supervisor` worker and from the fast `--message-judge`. Moving aliases such as
+`jev-latest` and `jev-preview` are refused for alignment supervision.
+
+```sh
+doxa fleet start --pool deepseek:deepseek-flash -n 2 \
+  --prompt 'Implement the approved change within src/' \
+  --allowed-path src --run-budget 10 --review-budget 1 \
+  --alignment-supervisor jev:jev-1.13.0 --supervision-mode shadow \
+  --review-threshold 0.75 --message-review off --dry-run
+```
+
+Jev receives three typed Choices: `aligned|uncertain|drifted|blocked`, a closed
+charter-basis category, and one current host artifact ID or `none`. The
+[TypeSafe API](https://docs.typesafe.ai/api) accepts structured state and returns
+Choice probabilities and confidence. DOXA validates the exact selected model,
+answer types, full normalized distributions, maximum-probability winners and
+reported usage. Duplicate JSON fields and invented citations fail closed. The
+citation must be supplied in this snapshot and exist in the host journal; this
+validates identity, not whether the model interpreted the evidence correctly.
+Rust supplies bounded fixed reason/action labels. Jev does not generate prose,
+commands, permissions or assignments.
+
+The frozen `--review-threshold` is a minimum Choice-confidence guard for this
+supervisor and remains the risk threshold for a separately enabled message
+judge. [Choice confidence](https://docs.typesafe.ai/confidence) describes the
+concentration of the returned distribution, not calibrated supervisor accuracy.
+Ties, low confidence, contradictory choices and absent supporting citations
+become `uncertain`; an empty initial evidence list cannot establish alignment.
+Enforce mode pauses new delegation on these verdicts; shadow records semantic
+concerns. A positive verdict cannot clear an existing pause, certify completion,
+waive tool permissions or release a dependent worker.
+
+Calls use `TYPESAFE_API_KEY`, no tools or history, the same shared durable review
+call/spend ceilings, and one bounded HTTP attempt. The published
+[Jev 1.13 pricing and context bounds](https://docs.typesafe.ai/models) are
+$0.042/M input tokens with free output, 32k tokens for state plus the longest
+question and 64k total input. DOXA conservatively bounds those inputs by bytes
+and exposes at most 65 current checkpoint references. Oversized snapshots are
+refused before a reservation. Invalid replies or outages after reservation
+retain the hold and make accounting unknown; that spend uncertainty blocks
+recovery even in shadow mode. There is no automatic retry or provider switch.
+
+Local synthetic HTTP fixtures exercise this role, transport and accounting;
+no live Jev supervisor or consented quality corpus has been evaluated. TypeSafe
+[documents limitations](https://docs.typesafe.ai/model-jaggedness/jev-1.13) around
+adversarial text, indirection and large irrelevant state. Human-labeled drift,
+false-completion, false-alert, latency and cost validation remains open.
+
+## Other independent reviewer providers
+
 For an OpenAI API reviewer, the exact GPT-6 Astra selectors are
 `--alignment-supervisor codex:gpt-6-astra` and
 `--message-judge llm:codex:gpt-6-astra`. They are independent selections;

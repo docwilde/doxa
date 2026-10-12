@@ -1,6 +1,7 @@
 //! A reported context window is independent of billing totals and LORE chars.
 use ratatui::{style::{Color, Style}, text::{Line, Span}};
 use serde_json::Value;
+use doxa_state::valid_session_id;
 use super::{App, safe_label, theme};
 
 #[derive(Clone, Debug, Default)]
@@ -11,6 +12,7 @@ pub(super) struct ContextUsage {
     invalid: bool,
     components: Vec<(String, u64)>,
     invalid_components: bool,
+    components_unreported: bool,
 }
 
 impl ContextUsage {
@@ -41,7 +43,7 @@ impl ContextUsage {
         let mut result = if ["total_tokens", "max_tokens", "percentage"].iter().any(|key| detail.get(key).is_some()) {
             Self::reported(detail, "total_tokens", "max_tokens", "percentage")
         } else {
-            Self { components: vec![], invalid_components: false, ..self.clone() }
+            Self { components: vec![], invalid_components: false, components_unreported: false, ..self.clone() }
         };
         if let Some(categories) = detail.get("categories").filter(|value| !value.is_null()) {
             let components = (|| {
@@ -80,6 +82,8 @@ impl ContextUsage {
                 result.components = components;
             }
             else { result.invalid_components = true; }
+        } else if result.fill_percentage().is_some() {
+            result.components_unreported = true;
         }
         result
     }
@@ -91,6 +95,55 @@ impl ContextUsage {
     pub(super) fn chip_label(&self) -> Option<String> {
         self.percentage.map(|p| format!("{p:.0}%"))
             .or_else(|| self.used.zip(self.capacity).map(|(u, c)| format!("{u}/{c}")))
+    }
+
+    /// A deliberately small, normalized cache for the native tabset. Provider
+    /// responses never cross this persistence boundary.
+    pub(super) fn persistence_value(&self) -> Option<Value> {
+        let (used, capacity) = self.used.zip(self.capacity)?;
+        if self.invalid || capacity == 0 || used > capacity {
+            return None;
+        }
+        let mut value = serde_json::json!({
+            "version": 1,
+            "used": used,
+            "capacity": capacity,
+        });
+        if !self.components.is_empty() && !self.invalid_components {
+            value["categories"] = serde_json::json!(self.components.iter()
+                .map(|(name, tokens)| serde_json::json!({"name":name,"tokens":tokens}))
+                .collect::<Vec<_>>());
+        }
+        Some(value)
+    }
+
+    /// Decode only the cache schema emitted above, then run category counts
+    /// through the same consistency checks as a live provider report.
+    pub(super) fn from_persistence(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        if object.keys().any(|key| !matches!(key.as_str(), "version" | "used" | "capacity" | "categories"))
+            || value["version"].as_u64() != Some(1) {
+            return None;
+        }
+        let used = value["used"].as_u64()?;
+        let capacity = value["capacity"].as_u64()?;
+        let mut detail = serde_json::json!({"total_tokens":used,"max_tokens":capacity});
+        if let Some(categories) = object.get("categories") {
+            let rows = categories.as_array()?;
+            if rows.is_empty() || rows.len() > 4 {
+                return None;
+            }
+            for row in rows {
+                let row = row.as_object()?;
+                if row.keys().any(|key| !matches!(key.as_str(), "name" | "tokens")) {
+                    return None;
+                }
+            }
+            detail["categories"] = categories.clone();
+        }
+        let usage = Self::default().detail(&detail);
+        (usage.used == Some(used) && usage.capacity == Some(capacity)
+            && !usage.invalid && !usage.invalid_components).then_some(usage)
     }
 
     fn lines(&self, width: usize, ascii: bool) -> Vec<Line<'static>> {
@@ -109,48 +162,116 @@ impl ContextUsage {
         };
         lines.extend(crate::memory_menu::wrap_review(&counts, width).into_iter().map(Line::from));
         let cells = width - 2;
-        let mut spans = vec![Span::raw("[")];
         if let Some(percent) = self.fill_percentage() {
             let used_cells = self.used.zip(self.capacity)
                 .map(|(u, c)| (u128::from(u) * cells as u128 / u128::from(c)) as usize)
                 .unwrap_or_else(|| (percent * cells as f64 / 100.0).floor() as usize);
-            if self.components.is_empty() {
-                spans.push(Span::styled(if ascii { "#" } else { "█" }.repeat(used_cells), Style::default().fg(theme::ACCENT)));
-            } else {
-                let capacity = self.capacity.unwrap();
-                let mut cumulative = 0_u64;
-                let mut previous = 0;
-                for (index, (_, tokens)) in self.components.iter().enumerate() {
-                    cumulative += tokens; // validated against used <= capacity
-                    let end = (u128::from(cumulative) * cells as u128 / u128::from(capacity)) as usize;
-                    spans.push(Span::styled(if ascii { component_marker(index).to_string() } else { "█".into() }.repeat(end - previous), Style::default().fg(component_color(index))));
-                    previous = end;
+            if ascii {
+                let mut spans = vec![Span::raw("[")];
+                if self.components.is_empty() {
+                    spans.push(Span::styled("#".repeat(used_cells), Style::default().fg(theme::ACCENT)));
+                } else {
+                    let capacity = self.capacity.unwrap();
+                    let mut cumulative = 0_u64;
+                    let mut previous = 0;
+                    for (index, (_, tokens)) in self.components.iter().enumerate() {
+                        cumulative += tokens; // validated against used <= capacity
+                        let end = (u128::from(cumulative) * cells as u128 / u128::from(capacity)) as usize;
+                        spans.push(Span::styled(component_marker(index).to_string().repeat(end - previous), Style::default().fg(component_color(index))));
+                        previous = end;
+                    }
                 }
+                spans.push(Span::styled(".".repeat(cells - used_cells), Style::default().fg(theme::MUTED)));
+                spans.push(Span::raw("]"));
+                lines.push(Line::from(spans));
+            } else {
+                let mut segments = Vec::new();
+                if self.components.is_empty() {
+                    segments.push((used_cells, theme::ACCENT));
+                } else {
+                    let capacity = self.capacity.unwrap();
+                    let mut cumulative = 0_u64;
+                    let mut previous = 0;
+                    for (index, (_, tokens)) in self.components.iter().enumerate() {
+                        cumulative += tokens; // validated against used <= capacity
+                        let end = (u128::from(cumulative) * cells as u128 / u128::from(capacity)) as usize;
+                        segments.push((end - previous, component_color(index)));
+                        previous = end;
+                    }
+                }
+                lines.push(super::bars::colored(cells, &segments, theme::BORDER));
             }
-            spans.push(Span::styled(if ascii { "." } else { "░" }.repeat(cells - used_cells), Style::default().fg(theme::MUTED)));
         } else {
-            spans.push(Span::styled("?".repeat(cells), Style::default().fg(theme::MUTED)));
+            lines.push(super::bars::unknown(cells));
         }
-        spans.push(Span::raw("]"));
-        lines.push(Line::from(spans));
         if self.fill_percentage().is_some() {
             if self.components.is_empty() {
-                lines.extend(crate::memory_menu::wrap_review(if ascii { "# Used · . Available" } else { "█ Used · ░ Available" }, width).into_iter().map(Line::from));
+                lines.extend(crate::memory_menu::wrap_review(if ascii { "# Used · . Available" } else { "Colored cells Used · dark cells Available" }, width).into_iter().map(Line::from));
             } else {
                 for (index, (name, tokens)) in self.components.iter().enumerate() {
-                    let label = format!("{} {name}: {tokens} tokens", component_marker(index));
+                    let label = if ascii { format!("{} {name}: {tokens} tokens", component_marker(index)) }
+                        else { format!("{name}: {tokens} tokens") };
                     lines.extend(crate::memory_menu::wrap_review(&label, width).into_iter().map(|text| Line::styled(text, Style::default().fg(component_color(index)))));
                 }
-                lines.extend(crate::memory_menu::wrap_review(&format!("{} Available: {} tokens", if ascii { "." } else { "░" }, self.capacity.unwrap() - self.used.unwrap()), width)
+                let available = if ascii { format!(". Available: {} tokens", self.capacity.unwrap() - self.used.unwrap()) }
+                    else { format!("Available: {} tokens", self.capacity.unwrap() - self.used.unwrap()) };
+                lines.extend(crate::memory_menu::wrap_review(&available, width)
                     .into_iter().map(|text| Line::styled(text, Style::default().fg(theme::MUTED))));
             }
         } else {
-            lines.push(Line::from("? Unknown fill"));
+            lines.push(Line::from("Fill not reported · bar is unavailable"));
         }
         if self.invalid_components {
             lines.extend(crate::memory_menu::wrap_review("Component breakdown unavailable · inconsistent or incomplete report", width).into_iter().map(Line::from));
+        } else if self.components_unreported && self.fill_percentage().is_some() {
+            lines.extend(crate::memory_menu::wrap_review("Component breakdown not reported by provider", width).into_iter().map(Line::from));
         }
         lines
+    }
+}
+
+fn normalized_context_record(session_id: &str, value: &Value) -> Option<Value> {
+    if !valid_session_id(session_id) { return None; }
+    let object = value.as_object()?;
+    if object.len() != 2
+        || object.get("session_id")?.as_str()? != session_id
+        || !object.contains_key("report") {
+        return None;
+    }
+    let report = ContextUsage::from_persistence(&object["report"])?.persistence_value()?;
+    Some(serde_json::json!({"session_id":session_id,"report":report}))
+}
+
+impl App {
+    pub(crate) fn context_report_record(&self, session_id: &str) -> Option<Value> {
+        if !valid_session_id(session_id) { return None; }
+        let report = self.session_telemetry.get(session_id)?.context_usage.persistence_value()?;
+        Some(serde_json::json!({"session_id":session_id,"report":report}))
+    }
+
+    pub(crate) fn context_report_state(&self, session_id: &str) -> Option<(bool, bool, Option<Value>)> {
+        if !valid_session_id(session_id) { return None; }
+        let telemetry = self.session_telemetry.get(session_id)?;
+        Some((telemetry.context_last_reported, telemetry.context_snapshot_dirty,
+            telemetry.context_usage.persistence_value()))
+    }
+
+    pub(crate) fn restore_context_report(&mut self, session_id: &str, value: &Value) -> bool {
+        let Some(record) = normalized_context_record(session_id, value) else { return false; };
+        let Some(usage) = ContextUsage::from_persistence(&record["report"]) else { return false; };
+        let telemetry = self.session_telemetry.entry(session_id.to_owned()).or_default();
+        // A report delivered during startup is newer than the cache and must
+        // never be replaced by persisted history.
+        if telemetry.context_snapshot_dirty
+            || (!telemetry.context_last_reported && telemetry.context_usage.persistence_value().is_some()) {
+            return false;
+        }
+        telemetry.store_context(usage, true, false);
+        true
+    }
+
+    pub(crate) fn normalize_context_report_record(session_id: &str, value: &Value) -> Option<Value> {
+        normalized_context_record(session_id, value)
     }
 }
 
@@ -171,8 +292,12 @@ impl App {
             return vec![Line::from("Session changed; reopen context")];
         };
         let unknown = ContextUsage::default();
-        let usage = self.session_telemetry.get(id).map(|t| &t.context_usage).unwrap_or(&unknown);
+        let telemetry = self.session_telemetry.get(id);
+        let usage = telemetry.map(|t| &t.context_usage).unwrap_or(&unknown);
         let mut lines = usage.lines(width, self.preferences.value("context_grid") == "ascii");
+        if telemetry.is_some_and(|value| value.context_last_reported) {
+            lines.insert(0, Line::from("Last reported before this restore"));
+        }
         lines.push(Line::from(""));
         lines.extend(info.lines.iter().filter(|line| !line.starts_with("context  ") && !line.starts_with("in use   "))
             .flat_map(|line| crate::memory_menu::wrap_review(line, width.max(1))).map(Line::from));
@@ -207,11 +332,12 @@ mod tests {
         for expected in ["30.0% in use", "300 / 1000 tokens", "A System: 100 tokens", "B Tools: 200 tokens", "Available: 700 tokens"] {
             assert!(rendered.contains(expected), "{expected}: {rendered}");
         }
-        let glyphs = usage.lines(22, false);
-        let line = glyphs.iter().find(|line| line.spans.first().is_some_and(|span| span.content == "[")).unwrap();
-        assert_eq!(line.spans[1].style.fg, Some(theme::ACCENT));
-        assert_eq!(line.spans[2].style.fg, Some(theme::SUCCESS));
-        assert_eq!(line.spans[3].style.fg, Some(theme::MUTED));
+        let colored = usage.lines(22, false);
+        let line = colored.iter().find(|line| line.spans.first().is_some_and(|span| span.content == "[")).unwrap();
+        assert_eq!(line.spans[1].style.bg, Some(theme::ACCENT));
+        assert_eq!(line.spans[2].style.bg, Some(theme::SUCCESS));
+        assert_eq!(line.spans[3].style.bg, Some(theme::BORDER));
+        assert!(!text(&colored).contains('█') && !text(&colored).contains('░'));
     }
 
     #[test]
@@ -222,8 +348,9 @@ mod tests {
             json!({"total_tokens":-1,"max_tokens":1000}), json!({"percentage":101}),
             json!({"percentage":"30"}), json!({"total_tokens":300,"max_tokens":1000,"percentage":60})] {
             let usage = ContextUsage::default().detail(&report);
-            assert_eq!(bar(&usage, 12), "[??????????]", "{report}");
+            assert_eq!(bar(&usage, 12), "[          ]", "{report}");
             assert!(!text(&usage.lines(40, true)).contains("0.0% in use"), "{report}");
+            assert!(text(&usage.lines(40, true)).contains("Fill not reported"), "{report}");
         }
         let zero = ContextUsage::default().detail(&json!({"total_tokens":0,"max_tokens":1000}));
         assert_eq!(bar(&zero, 12), "[..........]");
@@ -253,6 +380,27 @@ mod tests {
     }
 
     #[test]
+    fn persisted_context_is_bounded_normalized_and_rejects_tampering() {
+        let usage = measured();
+        let value = usage.persistence_value().unwrap();
+        assert_eq!(value, json!({"version":1,"used":300,"capacity":1000,
+            "categories":[{"name":"System","tokens":100},{"name":"Tools","tokens":200}]}));
+        let restored = ContextUsage::from_persistence(&value).unwrap();
+        assert_eq!(restored.used, Some(300));
+        assert_eq!(restored.capacity, Some(1000));
+        assert_eq!(restored.components, [("System".into(), 100), ("Tools".into(), 200)]);
+        for corrupt in [
+            json!({"version":1,"used":300,"capacity":1000,"credential":"not allowed"}),
+            json!({"version":1,"used":1001,"capacity":1000}),
+            json!({"version":2,"used":300,"capacity":1000}),
+            json!({"version":1,"used":300,"capacity":1000,"categories":[{"name":"System\nsecret","tokens":300}]}),
+            json!({"version":1,"used":300,"capacity":1000,"categories":[{"name":"System","tokens":300,"raw":"not allowed"}]}),
+        ] {
+            assert!(ContextUsage::from_persistence(&corrupt).is_none(), "{corrupt}");
+        }
+    }
+
+    #[test]
     fn telemetry_updates_clear_old_breakdown_and_invalid_counts() {
         let mut telemetry = super::super::session_telemetry::SessionTelemetry::default();
         telemetry.update_status(&json!({"ctx_tokens":300,"ctx_max_tokens":1000}));
@@ -264,7 +412,53 @@ mod tests {
         telemetry.update_status(&json!({"ctx_tokens":1001,"ctx_max_tokens":1000}));
         assert!(telemetry.context_tokens.is_none());
         assert!(telemetry.context.is_none());
-        assert_eq!(bar(&telemetry.context_usage, 12), "[??????????]");
+        assert_eq!(bar(&telemetry.context_usage, 12), "[          ]");
+    }
+
+    #[test]
+    fn restored_context_survives_status_placeholders_but_authoritative_unknown_clears_it() {
+        let mut app = App::default();
+        let record = json!({"session_id":"session-one","report":{"version":1,"used":300,"capacity":1000}});
+        assert!(app.restore_context_report("session-one", &record));
+        assert!(!app.restore_context_report("session-two", &record));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"session-one",
+            "ctx_tokens":null,"ctx_max_tokens":null,"ctx_percentage":null}));
+        assert_eq!(app.context_report_state("session-one").unwrap().0, true);
+        app.apply_daemon_frame(&json!({"type":"telemetry_status","session_id":"session-one","status":{
+            "ctx_tokens":null,"ctx_max_tokens":null,"ctx_percentage":null}}));
+        assert_eq!(app.context_report_state("session-one").unwrap().0, true);
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"session-one","event":{"type":"turn_done","data":{}}}));
+        assert_eq!(app.context_report_state("session-one"), Some((false, true, None)));
+
+        let mut detail_app = App::default();
+        assert!(detail_app.restore_context_report("session-one", &record));
+        detail_app.session_telemetry.get_mut("session-one").unwrap().update_context_detail(&json!({}));
+        assert_eq!(detail_app.context_report_state("session-one"), Some((false, true, None)));
+    }
+
+    #[test]
+    fn validated_categories_round_trip_through_the_owner_tabset() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = crate::ui_state::UiStateStore::new(dir.path(), "/project", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs = vec!["session-one".into()];
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"session-one",
+            "ctx_tokens":300,"ctx_max_tokens":1000}));
+        app.session_telemetry.get_mut("session-one").unwrap().update_context_detail(&json!({
+            "total_tokens":300,"max_tokens":1000,
+            "categories":[{"name":"System","tokens":100},{"name":"Tools","tokens":200}]
+        }));
+        store.save(&app).unwrap();
+
+        let saved = doxa_state::load_tabset(store.path(), "/project").unwrap();
+        assert_eq!(saved.raw["rust_ui"]["last_context_reports"]["session-one"]["report"]["categories"].as_array().unwrap().len(), 2);
+        let reloaded = crate::ui_state::UiStateStore::new(dir.path(), "/project", "machine").unwrap();
+        let mut restored = App::default();
+        assert!(reloaded.restore(&mut restored, &["session-one".into()]));
+        assert_eq!(restored.context_report_state("session-one").unwrap(), (true, false, Some(json!({
+            "version":1,"used":300,"capacity":1000,
+            "categories":[{"name":"System","tokens":100},{"name":"Tools","tokens":200}]
+        }))));
     }
 
     #[test]
@@ -325,5 +519,47 @@ mod tests {
         assert!(app.chip_info.is_none());
         assert!(app.active_chooser_rect().is_none());
         assert_eq!(app.size, Rect::new(0, 0, 16, 8));
+    }
+
+    #[test]
+    fn context_menu_draws_colored_cells_and_keeps_provider_composition() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(140, 38));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"fixture",
+            "ctx_tokens":300,"ctx_max_tokens":1000,"cwd":"/fixture"}));
+        app.open_diagnostic("context");
+        assert!(app.apply_daemon_frame(&json!({"type":"context_detail","session_id":"s","ok":true,
+            "detail":{"total_tokens":300,"max_tokens":1000,"categories":[{"name":"System","tokens":100},
+                {"name":"Tools","tokens":200},{"name":"Free space","tokens":700}]}})));
+
+        let area = app.active_chooser_rect().unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(140, 38)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let y = area.y + 3;
+        assert_eq!(buffer[(area.x + 1, y)].symbol(), "[");
+        assert_eq!(buffer[(area.right() - 3, y)].symbol(), "]");
+        let cells = usize::from(area.width.saturating_sub(5));
+        let system = cells * 100 / 1000;
+        let tools = cells * 300 / 1000 - system;
+        for index in 0..cells {
+            let cell = &buffer[(area.x + 2 + index as u16, y)];
+            assert_eq!(cell.symbol(), " ", "cell {index}");
+            let expected = if index < system { theme::ACCENT }
+                else if index < system + tools { theme::SUCCESS }
+                else { theme::BORDER };
+            assert_eq!(cell.bg, expected, "cell {index}");
+        }
+        assert!(text(&app.context_info_lines(usize::from(area.width - 3))).contains("Tools: 200 tokens"));
+    }
+
+    #[test]
+    fn context_totals_without_provider_categories_do_not_claim_a_composition() {
+        let usage = ContextUsage::default().detail(&json!({"total_tokens":300,"max_tokens":1000}));
+        let rendered = text(&usage.lines(80, false));
+        assert!(rendered.contains("30.0% in use"));
+        assert!(rendered.contains("Component breakdown not reported by provider"));
+        assert!(!rendered.contains("System:") && !rendered.contains("Tools:"));
     }
 }

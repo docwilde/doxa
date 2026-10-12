@@ -68,6 +68,16 @@ impl App {
                     self.fleet_review = None;
                     self.fleet_dependency_review = None;
                 }
+                if self.chip_info.as_ref().is_some_and(|info| info.kind == "usage") {
+                    let max_scroll = self.active_chooser_rect().map_or(0, |area| {
+                        let width = usize::from(area.width.saturating_sub(3)).max(1);
+                        let count = self.usage_info_lines(width).len();
+                        count.saturating_sub(usize::from(area.height.saturating_sub(2)).max(1))
+                    });
+                    if let Some(info) = &mut self.chip_info {
+                        info.scroll = info.scroll.min(max_scroll);
+                    }
+                }
                 if self.history_modal && self.active_chooser_rect().is_none() {
                     self.history_modal = false;
                     self.cancel_history_query();
@@ -116,6 +126,7 @@ impl App {
                     self.model_picker = None;
                     self.effort_picker = None;
                     self.engine_picker = false;
+                    self.cancel_new_session_catalog();
                     self.new_session = None;
                     self.permission_picker = None;
                     self.permission_confirm_dont_ask = false;
@@ -651,8 +662,8 @@ impl App {
             };
             let selected = self.transcript_selection.borrow().text(&owner);
             if let Some(text) = selected.filter(|text| !text.is_empty()) {
-                self.pending_clipboard_copy = Some(crate::clipboard::osc52(&text));
-                self.notice = "Clipboard copy queued for terminal · OSC52 support required".into();
+                self.pending_clipboard_copy = Some(text);
+                self.notice = "Clipboard copy queued".into();
                 return true;
             }
             if key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::Char('C') {
@@ -893,15 +904,24 @@ impl App {
                 }
             }
             let codegraph_area = self.active_chooser_rect();
-            let context_rows = self.chip_info.as_ref().filter(|info| info.kind == "context")
-                .map(|_| self.context_info_lines(codegraph_area.map_or(1, |area| usize::from(area.width.saturating_sub(3)).max(1))).len());
+            let dynamic_rows = self.chip_info.as_ref().and_then(|info| match info.kind {
+                "context" => {
+                    let width = codegraph_area.map_or(1, |area| usize::from(area.width.saturating_sub(3)).max(1));
+                    Some(self.context_info_lines(width).len())
+                }
+                "usage" => {
+                    let width = codegraph_area.map_or(1, |area| usize::from(area.width.saturating_sub(3)).max(1));
+                    Some(self.usage_info_lines(width).len())
+                }
+                _ => None,
+            });
             if let Some(info) = self.chip_info.as_mut().filter(|info| {
                 matches!(
                     info.kind,
                     "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "routing" | "compaction" | "native_plugin" | "native_status" | "codegraph"
                 )
             }) {
-                if let Some(count) = context_rows {
+                if let Some(count) = dynamic_rows {
                     let page = codegraph_area.map_or(1, |area| usize::from(area.height.saturating_sub(2)).max(1));
                     match key.code {
                         KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
@@ -1046,14 +1066,7 @@ impl App {
             return true;
         }
         if self.keybindings.matches(KeyAction::PeerMap, key) {
-            self.map_modal = true;
-            self.peer_map.selected = 0;
-            self.pending_peer_refresh = Some(
-                self.groups[self.active_group]
-                    .active_id()
-                    .unwrap_or("")
-                    .to_owned(),
-            );
+            self.open_peer_map(self.active_group);
             return true;
         }
         if self.tool_modal {
@@ -1411,9 +1424,7 @@ impl App {
                         } else if self.active_remote() && (self.input == "/peers" || self.input == "/mesh" || self.input == "/msg" || self.input.starts_with("/msg ")) {
                             self.notice = "Peer controls are available on the session host".into();
                         } else if self.input == "/peers" || self.input == "/mesh" {
-                            self.map_modal = true;
-                            self.peer_map.selected = 0;
-                            self.pending_peer_refresh = Some(id.to_owned());
+                            self.open_peer_map(self.active_group);
                             self.input.clear();
                             self.input_cursor = 0;
                         } else if self.input == "/msg" || self.input.starts_with("/msg ") {
@@ -2223,9 +2234,18 @@ impl App {
         if self.choice_dropdown.is_some() {
             if self.active_request_index().is_none() && self.delete_confirmation.is_none()
                 && self.stop_confirmation.is_none() && !self.diff_modal && !self.map_modal {
-                return self.choice_dropdown_mouse(mouse);
+                if self.choice_dropdown_mouse(mouse) {
+                    return true;
+                }
             }
-            self.choice_dropdown = None;
+            if self.choice_dropdown.is_some() {
+                self.choice_dropdown = None;
+            }
+            // A New Session dropdown is itself modal. Dismiss it without
+            // letting the same click activate Start or close the form.
+            if self.new_session.is_some() && self.settings_menu.is_none() {
+                return true;
+            }
         }
         if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Down(_)
             | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
@@ -2608,12 +2628,36 @@ impl App {
                         self.settings_menu.as_mut().unwrap().selected = index;
                         return self.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                     }
-                } else {
-                    self.close_settings_menu();
+                    return true;
                 }
-                return true;
+                // Dismiss the settings stack, then let this same click choose
+                // the prompt underneath it only for ordinary session Settings.
+                // Docker setup Settings belong to the New Session form; its
+                // clicks must never fall through to the form's actions.
+                let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+                let layout = self.layout(self.size);
+                let clicked_prompt = match layout.panes {
+                    Some(panes) => panes.into_iter().enumerate().any(|(group, pane)| {
+                        self.groups.get(group).is_some_and(|group| group.active_id().is_some())
+                            && self.pane_regions(group, pane)[4].contains(point)
+                    }),
+                    None => self.groups.get(self.active_group).is_some_and(|group| {
+                        group.active_id().is_some()
+                            && self.pane_regions(self.active_group, layout.body)[4].contains(point)
+                    }),
+                };
+                let forward_to_prompt = self.new_session.is_none()
+                    && !self.docker_settings_open
+                    && self.active_request_index().is_none()
+                    && clicked_prompt;
+                self.close_settings_menu();
+                if !forward_to_prompt {
+                    return true;
+                }
+            } else {
+                // Keep the settings stack modal for non-click mouse events.
+                return false;
             }
-            return false;
         }
         if self.chip_info.is_some() {
             let area = self.active_chooser_rect();
@@ -2715,7 +2759,9 @@ impl App {
             let inside_menu = self.active_chooser_rect().is_some_and(|area| {
                 area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
             });
-            if inside_menu && self.chip_info.as_ref().is_some_and(|info| info.kind == "context") {
+            if inside_menu
+                && self.chip_info.as_ref().is_some_and(|info| matches!(info.kind, "context" | "usage"))
+            {
                 let key = match mouse.kind {
                     MouseEventKind::ScrollUp => Some(KeyCode::Up),
                     MouseEventKind::ScrollDown => Some(KeyCode::Down),
@@ -3141,6 +3187,7 @@ impl App {
                 || mouse.row >= y + height
             {
                 self.engine_picker = false;
+                self.cancel_new_session_catalog();
                 self.new_session = None;
                 self.model_picker = None;
                 self.effort_picker = None;

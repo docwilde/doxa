@@ -229,7 +229,7 @@ fn scene(name: &str) -> App {
                 json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"restore-1","content":"pub fn parse(input: &str) -> Result<Node, Error> {\n    check_bounds(input)?;\n    decode(input)\n}\n\nThe remaining boundary case is covered by parser_test.rs."}]}}),
             ];
             let bytes = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n").into_bytes();
-            let markdown = history::render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: false });
+            let markdown = history::render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: false, ..Default::default() });
             event(&mut app, "demo-claude-02", "text_delta", json!({"text":markdown,"snapshot":true}));
             open_first_tool(&mut app);
             app.notice = "Restored session · expanded tool detail".into();
@@ -322,6 +322,25 @@ fn scene(name: &str) -> App {
                         {"name":"Free space","tokens":158000}]}}));
             app.notice = "Fixture · reported context tokens · LORE character caps stay separate".into();
         }
+        "usage-quota" => {
+            let id = "demo-claude-02";
+            app.groups[0].tabs = vec![id.into()];
+            event(&mut app, id, "billing", json!({
+                "mode":"subscription", "type":"Max",
+                "quota":"5h:42% week:75% opus:55% sonnet:34% included:21% extra:9%",
+                "quota_limits":{
+                    "five_hour":{"percent":42,"resets_at":1800000000},
+                    "seven_day":{"percent":75,"resets_at":1900000000},
+                    "seven_day_opus":{"percent":55},
+                    "seven_day_sonnet":{"percent":34},
+                    "seven_day_overage_included":{"percent":21},
+                    "overage":{"percent":9}
+                }
+            }));
+            app.input = "/usage".into();
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            app.notice = "Fixture · synthetic provider quota snapshot · no billing request".into();
+        }
         "routing-status" => {
             let id = "demo-router-04";
             app.apply_daemon_frame(&json!({"type":"hello","session_id":id,"engine":"router",
@@ -366,7 +385,11 @@ fn scene(name: &str) -> App {
                 "sent_at":"2026-10-11T13:26:00Z",
                 "body":"Received the handoff. I will verify reconnect before approving."}));
             event(&mut app,"demo-claude-02","prompt_queued",json!({"id":"q-peer","peer_started":true,
-                "peer_origin":format!("Parser reviewer ({sender})"),"timestamp":"2026-10-11T13:25:00Z",
+                "peer_origin":format!("Parser reviewer ({sender})"),
+                "peer_origin_data":{"sender_session_id":sender,"sender_title":"Parser reviewer",
+                    "message_id":"gallery-peer-queue","sent_at":"2026-10-11T13:25:00Z",
+                    "from_repo":"/demo/project","remote_origin":null,"source":"peer_message"},
+                "timestamp":"2026-10-11T13:25:00Z",
                 "text":"Run the **reconnect review** next.\n\nReport unresolved errors before release."}));
             if name == "peer-expanded" {
                 click_visible_text(&mut app, "Peer Parser reviewer");
@@ -467,7 +490,7 @@ fn scene(name: &str) -> App {
         "fleet-review" | "fleet-dependency" => {
             app.groups[0].tabs=vec!["demo-codex-01".into()];
             app.sessions.iter_mut().for_each(|session|session.transcript.clear());
-            app.show_fleet_review_fixture(&json!({"review_version":1,"run_id":"parser-checks","root":"/demo/fleet","cwd":"/demo/project","mode":"supervisor","isolation":"docker-open","workers":2,"sessions":3,"seed":7,"run_budget_usd":6.0,"allow_unbudgeted":false,"approval_policy":"peer","approval_grace_s":30,"dry_run":false,"prompt_sha256":"a".repeat(64),"charter_sha256":"b".repeat(64),"assignments_sha256":"c".repeat(64),"quiescence_timeout_s":1800,"quiescence_grace_s":5,"preflight":"Planned coordinator + 2 workers; budget bounded","independent_review":{"supervisor":"claude:claude-sonnet-5-5","supervisor_mode":"enforce","message_judge":"jev:jev-1.13.0","message_mode":"shadow","budget_usd":1.5,"max_calls":20,"interval_s":60,"input_usd_per_million":0.4,"output_usd_per_million":0.8,"risk_threshold":0.7},"slots":[{"index":0,"engine":"codex","model":"gpt-6-sol","role":"supervisor","lore":true},{"index":1,"engine":"claude","model":"claude-sonnet-4","role":"worker","lore":true,"task_sha256":"d".repeat(64),"allowed_paths":["src/parser.rs"],"depends_on":[]},{"index":2,"engine":"codex","model":"gpt-6-sol","role":"worker","lore":true,"task_sha256":"e".repeat(64),"allowed_paths":["src/parser_test.rs"],"depends_on":[1]}]})).unwrap();
+            app.show_fleet_review_fixture(&json!({"review_version":1,"run_id":"parser-checks","root":"/demo/fleet","cwd":"/demo/project","mode":"supervisor","isolation":"docker-open","workers":2,"sessions":3,"seed":7,"run_budget_usd":6.0,"allow_unbudgeted":false,"approval_policy":"peer","approval_grace_s":30,"dry_run":false,"prompt_sha256":"a".repeat(64),"charter_sha256":"b".repeat(64),"assignments_sha256":"c".repeat(64),"quiescence_timeout_s":1800,"quiescence_grace_s":5,"preflight":"Planned coordinator + 2 workers; budget bounded","independent_review":{"supervisor":{"provider":"jev","model":"jev-1.13.0"},"supervisor_mode":"enforce","message_judge":{"provider":"jev","model":"jev-1.13.0"},"message_mode":"shadow","budget_usd":1.5,"max_calls":20,"interval_s":60,"input_usd_per_million":0.4,"output_usd_per_million":0.8,"risk_threshold":0.7},"slots":[{"index":0,"engine":"codex","model":"gpt-6-sol","role":"supervisor","lore":true},{"index":1,"engine":"claude","model":"claude-sonnet-4","role":"worker","lore":true,"task_sha256":"d".repeat(64),"allowed_paths":["src/parser.rs"],"depends_on":[]},{"index":2,"engine":"codex","model":"gpt-6-sol","role":"worker","lore":true,"task_sha256":"e".repeat(64),"allowed_paths":["src/parser_test.rs"],"depends_on":[1]}]})).unwrap();
             // Drive the same reducer/visibility watermark used by the live menu.
             let mut terminal=Terminal::new(TestBackend::new(126,31)).unwrap();
             terminal.draw(|frame|app.draw(frame)).unwrap();
@@ -566,7 +589,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "settings-router" | "settings-mcp" | "glm-account" | "setup-docker" | "context" | "routing-status" | "queued-prompts" | "peer-messages" | "peer-expanded" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
+        "hero" | "triage" | "pane-triage" | "project-label" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "settings" | "settings-router" | "settings-mcp" | "glm-account" | "setup-docker" | "context" | "usage-quota" | "routing-status" | "queued-prompts" | "peer-messages" | "peer-expanded" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();

@@ -243,7 +243,16 @@ pub fn load_config_checked(path: &Path) -> io::Result<toml::Table> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(toml::Table::new()),
         Err(error) => return Err(error),
     };
-    let source = String::from_utf8(raw).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    parse_config(&raw)
+}
+
+/// Parse config bytes whose descriptor and ownership a caller already checked.
+/// Keep the same bound as file-backed configuration reads.
+pub fn parse_config(raw: &[u8]) -> io::Result<toml::Table> {
+    if raw.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized config"));
+    }
+    let source = std::str::from_utf8(raw).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     source.parse::<toml::Table>().map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 

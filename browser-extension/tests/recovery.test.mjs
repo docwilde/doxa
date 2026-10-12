@@ -26,8 +26,8 @@ async function extension() {
       if(op==='transcript') {if(state.fail)throw new Error('snapshot failed');return structuredClone(state.history);}
       writes.push({id,op,body:structuredClone(body)});return {ok:true};
     },
-    events:(id,cursor,signal,emit)=>new Promise(resolve=>{
-      streams.push({id,cursor,signal,emit,end:resolve}); signal.addEventListener('abort',resolve,{once:true});
+    events:(id,incarnation,cursor,signal,emit)=>new Promise(resolve=>{
+      streams.push({id,incarnation,cursor,signal,emit,end:resolve}); signal.addEventListener('abort',resolve,{once:true});
     }),
   };
   const context=vm.createContext({document:{getElementById:get,createElement:()=>new Element(),createDocumentFragment:()=>new Element()},
@@ -41,6 +41,7 @@ async function extension() {
 }
 test('packaged approval displays and sends the exact reviewed request and incarnation',async()=>{
   const b=await extension();assert.equal(b.context.probe.ready,true);
+  assert.equal(b.streams[0].incarnation,'first');
   assert.deepEqual(JSON.parse(b.get('question').children.find(child=>child.textContent?.startsWith('{')).textContent),b.original);
   await b.allow().onclick();assert.deepEqual(b.writes[0].body,{id:'same-id',answer:{decision:'allow'},incarnation:'first',reviewed_request:b.original});
 });

@@ -26,9 +26,15 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RESTORE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A bounded tail ending at the daemon's persisted transcript size at hello time.
+#[derive(Default)]
 pub struct TranscriptSnapshot {
     pub bytes: Vec<u8>,
     pub earlier_bytes_omitted: bool,
+    /// Present for a live-daemon restore. Offline archives do not have a
+    /// trusted daemon identity and therefore cannot restore peer cards.
+    pub session_id: Option<String>,
+    pub peer_scope: Option<String>,
+    pub peer_bytes: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -159,7 +165,11 @@ impl DaemonClient {
         let hello = read_json_until(&mut reader, &mut pending_bytes, deadline)?;
         validate_hello(&hello)?;
         let snapshot = if restore { read_snapshot(&hello) } else { None };
-        let attach_cursor = if snapshot.is_some() { hello["next_seq"].as_u64() } else { cursor };
+        // The host samples this cursor before reading either durable file.
+        // Events published during the bounded file reads must replay afterward.
+        let attach_cursor = if snapshot.is_some() {
+            hello["transcript_seq"].as_u64().or_else(|| hello["next_seq"].as_u64())
+        } else { cursor };
         let mut client = Self {
             reader, writer, hello, cursor: attach_cursor.unwrap_or(0), next_id: 1,
             queued: VecDeque::new(),
@@ -283,27 +293,52 @@ impl DaemonClient {
 }
 
 fn read_snapshot(hello: &Value) -> Option<TranscriptSnapshot> {
-    let path = hello["transcript_path"].as_str()?;
-    let size = hello["transcript_bytes"].as_u64()?;
-    if size == 0 { return None; }
-    // Hello comes from the socket peer. Never let a FIFO in its claimed
-    // transcript path block startup, or follow a final symlink to another file.
-    let mut file = OpenOptions::new().read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-        .open(path).ok()?;
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.len() < size {
-        return None;
-    }
-    let start = size.saturating_sub(MAX_RESTORE_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut bytes = vec![0; (size - start) as usize];
-    file.read_exact(&mut bytes).ok()?;
-    if start > 0 {
-        let after_first_line = bytes.iter().position(|byte| *byte == b'\n')? + 1;
-        bytes.drain(..after_first_line);
-    }
-    Some(TranscriptSnapshot { bytes, earlier_bytes_omitted: start > 0 })
+    const MAX_PEER_RESTORE_BYTES: u64 = 4 * 1024 * 1024;
+    let session_id = hello["session_id"].as_str().filter(|id| doxa_transcript::valid_session_id(id))?.to_owned();
+    let (bytes, earlier_bytes_omitted) = if let (Some(path), Some(size)) =
+        (hello["transcript_path"].as_str(), hello["transcript_bytes"].as_u64()) {
+        if size == 0 { (Vec::new(), false) } else {
+            let restored = (|| -> Option<(Vec<u8>, bool)> {
+                // Never let a FIFO block startup or follow a final symlink.
+                let mut file = OpenOptions::new().read(true)
+                    .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(path).ok()?;
+                let meta = file.metadata().ok()?;
+                if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.len() < size { return None; }
+                let start = size.saturating_sub(MAX_RESTORE_BYTES);
+                file.seek(SeekFrom::Start(start)).ok()?;
+                let mut bytes = vec![0; (size - start) as usize];
+                file.read_exact(&mut bytes).ok()?;
+                if start > 0 {
+                    let after_first_line = bytes.iter().position(|byte| *byte == b'\n')? + 1;
+                    bytes.drain(..after_first_line);
+                }
+                Some((bytes, start > 0))
+            })();
+            restored.unwrap_or_default()
+        }
+    } else { (Vec::new(), false) };
+    let (peer_bytes, peer_scope) = if let (Some(path), Some(size), Some(scope)) = (
+        hello["peer_history_path"].as_str(), hello["peer_history_bytes"].as_u64(), hello["peer_history_scope"].as_str()) {
+        if size > 0 && size <= MAX_PEER_RESTORE_BYTES && !scope.is_empty() && scope.len() <= 512
+            && !scope.chars().any(char::is_control) {
+            let restored = (|| -> Option<Vec<u8>> {
+                let mut file = OpenOptions::new().read(true)
+                    .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(path).ok()?;
+                let meta = file.metadata().ok()?;
+                // A concurrent append is fine: the hello byte count is the
+                // snapshot boundary. Symlinks, hardlinks, public files, and
+                // files shorter than that boundary are rejected.
+                if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1
+                    || meta.mode() & 0o077 != 0 || meta.len() < size { return None; }
+                let mut bytes = vec![0; size as usize];
+                file.read_exact(&mut bytes).ok()?;
+                Some(bytes)
+            })();
+            restored.map(|bytes| (bytes, Some(scope.to_owned()))).unwrap_or_default()
+        } else { (Vec::new(), None) }
+    } else { (Vec::new(), None) };
+    if bytes.is_empty() && peer_bytes.is_empty() { return None; }
+    Some(TranscriptSnapshot { bytes, earlier_bytes_omitted, session_id:Some(session_id), peer_scope, peer_bytes })
 }
 
 fn read_json_until(reader: &mut BufReader<UnixStream>, pending: &mut Vec<u8>, deadline: Option<Instant>) -> Result<Value, TransportError> {
@@ -372,6 +407,43 @@ fn map_wire_error(error: WireError) -> TransportError {
 mod deadline_tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn peer_restore_reads_only_the_private_hello_bound_snapshot() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut permissions = std::fs::metadata(dir.path()).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(dir.path(), permissions).unwrap();
+        let transcript_path = dir.path().join("transcript.jsonl");
+        let journal_path = dir.path().join("peer-owner-session.jsonl");
+        std::fs::write(&transcript_path, b"transcript\n").unwrap();
+        std::fs::write(&journal_path, b"{\"old\":true}\n").unwrap();
+        for path in [&transcript_path, &journal_path] {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+        let peer_snapshot_size = std::fs::metadata(&journal_path).unwrap().len();
+        std::fs::OpenOptions::new().append(true).open(&journal_path).unwrap()
+            .write_all(b"{\"later\":true}\n").unwrap();
+        let hello = json!({"session_id":"owner-session","transcript_path":transcript_path,
+            "transcript_bytes":11,"peer_history_path":journal_path,"peer_history_bytes":peer_snapshot_size,
+            "peer_history_scope":"/private/project"});
+        let snapshot = read_snapshot(&hello).unwrap();
+        assert_eq!(snapshot.session_id.as_deref(), Some("owner-session"));
+        assert_eq!(snapshot.peer_scope.as_deref(), Some("/private/project"));
+        assert_eq!(snapshot.peer_bytes, b"{\"old\":true}\n");
+        assert_eq!(snapshot.bytes, b"transcript\n");
+
+        let mut permissions = std::fs::metadata(&journal_path).unwrap().permissions();
+        permissions.set_mode(0o644);
+        std::fs::set_permissions(&journal_path, permissions).unwrap();
+        let fallback = read_snapshot(&hello).unwrap();
+        assert!(fallback.peer_bytes.is_empty(), "an unsafe sidecar is discarded");
+        assert_eq!(fallback.bytes, b"transcript\n", "the independent transcript remains restorable");
+    }
+
     #[test]
     fn ordinary_and_restore_connections_reject_full_backlog_without_blocking() {
         for restore in [false, true] {

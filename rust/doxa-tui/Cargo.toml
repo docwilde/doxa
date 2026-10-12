@@ -1,6 +1,6 @@
 [package]
 name = "doxa-tui"
-version = "2.0.0-beta.47"
+version = "2.0.0-beta.48"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -21,6 +21,7 @@ doxa-claude = { path = "../doxa-claude" }
 doxa-engines = { path = "../doxa-engines" }
 doxa-peers = { path = "../doxa-peers" }
 doxa-state = { path = "../doxa-state" }
+doxa-transcript = { path = "../doxa-transcript" }
 doxa-worktrees = { path = "../doxa-worktrees" }
 doxa-vendors = { path = "../doxa-vendors" }
 doxa-mcp = { path = "../doxa-mcp" }

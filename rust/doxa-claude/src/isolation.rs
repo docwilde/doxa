@@ -46,12 +46,16 @@ fn directory(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 fn bytes(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    bytes_with_mode(path, limit, 0)
+}
+fn bytes_with_mode(path: &Path, limit: u64, forbidden_mode: u32) -> io::Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     let m = file.metadata()?;
-    if !m.is_file() || m.uid() != unsafe { libc::geteuid() } || m.nlink() != 1 || m.len() > limit {
+    if !m.is_file() || m.uid() != unsafe { libc::geteuid() } || m.nlink() != 1
+        || m.len() > limit || m.mode() & forbidden_mode != 0 {
         return Err(unsafe_path());
     }
     let mut bytes = Vec::new();
@@ -107,10 +111,69 @@ pub fn sync_credentials(force: bool) -> io::Result<bool> {
     write(&dest, &source_bytes)?;
     Ok(true)
 }
+struct ArtifactPolicy {
+    plugin: bool,
+    root: PathBuf,
+    external_roots: Vec<PathBuf>,
+}
+impl ArtifactPolicy {
+    fn new(source: &Path, plugin: bool, external_roots: &[PathBuf]) -> io::Result<Self> {
+        let root = fs::canonicalize(source)?;
+        let meta = fs::metadata(&root)?;
+        if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() }
+            || external_roots.len() > 16 {
+            return Err(unsafe_path());
+        }
+        let mut approved = Vec::new();
+        for path in external_roots {
+            if !path.is_absolute() { return Err(unsafe_path()); }
+            let real = fs::canonicalize(path)?;
+            let meta = fs::metadata(&real)?;
+            if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() }
+                || meta.mode() & 0o022 != 0 {
+                return Err(unsafe_path());
+            }
+            approved.push(real);
+        }
+        Ok(Self { plugin, root, external_roots: approved })
+    }
+
+    fn resolve(&self, path: &Path) -> io::Result<PathBuf> {
+        let real = fs::canonicalize(path)?;
+        if self.plugin && !real.starts_with(&self.root)
+            && !self.external_roots.iter().any(|root| real.starts_with(root)) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+                "Claude plugin artifact leaves its approved roots"));
+        }
+        Ok(real)
+    }
+}
+
+/// External plugin assets require an owner-controlled, per-plugin grant.
+/// Personal skills retain their existing one-direction snapshot behavior.
+fn plugin_external_roots(config: &Path, key: &str) -> io::Result<Vec<PathBuf>> {
+    let raw = match bytes_with_mode(config, doxa_state::MAX_CONFIG_BYTES, 0o022) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let config = doxa_state::parse_config(&raw)?;
+    let Some(table) = config.get("plugin_external_roots") else { return Ok(Vec::new()); };
+    let table = table.as_table().ok_or_else(unsafe_path)?;
+    let Some(roots) = table.get(key) else { return Ok(Vec::new()); };
+    let roots = roots.as_array().ok_or_else(unsafe_path)?;
+    if roots.len() > 16 { return Err(unsafe_path()); }
+    roots.iter().map(|value| {
+        let path = value.as_str().map(PathBuf::from).ok_or_else(unsafe_path)?;
+        if !path.is_absolute() { return Err(unsafe_path()); }
+        Ok(path)
+    }).collect()
+}
+
 fn copy_tree(
     source: &Path,
     dest: &Path,
-    plugin: bool,
+    policy: &ArtifactPolicy,
     depth: usize,
     budget: &mut u64,
 ) -> io::Result<()> {
@@ -123,7 +186,7 @@ fn copy_tree(
         let name = entry.file_name();
         let name_text = name.to_string_lossy();
         if name_text == ".git"
-            || plugin
+            || policy.plugin
                 && matches!(
                     name_text.as_ref(),
                     "hooks" | "hooks.json" | ".mcp.json" | "mcp.json"
@@ -133,13 +196,13 @@ fn copy_tree(
         }
         let src = entry.path();
         let dst = dest.join(name);
-        let real = fs::canonicalize(&src)?;
+        let real = policy.resolve(&src)?;
         let m = fs::metadata(&real)?;
         if m.uid() != unsafe { libc::geteuid() } {
             return Err(unsafe_path());
         }
         if m.is_dir() {
-            copy_tree(&real, &dst, plugin, depth + 1, budget)?;
+            copy_tree(&real, &dst, policy, depth + 1, budget)?;
         } else if m.is_file() {
             let data = bytes(&real, 4 * 1024 * 1024)?;
             *budget = budget
@@ -152,12 +215,16 @@ fn copy_tree(
     Ok(())
 }
 fn snapshot(source: &Path, dest: &Path, plugin: bool) -> io::Result<()> {
+    snapshot_with_roots(source, dest, plugin, &[])
+}
+fn snapshot_with_roots(source: &Path, dest: &Path, plugin: bool, roots: &[PathBuf]) -> io::Result<()> {
+    let policy = ArtifactPolicy::new(source, plugin, roots)?;
     let parent = dest.parent().ok_or_else(unsafe_path)?;
     directory(parent)?;
     let staging = tempfile::Builder::new()
         .prefix(".snapshot-")
         .tempdir_in(parent)?;
-    copy_tree(source, staging.path(), plugin, 0, &mut (64 * 1024 * 1024))?;
+    copy_tree(&policy.root, staging.path(), &policy, 0, &mut (64 * 1024 * 1024))?;
     write(&staging.path().join(".doxa-skills-snapshot"), b"")?;
     if plugin {
         let path = staging.path().join(".claude-plugin/plugin.json");
@@ -220,7 +287,8 @@ pub fn adopted_plugins() -> io::Result<Vec<PathBuf>> {
             continue;
         }
         let dest = config_dir().join("adopted-plugins").join(key);
-        if snapshot(&source, &dest, true).is_ok() {
+        let roots = plugin_external_roots(&config_dir().parent().unwrap().join("config.toml"), key)?;
+        if snapshot_with_roots(&source, &dest, true, &roots).is_ok() {
             result.push(dest);
         }
     }
@@ -306,7 +374,16 @@ pub fn plugin_commands(mut cancelled: impl FnMut() -> bool) -> io::Result<Vec<Va
             continue;
         };
         let plugin = key.split('@').next().unwrap_or(key);
-        for entry in fs::read_dir(source.join("commands"))
+        let roots = plugin_external_roots(&config_dir().parent().unwrap().join("config.toml"), key)?;
+        let policy = match ArtifactPolicy::new(&source, true, &roots) {
+            Ok(policy) => policy,
+            Err(_) => continue,
+        };
+        let commands = match policy.resolve(&source.join("commands")) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        for entry in fs::read_dir(commands)
             .into_iter()
             .flatten()
             .flatten()
@@ -328,7 +405,7 @@ pub fn plugin_commands(mut cancelled: impl FnMut() -> bool) -> io::Result<Vec<Va
             else {
                 continue;
             };
-            let raw = match fs::canonicalize(&path).and_then(|path| bytes(&path, 65536)) {
+            let raw = match policy.resolve(&path).and_then(|path| bytes(&path, 65536)) {
                 Ok(raw) => raw,
                 Err(_) => continue,
             };
@@ -397,6 +474,7 @@ mod tests {
         fs::create_dir_all(source.join(".claude-plugin")).unwrap();
         fs::create_dir_all(source.join("hooks")).unwrap();
         fs::create_dir_all(source.join("scripts")).unwrap();
+        fs::create_dir_all(source.join("assets")).unwrap();
         fs::write(source.join(".claude-plugin/plugin.json"),br#"{"name":"safe","hooks":"arbitrary-command","mcpServers":{"foreign":{}},"lspServers":{},"description":"approved commands"}"#).unwrap();
         fs::write(source.join("hooks/hooks.json"), "bad").unwrap();
         fs::write(source.join(".mcp.json"), "bad").unwrap();
@@ -406,7 +484,7 @@ mod tests {
             fs::Permissions::from_mode(0o700),
         )
         .unwrap();
-        let approved = dir.path().join("approved.md");
+        let approved = source.join("assets/approved.md");
         fs::write(&approved, "approved skill").unwrap();
         std::os::unix::fs::symlink(&approved, source.join("approved.md")).unwrap();
         snapshot(&source, &target, true).unwrap();
@@ -432,6 +510,72 @@ mod tests {
             "approved skill"
         );
     }
+    #[test]
+    fn plugin_external_assets_require_an_explicit_root_and_publish_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("plugin");
+        let approved = dir.path().join("approved-assets");
+        let unrelated = dir.path().join("approved-assets-other");
+        let target = dir.path().join("isolated");
+        for path in [&source, &approved, &unrelated] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::create_dir(source.join("skills")).unwrap();
+        fs::write(approved.join("SKILL.md"), "explicitly approved external skill").unwrap();
+        fs::write(unrelated.join("private.md"), "SYNTHETIC-PRIVATE-SENTINEL").unwrap();
+        let link = source.join("skills/external");
+        std::os::unix::fs::symlink(&approved, &link).unwrap();
+
+        assert!(snapshot(&source, &target, true).is_err());
+        assert!(!target.exists(), "unapproved bytes must not be published");
+        snapshot_with_roots(&source, &target, true, &[approved.clone()]).unwrap();
+        assert_eq!(fs::read_to_string(target.join("skills/external/SKILL.md")).unwrap(),
+            "explicitly approved external skill");
+        assert!(!fs::symlink_metadata(target.join("skills/external")).unwrap().file_type().is_symlink());
+
+        // A common textual prefix is not an approved directory component.
+        std::os::unix::fs::symlink(unrelated.join("private.md"), source.join("private.md")).unwrap();
+        assert!(snapshot_with_roots(&source, &target, true, &[approved]).is_err());
+        assert!(!target.join("private.md").exists());
+        assert_eq!(fs::read_to_string(target.join("skills/external/SKILL.md")).unwrap(),
+            "explicitly approved external skill", "a failed replacement preserves the old snapshot");
+        fs::set_permissions(&unrelated, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(ArtifactPolicy::new(&source, true, &[unrelated]).is_err());
+    }
+
+    #[test]
+    fn personal_skill_snapshot_keeps_external_one_direction_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("skills");
+        let target = dir.path().join("copy");
+        fs::create_dir(&source).unwrap();
+        let external = dir.path().join("personal.md");
+        fs::write(&external, "personal skill").unwrap();
+        std::os::unix::fs::symlink(&external, source.join("SKILL.md")).unwrap();
+        snapshot(&source, &target, false).unwrap();
+        fs::write(target.join("SKILL.md"), "isolated edit").unwrap();
+        assert_eq!(fs::read_to_string(external).unwrap(), "personal skill");
+    }
+
+    #[test]
+    fn plugin_external_grants_are_per_plugin_and_owner_controlled() {
+        let dir = tempfile::tempdir().unwrap();
+        let approved = dir.path().join("assets");
+        fs::create_dir(&approved).unwrap();
+        let config = dir.path().join("config.toml");
+        let path = serde_json::to_string(approved.to_str().unwrap()).unwrap();
+        fs::write(&config, format!("[plugin_external_roots]\n\"safe@market\" = [{path}]\n")).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(plugin_external_roots(&config, "safe@market").unwrap(), vec![approved]);
+        assert!(plugin_external_roots(&config, "other@market").unwrap().is_empty());
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(plugin_external_roots(&config, "safe@market").is_err());
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&config, "[plugin_external_roots]\n\"safe@market\" = [\"../relative\"]\n").unwrap();
+        assert!(plugin_external_roots(&config, "safe@market").is_err());
+    }
+
     #[test]
     fn snapshot_never_deletes_unowned_directory_or_reads_special_file() {
         let dir = tempfile::tempdir().unwrap();

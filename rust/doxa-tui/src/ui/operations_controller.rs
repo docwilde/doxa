@@ -1086,7 +1086,12 @@ impl App {
         if let Some(scroll)=scroll {
             if self.groups[self.active_group].active_id()==Some(id) {
                 self.open_diagnostic("usage");
-                if let Some(info)=self.chip_info.as_mut() {info.scroll=scroll.min(info.lines.len().saturating_sub(1));}
+                let max_scroll = self.active_chooser_rect().map_or(0, |area| {
+                    let width = usize::from(area.width.saturating_sub(3)).max(1);
+                    let count = self.usage_info_lines(width).len();
+                    count.saturating_sub(usize::from(area.height.saturating_sub(2)).max(1))
+                });
+                if let Some(info)=self.chip_info.as_mut() {info.scroll=scroll.min(max_scroll);}
             }
         }
     }

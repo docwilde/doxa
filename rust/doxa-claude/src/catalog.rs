@@ -46,6 +46,12 @@ pub fn discover_authenticated(options: CliOptions<'_>, timeout: Duration) -> Res
 pub fn discover(options: CliOptions<'_>, timeout: Duration) -> Result<Value, Error> {
     discover_inner(options, timeout, false, None)
 }
+/// Prospective session discovery owns the CLI until cancellation has killed
+/// and reaped it.
+pub fn discover_cancellable(options: CliOptions<'_>, timeout: Duration,
+    cancel: &AtomicBool) -> Result<Value, Error> {
+    discover_inner(options, timeout, false, Some(cancel))
+}
 /// Router discovery owns the CLI until cancellation has killed and reaped it.
 pub fn discover_authenticated_cancellable(options: CliOptions<'_>, timeout: Duration,
     cancel: &AtomicBool) -> Result<Value, Error> {
@@ -85,7 +91,7 @@ fn discover_inner(options: CliOptions<'_>, timeout: Duration, require_auth: bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::{fs, os::unix::fs::PermissionsExt, sync::Arc, thread};
 
     #[test]
     fn authenticated_catalog_requires_account_evidence_beyond_provider_identity() {
@@ -127,6 +133,40 @@ for line in sys.stdin:
         let calls = fs::read_to_string(root.path().join("calls.jsonl")).unwrap();
         assert_eq!(calls.lines().count(), 1);
         assert!(!calls.contains("\"type\": \"user\""));
+    }
+
+    #[test]
+    fn cancelled_catalog_discovery_kills_and_reaps_its_provider_process() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let executable = root.path().join("claude-fixture");
+        fs::write(&executable, r#"#!/usr/bin/env python3
+import os, pathlib, sys, time
+pathlib.Path('catalog.pid').write_text(str(os.getpid()))
+for line in sys.stdin:
+    time.sleep(0.1)
+"#).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let cancel=Arc::new(AtomicBool::new(false));
+        let worker_cancel=cancel.clone();
+        let pidfile=root.path().join("catalog.pid");
+        let watcher=thread::spawn(move || {
+            let deadline=Instant::now()+Duration::from_secs(3);
+            while Instant::now()<deadline {
+                if pidfile.exists() { worker_cancel.store(true,Ordering::Release); return true; }
+                thread::sleep(Duration::from_millis(10));
+            }
+            false
+        });
+        let result=discover_cancellable(CliOptions {
+            executable:&executable,cwd:root.path(),config_dir:root.path(),
+            session_id:"12345678-1234-1234-1234-123456789abc",resume:false,
+            model:None,effort:None,permission_mode:"manual",plugins:&[],
+        },Duration::from_secs(5),&cancel);
+        assert!(watcher.join().unwrap(),"provider fixture did not start");
+        assert!(matches!(result,Err(Error::Closed)));
+        let pid=fs::read_to_string(root.path().join("catalog.pid")).unwrap().parse::<i32>().unwrap();
+        assert_eq!(unsafe { libc::kill(pid,0) },-1,"cancelled catalog child was not reaped");
     }
 
     #[test]

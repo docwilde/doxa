@@ -28,13 +28,12 @@ fn json_response(status: StatusCode, value: Value) -> Response<Body> {
 fn error(status: StatusCode, message: &str) -> Response<Body> { json_response(status, json!({"error":message})) }
 fn denied(message: &str) -> Response<Body> { error(StatusCode::FORBIDDEN, message) }
 
-fn authenticated(request: &Request<Incoming>, attested: bool, kind: &str) -> Result<String, Response<Body>> {
-    let headers = request.headers();
+fn authenticated(headers: &hyper::HeaderMap, method: &Method, attested: bool, kind: &str) -> Result<String, Response<Body>> {
     if headers.get_all("tailscale-user-login").iter().count() != 1 { return Err(denied("exactly one Tailscale identity header required")); }
     let login = headers.get("tailscale-user-login").and_then(|value| value.to_str().ok());
     let decision = policy::evaluate(kind, login, attested, None);
     if !decision.allowed { return Err(denied(&decision.reason)); }
-    if request.method() != Method::GET && !same_origin(headers) { return Err(denied("cross-origin write refused")); }
+    if *method != Method::GET && !same_origin(headers) { return Err(denied("cross-origin write refused")); }
     Ok(login.expect("accepted by policy").to_owned())
 }
 fn same_origin(headers: &hyper::HeaderMap) -> bool {
@@ -66,6 +65,29 @@ impl App {
 }
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.bytes().enumerate().all(|(i, b)| b.is_ascii_alphanumeric() || (i > 0 && b == b'-'))
+}
+fn route_kind(method: &Method, parts: &[&str]) -> Option<&'static str> {
+    match (method, parts) {
+        (&Method::GET, [] | ["remote.js"] | ["remote.css"] | ["api", "sessions"]) => Some("read_status"),
+        (&Method::GET, ["api", "sessions", _, "transcript"] | ["api", "sessions", _, "events"])
+        | (&Method::POST, ["api", "sessions", _, "transcript"]) => Some("read_transcript"),
+        (&Method::POST, ["api", "sessions", _, "prompt"]) => Some("send_prompt"),
+        (&Method::POST, ["api", "sessions", _, "answer"]) => Some("approve_tool"),
+        _ => None,
+    }
+}
+fn static_route(method: &Method, parts: &[&str]) -> Option<Response<Body>> {
+    match (method, parts) {
+        (&Method::GET, []) => Some(response(StatusCode::OK, "text/html; charset=utf-8", include_str!("../assets/index.html"))),
+        (&Method::GET, ["remote.js"]) => Some(response(StatusCode::OK, "text/javascript; charset=utf-8", include_str!("../assets/remote.js"))),
+        (&Method::GET, ["remote.css"]) => Some(response(StatusCode::OK, "text/css; charset=utf-8", include_str!("../assets/remote.css"))),
+        _ => None,
+    }
+}
+fn authorize_route(method: &Method, parts: &[&str], headers: &hyper::HeaderMap, attested: bool)
+    -> Result<String, Response<Body>> {
+    let kind = route_kind(method, parts).ok_or_else(||error(StatusCode::NOT_FOUND,"unknown remote route"))?;
+    authenticated(headers, method, attested, kind)
 }
 async fn connect(app: &App, entry: &PeerRecord, login: Option<&str>, cursor: Option<u64>) -> io::Result<daemon::Client> {
     let path = entry.daemon_socket.as_deref().ok_or_else(||io::Error::other("session has no daemon socket"))?;
@@ -126,20 +148,12 @@ fn bypass_opt_in() -> bool {
 async fn handle(request: Request<Incoming>, app: Arc<App>, attested: bool) -> Response<Body> {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
-    let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
-    let kind = match (method.clone(), parts.as_slice()) {
-        (Method::GET, [] | ["remote.js"] | ["remote.css"] | ["api","sessions"]) => "read_status",
-        (Method::GET, ["api","sessions",_,"transcript"] | ["api","sessions",_,"events"]) => "read_transcript",
-        (Method::POST, ["api","sessions",_,"transcript"]) => "read_transcript",
-        (Method::POST, ["api","sessions",_,"prompt"]) => "send_prompt",
-        (Method::POST, ["api","sessions",_,"answer"]) => "approve_tool",
-        _ => return error(StatusCode::NOT_FOUND,"unknown remote route"),
+    let parts = policy::route_segments(&path);
+    let login = match authorize_route(&method, parts.as_slice(), request.headers(), attested) {
+        Ok(login)=>login, Err(reply)=>return reply,
     };
-    let login = match authenticated(&request, attested, kind) { Ok(login)=>login, Err(reply)=>return reply };
+    if let Some(reply) = static_route(&method, parts.as_slice()) { return reply; }
     match (method, parts.as_slice()) {
-        (Method::GET, []) => response(StatusCode::OK,"text/html; charset=utf-8",include_str!("../assets/index.html")),
-        (Method::GET, ["remote.js"]) => response(StatusCode::OK,"text/javascript; charset=utf-8",include_str!("../assets/remote.js")),
-        (Method::GET, ["remote.css"]) => response(StatusCode::OK,"text/css; charset=utf-8",include_str!("../assets/remote.css")),
         (Method::GET, ["api","sessions"]) => match app.sessions() {
             Ok(entries) => json_response(StatusCode::OK,json!({"sessions":entries.into_iter().map(|p|json!({
                 "id":p.session_id,"title":p.title,"engine":p.engine,"model":p.model,"clients":p.clients,
@@ -329,6 +343,39 @@ async fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn root_page_requires_attested_allowlisted_identity() {
+        let _guard = ENV.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let vars = ["DOXA_HOME", "DOXA_REMOTE_ENABLED", "DOXA_REMOTE_ALLOWED_LOGINS"];
+        let old = vars.map(std::env::var_os);
+        std::env::set_var("DOXA_HOME", home.path());
+        std::env::set_var("DOXA_REMOTE_ENABLED", "1");
+        std::env::set_var("DOXA_REMOTE_ALLOWED_LOGINS", "owner@example.com");
+
+        let parts = policy::route_segments("/");
+        let method = Method::GET;
+        assert!(parts.is_empty());
+        assert_eq!(route_kind(&method, &parts), Some("read_status"));
+        assert_eq!(authorize_route(&method, &parts, &hyper::HeaderMap::new(), true).unwrap_err().status(), StatusCode::FORBIDDEN);
+
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("tailscale-user-login", "owner@example.com".parse().unwrap());
+        assert!(authorize_route(&method, &parts, &headers, false).is_err());
+        assert_eq!(authorize_route(&method, &parts, &headers, true).unwrap(), "owner@example.com");
+        let page = static_route(&method, &parts).expect("root serves packaged page after authorization");
+        assert_eq!(page.status(), StatusCode::OK);
+        assert!(String::from_utf8(page.into_body().collect().await.unwrap().to_bytes().to_vec())
+            .unwrap().contains("DOXA remote"));
+
+        for (name, value) in vars.into_iter().zip(old) {
+            if let Some(value) = value { std::env::set_var(name, value); }
+            else { std::env::remove_var(name); }
+        }
+    }
+
     #[test] fn remote_policy_is_fail_closed_for_dangerous_modes_and_ids() {
         assert!(remote_dangerous("bypassPermissions")); assert!(remote_dangerous("full-access"));
         assert!(remote_dangerous("dontAsk")); assert!(!remote_dangerous("plan"));

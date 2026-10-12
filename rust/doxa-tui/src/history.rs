@@ -20,6 +20,8 @@ const MAX_FILES: usize = 2048;
 const MAX_OFFLINE: usize = 64;
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const MAX_CODEX_METADATA_BYTES: u64 = 64 * 1024;
+const MAX_RESTORED_PEER_EVENTS: usize = 2048;
+const MAX_RESTORED_PEER_RECORD_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct OfflineSession {
@@ -128,7 +130,7 @@ fn read_offline(mut file: File, uid: u32) -> Option<String> {
             bytes.clear();
         }
     }
-    Some(render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: start > 0 }))
+    Some(render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: start > 0, ..Default::default() }))
 }
 
 fn internal_router_worker(file: &mut File) -> bool {
@@ -532,6 +534,7 @@ const MAX_RESTORED_DETAIL_BYTES: usize = 256 * 1024;
 #[derive(Default)]
 struct Turn {
     prompt: String,
+    peer_card: Option<String>,
     answer: String,
     tools: Vec<String>,
     tool_names: std::collections::HashMap<String, String>,
@@ -586,6 +589,43 @@ fn append_text(target: &mut String, text: &str) {
 
 pub fn render(snapshot: &TranscriptSnapshot) -> String {
     let mut turns: Vec<Turn> = Vec::new();
+    let mut peer_cards = Vec::new();
+    let mut peer_ids = std::collections::HashSet::new();
+    let mut peer_history_omitted = false;
+    if let (Some(session_id), Some(scope)) = (snapshot.session_id.as_deref(), snapshot.peer_scope.as_deref()) {
+        if doxa_transcript::valid_session_id(session_id) && !scope.is_empty() && scope.len() <= 512
+            && !scope.chars().any(char::is_control) {
+            let lines = snapshot.peer_bytes.split(|byte| *byte == b'\n').filter(|line| !line.is_empty());
+            peer_history_omitted = lines.clone().take(MAX_RESTORED_PEER_EVENTS + 1).count() > MAX_RESTORED_PEER_EVENTS;
+            for line in lines.take(MAX_RESTORED_PEER_EVENTS) {
+                if line.is_empty() || line.len() > MAX_RESTORED_PEER_RECORD_BYTES { continue; }
+                let Ok(row) = serde_json::from_slice::<Value>(line) else { continue };
+                let Some(fields) = row.as_object() else { continue };
+                if fields.len() != 5 || fields.keys().any(|key| !matches!(key.as_str(),
+                    "version" | "session_id" | "scope" | "event_type" | "data"))
+                    || row["version"].as_u64() != Some(1)
+                    || row["session_id"].as_str() != Some(session_id)
+                    || row["scope"].as_str() != Some(scope) { continue; }
+                let event_type = row["event_type"].as_str().unwrap_or("");
+                let data = &row["data"];
+                let allowed = match event_type {
+                    "peer_message" => &["from_id", "from_title", "body", "from_repo", "sent_at", "kind",
+                        "origin", "message_id", "in_reply_to", "unreviewed"][..],
+                    "peer_sent" => &["to", "failed", "body", "sent_at", "kind", "in_reply_to", "message_id"][..],
+                    _ => continue,
+                };
+                let Some(data_fields) = data.as_object() else { continue };
+                if data_fields.keys().any(|key| !allowed.contains(&key.as_str())) { continue; }
+                let Some(message_id) = data["message_id"].as_str() else { continue };
+                let sent = event_type == "peer_sent";
+                if peer_ids.contains(&(message_id.to_owned(), sent)) { continue; }
+                if let Some(marker) = crate::ui::restored_peer_message(event_type, data, session_id) {
+                    peer_ids.insert((message_id.to_owned(), sent));
+                    peer_cards.push(marker);
+                }
+            }
+        }
+    }
     for line in snapshot.bytes.split(|byte| *byte == b'\n') {
         let Ok(record) = serde_json::from_slice::<Value>(line) else { continue };
         let kind = record["type"].as_str().unwrap_or("");
@@ -651,6 +691,28 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
                     }
                 }
             }
+            let origin = record.get("doxa_peer_origin");
+            // Bind persisted origin to both the attached snapshot and the
+            // exact transcript row before using it to style or suppress the
+            // provider-facing prompt. A copied/cross-session field stays prose.
+            let row_matches_snapshot = snapshot.session_id.as_deref().is_some_and(|session_id|
+                doxa_transcript::valid_session_id(session_id)
+                    && record["sessionId"].as_str() == Some(session_id));
+            if row_matches_snapshot {
+                if origin.and_then(crate::ui::peer_origin_message_id)
+                    .is_some_and(|message_id| peer_ids.contains(&(message_id, false))) {
+                    // The private receipt journal supplies the same admitted
+                    // message as a typed card. Keep a turn slot for its assistant
+                    // response, but do not render the provider wrapper twice.
+                    turns.push(Turn::default());
+                    continue;
+                }
+                if let Some(marker) = origin.and_then(|origin|
+                    crate::ui::restored_peer_turn(origin, &prompt)) {
+                    turns.push(Turn { peer_card: Some(marker), ..Turn::default() });
+                    continue;
+                }
+            }
             if !prompt.is_empty() { turns.push(Turn { prompt, ..Turn::default() }); }
             else if let Some(blocks) = content.as_array() {
                 if let Some(turn) = turns.last_mut() {
@@ -698,7 +760,10 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
                 turn.tools[*index].push_str(&restored_detail_marker("result", &Value::String(detail.clone())));
             }
         }
-        if !turn.prompt.is_empty() {
+        if let Some(peer_card) = turn.peer_card {
+            out.push_str(&peer_card);
+            out.push_str("\n\n");
+        } else if !turn.prompt.is_empty() {
             out.push_str("**You:**\n\n");
             out.push_str(&turn.prompt);
             out.push_str("\n\n");
@@ -716,6 +781,17 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
             out.push_str(&format!("{tool}\n\n"));
         }
         if turn.tools.len() > 60 { out.push_str("[Additional tools omitted from this view]\n\n"); }
+    }
+    if !peer_cards.is_empty() {
+        append_text(&mut out, "**Recovered peer history (original transcript placement unavailable):**");
+        out.push_str("\n\n");
+    }
+    for marker in peer_cards {
+        out.push_str(&marker);
+        out.push_str("\n\n");
+    }
+    if peer_history_omitted {
+        append_text(&mut out, "[Additional peer history omitted from this restore view at the event limit.]");
     }
     if out.len() > MAX_VIEW_BYTES {
         let mut start = out.len() - MAX_VIEW_BYTES;
@@ -770,7 +846,7 @@ for line in sys.stdin:
             "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"found\"}]}}\n",
             "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"second?\"},{\"type\":\"text\",\"text\":\"more detail\"}]}}\n",
         );
-        let rendered = render(&TranscriptSnapshot { bytes: lines.as_bytes().to_vec(), earlier_bytes_omitted: false });
+        let rendered = render(&TranscriptSnapshot { bytes: lines.as_bytes().to_vec(), earlier_bytes_omitted: false, ..Default::default() });
         assert!(rendered.contains("first?"));
         assert!(rendered.contains("yes\n\nindeed"));
         assert!(rendered.contains("Tool: Search started"));
@@ -780,10 +856,96 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn restores_only_session_and_scope_bound_typed_peer_journal_rows() {
+        let owner = "owner-session";
+        let scope = "/private/scope";
+        let sender = "sender-session";
+        let receipt = serde_json::json!({"version":1,"session_id":owner,"scope":scope,
+            "event_type":"peer_message","data":{"from_id":sender,"from_title":"Reviewer",
+                "body":"received body","from_repo":null,"sent_at":"2026-10-11T13:25:00Z",
+                "kind":"direct","origin":null,"message_id":"msg-received","in_reply_to":null,"unreviewed":false}});
+        let sent = serde_json::json!({"version":1,"session_id":owner,"scope":scope,
+            "event_type":"peer_sent","data":{"to":[sender],"failed":[],"body":"sent body",
+                "sent_at":"2026-10-11T13:26:00Z","kind":"direct","in_reply_to":null,"message_id":"msg-sent"}});
+        let wrong_session = serde_json::json!({"version":1,"session_id":"other-session","scope":scope,
+            "event_type":"peer_sent","data":{"to":[sender],"failed":[],"body":"wrong session",
+                "sent_at":"2026-10-11T13:27:00Z","kind":"direct","in_reply_to":null,"message_id":"msg-cross-session"}});
+        let wrong_scope = serde_json::json!({"version":1,"session_id":owner,"scope":"other-scope",
+            "event_type":"peer_message","data":{"from_id":sender,"from_title":"Reviewer",
+                "body":"wrong scope","from_repo":null,"sent_at":null,"kind":"direct",
+                "origin":null,"message_id":"msg-cross-scope","in_reply_to":null,"unreviewed":false}});
+        let peer_bytes = [receipt, sent, wrong_session, wrong_scope].iter()
+            .map(Value::to_string).collect::<Vec<_>>().join("\n").into_bytes();
+        let rendered = render(&TranscriptSnapshot { session_id:Some(owner.into()), peer_scope:Some(scope.into()),
+            peer_bytes:peer_bytes.clone(), ..Default::default() });
+        assert!(rendered.contains("received body") && rendered.contains("sent body"));
+        assert!(rendered.contains("Recovered peer history (original transcript placement unavailable)"));
+        assert!(!rendered.contains("wrong session") && !rendered.contains("wrong scope"));
+        assert_eq!(rendered.matches("\u{001e}DOXA_MESSAGE:").count(), 2);
+        assert_eq!(rendered.split("\n\n")
+            .filter(|paragraph| paragraph.trim_matches('\n').starts_with("\u{001e}DOXA_MESSAGE:"))
+            .count(), 2, "each recovered card must occupy its own renderable paragraph");
+
+        let stale = render(&TranscriptSnapshot { session_id:Some("another-session".into()),
+            peer_scope:Some(scope.into()), peer_bytes, ..Default::default() });
+        assert!(!stale.contains("\u{001e}DOXA_MESSAGE:"));
+    }
+
+    #[test]
+    fn restores_typed_peer_turn_in_place_without_journal_and_rejects_cross_session_origin() {
+        let owner = "owner-session";
+        let origin = serde_json::json!({"sender_session_id":"sender-session","sender_title":"Reviewer",
+            "message_id":"msg-restored","sent_at":"2026-10-11T13:25:00Z","from_repo":null,
+            "remote_origin":null,"source":"peer_message"});
+        let records = [
+            serde_json::json!({"type":"user","sessionId":owner,"doxa_peer_origin":origin,
+                "message":{"role":"user","content":"typed inbound peer prompt"}}),
+            serde_json::json!({"type":"assistant","sessionId":owner,
+                "message":{"role":"assistant","content":[{"type":"text","text":"peer answer"}]}}),
+            serde_json::json!({"type":"user","sessionId":"other-session","doxa_peer_origin":origin,
+                "message":{"role":"user","content":"cross session ordinary prompt"}}),
+            serde_json::json!({"type":"assistant","sessionId":"other-session",
+                "message":{"role":"assistant","content":[{"type":"text","text":"ordinary answer"}]}}),
+        ];
+        let bytes = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n").into_bytes();
+        let rendered = render(&TranscriptSnapshot { session_id:Some(owner.into()), bytes, ..Default::default() });
+
+        assert_eq!(rendered.matches("\u{001e}DOXA_MESSAGE:").count(), 1);
+        assert_eq!(rendered.matches("**You:**").count(), 1);
+        assert!(rendered.contains("cross session ordinary prompt"));
+        let marker = "\u{001e}DOXA_MESSAGE:";
+        let card_start = rendered.find(marker).unwrap();
+        let answer_start = rendered.find("peer answer").unwrap();
+        assert!(card_start < answer_start, "the restored peer card stays at its transcript turn position");
+        let paragraph = rendered[card_start..].split("\n\n").next().unwrap();
+        let card: Value = serde_json::from_str(paragraph.strip_prefix(marker).unwrap()).unwrap();
+        assert_eq!(card["starts_turn"], true);
+        assert_eq!(card["message_id"], "msg-restored");
+        assert!(card["text"].as_str().unwrap().contains("typed inbound peer prompt"));
+    }
+
+    #[test]
+    fn restored_peer_journal_enforces_exact_event_limit_and_marks_omission() {
+        let owner = "owner-session";
+        let scope = "/private/scope";
+        let bytes = (0..=MAX_RESTORED_PEER_EVENTS).map(|index| serde_json::json!({
+            "version":1,"session_id":owner,"scope":scope,"event_type":"peer_message",
+            "data":{"from_id":"sender-session","from_title":"Worker","body":"x",
+                "from_repo":null,"sent_at":null,"kind":"direct","origin":null,
+                "message_id":format!("msg-{index}"),"in_reply_to":null,"unreviewed":false}
+        }).to_string()).collect::<Vec<_>>().join("\n").into_bytes();
+        let rendered = render(&TranscriptSnapshot { session_id:Some(owner.into()), peer_scope:Some(scope.into()),
+            peer_bytes:bytes, ..Default::default() });
+        assert!(rendered.contains("msg-2047"));
+        assert!(!rendered.contains("msg-2048"));
+        assert!(rendered.contains("Additional peer history omitted from this restore view at the event limit."));
+    }
+
+    #[test]
     fn restored_tool_call_and_result_keep_bounded_matching_details() {
         let input = "x".repeat(1000);
         let lines = format!("{{\"type\":\"user\",\"message\":{{\"content\":\"question\"}}}}\n{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"Read\",\"input\":{{\"path\":\"{input}\"}}}}]}}}}\n{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"call-1\",\"content\":\"found\"}}]}}}}\n");
-        let rendered = render(&TranscriptSnapshot { bytes: lines.into_bytes(), earlier_bytes_omitted: false });
+        let rendered = render(&TranscriptSnapshot { bytes: lines.into_bytes(), earlier_bytes_omitted: false, ..Default::default() });
         assert!(rendered.contains("Tool: Read started ·"));
         assert!(rendered.contains("Tool: Read finished · found"));
         assert!(rendered.contains(crate::ui::transcript_tools::RESTORED_TOOL_PREFIX));
@@ -802,7 +964,7 @@ for line in sys.stdin:
             serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}),
         ];
         let bytes = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n").into_bytes();
-        let rendered = render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: false });
+        let rendered = render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: false, ..Default::default() });
         assert!(rendered.contains("Tool: command_execution started"));
         assert!(rendered.contains("Tool: command_execution finished · short"));
         assert!(rendered.contains("full result\\nsecond line"));

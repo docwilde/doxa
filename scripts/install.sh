@@ -8,6 +8,15 @@ main() {
   umask 077
 
   repo_url="${DOXA_RUST_REPO_URL:-https://github.com/docwilde/doxa}"
+  expected_sha="${DOXA_RUST_EXPECTED_SHA:-}"
+  case "$expected_sha" in
+    "") ;;
+    *[!0-9a-fA-F]*) printf 'doxa-install: DOXA_RUST_EXPECTED_SHA must be a 40-character commit SHA\n' >&2; exit 1 ;;
+  esac
+  [ -z "$expected_sha" ] || [ "${#expected_sha}" -eq 40 ] || {
+    printf 'doxa-install: DOXA_RUST_EXPECTED_SHA must be a 40-character commit SHA\n' >&2; exit 1;
+  }
+  expected_sha=$(printf '%s' "$expected_sha" | tr 'A-F' 'a-f')
   ref="${1:-main}"
   if [ "$ref" = "--rust" ]; then
     shift
@@ -71,12 +80,31 @@ main() {
   trap 'cleanup' EXIT
   trap 'exit 1' HUP INT TERM
 
-  printf 'doxa-install: fetching %s from %s\n' "$ref" "$repo_url"
+  if [ -n "$expected_sha" ]; then
+    printf 'doxa-install: source build trusts the configured repository/ref only when its resolved commit matches the caller pin\n'
+  else
+    printf 'doxa-install: source build; configured repository/ref is the trust input (no release signature or attestation is checked)\n'
+  fi
+  printf 'doxa-install: fetching selected source ref %s\n' "$ref"
   git -C "$checkout" init -q || exit 1
   git -C "$checkout" remote add origin "$repo_url" || exit 1
   git -C "$checkout" fetch --quiet --depth 1 origin "$ref" || exit 1
   git -C "$checkout" checkout --quiet --detach FETCH_HEAD || exit 1
   sha=$(git -C "$checkout" rev-parse HEAD) || exit 1
+  case "$sha" in
+    *[!0-9a-f]*) printf 'doxa-install: source did not resolve to a 40-character lowercase commit SHA\n' >&2; exit 1 ;;
+  esac
+  [ "${#sha}" -eq 40 ] || {
+    printf 'doxa-install: source did not resolve to a 40-character lowercase commit SHA\n' >&2; exit 1;
+  }
+  [ -z "$expected_sha" ] || [ "$sha" = "$expected_sha" ] || {
+    printf 'doxa-install: resolved source commit does not match DOXA_RUST_EXPECTED_SHA\n' >&2; exit 1;
+  }
+  if [ -n "$expected_sha" ]; then
+    printf 'doxa-install: caller-pinned commit verified: %s\n' "$sha"
+  else
+    printf 'doxa-install: selected source commit: %s (identity only; not an authenticated signature)\n' "$sha"
+  fi
   tui_manifest="$checkout/rust/doxa-tui/Cargo.toml"
   daemon_manifest="$checkout/rust/doxa-daemon/Cargo.toml"
   remote_manifest="$checkout/rust/doxa-remote/Cargo.toml"

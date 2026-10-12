@@ -123,6 +123,8 @@ pub(super) struct Store {
     root: String,
     identity: Option<String>,
     workspace: Vec<PathBuf>,
+    source_digest: Option<[u8; 32]>,
+    sources: Vec<String>,
     previews: Vec<Preview>,
     cache: Option<Arc<Mutex<PngCache>>>,
     revision: u64,
@@ -144,6 +146,15 @@ impl Store {
     }
 
     pub fn revision(&self) -> u64 { self.revision }
+
+    fn refresh_sources(&mut self, transcript: &str) -> bool {
+        let digest: [u8; 32] = Sha256::digest(transcript.as_bytes()).into();
+        if self.source_digest == Some(digest) { return false; }
+        self.source_digest = Some(digest);
+        self.sources = transcript_tools::mermaid_sources(transcript).into_iter().rev()
+            .take(MAX_CACHED).collect();
+        true
+    }
 
     pub fn ready_keys(&self, width: u16) -> HashSet<String> {
         self.previews.iter().filter(|entry| entry.width == width
@@ -185,10 +196,11 @@ impl Store {
         }
         let Some(picker) = picker else { return; };
         if renderer.is_empty() || root.is_empty() || !Path::new(BWRAP).is_file() { return; }
+        self.refresh_sources(transcript);
         if self.cache.is_none() { self.cache = PngCache::new().map(|cache| Arc::new(Mutex::new(cache))); }
-        // A transcript can contain many restored diagrams. Admit the latest
-        // eight so older entries cannot evict them on every frame.
-        for source in transcript_tools::mermaid_sources(transcript).into_iter().rev().take(MAX_CACHED) {
+        // `sources` is newest-first; unchanged transcript paints reuse the
+        // bounded source-only parse instead of walking every fence again.
+        for source in self.sources.iter().cloned() {
             let key = transcript_tools::mermaid_key(&source);
             if self.previews.iter().any(|entry| entry.key == key && entry.width == width) { continue; }
             if self.previews.iter().filter(|entry| matches!(entry.state, State::Loading(_))).count() >= MAX_ACTIVE { break; }
@@ -792,6 +804,7 @@ mod tests {
         let cache_path = cache.lock().unwrap().dir.path().to_path_buf();
         let mut store = Store { renderer: renderer.clone(), root: root.to_owned(),
             identity: renderer_identity(&renderer, root), workspace: vec![PathBuf::from("/old")],
+            source_digest: None, sources: Vec::new(),
             previews: vec![Preview { key: "old".into(), width: 24,
                 cancel: Arc::new(AtomicBool::new(false)), state: State::Unavailable }],
             cache: Some(cache.clone()), revision: 0 };
@@ -801,6 +814,19 @@ mod tests {
         assert!(store.cache.is_none());
         assert!(!cache_path.exists());
         assert!(store.revision() > 0);
+    }
+
+    #[test]
+    fn unchanged_transcript_reuses_the_bounded_mermaid_source_parse() {
+        let mut store = Store::default();
+        let first = "```mermaid\ngraph TD\nA-->B\n```";
+        assert!(store.refresh_sources(first));
+        assert_eq!(store.sources, ["graph TD\nA-->B"]);
+        assert!(!store.refresh_sources(first));
+
+        let changed = "```mermaid\ngraph TD\nA-->C\n```";
+        assert!(store.refresh_sources(changed));
+        assert_eq!(store.sources, ["graph TD\nA-->C"]);
     }
 
     #[test]
@@ -849,6 +875,7 @@ mod tests {
         let package = root.path().to_string_lossy().into_owned();
         let mut store = Store { renderer: renderer.clone(), root: package.clone(),
             identity: renderer_identity(&renderer, &package), workspace: Vec::new(),
+            source_digest: None, sources: Vec::new(),
             previews: Vec::new(), cache: None, revision: 0 };
         for index in 0..MAX_CACHED {
             store.previews.push(Preview { key: format!("old-{index}"), width: 24,

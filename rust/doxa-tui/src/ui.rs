@@ -1,5 +1,6 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 mod actions;
+mod bars;
 mod commands;
 mod choice_dropdown;
 mod codegraph_viewer;
@@ -43,6 +44,7 @@ mod session_events;
 mod session_telemetry;
 mod glm_account;
 mod transcript_events;
+mod usage_bars;
 
 use session_telemetry::SessionTelemetry;
 use transcript_events::{append_transcript, transcript_tail, ReasoningStream};
@@ -79,6 +81,54 @@ mod transcript_roles;
 mod transcript_messages;
 pub(crate) mod transcript_tools;
 use tool_cards::ToolCards;
+
+/// Turn a validated, host-scrubbed peer journal row into the same typed
+/// transcript card used for live peer events. Unknown journal rows are omitted.
+pub(crate) fn restored_peer_message(event_type: &str, data: &serde_json::Value, owner: &str) -> Option<String> {
+    let session_id = |key: &str| data[key].as_str().is_some_and(doxa_transcript::valid_session_id);
+    let has_message_id = data["message_id"].as_str().is_some_and(|id| {
+        !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    });
+    if !has_message_id { return None; }
+    let message = match event_type {
+        "peer_message" if session_id("from_id") => {
+            let mut message = transcript_messages::Message::peer(data, true)?;
+            message.unreviewed = data["unreviewed"].as_bool()?;
+            message.recipients.push(owner.to_owned());
+            message
+        }
+        "peer_sent" => {
+            if !data["to"].as_array().is_some_and(|rows| !rows.is_empty() && rows.len() <= 256
+                && rows.iter().all(|row| row.as_str().is_some_and(doxa_transcript::valid_session_id)))
+                || !data["failed"].is_null() && !data["failed"].as_array().is_some_and(|rows| rows.len() <= 256
+                    && rows.iter().all(|row| row.as_str().is_some_and(doxa_transcript::valid_session_id))) {
+                return None;
+            }
+            transcript_messages::Message::sent(data, owner, true)?
+        }
+        _ => return None,
+    };
+    Some(message.encoded())
+}
+
+pub(crate) fn peer_origin_message_id(value: &serde_json::Value) -> Option<String> {
+    if value["source"] != "peer_message" { return None; }
+    parse_peer_origin_for_restore(value).and_then(|(_, message_id)| message_id)
+}
+
+/// Rebuild a transcript-position peer turn only from the typed provenance
+/// persisted on its user row. Callers must first bind that row to the attached
+/// session; the prompt text itself is never used to infer peer origin.
+pub(crate) fn restored_peer_turn(origin: &serde_json::Value, prompt: &str) -> Option<String> {
+    let (label, _) = parse_peer_origin_for_restore(origin)?;
+    let data = serde_json::json!({"peer_started":true,"peer_origin":label,
+        "peer_origin_data":origin,"prompt":prompt});
+    transcript_messages::Message::peer_turn(&data, true).map(|message| message.encoded())
+}
+
+fn parse_peer_origin_for_restore(value: &serde_json::Value) -> Option<(String, Option<String>)> {
+    transcript_messages::parse_peer_origin(value)
+}
 
 const MIN_PANE_WIDTH: u16 = 28;
 const MIN_PANE_HEIGHT: u16 = 8;
@@ -547,6 +597,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "context" => "Current session context usage · click for details",
         "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
+        "peers" => "Same-scope peer map · click to refresh roster",
         "cost" => "Provider billing and quota information",
         "glm_account" => "GLM declared API profile, unknown cash/bundle remainder and external quota monitor",
         "balance" => "Current DeepSeek API account balance",
@@ -1599,6 +1650,7 @@ pub struct App {
     session_capabilities: HashMap<String, EngineCapabilities>,
     permission_modes: HashMap<String, String>,
     session_activity: HashMap<String, (bool, usize)>,
+    peer_message_ids: HashMap<String, transcript_messages::MessageIdIndex>,
     unread_sessions: HashSet<String>,
     streaming_text: HashSet<String>,
     reasoning_streams: HashMap<String, ReasoningStream>,
@@ -1640,8 +1692,11 @@ pub struct App {
     new_session: Option<NewSession>,
     docker_setup: Option<docker_setup::Prerequisites>,
     docker_settings_open: bool,
-    new_session_catalog_pending: Option<(launch::Engine, Receiver<Result<serde_json::Value, &'static str>>)>,
+    new_session_catalog_pending: Option<model_controls::CatalogJob>,
+    new_session_catalog_queued: Option<model_controls::CatalogRequest>,
+    catalog_generation: u64,
     router_review: Option<router_settings::RouterReview>,
+    router_freshness_pending: Option<(PathBuf, String, Instant, Receiver<bool>)>,
     vendor_catalog_pending: Option<(
         launch::Engine,
         Receiver<Option<Vec<doxa_vendors::ModelCapability>>>,
@@ -1669,7 +1724,8 @@ pub struct App {
     image_store: RefCell<transcript_images::Store>,
     mermaid_store: RefCell<transcript_mermaid::Store>,
     transcript_selection: RefCell<crate::selection::Selection>,
-    pending_clipboard_copy: Option<Vec<u8>>,
+    pending_clipboard_copy: Option<String>,
+    clipboard_copy_job: Option<crate::clipboard::CopyJob>,
     clipboard_job: Option<crate::clipboard::Job>,
     clipboard_secret_owner: Option<u64>,
     tool_modal: bool,
@@ -1897,6 +1953,7 @@ impl Default for App {
             session_capabilities: HashMap::new(),
             permission_modes: HashMap::new(),
             session_activity: HashMap::new(),
+            peer_message_ids: HashMap::new(),
             unread_sessions: HashSet::new(),
             streaming_text: HashSet::new(),
             reasoning_streams: HashMap::new(),
@@ -1939,7 +1996,10 @@ impl Default for App {
             docker_setup: None,
             docker_settings_open: false,
             new_session_catalog_pending: None,
+            new_session_catalog_queued: None,
+            catalog_generation: 0,
             router_review: None,
+            router_freshness_pending: None,
             vendor_catalog_pending: None,
             pending_launches: Vec::new(),
             pending_attaches: Vec::new(),
@@ -1965,6 +2025,7 @@ impl Default for App {
             mermaid_store: RefCell::new(transcript_mermaid::Store::default()),
             transcript_selection: RefCell::new(crate::selection::Selection::default()),
             pending_clipboard_copy: None,
+            clipboard_copy_job: None,
             clipboard_job: None,
             clipboard_secret_owner: None,
             tool_modal: false,

@@ -194,7 +194,10 @@ impl App {
     }
 
     pub(super) fn choice_dropdown_mouse(&mut self, mouse: MouseEvent) -> bool {
-        let Some(area) = self.choice_dropdown_rect() else { self.choice_dropdown = None; return true; };
+        let Some(area) = self.choice_dropdown_rect() else {
+            self.choice_dropdown = None;
+            return !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+        };
         let point = Position::new(mouse.column, mouse.row);
         if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
             if area.contains(point) {
@@ -212,6 +215,7 @@ impl App {
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left) { self.select_dropdown_choice(); }
             } else if mouse.kind == MouseEventKind::Down(MouseButton::Left) && !area.contains(point) {
                 self.choice_dropdown = None;
+                return false;
             }
         }
         true
@@ -709,7 +713,7 @@ mod tests {
             assert!(app.choice_dropdown.is_some());
             assert!(app.pending_launches.is_empty());
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            app.new_session_catalog_pending = Some((engine, rx));
+            app.install_catalog_receiver_for_test(engine, rx);
             tx.send(Ok(serde_json::json!({"models":["fixture-a","fixture-b","fixture-a","bad\nmodel",""],
                 "capabilities":[{"model":"fixture-b","is_default":true}]}))).unwrap();
             assert!(app.poll_new_session_catalog());
@@ -733,18 +737,18 @@ mod tests {
         app.select_new_engine();
         key(&mut app, KeyCode::Enter);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        app.new_session_catalog_pending = Some((launch::Engine::Codex, rx));
+        app.install_catalog_receiver_for_test(launch::Engine::Codex, rx);
         tx.send(Err("Catalog unavailable")).unwrap();
         assert!(app.poll_new_session_catalog());
         assert!(app.choice_dropdown.as_ref().unwrap().choices.is_empty());
         assert!(paint(&app).contains("No models"));
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        app.new_session_catalog_pending = Some((launch::Engine::Codex, rx));
+        app.install_catalog_receiver_for_test(launch::Engine::Codex, rx);
         app.engine_selected = 1;
         app.select_new_engine();
-        assert!(tx.send(Ok(serde_json::json!({"models":["stale-codex-model"]}))).is_err());
+        tx.send(Ok(serde_json::json!({"models":["stale-codex-model"]}))).unwrap();
         assert!(app.choice_dropdown.is_none());
         assert!(app.new_session.as_ref().unwrap().models.is_empty());
-        assert!(!app.poll_new_session_catalog());
+        assert!(app.poll_new_session_catalog());
     }
 }

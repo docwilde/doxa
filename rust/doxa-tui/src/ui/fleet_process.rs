@@ -99,7 +99,7 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
         lines.push(format!("Host test working directory: {}",recipe["cwd_relative"]));
         lines.push(format!("Host test timeout seconds: {}",recipe["timeout_s"]));
     }
-    if value["independent_review"].is_object(){let review=&value["independent_review"];for(label,key)in [("Independent supervisor model","supervisor"),("Supervisor action","supervisor_mode"),("Fast message judge","message_judge"),("Message review mode","message_mode"),("Review allocation USD","budget_usd"),("Maximum review calls","max_calls"),("Checkpoint interval seconds","interval_s"),("Input rate USD/Mtok","input_usd_per_million"),("Output rate USD/Mtok","output_usd_per_million"),("Message risk threshold","risk_threshold")]{lines.push(format!("{label}: {}",review[key]));}lines.push("Independent models use API credentials; review data is LORE-scrubbed, stateless and has no tools.".into());}
+    if value["independent_review"].is_object(){let review=&value["independent_review"];for(label,key)in [("Independent supervisor model","supervisor"),("Supervisor action","supervisor_mode"),("Fast message judge","message_judge"),("Message review mode","message_mode"),("Review allocation USD","budget_usd"),("Maximum review calls","max_calls"),("Checkpoint interval seconds","interval_s"),("Input rate USD/Mtok","input_usd_per_million"),("Output rate USD/Mtok","output_usd_per_million"),("Message risk threshold","risk_threshold")]{lines.push(format!("{label}: {}",review[key]));}if review["supervisor"]["provider"]=="jev" {lines.push(format!("Jev supervisor minimum Choice confidence: {}",review["risk_threshold"]));lines.push("Pinned Jev input rate: $0.042/M; output free. Verdicts cannot grant approval or dependency release.".into());}lines.push("Independent models use API credentials; review data is LORE-scrubbed, stateless and has no tools.".into());}
     if let Some(hash)=value["charter_sha256"].as_str(){lines.push(format!("Approved charter SHA256: {hash}"));}
     let mut counts:BTreeMap<(String,String,String,String),usize>=BTreeMap::new();
     for slot in value["slots"].as_array().into_iter().flatten(){let key=(slot["role"].as_str().unwrap_or("worker").into(),slot["engine"].as_str().unwrap_or("unknown").into(),slot["model"].as_str().unwrap_or("provider default").into(),match slot["lore"].as_bool(){Some(true)=>"on",Some(false)=>"off",None=>"unknown"}.into());*counts.entry(key).or_default()+=1;}
@@ -204,7 +204,23 @@ mod tests{
         let review=prepared.lines.join("\n");
         for visible in ["claude-sonnet-5-5","deepseek-flash","shadow","enforce","Input rate USD/Mtok: 0.42","Output rate USD/Mtok: 0.84","Message risk threshold: 0.7","API credentials"]{assert!(review.contains(visible),"{visible}");}
         assert!(!review.contains("PRIVATE-TASK"));
-        let mut invalid=args.clone();let model=invalid.iter().position(|arg|arg=="--alignment-supervisor").unwrap()+1;invalid[model]="jev:jev-1.13.0".into();assert!(Prepared::start(invalid,None).is_err());
+        let mut invalid=args.clone();let model=invalid.iter().position(|arg|arg=="--alignment-supervisor").unwrap()+1;invalid[model]="jev:jev-latest".into();assert!(Prepared::start(invalid,None).is_err());
+    }
+
+    #[test]
+    fn jev_independent_supervisor_is_frozen_in_native_tui_review_without_approval_authority() {
+        let root=tempfile::Builder::new().prefix("r").rand_bytes(4).tempdir().unwrap();
+        let mut args=words("--pool fixture:fixture-v1 --prompt 'PRIVATE-JEV-TASK' -n 1 --run-budget 10 --alignment-supervisor jev:jev-1.13.0 --supervision-mode shadow --message-review shadow --message-judge llm:deepseek:reviewer --review-budget 1 --review-threshold 0.73").unwrap();
+        args.extend(["--root".into(),root.path().to_string_lossy().into_owned()]);
+        let prepared=Prepared::start(args.clone(),None).unwrap();
+        assert_eq!(&prepared.args[1..1+args.len()],args);
+        let shown=prepared.lines.join("\n");
+        assert!(shown.contains("jev-1.13.0") && shown.contains("deepseek"));
+        assert!(shown.contains("Jev supervisor minimum Choice confidence: 0.73"));
+        assert!(!shown.contains("PRIVATE-JEV-TASK"));
+        assert!(prepared.launch(Path::new("/nonexistent-fixture-executable")).is_err(), "explicit launch review remains required");
+        let at=args.iter().position(|arg|arg=="--alignment-supervisor").unwrap()+1;
+        args[at]="jev:jev-preview".into();assert!(Prepared::start(args,None).is_err());
     }
 
     #[test]

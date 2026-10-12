@@ -71,23 +71,33 @@ fn fence_marker(line: &str) -> Option<(u8, usize, &str)> {
 }
 
 fn standalone_mermaid(paragraphs: &[&str], start: usize) -> Option<(usize, String, String)> {
+    let mut scanned=0;
+    standalone_mermaid_with_work(paragraphs, start, &mut scanned)
+}
+
+fn standalone_mermaid_with_work(paragraphs: &[&str], start: usize, scanned: &mut usize) -> Option<(usize, String, String)> {
     let first = paragraphs.get(start)?.trim_matches('\n');
     let (marker, count, language) = fence_marker(first.lines().next()?)?;
     if !language.trim().eq_ignore_ascii_case("mermaid") { return None; }
     let mut raw = String::new();
     for (end, paragraph) in paragraphs.iter().enumerate().skip(start) {
+        let paragraph = paragraph.trim_matches('\n');
         if !raw.is_empty() { raw.push_str("\n\n"); }
-        raw.push_str(paragraph.trim_matches('\n'));
+        raw.push_str(paragraph);
+        *scanned = scanned.saturating_add(paragraph.len());
         if raw.len() > MAX_MERMAID_SOURCE + 128 { return None; }
-        let mut lines = raw.lines();
-        lines.next();
-        let rest: Vec<&str> = lines.collect();
+        let lines: Vec<&str> = paragraph.lines().collect();
+        let rest = if end == start { &lines[1..] } else { &lines[..] };
         let Some(last) = rest.last() else { continue; };
         let closing = |line: &str| fence_marker(line).is_some_and(|(kind, n, tail)|
             kind == marker && n >= count && tail.trim().is_empty());
+        *scanned = scanned.saturating_add(paragraph.len());
         if rest[..rest.len() - 1].iter().any(|line| closing(line)) { return None; }
         if !closing(last) { continue; }
-        let body = rest[..rest.len() - 1].join("\n");
+        *scanned = scanned.saturating_add(raw.len());
+        let mut body_lines: Vec<_> = raw.lines().skip(1).collect();
+        body_lines.pop();
+        let body = body_lines.join("\n");
         if body.trim().is_empty() || body.len() > MAX_MERMAID_SOURCE { return None; }
         return Some((end, raw, body));
     }
@@ -97,20 +107,26 @@ fn standalone_mermaid(paragraphs: &[&str], start: usize) -> Option<(usize, Strin
 /// Complete, standalone fences only. The same parser drives scheduling and
 /// layout, so an outer code fence never starts an unseen renderer job.
 pub(super) fn mermaid_sources(source: &str) -> Vec<String> {
+    mermaid_sources_with_work(source).0
+}
+
+fn mermaid_sources_with_work(source: &str) -> (Vec<String>, usize) {
     let paragraphs: Vec<_> = source.split("\n\n").collect();
     let mut found = Vec::new();
     let mut index = 0;
     let mut outer: Option<(u8, usize)> = None;
+    let mut scanned = 0usize;
     while index < paragraphs.len() {
         let paragraph = paragraphs[index].trim_matches('\n');
         if outer.is_none() {
-            if let Some((end, _, body)) = standalone_mermaid(&paragraphs, index) {
+            if let Some((end, _, body)) = standalone_mermaid_with_work(&paragraphs, index, &mut scanned) {
                 found.push(body);
                 index = end + 1;
                 continue;
             }
         }
         for line in paragraph.lines() {
+            scanned = scanned.saturating_add(line.len());
             if let Some((kind, count, tail)) = fence_marker(line) {
                 match outer {
                     Some((open, minimum)) if open == kind && count >= minimum && tail.trim().is_empty() => outer = None,
@@ -121,7 +137,7 @@ pub(super) fn mermaid_sources(source: &str) -> Vec<String> {
         }
         index += 1;
     }
-    found
+    (found, scanned)
 }
 
 enum Block<'a> {
@@ -719,6 +735,29 @@ mod tests {
         assert!(mermaid_sources(nested).is_empty());
         assert!(mermaid_sources("```mermaid\ngraph TD\nA-->B").is_empty());
         assert!(mermaid_sources("Prefix\n```mermaid\ngraph TD\nA-->B\n```").is_empty());
+        assert!(mermaid_sources("```mermaid\nA-->B\n```\ntrailing text").is_empty());
+    }
+
+    #[test]
+    fn mermaid_fence_scan_work_is_linear_for_many_paragraphs_and_incomplete_input() {
+        let body = vec!["A"; 5_100].join("\n\n");
+        let mut source = String::new();
+        for index in 0..31 {
+            source.push_str("```mermaid\ngraph TD\n");
+            source.push_str(&body);
+            source.push_str("\n```");
+            if index < 30 { source.push_str("\n\n"); }
+        }
+        assert!(source.len() <= 512 * 1024);
+        let (diagrams, scanned) = mermaid_sources_with_work(&source);
+        assert_eq!(diagrams.len(), 31);
+        assert!(scanned <= source.len() * 4, "scanned {scanned} bytes for {} input bytes", source.len());
+
+        let incomplete = format!("```mermaid\ngraph TD\n{body}");
+        let (diagrams, scanned) = mermaid_sources_with_work(&incomplete);
+        assert!(diagrams.is_empty());
+        assert!(scanned <= incomplete.len() * 4,
+            "scanned {scanned} bytes for {} incomplete input bytes", incomplete.len());
     }
 
     #[test]
@@ -983,6 +1022,7 @@ mod tests {
         let source = crate::history::render(&crate::transport::TranscriptSnapshot {
             bytes: records.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n").into_bytes(),
             earlier_bytes_omitted: false,
+            ..Default::default()
         });
         let keys = HashSet::from([FoldKey::Section(0), FoldKey::Tool("a".into())]);
         let (lines, sections) = render(&source, 80, Some(&keys), None);
@@ -1000,7 +1040,7 @@ mod tests {
             serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"path":"src/main.rs"}}]}}),
             serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":result}]}}));
         let source = crate::history::render(&crate::transport::TranscriptSnapshot {
-            bytes: records.into_bytes(), earlier_bytes_omitted: false,
+            bytes: records.into_bytes(), earlier_bytes_omitted: false, ..Default::default()
         });
         let (collapsed, sections) = render(&source, 80, None, None);
         assert_eq!(sections.len(), 1);
@@ -1026,6 +1066,7 @@ mod tests {
         let source = crate::history::render(&crate::transport::TranscriptSnapshot {
             bytes: records.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n").into_bytes(),
             earlier_bytes_omitted: false,
+            ..Default::default()
         });
         let (collapsed, sections) = render(&source, 80, None, None);
         assert_eq!(sections.len(), 1);

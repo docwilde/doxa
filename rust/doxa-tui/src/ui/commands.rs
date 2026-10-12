@@ -409,14 +409,7 @@ impl App {
             LocalCommand::Beliefs => self.open_lore_picker(),
             LocalCommand::Diff => self.open_diff(),
             LocalCommand::Peers => {
-                self.map_modal = true;
-                self.peer_map.selected = 0;
-                self.pending_peer_refresh = Some(
-                    self.groups[self.active_group]
-                        .active_id()
-                        .unwrap_or("")
-                        .to_owned(),
-                );
+                self.open_peer_map(self.active_group);
             }
             LocalCommand::Split => {
                 self.split_active_pane(Split::Horizontal);
@@ -1195,7 +1188,7 @@ impl App {
         ));
         lines.push(format!("{} or /mode: permission picker", self.keybindings.display(KeyAction::Permission)));
         lines.push("Drag transcript text to select · Ctrl+C / Ctrl+Shift+C copy · Esc clears · Ctrl+V paste into prompt".into());
-        lines.push("Terminal fallback: Shift+drag, Ctrl+Shift+C / Ctrl+Shift+V; OSC52 support required for native copy".into());
+        lines.push("Copy uses wl-copy/xclip/pbcopy when available, otherwise OSC52; terminal fallback: Shift+drag, Ctrl+Shift+C / Ctrl+Shift+V".into());
         for row in COMMANDS {
             lines.push(format!("{} · {}", row.form, row.summary));
             lines.push(format!("  {}", row.support));

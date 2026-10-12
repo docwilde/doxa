@@ -45,7 +45,7 @@ pub fn serve(runtime:&Path)->io::Result<()> {
                 let from=body["from_id"].as_str().filter(|s|doxa_transcript::valid_session_id(s)).ok_or_else(||io::Error::other("remote sender identity required"))?;
                 let mut frame=serde_json::to_value(PeerFrame{authenticated_pid:None,from_id:from.into(),from_title:body["from_title"].as_str().unwrap_or("remote peer").into(),body:text.into(),from_repo:body["from_repo"].as_str().map(str::to_owned),sent_at:doxa_peers::now(),kind:Some(body["kind"].as_str().filter(|s|matches!(*s,"direct"|"broadcast")).unwrap_or("direct").into())})?;
                 scrub_value(&mut frame,&mut lore)?;
-                if frame["from_id"]!=from{return Err(io::Error::other("LORE changed remote sender identity"));}
+                if frame["from_id"]!=from{return Err(io::Error::other("LORE changed remote message identity"));}
                 let frame=serde_json::from_value(frame)?;delivery::send(Path::new(&peer.socket_path),&frame)?;
                 json!({"delivered_to":peer.session_id,"title":peer.title})
             },_=>return Err(io::Error::other("unsupported remote peer operation")),

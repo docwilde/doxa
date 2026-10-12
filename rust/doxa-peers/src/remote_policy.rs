@@ -8,6 +8,14 @@ impl Decision {
     fn allow(reason: impl Into<String>) -> Self { Self { allowed:true,reason:reason.into() } }
     fn deny(reason: impl Into<String>) -> Self { Self { allowed:false,reason:reason.into() } }
 }
+
+/// Normalize a request path into route segments. The root path has no segments;
+/// all other paths keep interior empty segments so malformed separators fail
+/// route matching instead of aliasing a valid endpoint.
+pub fn route_segments(path: &str) -> Vec<&str> {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() { Vec::new() } else { trimmed.split('/').collect() }
+}
 pub fn setting(key: &str, env: &str) -> String {
     let home = std::env::var_os("DOXA_HOME").filter(|v| !v.is_empty()).map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".doxa"));
@@ -68,5 +76,12 @@ mod tests {
         assert!(request_kind("set_permission_mode",false,false,Some("plan")).allowed);
         assert!(!request_kind("set_permission_mode",true,true,None).allowed);
         assert!(!request_kind("unknown",true,true,None).allowed);
+    }
+    #[test]
+    fn route_segments_normalize_root_without_aliasing_interior_separators() {
+        assert!(route_segments("/").is_empty());
+        assert!(route_segments("///").is_empty());
+        assert_eq!(route_segments("/api/sessions/"), ["api", "sessions"]);
+        assert_eq!(route_segments("/api//sessions"), ["api", "", "sessions"]);
     }
 }

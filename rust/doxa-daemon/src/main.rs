@@ -20,7 +20,7 @@ use budget_host::BudgetHost;
 use codex_host::CodexHost;
 use doxa_engines::codex_driver::{DriverOptions, SandboxMode};
 use doxa_peers::{delivery::Inbox, new_incarnation};
-use doxa_runtime::{Daemon, ExternalPrompt, Host, Session};
+use doxa_runtime::{Daemon, ExternalPrompt, Host, PeerTurnOrigin, Session};
 use doxa_vendors::Vendor;
 use peer_host::PeerHost;
 use serde_json::{json, Value};
@@ -793,9 +793,13 @@ fn run() -> io::Result<()> {
         Err(_) => { handle.publish(json!({"type":"remote_peer_bridge","data":{"state":"startup_failed"}})); None }
     };
     if let Some(task) = &options.task {
-        let origin = options.parent_session_id.as_deref().unwrap_or("child-task");
+        let sender = options.parent_session_id.as_deref().unwrap_or("child-task");
+        let origin = PeerTurnOrigin::new(sender.to_owned(),
+            (if options.parent_session_id.is_some() { "Parent session" } else { "Parent task" }).into(),
+            Some(doxa_peers::delivery::new_message_id()), None, None, None, "child_task".into())
+            .map_err(io::Error::other)?;
         let framed_task = initial_task_prompt(task, options.parent_session_id.as_deref());
-        if handle.enqueue_peer_prompt(framed_task, origin).map_err(io::Error::other)? != ExternalPrompt::Started {
+        if handle.enqueue_peer_prompt_with_origin(framed_task, origin).map_err(io::Error::other)? != ExternalPrompt::Started {
             return Err(io::Error::other("child task was not admitted"));
         }
     }
@@ -832,7 +836,7 @@ fn run() -> io::Result<()> {
                 handle.publish(event.clone());
                 let accepted = if wake_enabled && !broadcast {
                     match PeerHost::peer_prompt(&event) {
-                        Some((prompt, origin)) => match handle.enqueue_peer_prompt(prompt, &origin) {
+                        Some((prompt, origin)) => match handle.enqueue_peer_prompt_with_origin(prompt, origin) {
                             Ok(ExternalPrompt::Started | ExternalPrompt::Queued) => true,
                             Ok(ExternalPrompt::Full) => false,
                             Err(_) => false,

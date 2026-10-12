@@ -562,6 +562,10 @@ impl App {
                 if info.kind == "context" {
                     return (self.context_info_lines(usize::from(pane.width.saturating_sub(3)).max(1)).len() + 2).clamp(7, 19) as u16;
                 }
+                if info.kind == "usage" {
+                    let width = usize::from(pane.width.saturating_sub(3)).max(1);
+                    return (self.usage_info_lines(width).len() + 2).clamp(7, 19) as u16;
+                }
                 if matches!(
                     info.kind,
                     "memory"
@@ -630,7 +634,7 @@ impl App {
         self.chooser_rect(pane)
     }
 
-    pub(super) fn chips(&self, index: usize) -> Vec<(&'static str, String)> {
+    pub(crate) fn chips(&self, index: usize) -> Vec<(&'static str, String)> {
         let id = self.groups[index].active_id();
         let identity = id.and_then(|id| self.session_identity.get(id));
         if self.pane_remote(index) {
@@ -722,7 +726,16 @@ impl App {
         } else {
             String::new()
         };
-        chips.push(("context", format!("Ctx {context}{absolute}")));
+        let historical = if telemetry.is_some_and(|value| value.context_last_reported) {
+            "Last reported · "
+        } else {
+            ""
+        };
+        if historical.is_empty() {
+            chips.push(("context", format!("Ctx {context}{absolute}")));
+        } else {
+            chips.push(("context", format!("{historical}Ctx {context}{absolute}")));
+        }
         let memory = self
             .memory_cache
             .get(id.unwrap_or(""))
@@ -751,6 +764,16 @@ impl App {
             .filter(|label| label.ends_with(" beliefs"))
             .unwrap_or("Beliefs");
         chips.push(("beliefs", beliefs.to_owned()));
+        if let Some(id) = id.filter(|id| !self.offline_ids.contains(*id)) {
+            let peers = self
+                .peer_map
+                .reported_count(id)
+                .map(|count| format!("Peers {count}"))
+                .unwrap_or_else(|| "Peers".to_owned());
+            // The local peer map is a host feature, independent of whether a
+            // provider was given model-facing peer tools.
+            chips.push(("peers", peers));
+        }
         let engine = identity.and_then(|pair| pair.0.as_deref());
         if engine == Some("glm") {
             if let Some(account)=telemetry.and_then(|value|value.glm_account.as_ref()) {chips.push(("glm_account",account.label()));}
@@ -931,6 +954,7 @@ impl App {
             "effort" => self.open_effort_picker(),
             "isolation" => self.open_isolation_info(group),
             "beliefs" => self.open_lore_picker(),
+            "peers" => self.open_peer_map(group),
             "repo" | "directory" => self.open_repo_picker(group),
             "memory" => self.open_memory_menu(group),
             "more" => {
@@ -949,6 +973,30 @@ impl App {
             }
             kind => self.open_chip_info(kind, group),
         }
+    }
+
+    pub(super) fn open_peer_map(&mut self, group: usize) {
+        let Some(owner) = self
+            .groups
+            .get(group)
+            .and_then(|group| group.active_id())
+            .map(str::to_owned)
+        else {
+            self.notice = "Select a session before opening the peer map".into();
+            return;
+        };
+        if self.pane_remote(group) {
+            self.notice = "Peer controls are available on the session host".into();
+            return;
+        }
+        if self.offline_ids.contains(&owner) {
+            self.notice = "Archived transcript is read-only".into();
+            return;
+        }
+        self.active_group = group;
+        self.map_modal = true;
+        self.peer_map.selected = 0;
+        self.pending_peer_refresh = Some(owner);
     }
 
     pub(super) fn chip_window(&self, index: usize, width: usize) -> Vec<(&'static str, String)> {
