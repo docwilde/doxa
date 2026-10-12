@@ -359,7 +359,7 @@ impl ClaudeHost {
                 }
             };
             if old["engine"] != "claude"
-                || old["session_id"] != session_id
+                || old.get("session_id").map_or(old["thread_id"] != session_id, |id| id != session_id)
                 || !old["thread_id"].as_str().is_some_and(doxa_claude::cli::canonical_session_id)
                 || old["cwd"] != cwd
                 || old["lore_enabled"] != enabled

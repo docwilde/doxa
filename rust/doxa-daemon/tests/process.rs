@@ -5085,7 +5085,7 @@ fn long_claude_restore_keeps_logical_identity_original_turns_and_bounded_hook_co
         store.try_append(json!({"type":"user","message":{"role":"user","content":user}}),"claude",|s|Ok(s.into())).unwrap();
         store.try_append(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":answer},{"type":"thinking","thinking":"PRIVATE_REASONING_EXCLUDED"}]}}),"claude",|s|Ok(s.into())).unwrap();
     }
-    store.try_write_thread(json!({"thread_id":CLAUDE_SESSION,"engine":"claude","cwd":dir.path(),"lore_enabled":true,"spawn_depth":0,"parent_session_id":null,"turn_incomplete":false,"model":"opus","effort":"high","permission_mode":"default"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
+    store.try_write_thread(json!({"thread_id":CLAUDE_SESSION,"session_id":CLAUDE_SESSION,"engine":"claude","cwd":dir.path(),"lore_enabled":true,"spawn_depth":0,"parent_session_id":null,"turn_incomplete":false,"model":"opus","effort":"high","permission_mode":"default"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
     let original=fs::read(store.transcript_path()).unwrap();
     let script=dir.path().join("claude-recovery.py");
     claude_fixture(&script,&format!("assert '--resume' not in args\nassert session != '{}'",CLAUDE_SESSION),r#"if frame['type']=='user':
@@ -5125,7 +5125,7 @@ fn long_codex_restore_creates_bounded_thread_without_replacing_logical_history()
         store.try_append(json!({"type":"user","message":{"role":"user","content":user}}),"codex",|s|Ok(s.into())).unwrap();
         store.try_append(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":answer}]}}),"codex",|s|Ok(s.into())).unwrap();
     }
-    store.try_write_thread(json!({"thread_id":"previous-thread","engine":"codex","transport":"app-server","cwd":dir.path(),"lore_enabled":true,"lore_tools":false,"peer_tools":false,"turn_incomplete":false,"model":"account-model","effort":"high","permission_mode":"default"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
+    store.try_write_thread(json!({"thread_id":"previous-thread","session_id":"codex-session","engine":"codex","transport":"app-server","cwd":dir.path(),"lore_enabled":true,"lore_tools":false,"peer_tools":false,"turn_incomplete":false,"model":"account-model","effort":"high","permission_mode":"default"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
     let original=fs::read(store.transcript_path()).unwrap();
     let codex=dir.path().join("codex-recovery");executable(&codex,include_str!("fixtures/codex_appserver.py"));
     executable(&codex.with_extension("turn"),&format!(r#"#!/bin/sh
