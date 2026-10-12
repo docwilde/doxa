@@ -162,10 +162,11 @@ for line in sys.stdin:
     let path = fake(dir.path(), &script);
     let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
 
-    let CodegraphSnapshot::Current(snapshot) = client.codegraph_snapshot(cwd, "file", "src/service.py").unwrap()
+    let rendered_snapshot = client.codegraph_snapshot(cwd, "file", "src/service.py").unwrap();
+    let CodegraphSnapshot::Current(snapshot) = &rendered_snapshot
         else { panic!("expected Python snapshot fixture") };
     assert_eq!(snapshot.path, "src/service.py");
-    assert_eq!(snapshot.to_value()["binding"], "unknown");
+    assert_eq!(rendered_snapshot.to_value()["binding"], "unknown");
     assert!(matches!(client.codegraph_snapshot(cwd, "file", "../service.py"), Err(LoreError::InvalidFrame)));
     assert!(matches!(client.codegraph_snapshot(cwd, "file", "service.js"), Err(LoreError::InvalidFrame)));
     assert!(matches!(client.codegraph_snapshot("/other/worktree", "file", "src/service.py"),
