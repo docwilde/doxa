@@ -1,0 +1,44 @@
+name: Screenshot gallery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/gallery/**
+      - assets/shots/**
+      - rust/doxa-tui/Cargo.toml
+      - scripts/build_gallery_site.py
+      - .github/workflows/gallery-pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gallery-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Package only gallery source and selected screenshots
+        run: python3 scripts/build_gallery_site.py --output "$RUNNER_TEMP/gallery-site"
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: ${{ runner.temp }}/gallery-site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish the screenshot carousel
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

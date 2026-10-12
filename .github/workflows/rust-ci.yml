@@ -85,6 +85,7 @@ jobs:
       - name: Check task, quota fixture and release installer
         run: |
           python3 scripts/check_workflow_action_pins.py
+          python3 scripts/build_gallery_site.py --output "$RUNNER_TEMP/doxa-gallery-site"
           sh -n scripts/install.sh task
           ./task help
           # Stdlib-only checks for the protected provider's build tooling.
