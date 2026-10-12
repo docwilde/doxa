@@ -2181,7 +2181,8 @@ impl App {
                         _ => "",
                     };
                     let badge = format!("{pane}{provenance}{queue}");
-                    let title_width = usize::from(area.width.saturating_sub(5))
+                    let fleet_prefix = self.fleet_rail_prefix(&session.id);
+                    let title_width = usize::from(area.width.saturating_sub(5)).saturating_sub(fleet_prefix.width())
                         .saturating_sub(badge.width());
                     let title = clipped_title(&session.title, title_width).0;
                     let style = if offline {
@@ -2206,7 +2207,7 @@ impl App {
                     } else {
                         style
                     };
-                    lines.push(Line::styled(format!("{mark} {title}{badge}"), style));
+                    lines.push(Line::styled(format!("{fleet_prefix}{mark} {title}{badge}"), style));
                 }
             }
         }

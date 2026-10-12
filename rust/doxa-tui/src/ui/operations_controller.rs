@@ -446,7 +446,7 @@ impl App {
         self.input_cursor = 0;
     }
     pub(super) fn poll_fleet(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = self.poll_fleet_rail(Instant::now());
         if let Some(controller) = self.fleet_controller.as_mut() {
             match controller.poll() {
                 Ok(Some(success)) => {

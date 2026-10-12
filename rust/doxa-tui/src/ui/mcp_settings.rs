@@ -29,7 +29,7 @@ mod tests {
         std::fs::set_permissions(directory.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut command=std::process::Command::new(std::env::current_exe().unwrap());
         command.args(["--exact",name,"--test-threads=1"]).env("DOXA_MCP_UI_FIXTURE",name).env("DOXA_HOME",directory.path());
-        for name in ["DEEPSEEK_API_KEY","ZAI_API_KEY","TYPESAFE_API_KEY","TAVILY_API_KEY","FIRECRAWL_API_KEY","EXA_API_KEY","BRAVE_API_KEY","DOXA_ENGINE","DOXA_MCP_ENABLED","DOXA_MCP_CONFIG"] {command.env_remove(name);}
+        for name in ["DEEPSEEK_API_KEY","ZAI_API_KEY","TYPESAFE_API_KEY","SUBQ_API_KEY","DOXA_ROUTER_MODEL","TAVILY_API_KEY","FIRECRAWL_API_KEY","EXA_API_KEY","BRAVE_API_KEY","DOXA_ENGINE","DOXA_MCP_ENABLED","DOXA_MCP_CONFIG"] {command.env_remove(name);}
         let output=command.output().unwrap();
         assert!(output.status.success(),"{} {}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
         false
@@ -242,7 +242,7 @@ async fn inspect(path: &Path, cwd: &Path, cancel: Arc<AtomicBool>) -> Result<Rep
 
 impl App {
     pub(super) fn poll_mcp_config_view(&mut self)->bool {
-        let selected=self.settings_menu.as_ref().filter(|menu|row.setting.category==crate::settings::CATEGORIES[menu.category] && menu.draft.is_none())
+        let selected=self.settings_menu.as_ref().filter(|menu|crate::settings::CATEGORIES[menu.category]=="MCP" && menu.draft.is_none())
             .map(|menu|(self.prompt_owner(),PathBuf::from(menu.effective_value("mcp_config"))));
         if let Some(view)=self.mcp_config_view.as_mut() {
             if let ConfigViewState::Running(receiver)=&view.state {
@@ -265,7 +265,7 @@ impl App {
         self.mcp_config_view=Some(ConfigView {owner,path,state:ConfigViewState::Running(receiver)});true
     }
     pub(super) fn mcp_page_key(&mut self,key:KeyEvent)->bool {
-        if !self.settings_menu.as_ref().is_some_and(|menu|row.setting.category==crate::settings::CATEGORIES[menu.category] && menu.draft.is_none()) {return false;}
+        if !self.settings_menu.as_ref().is_some_and(|menu|crate::settings::CATEGORIES[menu.category]=="MCP" && menu.draft.is_none()) {return false;}
         match key.code {
             KeyCode::PageUp=>self.mcp_server_page=self.mcp_server_page.saturating_sub(1),
             KeyCode::PageDown=>self.mcp_server_page=(self.mcp_server_page+1).min(15),

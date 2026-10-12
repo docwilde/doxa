@@ -1274,6 +1274,10 @@ impl App {
             KeyCode::Right if alt => self.adjust_split(5),
             KeyCode::Up if alt => self.adjust_split(-5),
             KeyCode::Down if alt => self.adjust_split(5),
+            KeyCode::Left | KeyCode::Right if self.focus == Focus::Rail => {
+                let id=self.rail_order().get(self.rail_selected).map(|index|self.sessions[*index].id.clone());
+                id.is_some_and(|id|self.collapse_fleet_parent(&id,Some(key.code==KeyCode::Left)))
+            }
             KeyCode::Up if self.focus == Focus::Rail => {
                 self.rail_selected = self.rail_selected.saturating_sub(1);
                 true
@@ -3439,6 +3443,7 @@ impl App {
                             }
                             Some(RailRow::Session(index) | RailRow::Pane { active: index, .. }) => {
                                 let id = self.sessions[*index].id.clone();
+                                if mouse.column <= rail.x + 3 && self.collapse_fleet_parent(&id,None) {self.focus=Focus::Rail;return true;}
                                 let now = Instant::now();
                                 let double_click = self.last_rail_click.as_ref().is_some_and(|(previous, at)|
                                     previous == &id && now.duration_since(*at) <= std::time::Duration::from_millis(500));
@@ -3454,7 +3459,12 @@ impl App {
                                 }
                                 return true;
                             }
-                            Some(RailRow::ProjectHeading(_) | RailRow::PastHeading) => {
+                            Some(RailRow::ProjectHeading(heading)) => {
+                                self.open_fleet_heading(heading);
+                                self.focus = Focus::Rail;
+                                return true;
+                            }
+                            Some(RailRow::PastHeading) => {
                                 self.focus = Focus::Rail;
                                 return true;
                             }

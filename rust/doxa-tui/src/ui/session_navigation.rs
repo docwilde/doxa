@@ -469,6 +469,11 @@ impl App {
     }
 
     pub(super) fn attach_selected(&mut self, id: &str) {
+        if self.offline_ids.contains(id) && self.history_entries.contains_key(id) {
+            let group=self.groups.iter().position(|group|group.tabs.iter().any(|tab|tab==id)).unwrap_or(self.active_group);
+            self.resume_archive(id,group,None);
+            return;
+        }
         for (group_index, group) in self.groups.iter_mut().enumerate() {
             if let Some(index) = group.tabs.iter().position(|tab| tab == id) {
                 group.active = index;
