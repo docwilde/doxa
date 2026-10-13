@@ -2516,23 +2516,31 @@ for line in sys.stdin:
 "#));
         let mut pids=Vec::new();
         for text in ["success","error","interrupt"] {
+            let owned=host.clone();let (finished,completion)=mpsc::channel();
+            let turn=std::thread::spawn(move||{
             let mut terminal_seen=false;let mut interrupted=false;let mut pid=String::new();
-            host.prompt(text,&mut|event|{
+            owned.prompt(text,&mut|event|{
+                if event["type"]=="turn_started"&&text=="interrupt" {
+                    interrupted=true;owned.call("interrupt",&json!({})).unwrap();
+                }
                 if event["type"]=="text_delta" {
                     pid.push_str(event["data"]["text"].as_str().unwrap());
-                    if text=="interrupt"&&!interrupted {
-                        interrupted=true;host.call("interrupt",&json!({})).unwrap();
-                    }
                 }
                 if event["type"]=="turn_done" {
-                    assert!(!host.has_active_work(),"terminal callback must observe idle after cleanup");
+                    assert!(!owned.has_active_work(),"terminal callback must observe idle after cleanup");
                     assert_eq!(event["data"]["is_error"],text!="success");
-                    assert_eq!(host.call("set_effort",&json!({"effort":"low"})).unwrap()["verification_pending"],false);
+                    assert_eq!(owned.call("set_effort",&json!({"effort":"low"})).unwrap()["verification_pending"],false);
                     terminal_seen=true;
                 }
             });
             assert!(terminal_seen);assert_eq!(interrupted,text=="interrupt");
-            assert!(!pid.is_empty());pids.push(pid);
+            assert!(!pid.is_empty());let _=finished.send(());pid
+            });
+            let completed=completion.recv_timeout(Duration::from_secs(10));
+            if completed.is_err(){host.shutdown();}
+            let pid=turn.join();
+            assert!(completed.is_ok(),"bounded callback fixture did not complete");
+            pids.push(pid.unwrap());
         }
         assert!(pids.windows(2).all(|pair|pair[0]==pair[1]),"completion settings changes must retain the same CLI process");
         assert!(host.shutdown());
