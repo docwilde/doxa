@@ -1,29 +1,71 @@
-# Actual UID1000 daemon/frontend fixture proof
+# Actual UID1000 daemon and frontend fixture proof
 
-The first attempt (`root-daemon-20261013`, project5011) failed before ROOT broker, daemon, frontend or container startup. The quota provisioner and three caller Git commands succeeded. The ROOT installer refused the absent fixed session state directory. This was a fixture setup error; no Runtime admission or frontend turn passed.
+All attempts use the disposable `doxa-proof` guest. The caller is UID1000, the independent Engine is UID1001, and the policy and broker are controlled by ROOT. The image and provider files are credential-free fixtures. These receipts do not verify vendor sessions, paid calls, TLS provider traffic, Core, LORE human review, or provider authentication.
 
-The executed harness was `8316d776`, SHA256 `a872f96a53514319d450e9277828d7bf7e30933e7ce915cabe6469673bfbd1c3`. Its final immutable ROOT pins matched the successful composed RuntimeR6 template SHA256 `2c65be7ae393e3febbeeb4c2cd96ce0ab18c27f1d88737c62cb2c058f46558f6` and image `sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23`.
+## Frozen artifacts
 
-All five directly spawned processes exited through their retained pidfds. Scope process, socket and registry counts were zero. No CID was created. EnginePID27821/socket device56,inode688 and configuration SHA remained unchanged. The provisioned project5011 tree/policy were preserved as failed-before-container evidence.
+The daemon and frontend were built from source `934661cd`.
 
-`38620be5` fixes the harness to create a fresh ROOT0:0/0755 state directory after controlled-parent validation. The ROOT installer independently creates and verifies the private Git metadata lock. A fresh coordinated scope and reviewed source are required for a retry. The actual fixture turn proves no vendor/provider/auth, paid call, Core or LORE human path.
+- Daemon SHA256: `bdab19e567fe3e7b337414933f64d90be5cd361c55434b482d1d1cd7e378b1aa`.
+- Frontend SHA256: `5b4d8ef78eb7c42d84fe9c80f4220cdefdad6d2cad5987399dedc5497aa965c2`.
+- ROOT broker SHA256: `6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5`.
+- Native gateway SHA256: `18d1d633a67aee1dd1bfd67eaf5de82ebcc42dfb0ef112198c6691439de98fe9`.
+- Image worker SHA256: `cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f`.
+- Immutable image: `sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23`.
+- Successful composed Runtime template SHA256: `2c65be7ae393e3febbeeb4c2cd96ce0ab18c27f1d88737c62cb2c058f46558f6`.
 
-## Second attempt
+The policy operation limit is 120 seconds. Each daemon proof has one shared body deadline of 240 seconds and a separate cleanup budget of 45 seconds. Each scope receives at most one typed frontend prompt. Old scopes and failed receipts remain preserved. No receipt was promoted after a failure.
 
-Fresh `root-daemon-r2-20261013`/project5015 reached ROOT ready, an actual UID1000 daemon registry, and two attached clients. The retained peer observer received the docker-hardened fixture hello and flat status101 with running=false/queued=0. Fixture resume=true rejected. No turn events occurred. The body deadline240s expired. The terminal capture shows the first-use DOXA operations setup modal consuming the injected bytes before the prompt editor. This is a failed frontend-turn receipt; raw terminal mode and alternate screen alone were insufficient readiness predicates.
+## Attempt 1: fixture setup failure
 
-Executed harness87d79c6d SHA256 d1ee3481426cbdb1d34c0126698d79b983b4d6681ef0827aa5ee6151393717c7; ROOT policySHA2560aae4d9063b722cd0166ea819a7e0195421d19a8986125001c7c233eef285d80. Exact CID6c1402a145ec77f1e51fa7437eb101058b6c41713377c32abddf2a7eb93284da returned404. Its actual captured cgroup disappeared. All directly owned process pidfds exited, ROOT status stopped, and scope process/socket/registry counts were zero. Cleanup errors were empty and Engine identity/configuration unchanged. No extra prompt, deadline extension or forced CID cleanup occurred. The fixture scope is preserved. A reviewed supported onboarding fixture and fresh coordinated scope are required for retry.
+Session `root-daemon-20261013`, project5011, failed before broker, daemon, frontend or container startup. The quota provisioner and three caller Git commands succeeded. ROOT installation refused the absent fixed state directory. No CID was created. All five directly owned processes exited, and scope process, socket and registry counts were zero. Engine identity and configuration were unchanged.
 
-## Third attempt
+Executed harness: `8316d776`, SHA256 `a872f96a53514319d450e9277828d7bf7e30933e7ce915cabe6469673bfbd1c3`. Source `38620be5` adds fresh ROOT0:0/0755 state directory creation after controlled-parent validation. The broker installer creates and verifies its private Git metadata lock.
 
-Fresh `root-daemon-r3-20261013`/project5016 used the frozen frontend ordinary empty UID1000:1000/0600 singlelink `.setup-done` completion marker. ROOT/daemon/two-clients and the memory-disabled fixture hello passed. The actual attached opening view rendered and one prompt was typed. No Enter was sent: the bounded full-prompt render check timed out because regex-stripped raw Ratatui output retains painted thin cursor glyphs between each character and interleaves footer redraws. ANSI cursor positions must be replayed for a faithful screen predicate. This is an honest failed frontend-turn receipt with no daemon turn events.
+## Attempt 2: first-use modal consumed input
 
-Executed harnessabaf10fd SHA25641072fcaab922569dfcbd2e7e92d376fbbdff8ac1f5b02d6483e6e276777bcda; ROOT policySHA256a0a5905514635720a3dc8711c48a3e1e666dad47336f27705d020c79ff2f1b31. Exact CID355f634e62341fccfe51e264c4ed81540c5679eb51f8501a9e3665829afc9060 returned404, captured actual cgroup disappeared, all retained process pidfds exited, ROOT stopped and scope socket/process/registry counts were zero. Cleanup errors empty, Engine unchanged, no forced cleanup or deadline extension. Preserve this scope before a reviewed fresh retry.
+Session `root-daemon-r2-20261013`, project5015, reached an actual ROOT container, UID1000 daemon registry and two attached clients. The observer received the fixture hello and flat status101, with no running or queued work. Fixture resume=true was rejected. The first-use operations modal consumed input, and no daemon turn events occurred. The body deadline expired.
 
-## Incremental terminal replay review
+Executed harness: `87d79c6d`, SHA256 `d1ee3481426cbdb1d34c0126698d79b983b4d6681ef0827aa5ee6151393717c7`. ROOT policy SHA256: `0aae4d9063b722cd0166ea819a7e0195421d19a8986125001c7c233eef285d80`. Exact CID: `6c1402a145ec77f1e51fa7437eb101058b6c41713377c32abddf2a7eb93284da`.
 
-Harness7410bac5 adds a fixture-only incremental fixed48x160 cell replay. It applies cursor positions/movement, overwrites and erases; handles split UTF8, wide cells and bounded combining marks; ignores only known style/mode controls and the frozen frontend exact OSC22 cursor-pointer form. Unsupported screen controls fail. Limits are16MiB total input,131072 controls,512-character pending control,16 codepoints per cell. Replay errors are recorded while teardown continues draining owned pipes. Prompt and response predicates use current cells, and reached screen artifacts are retained.
+Cleanup passed: CID404, captured cgroup absent, ROOT stopped, all retained process pidfds exited, zero scope processes, sockets and registry entries, and unchanged Engine. No extra prompt, forced CID cleanup or deadline extension occurred.
 
-Meaningful redraw/space/erase, UTF8 width and every-byte split, unsupported-control and byte/control-bound regressions passed. Actual preservedR3raw18550 bytes/SHA2564fd6ec6f97c8ae790b776894ed61fc5244a3c05d89fd13de8ead33e77dcb544d replayed identically in one chunk and byte-by-byte, reconstructing the full prompt. The recordedscreen and regression receipt prove only the evidence parser, never container admission or a successful frontend turn. A fresh reviewedR4/project5017 actual proof remains pending.
+## Attempt 3: terminal evidence predicate failed
 
-Review caught a production EOF gap. Source647f4eae now finalizes the incremental UTF8 decoder and rejects pending controls at actual PTY EOF. Errors are retained while teardown drains, and final receipt requires complete terminal EOF. Actual local PTY regressions measured valid UTF8 close versus partial CSI/UTF8 close: valid passed, both partial forms refused and retained errors. Existing faithful actualR3 replay still passes. Frozen binaries and body240/cleanup45 are unchanged.
+Session `root-daemon-r3-20261013`, project5016, used the frontend's normal empty `.setup-done` marker, owned by UID1000:1000 with mode0600 and one link in its private DOXA home. The marker schema is identical in frozen source934661cd and current source; file blob `7f858c0eea69af7ec2d4bc14ba1be4f8a536f173`. Memory remained disabled through `DOXA_LORE=0`, as confirmed by the actual daemon hello.
+
+The attached opening view rendered, and one prompt was typed. No Enter was sent. The full-prompt rendering predicate timed out because stripping escape codes concatenates painted cursor glyphs and interleaved footer redraws instead of reconstructing current screen cells. No daemon turn events occurred.
+
+Executed harness: `abaf10fd`, SHA256 `41072fcaab922569dfcbd2e7e92d376fbbdff8ac1f5b02d6483e6e276777bcda`. ROOT policy SHA256: `a0a5905514635720a3dc8711c48a3e1e666dad47336f27705d020c79ff2f1b31`. Exact CID: `355f634e62341fccfe51e264c4ed81540c5679eb51f8501a9e3665829afc9060`.
+
+All cleanup checks passed with no errors: CID404, actual cgroup absent, ROOT stopped, all retained pidfds exited, zero scope processes, sockets and registry entries, and unchanged Engine.
+
+## Incremental terminal replay verification
+
+Source7410bac5 adds a fixture-only incremental 48x160 cell replay. It applies cursor movement, overwrites and erases; handles split UTF8, wide cells and bounded combining marks; and accepts only the known style and mode controls plus the frozen frontend's exact OSC22 pointer form. Unsupported controls fail. Limits are 16MiB total input, 131072 controls, 512 characters per pending control, and 16 codepoints per cell.
+
+Redraw, space, erase, UTF8 width, combining marks, byte-by-byte input, unsupported-control and bound checks passed. The actual attempt3 capture contains 18550 bytes, SHA256 `4fd6ec6f97c8ae790b776894ed61fc5244a3c05d89fd13de8ead33e77dcb544d`. Whole-buffer and byte-by-byte replay produced identical cells and reconstructed the full prompt, with602 controls. This verifies the evidence parser only.
+
+Review found an EOF gap. Source647f4eae finalizes UTF8 and rejects pending controls at actual PTY EOF. Errors remain recorded while teardown drains. The final receipt requires complete terminal EOF. Actual PTY tests passed for valid UTF8 and rejected partial CSI and UTF8 on close. Independent review also covered partial OSC and cleanup behavior.
+
+## Attempt 4: frontend turn passed, daemon shutdown failed
+
+Session `root-daemon-r4-20261013`, project5017, ran the reviewed harness647f4eae, SHA256 `c8df3f1d4c294c25d1154f6961811ce54b9083ebb16dd3c60233d018932db577`. ROOT policy SHA256: `bdc9915c12fa5dc0910043564cbb49d4316fb2b8ff09e2d15b408c9883451bd6`. Exact CID: `0ed4047b457a2b254c076cd123efb64a91c569f0fda8f351970b614a32b5b0ac`.
+
+The one prompt passed the readiness, typing, rendered-input and Enter predicates. The retained observer received exactly one turn_started, one text_delta containing `Deterministic native fixture response.`, and one turn_done. The frontend rendered the response. Status102 showed running=false and queued=0. CtrlQ exited the captured frontend with code0, and actual PTY EOF finalized completely. The existing owner stop_if_idle request103 returned ok=true.
+
+The overall receipt is FAILED. The daemon exited with code1 and stderr `doxa-daemon: ROOT client operation refused, exceeded its bound or timed out`. A successful stop reply and complete resource cleanup do not satisfy the required clean daemon exit.
+
+All cleanup checks passed with an empty error list: ROOT stopped, exact CID404, captured cgroup absent, every directly owned pidfd exited, zero scope processes, sockets and registry entries, complete terminal EOF, and unchanged Engine PID27821/socket device56,inode688/configuration. The faithful opening, prompt and response screen artifacts and full raw trace are retained. No further input, forced cleanup or rerun occurred. The daemon Runtime.stop / ROOT client shutdown path requires production investigation before a fresh reviewed proof can pass.
+
+## Reproduction
+
+Only run in the authorized disposable guest with freshly reserved scope paths and the exact protected template and artifacts above. The Root-private script and UID1000-readable observer source must contain identical reviewed bytes. The actual fourth attempt used:
+
+```text
+python3 -I /root/isolation-proof/daemon-proof-5017.py --ack-disposable \
+  --template-policy /etc/doxa/hardened/composed-runtime-r6-20261013.json \
+  --seconds 240 --output /root/isolation-proof/daemon-run4
+```
+
+The harness uses direct typed Engine API calls and retained pidfds for its own children. It never signals processes discovered only by argv or a /proc snapshot. Final status can be passed only after the body and every required cleanup check succeed. Preserve failed scope data; a retry requires a fresh coordinated scope.
