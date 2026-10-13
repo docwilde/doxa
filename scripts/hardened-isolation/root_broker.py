@@ -418,6 +418,11 @@ def process_start_time(pid):
     return int(fields[19])
 
 
+def root_start_time_matches(pid, pidfd, expected):
+    require(integer(expected,1,2**64-1) and process_start_time(pid)==expected
+            and not select.select([pidfd],[],[],0)[0], "live ROOT peer start time differs from instance")
+
+
 class Engine:
     def __init__(self, policy):
         self.policy = policy
@@ -2062,6 +2067,7 @@ def authenticated_client(session_id, seconds):
                 and instance["exe_sha256"] == receipt["broker_exe_sha256"] and instance["script_sha256"] == receipt["broker_sha256"]
                 and instance["argv"][1:] == ["-I", receipt["broker_script"], "serve", "--policy", receipt["policy_path"]]
                 and (instance["socket_dev"], instance["socket_ino"]) == (meta.st_dev, meta.st_ino), "ROOT-controlled broker instance differs")
+        root_start_time_matches(pid,pidfd,instance["start_time"])
         current = os.lstat(receipt["broker_socket"])
         require((current.st_dev,current.st_ino) == (meta.st_dev,meta.st_ino), "ROOT broker socket replaced during attestation")
         channel = Channel(sock, Deadline(seconds))
@@ -2075,6 +2081,7 @@ def authenticated_client(session_id, seconds):
                            "pid":pid,"start_time":instance["start_time"],"policy_sha256":receipt["policy_sha256"],
                            "instance_sha256":sha(instance_raw)} and not select.select([pidfd], [], [], 0)[0],
                 "fresh ROOT instance challenge differs")
+        root_start_time_matches(pid,pidfd,instance["start_time"])
         return channel, pidfd, policy
     except BaseException:
         sock.close()

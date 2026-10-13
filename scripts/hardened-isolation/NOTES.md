@@ -78,3 +78,12 @@ Lifecycle regressions cover early helper failure cleanup, old/new CID handover,
 and helper teardown exceptions still reaching force-delete/confirmed absence.
 Typed guard now permits native live per-turn checks during persistent provider
 transport, without caller-mirror disk samples or invented usage counters.
+
+Baseline86ff32bf committed before tests;48 focused tests passed in0.575s.
+Guest marker proof20508042 passes actual Git2.53.0 as UID1001: unsafe clean/
+smudge/process markers reproduced, eight safe operations produced none; original
+index unchanged, ordinary apply changed worktree, ROOT readonly21-entry/663-byte
+metadata checked. No Engine/quota/provider writes. Initial fixture lacked its
+session_id; fixed and reran; both private scopes cleaned. Parent review requires
+live ROOT /proc/PID/stat starttime equality before/after fresh client challenge;
+added exact checks plus mismatch/reuse regression and updated actual-client proof.

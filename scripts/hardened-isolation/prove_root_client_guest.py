@@ -57,6 +57,9 @@ def main():
                 with open(f"/proc/{server.pid}/exe","rb") as f:f.read(1)
                 result["root_proc_exe_errno"]=None
             except OSError as e:result["root_proc_exe_errno"]=e.errno
+            result["root_proc_stat_start_time"]=b.process_start_time(server.pid)
+            result["root_instance_start_time"]=own_instance["start_time"]
+            b.require(result["root_proc_stat_start_time"]==result["root_instance_start_time"],"actual UID1000 ROOT start time mismatch")
             client=subprocess.run([sys.executable,"-I",str(script),"client","--session-id",sid,"--op","describe"],
                                   stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5,
                                   env={"PATH":"/usr/bin:/bin","LANG":"C"})

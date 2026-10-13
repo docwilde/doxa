@@ -24,3 +24,21 @@ config change, container operation, provider call or live workstation provisioni
 occurred. These facts do **not** prove composed container origin, quota, filter,
 gateway, root callback or real-provider admission. Evidence explicitly reports
 `admissible_as_hardened:false`; integration proofs belong to the coordinator.
+
+ROOT-generated Git metadata marker regression, baseline20508042:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I /root/isolation-proof/broker-git-safe-20508042/prove_git_safe_guest.py
+```
+
+Exit0. Actual Git2.53.0 runs as UID1001/GID1001. Malicious repository clean,
+smudge and process filters execute markers through unsafe diff/apply; eight
+reviewed commands using ROOT-generated readonly metadata produce no markers.
+The safe ordinary apply updates worktree bytes; the original index SHA remains
+unchanged. ROOT:EngineGID0550 directories and0440 single-link files verified
+(21 entries,663 logical bytes). `apply --cached`/`--index` are refused. First
+attempt failed because fixture policy omitted session_id; fixed that fixture
+field and reran. Both attempts removed their unique /run/doxa proof scope.
+Only versioned proof source copies remain under /root/isolation-proof. No Engine
+API, quota installation, provider or workstation provisioning was performed.
+Evidence: git-safe-20261013.json, `admissible_as_hardened:false`.

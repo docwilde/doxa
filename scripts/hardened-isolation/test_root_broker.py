@@ -111,6 +111,19 @@ class PolicyTests(unittest.TestCase):
 
 
 class FramingTests(unittest.TestCase):
+    def test_live_root_start_time_must_match_instance_before_and_after_challenge(self):
+        pidfd=os.pidfd_open(os.getpid())
+        try:
+            current=b.process_start_time(os.getpid())
+            b.root_start_time_matches(os.getpid(),pidfd,current)
+            with self.assertRaisesRegex(b.Refused,"start time differs"):
+                b.root_start_time_matches(os.getpid(),pidfd,current+1)
+            with patch.object(b,"process_start_time",side_effect=[current,current+1]):
+                b.root_start_time_matches(os.getpid(),pidfd,current)
+                with self.assertRaisesRegex(b.Refused,"start time differs"):
+                    b.root_start_time_matches(os.getpid(),pidfd,current)
+        finally:os.close(pidfd)
+
     def setUp(self):
         self.a, self.c = socket.socketpair()
     def tearDown(self):
