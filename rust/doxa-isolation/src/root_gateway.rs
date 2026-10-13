@@ -170,6 +170,9 @@ fn nonce() -> io::Result<String> {
 /// A status packet is useful only on a live pidfd-pinned socket from the
 /// exact ROOT-installed native binary, scoped by a fresh challenge.
 fn gateway_status(authority: &Authority) -> io::Result<Value> {
+    // Reply latency includes the peer's fresh kernel/artifact audit. A packet
+    // framing timeout cannot stand in for that administrator-bounded work.
+    let deadline=Instant::now()+Duration::from_secs(authority.policy.limits.operation_seconds);
     let path = status_path(authority); controlled(path.parent().unwrap())?;
     let meta = fs::symlink_metadata(&path)?;
     if !meta.file_type().is_socket() || meta.uid() != 0 || meta.mode() & 0o777 != 0o600 {
@@ -182,9 +185,9 @@ fn gateway_status(authority: &Authority) -> io::Result<Value> {
         return Err(error("live gateway executable or pidfd differs from policy"));
     }
     let challenge = nonce()?;
-    write_frame(&mut stream, &serde_json::to_vec(&json!({"op":"status","session_id":authority.policy.session_id,
-        "policy_sha256":authority.policy_sha256,"nonce":challenge}))?)?;
-    let reply: Value = serde_json::from_slice(&read_frame(&mut stream, MAX_STATUS, Instant::now()+STATUS_TIME)?)?;
+    write_frame_until(&mut stream, &serde_json::to_vec(&json!({"op":"status","session_id":authority.policy.session_id,
+        "policy_sha256":authority.policy_sha256,"nonce":challenge}))?,deadline.min(Instant::now()+STATUS_TIME))?;
+    let reply: Value = serde_json::from_slice(&read_frame(&mut stream, MAX_STATUS, deadline)?)?;
     alive(&pin)?;
     let current = fs::symlink_metadata(&path)?;
     if (current.dev(),current.ino()) != (meta.dev(),meta.ino()) || reply["nonce"] != challenge
@@ -193,7 +196,7 @@ fn gateway_status(authority: &Authority) -> io::Result<Value> {
         || reply["boot_id"] != authority.manifest.boot_id || reply["gateway_ready"] != true {
         return Err(error("ROOT gateway live status is stale or mismatched"));
     }
-    authority.revalidate()?;
+    authority.revalidate_until(deadline)?;
     Ok(reply)
 }
 
@@ -328,15 +331,15 @@ pub fn serve(policy: &Path, manifest: &Path, engine_pidfd: i32) -> io::Result<()
     authority.revalidate()?;
     _status.instance=Some(publish_instance(&authority,&meta)?);
     loop {
-        authority.revalidate()?;
         let (mut stream,_) = match listener.accept() {
             Ok(value)=>value,
             Err(e) if e.kind()==io::ErrorKind::WouldBlock=>{std::thread::sleep(Duration::from_millis(200));continue;},
             Err(e)=>return Err(e),
         };
+        let deadline=Instant::now()+Duration::from_secs(authority.policy.limits.operation_seconds);
         let result=(||->io::Result<Value>{
             let (_,peer)=peer(&stream,0)?;
-            let request:Value=serde_json::from_slice(&read_frame(&mut stream,MAX_STATUS,Instant::now()+STATUS_TIME)?)?;
+            let request:Value=serde_json::from_slice(&read_frame(&mut stream,MAX_STATUS,deadline.min(Instant::now()+STATUS_TIME))?)?;
             let challenge=request["nonce"].as_str().filter(|value|value.len()==32 && value.bytes().all(|b|b.is_ascii_hexdigit()))
                 .ok_or_else(||error("ROOT gateway requires a fresh bounded challenge"))?;
             let op=request["op"].as_str().ok_or_else(||error("ROOT gateway operation missing"))?;
@@ -345,19 +348,35 @@ pub fn serve(policy: &Path, manifest: &Path, engine_pidfd: i32) -> io::Result<()
                 || request["policy_sha256"]!=authority.policy_sha256 || request.as_object().is_none_or(|rows|rows.len()!=keys) {
                 return Err(error("ROOT gateway status schema or scope differs"));
             }
-            authority.revalidate()?; alive(&peer)?;
+            // Every admitted request retains the full fresh authority check.
+            // Idle polling never publishes readiness and must not consume a
+            // request's reply budget before its challenge can be accepted.
+            authority.revalidate_until(deadline)?; alive(&peer)?;
             let hook_ready=if op=="status"{hooks.ready()}else{hooks.control(&request)?};
             Ok(json!({"nonce":challenge,"session_id":authority.policy.session_id,"policy_sha256":authority.policy_sha256,
                 "cid":authority.manifest.cid,"engine_pid":authority.manifest.engine_pid,"boot_id":authority.manifest.boot_id,
                 "gateway_ready":true,"hook_ready":hook_ready}))
         })();
-        if let Ok(reply)=result { let _=write_frame(&mut stream,&serde_json::to_vec(&reply)?); }
+        match result {
+            Ok(reply)=>{let _=write_frame_until(&mut stream,&serde_json::to_vec(&reply)?,deadline.min(Instant::now()+STATUS_TIME));},
+            Err(reason)=>eprintln!("ROOT gateway control refused: {}",reason.to_string().chars().take(256).collect::<String>()),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authenticated_audit_reply_can_outlast_packet_framing_timeout() {
+        let(mut receiver,mut sender)=UnixStream::pair().unwrap();
+        let task=std::thread::spawn(move||{
+            std::thread::sleep(STATUS_TIME+Duration::from_millis(150));
+            write_frame(&mut sender,b"audited").unwrap();
+        });
+        assert_eq!(read_frame(&mut receiver,64,Instant::now()+Duration::from_secs(5)).unwrap(),b"audited");
+        task.join().unwrap();
+    }
     #[test]
     fn status_reader_has_one_total_deadline_and_packet_bound() {
         let (mut receiver,mut sender)=UnixStream::pair().unwrap();

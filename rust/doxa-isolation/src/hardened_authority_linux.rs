@@ -126,8 +126,13 @@ impl Authority {
     }
 
     pub fn revalidate(&self)->io::Result<()> {
+        self.revalidate_until(Instant::now()+Duration::from_secs(self.policy.limits.operation_seconds))
+    }
+
+    pub(crate) fn revalidate_until(&self,deadline:Instant)->io::Result<()> {
         require_root()?;
-        let deadline=Instant::now()+Duration::from_secs(self.policy.limits.operation_seconds);
+        let deadline=deadline.min(Instant::now()+Duration::from_secs(self.policy.limits.operation_seconds));
+        remaining(deadline)?;
         self.policy_file.revalidate(deadline)?;
         let (_,bytes)=pin_json(&self.manifest_path,16*1024,JsonMode::PrivateManifest,deadline)?;
         let current:RootManifest=serde_json::from_slice(&bytes).map_err(|_|error("ROOT manifest changed to an invalid shape"))?;
