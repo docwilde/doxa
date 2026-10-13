@@ -37,10 +37,31 @@ fn journal(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path).unwrap_or_default().lines().map(|line|serde_json::from_str(line).unwrap()).collect()
 }
 fn dead(pid: u64) -> bool {
+    let pid=i32::try_from(pid).expect("fixture PID fits pid_t");
+    assert!(pid>0,"fixture PID must identify one process");
+    if unsafe {libc::kill(pid,0)} == -1 {
+        return std::io::Error::last_os_error().raw_os_error()==Some(libc::ESRCH);
+    }
     // A killed orphan may remain a zombie until the system reaper runs; it is
     // incapable of retaining pipes or executing further work.
-    let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
-    state.is_none() || state.is_some_and(|v|v.rsplit_once(") ").is_some_and(|(_,v)|v.starts_with('Z')))
+    #[cfg(target_os="linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()
+            .is_some_and(|v|v.rsplit_once(") ").is_some_and(|(_,v)|v.starts_with('Z')))
+    }
+    #[cfg(not(target_os="linux"))]
+    {
+        // macOS has no /proc. An unavailable status query must not count as
+        // successful cleanup; kill(0) above still detects reaped processes.
+        std::process::Command::new("/bin/ps").args(["-o","stat=","-p",&pid.to_string()])
+            .output().ok().filter(|output|output.status.success())
+            .is_some_and(|output|String::from_utf8_lossy(&output.stdout).trim_start().starts_with('Z'))
+    }
+}
+
+#[test]
+fn process_liveness_does_not_treat_a_running_process_as_dead() {
+    assert!(!dead(u64::from(std::process::id())));
 }
 
 #[tokio::test]
@@ -132,13 +153,22 @@ async fn cancellation_before_connect_never_starts_a_process() {
 async fn timeout_cancels_attempted_call_and_cleans_up_process_group() {
     let _environment=isolated();
     let directory=tempfile::tempdir().unwrap();let path=directory.path().join("journal.jsonl");
-    let mut config=stdio_config("timeout",&path);config.limits.timeout_ms=150;
+    // The configured deadline also covers cold interpreter startup. Exercise
+    // startup beyond the old 150 ms budget, then the real tools/call deadline
+    // using the normal fixture limit. Production limits remain unchanged.
+    let config=stdio_config("slow_start_timeout",&path);
     let mut client=Client::connect(&config,directory.path(),cancel()).await.unwrap();
     client.list_tools(cancel()).await.unwrap();
     let error=client.call_tool("search",&json!({}),cancel()).await.unwrap_err();
     assert_eq!(error.kind,ErrorKind::Timeout);assert!(error.attempted);assert!(client.is_closed());
-    let records=journal(&path);assert!(records.iter().any(|v|v["method"]=="notifications/cancelled"));
-    for pid in records.iter().filter_map(|v|v["pid"].as_u64().or(v["descendant"].as_u64())) {
+    let records=journal(&path);
+    assert!(records.iter().any(|v|v["startup_delay_ms"]==350));
+    let calls=records.iter().filter(|v|v["method"]=="tools/call").collect::<Vec<_>>();
+    assert_eq!(calls.len(),1,"one attempted call, without replay");
+    assert!(records.iter().any(|v|v["method"]=="notifications/cancelled" && v["cancelled_id"]==calls[0]["id"]));
+    let pids=records.iter().filter_map(|v|v["pid"].as_u64().or(v["descendant"].as_u64())).collect::<Vec<_>>();
+    assert_eq!(pids.len(),2,"the server and its SIGTERM-resistant descendant must both start");
+    for pid in pids {
         // SIGKILL is asynchronous for descendants which are not our children.
         // Require their termination within a bounded scheduling window.
         let deadline=std::time::Instant::now()+std::time::Duration::from_millis(500);
