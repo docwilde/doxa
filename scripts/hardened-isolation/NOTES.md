@@ -236,3 +236,12 @@ replaced physical sockets. Proof script records exact local child/PIDFD/socket
 inodes with explicit substituted ROOT metadata/Engine scope. Source only; no
 guest changes, reruns, admission changes or resource bound increases. Race fix
 committed before focused verification; separate Root diagnostic follows.
+
+Race source8296b843:81 focused tests pass0.984s. Actual local race artifact
+evidence/gateway-exit-races-20261013.json SHA256
+4bc048a6a92e2bbc9321c23e5b2657ad651b8c18fb5f0d0efae98fe957a9f243
+records two actual benign child/PIDFD exit races with four physical Unix socket
+inodes each, complete pinned cleanup and no independent error recovery call.
+Artifact source SHA256292ef53c8734be73600e80b0873564958563146f1a0fd4fc3a630ba7d37b0164.
+Its ROOT metadata/Engine are explicitly substituted local fixtures, proving
+source cleanup behavior without live isolation admission. Guest remains frozen.

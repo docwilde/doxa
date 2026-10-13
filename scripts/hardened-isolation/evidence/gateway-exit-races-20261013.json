@@ -1,0 +1,46 @@
+{
+  "broker_sha256": "292ef53c8734be73600e80b0873564958563146f1a0fd4fc3a630ba7d37b0164",
+  "cases": [
+    {
+      "captured_pidfd_inode": 30767343,
+      "child_pid": 1421680,
+      "child_returncode": -15,
+      "elapsed_seconds": 0.0016063479997683316,
+      "independent_cleanup_called": false,
+      "physical_sockets_remaining": 0,
+      "pidfd_closed": true,
+      "race": "exit_before_capture",
+      "socket_inodes": {
+        "egress-claude.sock": 195858674,
+        "egress-codex.sock": 195858675,
+        "gateway-status.sock": 195858672,
+        "hook.sock": 195858673
+      },
+      "status": "stopped"
+    },
+    {
+      "captured_pidfd_inode": 30782662,
+      "child_pid": 1421682,
+      "child_returncode": -15,
+      "elapsed_seconds": 0.002148764004232362,
+      "independent_cleanup_called": false,
+      "physical_sockets_remaining": 0,
+      "pidfd_closed": true,
+      "race": "exit_before_sigterm",
+      "socket_inodes": {
+        "egress-claude.sock": 195858674,
+        "egress-codex.sock": 195858675,
+        "gateway-status.sock": 195858672,
+        "hook.sock": 195858673
+      },
+      "status": "stopped"
+    }
+  ],
+  "contract": "doxa-local-gateway-exit-race-proof-v1",
+  "fixture_uid": 1000,
+  "guest_mutations": false,
+  "live_admission_proved": false,
+  "root_metadata_substituted": true,
+  "scope": "actual benign local child/PIDFD and Unix socket inodes; ROOT metadata/Engine are fixtures",
+  "status": "passed"
+}
