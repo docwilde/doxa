@@ -190,11 +190,18 @@ cannot approve a changed original. Workspace Git uses bounded ROOT-generated
 readonly metadata on the existing broker mount, excluding tenant configuration,
 filters/hooks/includes/replacements and submodule traversal. Ordinary apply may
 change working files; `--cached` and `--index` are refused.
+Metadata is built in a ROOT-private directory on the same quota filesystem,
+then published/retired atomically. An existing fixed ROOT `0600` lock coordinates
+exclusive publication with bounded shared native quota audits. Its presence
+grants no authority; missing, changed or contended installation fails closed.
 
 Disposable proof scope is recorded beside each receipt. Project quota
 aggregate/EDQUOT, container/Engine restart and source-remount checks, real ELF32
 ioctl refusal, actual UID1000-to-ROOT broker authentication and actual UID1001 Git
-filter-marker checks have passed. The credential-free exact-origin and composed
+filter-marker checks have passed. The
+[credential-free exact-origin run6](../scripts/isolation-authority-evidence/20261013/RUN.md)
+also passed kernel checks, inside/private-PTY frames and six refusal cases, with
+exact container/cgroup/socket cleanup. It reports diagnostics only. The composed
 Runtime/provider/callback/stop-resume proof is being completed separately.
 Historical passes never grant admission for a different image/policy. Real
 Claude/Codex streaming, login/refresh, redirects and provider-specific alternate

@@ -8,7 +8,7 @@ project quota; the caller's independent mirror is not worker filesystem authorit
 See [the operator guide](../session-isolation.md#root-controlled-hardened-sessions),
 [quota provisioning](../root-controlled-quota.md), and the
 [ROOT broker protocol/package](../../scripts/hardened-isolation/README.md).
-Disposable exact-origin and composed lifecycle proof remains in progress;
+Disposable exact-origin diagnostics passed run6; composed lifecycle proof remains in progress;
 individual fixture receipts and static `ready` flags cannot activate it.
 Legacy profiles retain their monitored soft ceiling/free-space gates.
 Remote Engines, Docker Desktop and containerized controllers remain unavailable.
@@ -257,14 +257,22 @@ bytes; review-copy identity remains separate. Core and the native relay recheck
 the original after review, with Core checking again immediately before compact.
 ROOT-generated readonly Git metadata excludes tenant execution configuration;
 its bounded tree shares the hard quota and existing readonly broker mount.
+ROOT builds metadata outside the worker-visible binds on the same project
+filesystem and atomically publishes/retires complete generations. Exclusive
+publication and shared native audits coordinate through an independently checked
+fixed ROOT `0600` lock; lock waiting has a total deadline and no lock/receipt is
+an admission token.
 
 Current empirical scopes include aggregate project EDQUOT through every data
 bind, persistence after container/Engine restart and source remount, real ELF32
 compat ioctl refusal, actual unprivileged ROOT-broker peer authentication, and
 actual Git clean/smudge/process marker rejection. Each receipt names its exact
-source/image/policy and limitations. Live exact-origin and full credential-free
-Runtime/provider/callback/Git/cleanup composition are separate acceptance runs
-and remain in progress. They do not claim real Claude/Codex streaming,
+source/image/policy and limitations. The
+[live exact-origin run6](../../scripts/isolation-authority-evidence/20261013/RUN.md)
+passed kernel checks, intended-worker/private-PTY frames and six origin/device
+refusals with both CIDs/cgroups/sockets absent afterward. Full credential-free
+Runtime/provider/callback/Git/cleanup composition remains a separate acceptance
+run in progress. The fixtures do not claim real Claude/Codex streaming,
 authentication/refresh, redirects, all alternate outbound paths or encrypted
 HTTP authority. The earlier network-none/public-HTTPS and origin namespace
 fixtures remain historical transport observations only.
