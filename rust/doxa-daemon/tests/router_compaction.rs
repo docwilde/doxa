@@ -258,7 +258,21 @@ fn actual_router_fleet_start_and_controller_resume_keep_disjoint_limits_without_
         return;
     }
     let env=Env::new();fs::write(env.path().join("doxa/config.toml"),"lore=false\nworktree_per_session=false\n").unwrap();
-    let server=Server::new(|body|(response(body,"completed dummy fleet task"),Duration::from_millis(500)));
+    let settled=|state:&Value|state["turn"].as_u64().is_some_and(|turn|turn>=1) && state["incomplete"]==false
+        && state["receipts"].as_array().and_then(|rows|rows.last()).is_some_and(|receipt|receipt["turn"]==state["turn"]);
+    let initial=Arc::new(Mutex::new(None));let observed=initial.clone();let journals=env.path().join("doxa/router");
+    let server=Server::with_catalog(|body|(response(body,"completed dummy fleet task"),Duration::from_millis(500)),move||{
+        if observed.lock().unwrap().is_some(){return;}
+        let idle=fs::read_dir(&journals).unwrap().filter_map(Result::ok).find_map(|entry|
+            fs::read(entry.path()).ok().and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok())
+                .filter(|state|state["turn"]==0 && state["incomplete"]==false));
+        if let Some(idle)=idle {
+            *observed.lock().unwrap()=Some(idle);
+            // Eligibility precedes the turn increment. Hold this real catalog
+            // reply briefly so initial idle state overlaps fleet monitoring.
+            thread::sleep(Duration::from_millis(300));
+        }
+    });
     let wrapper=env.path().join("fleet-daemon");let quote=|text:&str|format!("'{}'",text.replace('\'',"'\\''"));
     fs::write(&wrapper,format!("#!/bin/sh\nexec {} --vendor-endpoint {} \"$@\"\n",quote(env!("CARGO_BIN_EXE_doxa-daemon")),quote(&server.endpoint))).unwrap();fs::set_permissions(&wrapper,fs::Permissions::from_mode(0o700)).unwrap();
     let launch=|mode:&str| {
@@ -282,10 +296,12 @@ fn actual_router_fleet_start_and_controller_resume_keep_disjoint_limits_without_
         let path=Path::new(slot["router_config"].as_str().unwrap());let config=doxa_router::Config::load(path).unwrap();routing_calls+=config.max_calls;routing_spend+=config.max_spend_usd_micros;
         assert_eq!(slot["router_config_sha256"],config.hash().unwrap());
         let id=slot["session_id"].as_str().unwrap();let journal=env.path().join("doxa/router").join(format!("{id}.router.json"));
-        wait(||serde_json::from_slice::<Value>(&fs::read(&journal).unwrap()).unwrap()["incomplete"]==false);
+        wait(||settled(&serde_json::from_slice::<Value>(&fs::read(&journal).unwrap()).unwrap()));
         let state:Value=serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();assert_eq!(state["identity"]["ceiling_usd_micros"],2_000_000);assert_eq!(state["worker"]["input_tokens"],3);assert_eq!(state["turn"],1);
         identities.push((id.to_owned(),state["worker"].clone(),state["router"].clone()));
     }
+    let idle=initial.lock().unwrap().clone().expect("catalog must observe the delayed initial Router journal");
+    assert_eq!(idle["turn"],0);assert_eq!(idle["incomplete"],false);assert!(!settled(&idle),"initial idle is not a completed dispatched turn");
     assert_eq!(routing_calls,8);assert_eq!(routing_spend,10000);assert_eq!(server.posts().len(),2);
     let mut resumed=launch("resume");wait(||resumed.try_wait().unwrap().is_some());let status=resumed.wait().unwrap();
     if !status.success(){let mut error=String::new();resumed.stderr.take().unwrap().read_to_string(&mut error).unwrap();panic!("fleet resume: {error}");}
