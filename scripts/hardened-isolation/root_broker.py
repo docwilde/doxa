@@ -40,6 +40,7 @@ MAX_JSON = 65536
 MAX_HEADER = 8192
 MAX_FRAME = 65536
 MAX_ARTIFACT = 512 * 1024 * 1024
+MAX_NATIVE_STDERR = 8192
 TAG_JSON, TAG_STDOUT, TAG_STDERR, TAG_EXIT, TAG_ERROR = range(1, 6)
 TAG_STDIN, TAG_EOF, TAG_CANCEL = range(6, 9)
 TAG_ENTRY, TAG_FILE, TAG_STAGED = range(9, 12)
@@ -631,6 +632,39 @@ def kill_owned_child(child):
         child.wait(timeout=2)
 
 
+class NativeStderr:
+    """Continuously drain a native service; retain only a bounded prefix."""
+    def __init__(self,pipe):
+        self.pipe=pipe;self.data=bytearray();self.total=0;self.lock=threading.Lock();self.stop=threading.Event()
+        os.set_blocking(pipe.fileno(),False)
+        self.thread=threading.Thread(target=self.run,daemon=True);self.thread.start()
+
+    def run(self):
+        while not self.stop.is_set():
+            ready,_,_=select.select([self.pipe],[],[],.05)
+            if not ready:continue
+            try:chunk=os.read(self.pipe.fileno(),MAX_FRAME)
+            except BlockingIOError:continue
+            if not chunk:return
+            with self.lock:
+                self.total=min(2**63-1,self.total+len(chunk));self.data.extend(chunk[:MAX_NATIVE_STDERR-len(self.data)])
+
+    def snapshot(self):
+        with self.lock:return bytes(self.data),self.total
+
+    def finish(self):
+        self.stop.set();self.thread.join(.2)
+        require(not self.thread.is_alive(),"native diagnostic drain did not stop")
+        for _ in range(16):
+            try:chunk=os.read(self.pipe.fileno(),MAX_FRAME)
+            except BlockingIOError:break
+            if not chunk:break
+            with self.lock:
+                self.total=min(2**63-1,self.total+len(chunk));self.data.extend(chunk[:MAX_NATIVE_STDERR-len(self.data)])
+        self.pipe.close()
+        return self.snapshot()
+
+
 class Broker:
     def __init__(self, policy_path):
         self.policy_path = str(canonical(str(policy_path)))
@@ -656,6 +690,10 @@ class Broker:
         self.host_init_pid = None
         self.gateway = None
         self.gateway_pidfd = None
+        self.gateway_sockets = {}
+        self.gateway_parents = {}
+        self.gateway_stderr = None
+        self.gateway_start_error = None
         self.adapters = {}
         if self.manifest_path.exists():
             self.manifest = strict_json(read_regular(self.manifest_path, root=True))
@@ -708,6 +746,50 @@ class Broker:
             controlled(path.parent)
         controlled(policy_paths(p)["session_mount"])
 
+    def native_diagnostic(self,operation,phase,family,pid,code,data,total,error=None):
+        """Native-only diagnostics, never provider stdio or admission evidence."""
+        require(operation in {"broker-check","stage-check","serve"},"native diagnostic scope")
+        controlled(self.state_dir)
+        path=self.state_dir/("native-"+operation+".json")
+        if path.exists():
+            meta=controlled(path,private=True)
+            require(stat.S_ISREG(meta.st_mode) and meta.st_nlink==1 and stat.S_IMODE(meta.st_mode)==0o600,"unsafe native diagnostic sink")
+        record={"contract":"doxa-root-native-diagnostic-v1","session_id":self.policy["session_id"],
+                "policy_sha256":self.policy_sha256,"operation":operation,"phase":phase,"family":family,"pid":pid,
+                "cid":getattr(self,"manifest",None).get("cid") if getattr(self,"manifest",None) else None,
+                "exit_code":code,"stderr":data[:MAX_NATIVE_STDERR].decode("utf-8","replace"),
+                "stderr_bytes":total,"stderr_truncated":total>MAX_NATIVE_STDERR,"error":str(error)[:256] if error else None}
+        atomic_root_write(path,compact(record)+b"\n",0o600)
+
+    def run_native(self,command,deadline,operation,phase,family,refusal,pass_fds=()):
+        output=bytearray();diagnostic=bytearray();total=0;failure=None
+        with subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                              env={"PATH":"/usr/bin:/bin","LANG":"C","TMPDIR":str(self.state_dir)},
+                              pass_fds=pass_fds,start_new_session=True) as child:
+            pipes={child.stdout.fileno():"stdout",child.stderr.fileno():"stderr"}
+            for fd in pipes:os.set_blocking(fd,False)
+            try:
+                while pipes:
+                    deadline.check()
+                    ready,_,_=select.select(list(pipes),[],[],min(.05,max(0,deadline.end-time.monotonic())))
+                    for fd in ready:
+                        try:chunk=os.read(fd,MAX_FRAME)
+                        except BlockingIOError:continue
+                        if not chunk:del pipes[fd];continue
+                        if pipes[fd]=="stdout":
+                            output.extend(chunk);require(len(output)<=MAX_JSON,"native authority response bound")
+                        else:
+                            total=min(2**63-1,total+len(chunk));diagnostic.extend(chunk[:MAX_NATIVE_STDERR-len(diagnostic)])
+                deadline.check();code=child.wait(timeout=max(.001,deadline.end-time.monotonic()));deadline.check()
+                require(code==0,refusal+" (exit="+str(code)+")")
+            except BaseException as error:
+                failure=error;kill_owned_child(child);raise
+            finally:
+                # Diagnostics are private and cannot weaken or replace a gate.
+                try:self.native_diagnostic(operation,phase,family,child.pid,child.returncode,bytes(diagnostic),total,failure)
+                except Exception:pass
+        return bytes(output)
+
     def native_check(self, deadline, phase, family="none"):
         """No plugin or generic host RPC: exactly one hash-pinned native seam."""
         self.preflight()
@@ -717,26 +799,8 @@ class Broker:
                    "--manifest", str(self.manifest_path), "--engine-pidfd", str(self.engine.pidfd),
                    "--phase", phase, "--family", family]
         self.gateway_live()
-        with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              env={"PATH": "/usr/bin:/bin", "LANG": "C", "TMPDIR": str(self.state_dir)},
-                              pass_fds=(self.engine.pidfd,), start_new_session=True) as child:
-            output = bytearray()
-            os.set_blocking(child.stdout.fileno(), False)
-            try:
-                while True:
-                    deadline.check()
-                    readable, _, _ = select.select([child.stdout], [], [], min(.1, max(0, deadline.end-time.monotonic())))
-                    if readable:
-                        chunk = os.read(child.stdout.fileno(), MAX_JSON+1-len(output))
-                        if not chunk:
-                            break
-                        output.extend(chunk)
-                        require(len(output) <= MAX_JSON, "native authority response bound")
-                require(child.wait(timeout=max(.001, deadline.end-time.monotonic())) == 0, "native authority refused composition")
-            except BaseException:
-                kill_owned_child(child)
-                raise
-        proof = strict_json(bytes(output))
+        output=self.run_native(command,deadline,"broker-check",phase,family,"native authority refused composition",(self.engine.pidfd,))
+        proof = strict_json(output)
         keys(proof, {"contract", "ready", "policy_sha256", "cid", "engine_pid", "boot_id", "phase", "family",
                      "quota_ready", "filter_ready", "gateway_ready", "hook_ready"})
         require(proof["contract"] == AUTHORITY_CONTRACT and proof["ready"] is True
@@ -757,26 +821,8 @@ class Broker:
         authority = self.policy["authority"]
         command = [authority["path"], "stage-check", "--policy", self.policy_path,
                    "--phase", phase, "--family", family]
-        with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              env={"PATH": "/usr/bin:/bin", "LANG": "C", "TMPDIR": str(self.state_dir)},
-                              start_new_session=True) as child:
-            data = bytearray()
-            os.set_blocking(child.stdout.fileno(), False)
-            try:
-                while True:
-                    deadline.check()
-                    ready, _, _ = select.select([child.stdout], [], [], min(.1, max(0, deadline.end-time.monotonic())))
-                    if ready:
-                        chunk = os.read(child.stdout.fileno(), MAX_JSON+1-len(data))
-                        if not chunk:
-                            break
-                        data.extend(chunk)
-                        require(len(data) <= MAX_JSON, "staging native response bound")
-                require(child.wait(timeout=max(.001, deadline.end-time.monotonic())) == 0, "native quota staging gate refused")
-            except BaseException:
-                kill_owned_child(child)
-                raise
-        result = strict_json(bytes(data))
+        data=self.run_native(command,deadline,"stage-check",phase,family,"native quota staging gate refused")
+        result = strict_json(data)
         keys(result, {"contract", "policy_sha256", "phase", "family", "quota_ready", "boot_id"})
         require(result["contract"] == "doxa-root-session-staging-v1" and result["policy_sha256"] == self.policy_sha256
                 and result["phase"] == phase and result["family"] == family and result["quota_ready"] is True
@@ -843,23 +889,98 @@ class Broker:
             self.gateway_live()
             return
         authority = self.policy["authority"]
+        self.gateway_sockets={};self.gateway_parents={};self.gateway_start_error=None
+        for path,_,_ in self.gateway_socket_paths():
+            parent=controlled(path.parent)
+            self.gateway_parents[path.parent]=(parent.st_dev,parent.st_ino,parent.st_uid,parent.st_gid,parent.st_mode)
+            require(not path.exists() and not path.is_symlink(),"gateway socket requires verified prior cleanup")
+        self.check_unknown_gateway_sockets()
         self.gateway = subprocess.Popen([authority["path"], "serve", "--policy", self.policy_path,
             "--manifest", str(self.manifest_path), "--engine-pidfd", str(self.engine.pidfd)],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             env={"PATH": "/usr/bin:/bin", "LANG": "C", "TMPDIR": str(self.state_dir)},
             pass_fds=(self.engine.pidfd,), start_new_session=True)
         self.gateway_pidfd = os.pidfd_open(self.gateway.pid)
+        self.gateway_stderr=NativeStderr(self.gateway.stderr)
         status_path = self.state_dir / "gateway-status.sock"
         # Existence is only a startup signal. Native broker-check authenticates
         # root peer pidfd, executable, fresh nonce and all current scope facts.
-        while not status_path.exists():
-            deadline.check()
-            require(self.gateway.poll() is None, "native gateway startup failed")
-            select.select([self.gateway_pidfd], [], [], min(.02, max(0, deadline.end-time.monotonic())))
-        self.gateway_live()
+        try:
+            while len(self.gateway_sockets)!=len(self.gateway_socket_paths()):
+                deadline.check()
+                self.capture_gateway_sockets()
+                require(self.gateway.poll() is None, "native gateway startup failed (exit="+str(self.gateway.returncode)+")")
+                select.select([self.gateway_pidfd], [], [], min(.02, max(0, deadline.end-time.monotonic())))
+            self.gateway_live()
+        except BaseException as error:
+            self.gateway_start_error=error
+            data,total=self.gateway_stderr.snapshot()
+            try:self.native_diagnostic("serve","startup","none",self.gateway.pid,self.gateway.poll(),data,total,error)
+            except Exception:pass
+            raise
+
+    def gateway_socket_paths(self):
+        broker=Path(policy_paths(self.policy)["session_mount"])
+        return [(self.state_dir/"gateway-status.sock",0,0o600),(broker/"hook.sock",self.policy["engine"]["gid"],0o660)]+[
+            (broker/("egress-"+family+".sock"),self.policy["engine"]["gid"],0o660) for family in sorted(self.policy["providers"])]
+
+    def check_unknown_gateway_sockets(self):
+        broker=Path(policy_paths(self.policy)["session_mount"]);controlled(broker)
+        expected={path.name for path,_,_ in self.gateway_socket_paths() if path.parent==broker}
+        for path in broker.iterdir():
+            meta=path.lstat()
+            require(not (stat.S_ISSOCK(meta.st_mode) or path.name.endswith(".sock")) or path.name in expected,
+                    "untracked gateway socket in fixed broker scope")
+
+    def capture_gateway_sockets(self):
+        self.check_unknown_gateway_sockets()
+        for path,gid,mode in self.gateway_socket_paths():
+            parent=controlled(path.parent)
+            require((parent.st_dev,parent.st_ino,parent.st_uid,parent.st_gid,parent.st_mode)==self.gateway_parents[path.parent],
+                    "gateway socket parent changed")
+            try:meta=path.lstat()
+            except FileNotFoundError:continue
+            identity=(meta.st_dev,meta.st_ino,meta.st_uid,meta.st_gid,meta.st_mode,meta.st_nlink)
+            if path in self.gateway_sockets:
+                require(identity==self.gateway_sockets[path],"captured gateway socket replaced")
+            elif stat.S_ISSOCK(meta.st_mode) and meta.st_uid==0 and meta.st_gid==gid and stat.S_IMODE(meta.st_mode)==mode and meta.st_nlink==1:
+                self.gateway_sockets[path]=identity
+
+    def remove_gateway_sockets(self):
+        require(self.gateway_pidfd is not None and select.select([self.gateway_pidfd],[],[],0)[0],
+                "gateway socket cleanup requires captured PIDFD exit")
+        self.check_unknown_gateway_sockets()
+        held={};pending=[]
+        try:
+            for path,gid,mode in self.gateway_socket_paths():
+                parent=controlled(path.parent)
+                expected=self.gateway_parents.get(path.parent)
+                require(expected is not None and (parent.st_dev,parent.st_ino,parent.st_uid,parent.st_gid,parent.st_mode)==expected,
+                        "gateway socket cleanup parent changed")
+                if path.parent not in held:
+                    fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW);held[path.parent]=fd
+                    meta=os.fstat(fd);require((meta.st_dev,meta.st_ino,meta.st_uid,meta.st_gid,meta.st_mode)==expected,"gateway socket parent FD drift")
+                try:meta=os.stat(path.name,dir_fd=held[path.parent],follow_symlinks=False)
+                except FileNotFoundError:continue
+                identity=(meta.st_dev,meta.st_ino,meta.st_uid,meta.st_gid,meta.st_mode,meta.st_nlink)
+                require(path in self.gateway_sockets and identity==self.gateway_sockets[path]
+                        and stat.S_ISSOCK(meta.st_mode) and meta.st_uid==0 and meta.st_gid==gid and stat.S_IMODE(meta.st_mode)==mode and meta.st_nlink==1,
+                        "gateway socket cleanup found untracked/replaced endpoint")
+                pending.append((path,identity))
+            for path,identity in pending:
+                meta=os.stat(path.name,dir_fd=held[path.parent],follow_symlinks=False)
+                require((meta.st_dev,meta.st_ino,meta.st_uid,meta.st_gid,meta.st_mode,meta.st_nlink)==identity,"gateway socket changed before unlink")
+                os.unlink(path.name,dir_fd=held[path.parent])
+            self.gateway_sockets.clear()
+        finally:
+            for fd in held.values():os.close(fd)
 
     def close_gateway(self):
+        failure=None
         if self.gateway is not None:
+            try:
+                if self.gateway_pidfd is not None and not select.select([self.gateway_pidfd],[],[],0)[0]:self.capture_gateway_sockets()
+            except Exception as error:failure=error
             if self.gateway.poll() is None:
                 try:
                     os.killpg(self.gateway.pid, signal.SIGTERM)
@@ -867,6 +988,13 @@ class Broker:
                 except subprocess.TimeoutExpired:
                     os.killpg(self.gateway.pid, signal.SIGKILL)
                     self.gateway.wait(timeout=1)
+            require(self.gateway_pidfd is not None and select.select([self.gateway_pidfd],[],[],0)[0],"owned gateway PIDFD has not exited")
+            if getattr(self,"gateway_stderr",None) is not None:
+                data,total=self.gateway_stderr.finish();self.gateway_stderr=None
+                try:self.native_diagnostic("serve","closed","none",self.gateway.pid,self.gateway.returncode,data,total,failure or self.gateway_start_error)
+                except Exception:pass
+            if failure is None:self.remove_gateway_sockets()
+            if failure is not None:raise failure
             self.gateway = None
         if self.gateway_pidfd is not None:
             os.close(self.gateway_pidfd)

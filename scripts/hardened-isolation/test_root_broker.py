@@ -7,7 +7,10 @@ import json
 import os
 from pathlib import Path
 import socket
+import stat
 import struct
+import subprocess
+import sys
 import threading
 import tempfile
 import time
@@ -353,6 +356,103 @@ class AuthorityCleanupTests(unittest.TestCase):
     def test_runtime_history_and_unselected_config_are_not_staging_inputs(self):
         for name in ["codex/config.toml", "codex/sessions/history.jsonl", "claude/projects/log.jsonl", "claude/skills/.git/config", "claude/adopted-plugins/p/hooks/do.sh", "claude/skills/p/.mcp.json"]:
             with self.assertRaises(b.Refused): b.home_entry_policy(name.split("/"), "file", 1)
+
+
+class NativeDiagnosticTests(unittest.TestCase):
+    def fixture(self):
+        broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy_sha256="3"*64
+        broker.state_dir=Path(os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))).resolve()
+        broker.native_diagnostic=Mock();return broker
+
+    def test_stderr_flood_does_not_deadlock_and_retains_bounded_reason_exit(self):
+        broker=self.fixture();command=[sys.executable,"-I","-c","import os;os.write(2,b'x'*(4*1024*1024));os.write(1,b'{}');raise SystemExit(7)"]
+        with self.assertRaisesRegex(b.Refused,"exit=7"):
+            broker.run_native(command,b.Deadline(2),"stage-check","before","none","native refused")
+        args=broker.native_diagnostic.call_args.args
+        self.assertEqual(args[4],7);self.assertEqual(len(args[5]),b.MAX_NATIVE_STDERR);self.assertEqual(args[6],4*1024*1024)
+
+    def test_stderr_flood_obeys_original_deadline_and_kills_owned_child(self):
+        broker=self.fixture();command=[sys.executable,"-I","-c","import os\nwhile True:os.write(2,b'x'*65536)"]
+        start=time.monotonic()
+        with self.assertRaises(b.Refused):broker.run_native(command,b.Deadline(.05),"broker-check","prepare","none","native refused")
+        self.assertLess(time.monotonic()-start,.5);args=broker.native_diagnostic.call_args.args
+        self.assertEqual(args[4],-9);self.assertLessEqual(len(args[5]),b.MAX_NATIVE_STDERR)
+        with self.assertRaises(ProcessLookupError):os.kill(args[3],0)
+
+    def test_native_service_stderr_drains_flood_and_closes_boundedly(self):
+        with subprocess.Popen([sys.executable,"-I","-c","import os;os.write(2,b'y'*(2*1024*1024));os.write(1,b'done')"],stdout=subprocess.PIPE,stderr=subprocess.PIPE) as child:
+            drain=b.NativeStderr(child.stderr)
+            self.assertEqual(child.stdout.read(4),b"done");self.assertEqual(child.wait(timeout=2),0)
+            data,total=drain.finish();self.assertEqual(len(data),b.MAX_NATIVE_STDERR);self.assertEqual(total,2*1024*1024)
+            self.assertFalse(drain.thread.is_alive());self.assertTrue(child.stderr.closed)
+
+
+class GatewaySocketCleanupTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self,alive=False):
+        short=Path.home()/".dt";short.mkdir(mode=0o700,exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="gs-",dir=short) as directory:
+            root=Path(directory);runtime=root/"r";runtime.mkdir();mount=root/"b";mount.mkdir()
+            broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy["engine"]["gid"]=os.getgid()
+            broker.policy["providers"]["codex"]={};broker.state_dir=runtime;broker.gateway_sockets={};broker.gateway_parents={}
+            shapes=broker.gateway_socket_paths
+            sockets=[];child=subprocess.Popen([sys.executable,"-I","-c","import time;time.sleep(5)" if alive else "pass"])
+            broker.gateway_pidfd=os.pidfd_open(child.pid)
+            if not alive:child.wait(timeout=2)
+            original_stat=os.stat;original_lstat=os.lstat
+            def root_socket(meta):
+                if stat.S_ISSOCK(meta.st_mode):
+                    fields=list(meta);fields[4]=0
+                    if stat.S_IMODE(meta.st_mode)==0o600:fields[5]=0
+                    return os.stat_result(fields)
+                return meta
+            with patch.object(b,"policy_paths",return_value={"session_mount":str(mount)}),patch.object(b,"controlled",side_effect=lambda p,**kw:original_stat(p)),\
+                 patch.object(b.os,"stat",side_effect=lambda *a,**kw:root_socket(original_stat(*a,**kw))),\
+                 patch.object(b.os,"lstat",side_effect=lambda *a,**kw:root_socket(original_lstat(*a,**kw))):
+                for path,gid,mode in broker.gateway_socket_paths():
+                    sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.bind(str(path));path.chmod(mode);sockets.append(sock)
+                    parent=original_stat(path.parent);broker.gateway_parents[path.parent]=(parent.st_dev,parent.st_ino,parent.st_uid,parent.st_gid,parent.st_mode)
+                broker.capture_gateway_sockets()
+                try:yield broker,mount,sockets
+                finally:
+                    for sock in sockets:sock.close()
+                    if child.poll() is None:child.kill();child.wait(timeout=2)
+                    os.close(broker.gateway_pidfd)
+
+    def test_exact_pinned_sockets_removed_only_after_pidfd_exit(self):
+        with self.fixture() as (broker,mount,sockets):
+            self.assertEqual(len(broker.gateway_sockets),4);broker.remove_gateway_sockets()
+            self.assertFalse(any(path.exists() for path,_,_ in broker.gateway_socket_paths()))
+        with self.fixture(alive=True) as (broker,mount,sockets):
+            with self.assertRaisesRegex(b.Refused,"PIDFD exit"):broker.remove_gateway_sockets()
+            self.assertTrue(all(path.exists() for path,_,_ in broker.gateway_socket_paths()))
+
+    def test_replacement_and_unknown_socket_fail_without_unlinking(self):
+        for replacement in (False,True):
+            with self.fixture() as (broker,mount,sockets):
+                path=mount/("hook.sock" if replacement else "unknown.sock")
+                if replacement:path.unlink()
+                extra=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);extra.bind(str(path));path.chmod(0o660);sockets.append(extra)
+                with self.assertRaises(b.Refused):broker.remove_gateway_sockets()
+                self.assertTrue(all(path.exists() for path,_,_ in broker.gateway_socket_paths()));self.assertTrue(path.exists())
+
+    def test_changed_parent_and_unlink_error_refuse_cleanup(self):
+        with self.fixture() as (broker,mount,sockets):
+            mount.chmod(0o700)
+            with self.assertRaisesRegex(b.Refused,"parent changed"):broker.remove_gateway_sockets()
+            self.assertTrue(all(path.exists() for path,_,_ in broker.gateway_socket_paths()))
+
+    def test_socket_mode_and_link_mutations_refuse_cleanup(self):
+        for hardlink in (False,True):
+            with self.fixture() as (broker,mount,sockets):
+                path=mount/"hook.sock"
+                if hardlink:os.link(path,mount/"extra-link")
+                else:path.chmod(0o600)
+                with self.assertRaises(b.Refused):broker.remove_gateway_sockets()
+                self.assertTrue(all(path.exists() for path,_,_ in broker.gateway_socket_paths()))
+        with self.fixture() as (broker,mount,sockets),patch.object(b.os,"unlink",side_effect=PermissionError("injected cleanup refusal")):
+            with self.assertRaises(PermissionError):broker.remove_gateway_sockets()
+            self.assertTrue(all(path.exists() for path,_,_ in broker.gateway_socket_paths()))
 
 
 class HardenedFollowupTests(unittest.TestCase):

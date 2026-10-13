@@ -135,3 +135,16 @@ diff-check. Broker SHA256 is4ff9a871df8eab03fd4be94693564c3d4d7ef3f21470b040b5e8
 Parent will reprove these final bytes in a fresh composed scope. Earlier actual
 atomic/client guest evidence331355b7 remains explicitly tied to prior source;
 no frozen guest policy, broker or global Engine state was changed for this fix.
+
+Composed5012/r4 independently confirmed exactCID404/kernel sockets/processes0
+but four stale physical native sockets after30-second prepare refusal. Narrow
+production fix pins ROOT/broker hook+family egress socket identities and runtime
+status identity while owned gateway is alive, then descriptor-relative removes
+only matching leaves after captured gateway PIDFD exit. Replacement/unknown
+socket/parent/mode/link errors preserve refusal and cleanup-required state.
+Native helper/service stderr now drains concurrently into8192-byte memory
+prefix, discards flood overflow, and records actual exit plus limited reason in
+three fixed Root600 diagnostic files. Provider stdout/stderr/environment is
+separate; diagnostics never admit a session. Meaningful socket replacement,
+unlink error, live PIDFD, stderr flood and absolute deadline regressions added.
+Only source/tests/docs changed; frozen4ff9 broker and guest5012 remain untouched.

@@ -171,6 +171,21 @@ active and returns ready only after current quota/kernel/filter/gateway checks.
 Failure independently removes the exact owned CID. No caller-mirror disk sample
 or invented usage numbers authorize a new turn.
 
+Gateway startup also pins the protected parent and physical inode/owner/mode/link
+identity of `hook.sock`, selected family egress sockets and the private status
+socket. Cleanup waits for the captured owned gateway PIDFD to exit, validates
+every endpoint, then unlinks only matching leaves through retained parent
+descriptors. Unknown sockets, replacements or unsafe metadata require ROOT review;
+they never authorize broad path deletion or a stopped receipt.
+
+Native `broker-check`, `stage-check` and gateway stderr are drained concurrently
+with stdout and deadlines. At most8192 stderr bytes are retained; overflow is
+discarded. Actual native exit, phase/family/CID and limited reason are recorded
+in three fixed ROOT600 files under the private runtime directory:
+`native-broker-check.json`, `native-stage-check.json`, `native-serve.json`.
+These capture native diagnostics only, never provider stdio or provider secret
+environment, and are neither client receipts nor admission evidence.
+
 `prove_git_safe_guest.py` executes actual Git as UID1001 with malicious source
 clean/smudge/process filter configuration. Unsafe diff/apply reproduce marker
 execution; the ROOT-generated metadata must run the reviewed commands without
