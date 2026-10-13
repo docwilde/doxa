@@ -56,6 +56,10 @@ class Refused(RuntimeError):
     pass
 
 
+class GatewayExited(Refused):
+    """Socket capture raced the exit of the retained gateway PIDFD."""
+
+
 def require(condition, reason):
     if not condition:
         raise Refused(reason)
@@ -993,8 +997,9 @@ class Broker:
                     "untracked gateway socket in fixed broker scope")
 
     def capture_gateway_sockets(self):
-        require(self.gateway_pidfd is not None and not select.select([self.gateway_pidfd],[],[],0)[0],
-                "gateway socket capture requires live owned PIDFD")
+        require(self.gateway_pidfd is not None,"gateway socket capture requires owned PIDFD")
+        if select.select([self.gateway_pidfd],[],[],0)[0]:
+            raise GatewayExited("gateway socket capture requires live owned PIDFD")
         self.check_unknown_gateway_sockets()
         for path,gid,mode in self.gateway_socket_paths():
             parent=controlled(path.parent)
@@ -1039,15 +1044,23 @@ class Broker:
 
     def close_gateway(self):
         failure=None;data,total=(b"",0)
+        owned_gateway=self.gateway;owned_pidfd=self.gateway_pidfd
+        def captured_exit():
+            require(self.gateway is owned_gateway and self.gateway_pidfd==owned_pidfd and owned_pidfd is not None
+                    and select.select([owned_pidfd],[],[],0)[0],"gateway exit differs from retained owned PIDFD")
         try:
             if self.gateway is not None:
                 try:
                     if self.gateway_pidfd is not None and not select.select([self.gateway_pidfd],[],[],0)[0]:self.capture_gateway_sockets()
+                except GatewayExited:captured_exit()
                 except Exception as error:failure=error
                 if getattr(self,"gateway_teardown_pending",False):kill_owned_child(self.gateway)
                 elif self.gateway.poll() is None:
                     try:
                         os.killpg(self.gateway.pid, signal.SIGTERM)
+                        self.gateway.wait(timeout=1)
+                    except ProcessLookupError:
+                        captured_exit()
                         self.gateway.wait(timeout=1)
                     except subprocess.TimeoutExpired:kill_owned_child(self.gateway)
                 require(self.gateway.returncode is not None,"owned gateway has not been reaped")

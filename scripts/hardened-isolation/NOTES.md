@@ -221,3 +221,18 @@ not native authority or live containment. Broker SHA256
 6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5.
 Fresh composed5014 remains pending parent review/freeze; no guest commands or
 mutations were performed, and frozen R5 evidence remains source-scoped.
+
+Actual daemon/frontend5017 stopped exactCID and helpers but daemon helper
+returned generic error. Source-only actual-child counterexamples reproduced two
+frozen6f839 stop races in~1.4ms: exit between outer PIDFD observation and socket
+capture, or between poll and SIGTERM. Independent cleanup then succeeded, but
+stop correctly re-raised its original error. Parent explicitly authorized only
+these known owned-exit races, without treating all cleanup success as stop
+success. Typed capture-exit and ESRCH now require the SAME retained PIDFD prove
+exit before continuing; exact socket/parent/owner ledger still validates before
+unlink. Live ESRCH/unknown/replaced/audit errors retain quarantine/refusal. Actual
+child/PIDFD tests cover both races, live ESRCH, original audit/stop refusal and
+replaced physical sockets. Proof script records exact local child/PIDFD/socket
+inodes with explicit substituted ROOT metadata/Engine scope. Source only; no
+guest changes, reruns, admission changes or resource bound increases. Race fix
+committed before focused verification; separate Root diagnostic follows.

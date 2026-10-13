@@ -526,14 +526,18 @@ class NativeDiagnosticTests(unittest.TestCase):
 
 class GatewaySocketCleanupTests(unittest.TestCase):
     @contextmanager
-    def fixture(self,alive=False):
+    def fixture(self,alive=False,owned=False):
         short=Path.home()/".dt";short.mkdir(mode=0o700,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="gs-",dir=short) as directory:
             root=Path(directory);runtime=root/"r";runtime.mkdir();mount=root/"b";mount.mkdir()
             broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy["engine"]["gid"]=os.getgid()
             broker.policy["providers"]["codex"]={};broker.state_dir=runtime;broker.gateway_sockets={};broker.gateway_parents={}
-            sockets=[];child=subprocess.Popen([sys.executable,"-I","-c","import time;time.sleep(5)"])
+            sockets=[];child=subprocess.Popen([sys.executable,"-I","-c","import time;time.sleep(5)"],
+                                             stderr=subprocess.PIPE if owned else None,start_new_session=owned)
             broker.gateway_pidfd=os.pidfd_open(child.pid)
+            if owned:
+                broker.gateway=child;broker.gateway_stderr=b.NativeStderr(child.stderr)
+                broker.gateway_teardown_pending=False;broker.gateway_start_error=None;broker.native_diagnostic=Mock()
             original_stat=os.stat;original_lstat=os.lstat
             def root_socket(meta):
                 if stat.S_ISSOCK(meta.st_mode):
@@ -553,7 +557,8 @@ class GatewaySocketCleanupTests(unittest.TestCase):
                 finally:
                     for sock in sockets:sock.close()
                     if child.poll() is None:child.kill();child.wait(timeout=2)
-                    os.close(broker.gateway_pidfd)
+                    if owned and broker.gateway_stderr is not None:broker.gateway_stderr.finish()
+                    if broker.gateway_pidfd is not None:os.close(broker.gateway_pidfd)
 
     def test_exact_pinned_sockets_removed_only_after_pidfd_exit(self):
         with self.fixture() as (broker,mount,sockets):
@@ -588,6 +593,88 @@ class GatewaySocketCleanupTests(unittest.TestCase):
                 self.assertTrue(all(path.exists() for path,_,_ in broker.gateway_socket_paths()))
         with self.fixture() as (broker,mount,sockets),patch.object(b.os,"unlink",side_effect=PermissionError("injected cleanup refusal")):
             with self.assertRaises(PermissionError):broker.remove_gateway_sockets()
+            self.assertTrue(all(path.exists() for path,_,_ in broker.gateway_socket_paths()))
+
+
+class NativeGatewayExitRaceTests(unittest.TestCase):
+    def exercise_stop_race(self,race):
+        with GatewaySocketCleanupTests().fixture(alive=True,owned=True) as (broker,mount,sockets):
+            child=broker.gateway;pidfd=broker.gateway_pidfd;pidfd_inode=os.fstat(pidfd).st_ino
+            pinned={path.name:identity[1] for path,identity in broker.gateway_sockets.items()}
+            broker.manifest={"cid":"2"*64,"status":"ready"};broker.policy_sha256="3"*64
+            broker.engine=Mock();broker.engine.exchange.side_effect=[(200,{}),(204,{}),(404,{})]
+            broker.checked_inspect=Mock();broker.close_adapters=Mock()
+            broker.persist=Mock(side_effect=lambda cid,status:broker.manifest.update(status=status));broker.cleanup=Mock()
+            original_capture=broker.capture_gateway_sockets;original_killpg=os.killpg
+            def capture():
+                if race=="exit_before_capture":original_killpg(child.pid,b.signal.SIGTERM);child.wait(timeout=1)
+                return original_capture()
+            broker.capture_gateway_sockets=capture
+            def raced_signal(pid,sig):
+                self.assertEqual(pid,child.pid);original_killpg(pid,sig);child.wait(timeout=1)
+                raise ProcessLookupError(3,"owned gateway group exited")
+            start=time.monotonic()
+            with patch.object(b.os,"killpg",side_effect=raced_signal) if race=="exit_before_sigterm" else patch.object(b.os,"killpg",wraps=original_killpg):
+                result=broker.stop(b.Deadline(120))
+            elapsed=time.monotonic()-start
+            self.assertEqual(result["status"],"stopped");self.assertEqual(child.returncode,-15)
+            self.assertIsNone(broker.gateway);self.assertIsNone(broker.gateway_pidfd);self.assertFalse(broker.native_quarantined())
+            broker.cleanup.assert_not_called();self.assertFalse(any(path.exists() for path,_,_ in broker.gateway_socket_paths()))
+            self.assertEqual(broker.gateway_sockets,{});self.assertTrue(child.stderr.closed)
+            with self.assertRaises(OSError):os.fstat(pidfd)
+            return {"race":race,"status":result["status"],"elapsed_seconds":elapsed,"child_pid":child.pid,
+                    "child_returncode":child.returncode,"captured_pidfd_inode":pidfd_inode,"pidfd_closed":True,
+                    "socket_inodes":pinned,"physical_sockets_remaining":0,"independent_cleanup_called":False}
+
+    def test_actual_pidfd_exit_during_socket_capture_is_verified_stop(self):
+        self.exercise_stop_race("exit_before_capture")
+
+    def test_actual_pidfd_exit_between_poll_and_sigterm_is_verified_stop(self):
+        self.exercise_stop_race("exit_before_sigterm")
+
+    def test_live_pidfd_esrch_retains_pins_and_quarantines(self):
+        with GatewaySocketCleanupTests().fixture(alive=True,owned=True) as (broker,mount,sockets):
+            child=broker.gateway;pidfd=broker.gateway_pidfd;drain=broker.gateway_stderr;pins=dict(broker.gateway_sockets)
+            with patch.object(b.os,"killpg",side_effect=ProcessLookupError(3,"group missing while child live")):
+                with self.assertRaisesRegex(b.Refused,"retained owned PIDFD"):broker.close_gateway()
+            self.assertIsNone(child.poll());self.assertFalse(b.select.select([pidfd],[],[],0)[0]);os.fstat(pidfd)
+            self.assertIs(broker.gateway,child);self.assertEqual(broker.gateway_pidfd,pidfd);self.assertIs(broker.gateway_stderr,drain)
+            self.assertEqual(broker.gateway_sockets,pins);self.assertTrue(broker.native_quarantined());self.assertFalse(child.stderr.closed)
+            self.assertTrue(all(path.exists() for path,_,_ in broker.gateway_socket_paths()))
+            broker.close_gateway();self.assertFalse(broker.native_quarantined())
+
+    def test_original_socket_audit_failure_survives_successful_cleanup(self):
+        with GatewaySocketCleanupTests().fixture(alive=True,owned=True) as (broker,mount,sockets):
+            child=broker.gateway;original_capture=broker.capture_gateway_sockets
+            broker.capture_gateway_sockets=Mock(side_effect=b.Refused("original socket audit refusal"))
+            with self.assertRaisesRegex(b.Refused,"original socket audit refusal"):broker.close_gateway()
+            self.assertIsNotNone(child.returncode);self.assertTrue(broker.native_quarantined())
+            self.assertTrue(all(path.exists() for path,_,_ in broker.gateway_socket_paths()))
+            broker.capture_gateway_sockets=original_capture;broker.close_gateway();self.assertFalse(broker.native_quarantined())
+
+    def test_original_stop_audit_error_is_not_hidden_by_verified_cleanup(self):
+        with GatewaySocketCleanupTests().fixture(alive=True,owned=True) as (broker,mount,sockets):
+            broker.manifest={"cid":"2"*64,"status":"ready"};broker.engine=Mock()
+            broker.engine.exchange.side_effect=[(200,{}),(204,{}),(404,{})];broker.engine.request.side_effect=[(204,{}),(404,{})]
+            broker.checked_inspect=Mock();broker.close_adapters=Mock()
+            broker.persist=Mock(side_effect=lambda cid,status:broker.manifest.update(status=status))
+            broker.capture_gateway_sockets=Mock(side_effect=b.Refused("original stop socket audit refusal"))
+            with self.assertRaisesRegex(b.Refused,"original stop socket audit refusal"):broker.stop(b.Deadline(120))
+            self.assertEqual(broker.manifest["status"],"stopped");self.assertIsNone(broker.gateway)
+            self.assertIsNone(broker.gateway_pidfd);self.assertFalse(broker.native_quarantined())
+            self.assertFalse(any(path.exists() for path,_,_ in broker.gateway_socket_paths()))
+            self.assertEqual([call.args[1] for call in broker.engine.request.call_args_list],["DELETE","GET"])
+
+    def test_gateway_exit_class_does_not_bypass_replaced_socket_ledger(self):
+        with GatewaySocketCleanupTests().fixture(alive=True,owned=True) as (broker,mount,sockets):
+            child=broker.gateway;original_capture=broker.capture_gateway_sockets
+            path=mount/"hook.sock";path.unlink();replacement=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+            replacement.bind(str(path));path.chmod(0o660);sockets.append(replacement)
+            def capture():
+                os.killpg(child.pid,b.signal.SIGTERM);child.wait(timeout=1);return original_capture()
+            broker.capture_gateway_sockets=capture
+            with self.assertRaisesRegex(b.Refused,"untracked/replaced"):broker.close_gateway()
+            self.assertIsNotNone(broker.gateway);self.assertIsNotNone(broker.gateway_pidfd);self.assertTrue(broker.native_quarantined())
             self.assertTrue(all(path.exists() for path,_,_ in broker.gateway_socket_paths()))
 
 
