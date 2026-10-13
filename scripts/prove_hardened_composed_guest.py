@@ -406,11 +406,19 @@ def main():
             kernel_paths={row.split(maxsplit=7)[7] for row in Path('/proc/net/unix').read_text().splitlines()[1:] if len(row.split(maxsplit=7))==8}
             live_sockets=sorted(sockets & kernel_paths)
             scoped_socket_files=[str(p) for base in [state,root/'broker'] if base.exists() for p in base.rglob('*') if stat.S_ISSOCK(p.lstat().st_mode)]
+            remaining_processes=[]
+            exact_programs={str(client).encode(),str(installed).encode(),str(args.gateway).encode()}
+            for path in Path('/proc').iterdir():
+                if not path.name.isdecimal() or int(path.name)==os.getpid():continue
+                try:
+                    argv=(path/'cmdline').read_bytes().split(b'\0')
+                    if exact_programs.intersection(argv):remaining_processes.append(process_facts(int(path.name)))
+                except (FileNotFoundError,ProcessLookupError):pass
             engine.live();require(engine.pid==report['engine_pid_before'] and engine.socket_identity==tuple(report['engine_socket_before']),'shared Engine changed during cleanup')
             report.update(engine_pid_after=engine.pid,engine_socket_after=engine.socket_identity)
             report['cleanup'].update(command_processes=commands,cgroups=sorted(owned_cgroups),remaining_cgroups=remaining_cgroups,
-                live_sockets=live_sockets,scoped_socket_files=scoped_socket_files,container_census=0)
-            require(not remaining_cgroups and not live_sockets and not scoped_socket_files,'owned cgroup/socket cleanup census is nonzero')
+                live_sockets=live_sockets,scoped_socket_files=scoped_socket_files,remaining_processes=remaining_processes,container_census=0)
+            require(not remaining_cgroups and not live_sockets and not scoped_socket_files and not remaining_processes,'owned process/cgroup/socket cleanup census is nonzero')
         except BaseException as cause:cleanup_errors.append('scope census: '+str(cause))
         if broker_owned is not None:broker_owned.close()
         if cleanup_errors:
