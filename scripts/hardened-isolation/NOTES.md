@@ -245,3 +245,15 @@ inodes each, complete pinned cleanup and no independent error recovery call.
 Artifact source SHA256292ef53c8734be73600e80b0873564958563146f1a0fd4fc3a630ba7d37b0164.
 Its ROOT metadata/Engine are explicitly substituted local fixtures, proving
 source cleanup behavior without live isolation admission. Guest remains frozen.
+
+Separate parent-authorized ROOT-only stop diagnostic stores one fixed private600
+record, bounded4096 bytes, with operation/phase/fixed reason and whitelisted
+exception/errno/cause class only. No raw exception text, client-private paths,
+arguments/environment or provider bytes are stored. Stop classifies original
+failure BEFORE independent cleanup, preserving the original refusal even if
+cleanup succeeds; dispatch idle/request/reply failures also retain fixed phase.
+Storage errors return false without altering refusal or authority/deadlines.
+Tests cover private bounded storage, synthetic secret omission, busy/exit/ESRCH/
+deadline/wait labels, unsafe sink/link/scope rejection, injected write failure,
+original phase/refusal and concurrent busy-stop dispatch. No guest/rerun/bounds
+changes. Separate diagnostic commit precedes focused verification.

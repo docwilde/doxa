@@ -195,6 +195,14 @@ cleanup is uncertain. Quiesced shutdown keeps ownership across bounded retries;
 systemd's control-group stop remains the forced service termination boundary.
 Native helpers do not rely on a context-manager implicit unbounded child wait.
 
+ROOT also keeps one optional private600 `control-stop-failure.json` record for
+failed typed stop controls. It stores fixed operation/phase/reason labels and
+whitelisted exception class/errno, including a bounded cause classification.
+Raw exception text, client paths/arguments/environment and provider output are
+absent. The original failure is classified before independent cleanup; logging
+failure does not change refusal, deadlines or admission. Dispatch-idle and reply
+failures are recorded separately from failures inside the stop lifecycle.
+
 `prove_git_safe_guest.py` executes actual Git as UID1001 with malicious source
 clean/smudge/process filter configuration. Unsafe diff/apply reproduce marker
 execution; the ROOT-generated metadata must run the reviewed commands without

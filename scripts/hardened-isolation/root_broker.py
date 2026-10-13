@@ -771,6 +771,55 @@ class Broker:
                 "stderr_bytes":total,"stderr_truncated":total>MAX_NATIVE_STDERR,"error":str(error)[:256] if error else None}
         atomic_root_write(path,compact(record)+b"\n",0o600)
 
+    def control_failure(self,operation,phase,error):
+        """Optional ROOT-only fixed classification; never store raw control errors."""
+        try:
+            require(operation=="stop" and phase in {"request-validation","dispatch-idle","reply","cleanup-retry","scope",
+                    "engine-connect","inspect-cid","remove-cid","confirm-cid-absent","persist-stopped",
+                    "close-gateway","close-adapters","describe"},"control diagnostic scope")
+            classes={Refused:"Refused",GatewayExited:"GatewayExited",ProcessLookupError:"ProcessLookupError",
+                     subprocess.TimeoutExpired:"TimeoutExpired",TimeoutError:"TimeoutError",PermissionError:"PermissionError",
+                     FileNotFoundError:"FileNotFoundError",OSError:"OSError",ValueError:"ValueError",RuntimeError:"RuntimeError"}
+            def classified(value):
+                number=getattr(value,"errno",None)
+                return classes.get(type(value),"Other"),number if integer(number,0,4095) else None
+            exception,number=classified(error);cause=error.__cause__ or error.__context__
+            cause_exception,cause_errno=classified(cause) if cause is not None else (None,None)
+            reasons={"session transport is active; lifecycle/staging requires idle":"busy-transport",
+                     "absolute transaction deadline":"deadline","client cancelled":"cancelled",
+                     "gateway socket capture requires live owned PIDFD":"gateway-exited-during-capture",
+                     "gateway socket capture requires owned PIDFD":"gateway-pidfd-missing",
+                     "gateway exit differs from retained owned PIDFD":"gateway-exit-unconfirmed",
+                     "owned gateway has not been reaped":"gateway-exit-unconfirmed",
+                     "owned gateway PIDFD has not exited":"gateway-exit-unconfirmed",
+                     "gateway socket cleanup found untracked/replaced endpoint":"gateway-socket-drift",
+                     "gateway socket cleanup parent changed":"gateway-socket-drift",
+                     "gateway socket parent FD drift":"gateway-socket-drift",
+                     "gateway socket parent changed":"gateway-socket-drift",
+                     "captured gateway socket replaced":"gateway-socket-drift",
+                     "gateway socket changed before unlink":"gateway-socket-drift",
+                     "untracked gateway socket in fixed broker scope":"untracked-gateway-socket",
+                     "untracked gateway endpoints require ROOT cleanup":"untracked-gateway-socket",
+                     "owned native child cleanup retry is uncertain":"native-cleanup-uncertain",
+                     "owned native helpers still require ROOT cleanup retry":"native-cleanup-uncertain",
+                     "root policy changed":"policy-drift","root native authority identity changed":"authority-drift"}
+            message=error.args[0] if len(error.args)==1 and type(error.args[0]) is str and len(error.args[0])<=128 else None
+            reason=reasons.get(message,"process-group-missing" if exception=="ProcessLookupError" else
+                              "child-wait-timeout" if exception=="TimeoutExpired" else "unclassified")
+            record={"contract":"doxa-root-control-failure-v1","session_id":self.policy["session_id"],
+                    "policy_sha256":self.policy_sha256,"op":operation,"phase":phase,"reason":reason,
+                    "exception":exception,"errno":number,"cause_exception":cause_exception,"cause_errno":cause_errno}
+            raw=compact(record)+b"\n";require(len(raw)<=4096,"control diagnostic bound")
+            with self.state_lock:
+                controlled(self.state_dir);path=self.state_dir/"control-stop-failure.json"
+                if path.exists():
+                    meta=controlled(path,private=True)
+                    require(stat.S_ISREG(meta.st_mode) and meta.st_gid==0 and meta.st_nlink==1
+                            and stat.S_IMODE(meta.st_mode)==0o600,"unsafe control diagnostic sink")
+                atomic_root_write(path,raw,0o600)
+            return True
+        except BaseException:return False
+
     def native_quarantined(self):
         return bool(getattr(self,"failed_native_children",())) or getattr(self,"gateway_teardown_pending",False)
 
@@ -1306,31 +1355,41 @@ class Broker:
         return False
 
     def stop(self, deadline):
-        if self.native_quarantined():
-            if self.manifest is not None:
-                require(self.cleanup(self.manifest["cid"]),"owned native child cleanup retry is uncertain")
-            else:
-                self.retry_native_children(Deadline(3));self.close_gateway();self.close_adapters()
-            self.require_native_clear()
-            return self.describe()
-        if self.manifest is None or self.manifest["status"] == "stopped":
-            return self.describe()
-        cid = self.manifest["cid"]
+        cid=None;phase="scope"
         try:
+            if self.native_quarantined():
+                phase="cleanup-retry"
+                if self.manifest is not None:
+                    require(self.cleanup(self.manifest["cid"]),"owned native child cleanup retry is uncertain")
+                else:
+                    self.retry_native_children(Deadline(3));self.close_gateway();self.close_adapters()
+                self.require_native_clear();phase="describe"
+                return self.describe()
+            if self.manifest is None or self.manifest["status"] == "stopped":
+                phase="describe"
+                return self.describe()
+            cid=self.manifest["cid"];phase="engine-connect"
             channel = self.engine.connect(deadline)
             try:
+                phase="inspect-cid"
                 status, info = self.engine.exchange(channel, "GET", f"/containers/{cid}/json", statuses=(200,404))
                 if status != 404:
                     self.checked_inspect(channel, cid, live=False)
+                    phase="remove-cid"
                     self.engine.exchange(channel, "DELETE", f"/containers/{cid}?force=1&v=1", statuses=(204,404))
+                    phase="confirm-cid-absent"
                     self.engine.exchange(channel, "GET", f"/containers/{cid}/json", statuses=(404,))
             finally:
                 channel.sock.close()
+            phase="persist-stopped"
             self.persist(cid, "stopped")
-            self.close_gateway(); self.close_adapters()
+            phase="close-gateway";self.close_gateway()
+            phase="close-adapters";self.close_adapters()
+            phase="describe"
             return self.describe()
-        except BaseException:
-            self.cleanup(cid)
+        except BaseException as error:
+            self.control_failure("stop",phase,error)
+            if cid is not None:self.cleanup(cid)
             raise
 
     def exec_start(self, deadline, cmd, env=(), cwd="/workspace"):
@@ -2068,6 +2127,7 @@ def serve(policy_path):
         try:
             with sock:
                 client = Channel(sock, Deadline(resource_limits(broker.policy)["operation_seconds"], broker.closing.is_set))
+                op=None;stop_entered=False;control_phase="request-validation"
                 try:
                     _, uid, _ = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
                     require(uid == broker.policy["caller_uid"], "client identity differs from installed session")
@@ -2100,13 +2160,18 @@ def serve(policy_path):
                         keys(request, {"v", "session_id", "op"}, {"staging"} if op == "prepare" else ())
                         require(type(request.get("staging", False)) is bool, "staging flag must be boolean")
                         with broker.state_lock:
+                            control_phase="dispatch-idle"
                             if op not in {"describe","guard"}: broker.idle()
                             if request.get("staging") is True: broker.stage(client, initial=True)
                             deadline = client.deadline
                             deadline.cancelled = lambda: broker.closing.is_set() or bool(select.select([sock], [], [], 0)[0])
+                            if op=="stop":stop_entered=True
                             result = broker.describe() if op == "describe" else getattr(broker, op)(deadline)
+                        control_phase="reply"
                         client.json_frame(TAG_JSON, result)
                 except Exception as error:
+                    if op=="stop" and (not stop_entered or control_phase=="reply"):
+                        broker.control_failure("stop",control_phase,error)
                     try:
                         client.deadline = Deadline(1)
                         client.json_frame(TAG_ERROR, {"error": str(error)[:256], "status": broker.describe()["status"]})

@@ -596,6 +596,75 @@ class GatewaySocketCleanupTests(unittest.TestCase):
             self.assertTrue(all(path.exists() for path,_,_ in broker.gateway_socket_paths()))
 
 
+class ControlFailureDiagnosticTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))) as directory:
+            broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy_sha256="3"*64
+            broker.state_dir=Path(directory).resolve();broker.state_lock=threading.RLock()
+            def root_meta(path,**_):
+                meta=Path(path).lstat();fields=list(meta);fields[4]=0;fields[5]=0;return os.stat_result(fields)
+            with patch.object(b,"controlled",side_effect=root_meta):yield broker
+
+    def test_stop_diagnostic_is_private_bounded_and_contains_no_raw_error_data(self):
+        with self.fixture() as broker:
+            secret="fixture-private-token";error=b.Refused(secret+" /caller/private/path " + "x"*100000)
+            self.assertTrue(broker.control_failure("stop","close-gateway",error))
+            path=broker.state_dir/"control-stop-failure.json";raw=path.read_bytes();record=json.loads(raw)
+            self.assertLessEqual(len(raw),4096);self.assertEqual(path.stat().st_mode&0o777,0o600)
+            self.assertEqual(record["reason"],"unclassified");self.assertEqual(record["phase"],"close-gateway")
+            self.assertEqual(record["exception"],"Refused");self.assertIsNone(record["errno"])
+            self.assertNotIn(secret.encode(),raw);self.assertNotIn(b"/caller/private/path",raw)
+            self.assertEqual(set(record),{"contract","session_id","policy_sha256","op","phase","reason","exception","errno","cause_exception","cause_errno"})
+
+    def test_fixed_busy_exit_deadline_and_esrch_classifications(self):
+        cases=[(b.Refused("session transport is active; lifecycle/staging requires idle"),"busy-transport"),
+               (b.Refused("gateway exit differs from retained owned PIDFD"),"gateway-exit-unconfirmed"),
+               (b.GatewayExited("gateway socket capture requires live owned PIDFD"),"gateway-exited-during-capture"),
+               (b.Refused("absolute transaction deadline"),"deadline"),
+               (ProcessLookupError(3,"fixture-private-error"),"process-group-missing"),
+               (subprocess.TimeoutExpired(["fixture-private-argv"],1,stderr=b"fixture-private-bytes"),"child-wait-timeout")]
+        with self.fixture() as broker:
+            for error,reason in cases:
+                self.assertTrue(broker.control_failure("stop","dispatch-idle",error))
+                record=json.loads((broker.state_dir/"control-stop-failure.json").read_bytes())
+                self.assertEqual(record["reason"],reason);self.assertNotIn("fixture-private",json.dumps(record))
+            error=b.Refused("gateway exit differs from retained owned PIDFD")
+            error.__context__=ProcessLookupError(3,"fixture-private-cause")
+            self.assertTrue(broker.control_failure("stop","close-gateway",error))
+            record=json.loads((broker.state_dir/"control-stop-failure.json").read_bytes())
+            self.assertEqual(record["cause_exception"],"ProcessLookupError");self.assertEqual(record["cause_errno"],3)
+
+    def test_unsafe_sink_or_unknown_scope_does_not_write(self):
+        with self.fixture() as broker:
+            sink=broker.state_dir/"control-stop-failure.json";sink.write_bytes(b"existing");sink.chmod(0o644)
+            self.assertFalse(broker.control_failure("stop","scope",b.Refused("fixture")));self.assertEqual(sink.read_bytes(),b"existing")
+            sink.chmod(0o600);os.link(sink,broker.state_dir/"linked")
+            self.assertFalse(broker.control_failure("stop","scope",b.Refused("fixture")));self.assertEqual(sink.read_bytes(),b"existing")
+            self.assertFalse(broker.control_failure("provider_exec","scope",b.Refused("fixture")))
+            self.assertFalse(broker.control_failure("stop","/caller/private",b.Refused("fixture")))
+
+    def test_diagnostic_write_failure_preserves_original_stop_refusal(self):
+        for failure in (OSError("injected storage refusal"),SystemExit("injected storage interruption")):
+            with self.fixture() as broker:
+                original=b.Refused("original stop refusal");broker.manifest={"cid":"2"*64,"status":"ready"}
+                broker.engine=Mock();broker.engine.connect.side_effect=original;broker.cleanup=Mock(return_value=True)
+                with patch.object(b,"atomic_root_write",side_effect=failure):
+                    with self.assertRaises(b.Refused) as raised:broker.stop(b.Deadline(1))
+                self.assertIs(raised.exception,original);broker.cleanup.assert_called_once_with("2"*64)
+
+    def test_stop_records_original_phase_before_cleanup_and_reraises(self):
+        with self.fixture() as broker:
+            original=b.Refused("original stop socket audit refusal");broker.manifest={"cid":"2"*64,"status":"ready"}
+            broker.engine=Mock();broker.engine.exchange.side_effect=[(200,{}),(204,{}),(404,{})]
+            broker.checked_inspect=Mock();broker.persist=Mock();broker.close_gateway=Mock(side_effect=original)
+            broker.close_adapters=Mock();broker.cleanup=Mock(return_value=True)
+            with self.assertRaises(b.Refused) as raised:broker.stop(b.Deadline(1))
+            self.assertIs(raised.exception,original);record=json.loads((broker.state_dir/"control-stop-failure.json").read_bytes())
+            self.assertEqual(record["phase"],"close-gateway");self.assertEqual(record["reason"],"unclassified")
+            self.assertNotIn("original stop socket audit refusal",json.dumps(record));broker.cleanup.assert_called_once_with("2"*64)
+
+
 class NativeGatewayExitRaceTests(unittest.TestCase):
     def exercise_stop_race(self,race):
         with GatewaySocketCleanupTests().fixture(alive=True,owned=True) as (broker,mount,sockets):
@@ -1184,12 +1253,15 @@ class ConcurrentControlTests(unittest.TestCase):
                         tag,payload=channel.receive_frame()
                         self.assertEqual(tag,b.TAG_JSON); self.assertEqual(b.strict_json(payload)["status"],"concurrent-snapshot")
                     finally: control.close()
-                    idle, channel=connection("prepare")
-                    try:
-                        tag,payload=channel.receive_frame()
-                        self.assertEqual(tag,b.TAG_ERROR); self.assertIn("active",b.strict_json(payload)["error"])
-                        fake.prepare.assert_not_called()
-                    finally: idle.close()
+                    for op in ("prepare","stop"):
+                        idle, channel=connection(op)
+                        try:
+                            tag,payload=channel.receive_frame()
+                            self.assertEqual(tag,b.TAG_ERROR); self.assertIn("active",b.strict_json(payload)["error"])
+                            getattr(fake,op).assert_not_called()
+                        finally: idle.close()
+                    fake.control_failure.assert_called_once()
+                    self.assertEqual(fake.control_failure.call_args.args[:2],("stop","dispatch-idle"))
                 finally:
                     release.set(); provider.close()
                     signals[b.signal.SIGTERM]()
