@@ -385,6 +385,8 @@ mod tests {
                 ||readonly_filter().is_err(){unsafe{libc::_exit(2);}}
             let root=open_root(unsafe{libc::getpid()}).unwrap();
             let mut ok=in_root(&root,&fixed_path,libc::O_RDONLY).is_ok();
+            ok&=perform(unsafe{libc::getpid()},Operation::Artifact(fixed_path.clone()),
+                Instant::now()+std::time::Duration::from_secs(1)).is_ok();
             ok&=in_root(&root,&fixed_path,libc::O_WRONLY).is_err();
             ok&=in_root(&root,&unrelated_path,libc::O_RDONLY).is_err();
             unsafe{libc::_exit(if ok{0}else{3});}
