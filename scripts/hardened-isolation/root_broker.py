@@ -2210,8 +2210,8 @@ def serve(policy_path):
                         keys(request, {"v", "session_id", "op"}, {"staging"} if op == "prepare" else ())
                         require(type(request.get("staging", False)) is bool, "staging flag must be boolean")
                         deadline=client.deadline
-                        deadline.cancelled=lambda:broker.closing.is_set() or bool(select.select([sock],[],[],0)[0])
                         if op=="stop":
+                            deadline.cancelled=lambda:broker.closing.is_set() or bool(select.select([sock],[],[],0)[0])
                             stop_entered=True
                             result=broker.stop(deadline)
                         else:
@@ -2219,6 +2219,7 @@ def serve(policy_path):
                                 control_phase="dispatch-idle"
                                 if op not in {"describe","guard"}:broker.idle()
                                 if request.get("staging") is True:broker.stage(client,initial=True)
+                                deadline.cancelled=lambda:broker.closing.is_set() or bool(select.select([sock],[],[],0)[0])
                                 result=broker.describe() if op=="describe" else getattr(broker,op)(deadline)
                         control_phase="reply"
                         client.json_frame(TAG_JSON, result)

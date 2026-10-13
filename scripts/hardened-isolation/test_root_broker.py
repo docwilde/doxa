@@ -1309,6 +1309,19 @@ class StopQuiescenceTests(unittest.TestCase):
 
 
 class ConcurrentControlTests(unittest.TestCase):
+    def test_socketpair_staging_readability_is_not_disconnect_until_after_upload(self):
+        server,client=socket.socketpair();data=b"typed-staging-bytes";closing=threading.Event()
+        try:
+            client.sendall(data)
+            readable=lambda:closing.is_set() or bool(b.select.select([server],[],[],0)[0])
+            with self.assertRaisesRegex(b.Refused,"client cancelled"):b.Deadline(1,readable).check()
+            deadline=b.Deadline(1,closing.is_set);channel=b.Channel(server,deadline)
+            deadline.check();self.assertEqual(channel.exact(len(data)),data)
+            deadline.cancelled=readable;deadline.check()
+            client.close()
+            with self.assertRaisesRegex(b.Refused,"client cancelled"):deadline.check()
+        finally:client.close();server.close()
+
     def test_control_snapshot_dispatches_while_provider_stdio_is_active(self):
         short=Path.home()/".dt"; short.mkdir(mode=0o700,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="rb-",dir=short) as directory:
@@ -1322,6 +1335,12 @@ class ConcurrentControlTests(unittest.TestCase):
             def execute(request,client):
                 started.set(); release.wait(2)
             fake.execute.side_effect=execute
+            stage_data=b"typed-staging-bytes";staged=[]
+            def stage(client,initial=False):
+                self.assertTrue(initial);client.deadline.check();staged.append(client.exact(len(stage_data)))
+            fake.stage.side_effect=stage
+            def prepare(deadline):deadline.check();return {"status":"ready"}
+            fake.prepare.side_effect=prepare
             def stop_call(deadline):
                 self.assertFalse(fake.state_lock._is_owned(),"stop dispatcher held the state lock")
                 stop_started.set();self.assertTrue(release.wait(2));return {"status":"stopped"}
@@ -1340,11 +1359,18 @@ class ConcurrentControlTests(unittest.TestCase):
                 for _ in range(100):
                     if endpoint.exists(): break
                     time.sleep(.005)
-                def connection(op):
+                def connection(op,staging=False,payload=b""):
                     peer=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); peer.connect(str(endpoint))
-                    channel=b.Channel(peer,b.Deadline(1)); raw=b.compact({"v":1,"session_id":p["session_id"],"op":op})
-                    channel.send(len(raw).to_bytes(4,"big")+raw)
+                    channel=b.Channel(peer,b.Deadline(1));request={"v":1,"session_id":p["session_id"],"op":op}
+                    if staging:request["staging"]=True
+                    raw=b.compact(request);channel.send(len(raw).to_bytes(4,"big")+raw+payload)
                     return peer,channel
+                upload,channel=connection("prepare",staging=True,payload=stage_data)
+                try:
+                    tag,payload=channel.receive_frame();self.assertEqual(tag,b.TAG_JSON)
+                    self.assertEqual(b.strict_json(payload)["status"],"ready");self.assertEqual(staged,[stage_data])
+                finally:upload.close()
+                fake.prepare.reset_mock()
                 provider, _=connection("provider_exec")
                 self.assertTrue(started.wait(1))
                 try:

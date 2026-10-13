@@ -292,3 +292,13 @@ retained stop gate. Frozen graceful sourceSHA
 6c9bbc19e16bec6112adc5d9a511711361b10063962b0a8a309eceab7103b1c7
 is unchanged by this fixture refinement; current Root/Plugin review remains the
 gate for further guest work.
+
+Parent634 dispatch review caught readability cancellation installed before
+initial staging, treating legitimate queued upload bytes as disconnect. Narrow
+correction keeps stop cancellation before quiescence, but other lifecycle calls
+stage with the original closing-only deadline, then enable peer cancellation.
+Actual live Unix dispatch test sends request+upload bytes together and verifies
+prepare succeeds after consumed staging. Socketpair test reproduces pre-upload
+readability false cancellation, then verifies closing-only staging consumption,
+post-upload operation and real EOF cancellation. No guest edits/reruns or bounds
+changes. Committing correction before focused verification.
