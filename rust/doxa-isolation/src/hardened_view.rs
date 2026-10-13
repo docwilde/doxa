@@ -50,6 +50,7 @@ impl<'a> Context<'a> {
     }
     pub fn read(&self,operation:Operation,deadline:Instant)->io::Result<Fact> {
         self.revalidate()?;remaining(deadline)?;
+        let parent_pid=unsafe{libc::getpid()};let parent_pin=open_pidfd(parent_pid)?;
         let mut pipe=[-1,-1];
         if unsafe{libc::pipe2(pipe.as_mut_ptr(),libc::O_CLOEXEC|libc::O_NONBLOCK)}!=0{return Err(io::Error::last_os_error());}
         let input=unsafe{File::from_raw_fd(pipe[0])};let output=unsafe{File::from_raw_fd(pipe[1])};
@@ -61,6 +62,9 @@ impl<'a> Context<'a> {
         if reply<0{return Err(io::Error::last_os_error());}let reply=unsafe{File::from_raw_fd(reply)};
         let child=unsafe{libc::fork()};if child<0{return Err(io::Error::last_os_error());}
         if child==0 {
+            // Arm before any namespace/credential setup. If ROOT died between
+            // fork and prctl, the inherited exact parent pidfd/getppid catches it.
+            if !arm_parent_death(parent_pid,Some(parent_pin.as_raw_fd())){unsafe{libc::_exit(2);}}
             let success=unsafe{libc::dup2(reply.as_raw_fd(),3)}>=0&&unsafe{libc::dup2(ns.as_raw_fd(),4)}>=0
                 &&unsafe{libc::close(0)}==0&&unsafe{libc::close(1)}==0&&unsafe{libc::close(2)}==0
                 &&unsafe{libc::syscall(libc::SYS_close_range,5u32,u32::MAX,0u32)}==0
@@ -69,7 +73,10 @@ impl<'a> Context<'a> {
                 &&unsafe{libc::setns(4,libc::CLONE_NEWUSER)}==0;
             unsafe{libc::close(4);}
             if !success{unsafe{libc::_exit(2);}}
-            if drop_authority().is_err()||readonly_landlock(self.pid,&operation).is_err()
+            // Credential transitions clear PDEATHSIG. Re-arm and confirm the
+            // kernel still names the original parent before reading any file.
+            if drop_authority().is_err()||!arm_parent_death(parent_pid,None)
+                ||readonly_landlock(self.pid,&operation).is_err()
                 ||readonly_filter().is_err(){unsafe{libc::_exit(3);}}
             let reply=match perform(self.pid,operation,deadline) {
                 Ok(fact)=>Reply{fact:Some(fact),error:None},
@@ -90,6 +97,16 @@ impl<'a> Context<'a> {
         if !reaped{return Err(error("view helper cleanup could not confirm quiescence"));}
         let fact=result?;self.revalidate()?;Ok(fact)
     }
+}
+
+fn arm_parent_death(expected:i32,pin:Option<i32>)->bool {
+    if unsafe{libc::prctl(libc::PR_SET_PDEATHSIG,libc::SIGKILL,0,0,0)}!=0
+        ||unsafe{libc::getppid()}!=expected{return false;}
+    if let Some(fd)=pin {
+        let mut p=libc::pollfd{fd,events:libc::POLLIN,revents:0};
+        if unsafe{libc::poll(&mut p,1,0)}!=0||p.revents!=0{return false;}
+    }
+    (unsafe{libc::getppid()})==expected
 }
 
 fn drop_authority()->io::Result<()> {
@@ -319,6 +336,16 @@ mod tests {
     fn view_replies_cannot_contain_admission_flags() {
         assert!(serde_json::from_str::<Reply>(r#"{"ready":true,"fact":null,"error":null}"#).is_err());
         assert!(serde_json::from_str::<Reply>(r#"{"fact":{"device":1},"error":null}"#).is_err());
+    }
+    #[test]
+    fn parent_death_arm_rejects_an_already_reparented_helper() {
+        let child=unsafe{libc::fork()};assert!(child>=0);
+        if child==0 {
+            let actual=unsafe{libc::getppid()};
+            let ok=!arm_parent_death(actual.wrapping_add(1),None);
+            unsafe{libc::_exit(if ok{0}else{2});}
+        }
+        let mut status=0;assert_eq!(unsafe{libc::waitpid(child,&mut status,0)},child);assert_eq!(status,0);
     }
     #[test]
     fn closing_reply_without_exiting_has_a_total_deadline() {
