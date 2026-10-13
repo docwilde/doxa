@@ -1262,17 +1262,17 @@ class StopQuiescenceTests(unittest.TestCase):
         broker._stop_idle.assert_called_once()
 
     def test_disconnect_retains_gate_without_cancelling_existing_provider(self):
-        broker=self.fixture();broker.active_provider=True;cancelled=threading.Event();errors=[]
+        broker=self.fixture();broker.active_provider=True;server,client=socket.socketpair();errors=[]
         def stop():
-            try:broker.stop(b.Deadline(1,cancelled.is_set))
+            try:broker.stop(b.Deadline(1,lambda:bool(b.select.select([server],[],[],0)[0])))
             except BaseException as error:errors.append(error)
         worker=threading.Thread(target=stop);worker.start()
         try:
-            self.wait_gate(broker);cancelled.set();worker.join(.3);self.assertFalse(worker.is_alive())
+            self.wait_gate(broker);client.close();worker.join(.3);self.assertFalse(worker.is_alive())
             self.assertEqual(len(errors),1);self.assertIn("client cancelled",str(errors[0]))
             self.assertIsNotNone(broker.stop_gate);self.assertIsNone(broker.stop_owner);self.assertTrue(broker.active_provider)
             self.assertFalse(broker.closing.is_set());broker.cleanup.assert_not_called();broker._stop_idle.assert_not_called()
-        finally:cancelled.set();worker.join(1)
+        finally:client.close();worker.join(1);server.close()
 
     def test_overlapping_stop_cannot_release_another_waiters_gate(self):
         broker=self.fixture();broker.active_workspace=1;errors=[]

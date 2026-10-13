@@ -285,3 +285,10 @@ deadline. No globalclosing flag, unknown-process force, bounds or Rust changes.
 Seven focused quiescence cases pass0.123s;93 full broker tests pass1.098s, with
 normal stop/resume and exact PIDFD/socket ownership checks retained. Source-only;
 frozen busy-failure guest receipt/artifacts remain untouched.
+
+Disconnect regression uses an actual Unix socketpair EOF with the production
+readability cancellation predicate, preserving active provider ownership and
+retained stop gate. Frozen graceful sourceSHA
+6c9bbc19e16bec6112adc5d9a511711361b10063962b0a8a309eceab7103b1c7
+is unchanged by this fixture refinement; current Root/Plugin review remains the
+gate for further guest work.
