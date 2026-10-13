@@ -329,6 +329,9 @@ def main() -> None:
         report["inspect_init"] = {"cid":cid,"host_init_pid":init,"cgroup":cgroup,
             "Config": {key:info.get("Config",{}).get(key) for key in
                 ["Entrypoint","Cmd","User","WorkingDir","Tty","OpenStdin","Labels"]}}
+        mounts = Path(f"/proc/{init}/mountinfo").read_text()
+        require(len(mounts) <= 2 * 1024 * 1024, "kernel mount evidence exceeds bound")
+        report["kernel_mountinfo"] = mounts
         module.inspect_exact(policy, policy_sha, cid, info, image_labels=image_labels)
         require(engine.archive_hash(module.Deadline(10), cid, module.WORKER) == args.worker_sha256, "actual image worker SHA differs")
         require(engine.archive_hash(module.Deadline(10), cid, "/usr/local/bin/claude") == helper_sha, "actual origin fixture SHA differs")
