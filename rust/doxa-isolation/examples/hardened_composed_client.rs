@@ -627,3 +627,23 @@ fn main() -> io::Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn expired_clock_prevents_control_and_late_result_cannot_pass() {
+        let called = std::cell::Cell::new(false);
+        let result = bounded(Instant::now() - Duration::from_millis(1), || {
+            called.set(true);
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!called.get());
+        let result = bounded(Instant::now() + Duration::from_millis(2), || {
+            std::thread::sleep(Duration::from_millis(10));
+            Ok(())
+        });
+        assert!(result.is_err());
+    }
+}
