@@ -354,6 +354,10 @@ def main(args):
         policy["session_id"] = SID; policy["root"] = str(quota_root)
         module.validate_policy(policy)
         engine = module.Engine(policy)
+        # The constructor has no kernel peer capability. Establish the real
+        # pinned Unix connection before using its PID/socket observations.
+        channel = engine.connect(module.Deadline(budget.left(10)))
+        channel.sock.close()
         require(engine.pid == 27821 and engine.socket_identity[1] == 688, "shared Engine identity differs")
         before = {"pid": engine.pid, "socket": engine.socket_identity, "config_sha256": sha(policy["engine"]["config_path"])}
         report["engine_before"] = before
