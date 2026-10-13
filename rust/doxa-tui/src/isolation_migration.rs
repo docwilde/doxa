@@ -108,7 +108,57 @@ pub(crate) fn change(client:&mut DaemonClient,target:Profile)->io::Result<(Daemo
 #[cfg(test)]
 mod tests{
     use super::*;
-    use std::{ffi::OsString,os::unix::fs::PermissionsExt,process::Command};
+    use std::{ffi::OsString,os::unix::{fs::{FileTypeExt,PermissionsExt},net::UnixListener},process::Command};
+    fn reviewed_test_host_path(host:&str,uid:u32)->Option<PathBuf>{
+        if uid==0{return None;}
+        let socket=host.strip_prefix("unix://")?;
+        if socket.len()>4096 || !socket.bytes().all(|byte|byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
+            || socket.split('/').skip(1).any(|part|matches!(part,""|"."|"..")){return None;}
+        let path=PathBuf::from(socket);let runtime=PathBuf::from(format!("/run/user/{uid}"));
+        let relative=path.strip_prefix(&runtime).ok()?;
+        if relative.as_os_str().is_empty() || relative==Path::new("docker.sock"){return None;}
+        Some(path)
+    }
+    fn private_test_directory(path:&Path,uid:u32)->io::Result<()>{
+        let meta=fs::symlink_metadata(path)?;
+        if !meta.is_dir() || meta.uid()!=uid || meta.mode()&0o077!=0{return Err(invalid("test Engine directory must be private and owned"));}
+        Ok(())
+    }
+    fn private_test_socket(path:&Path,uid:u32)->io::Result<()>{
+        if fs::canonicalize(path)?!=path{return Err(invalid("test Engine socket must be canonical"));}
+        let meta=fs::symlink_metadata(path)?;
+        if !meta.file_type().is_socket() || meta.uid()!=uid || meta.nlink()!=1 || meta.mode()&0o077!=0 || meta.mode()&0o600!=0o600{
+            return Err(invalid("test Engine socket must be private and owned"));
+        }
+        private_test_directory(path.parent().ok_or_else(||invalid("test Engine socket parent missing"))?,uid)
+    }
+    #[test]
+    fn reviewed_migration_endpoint_requires_same_user_dedicated_rootless_socket(){
+        for host in ["unix:///run/user/1001/doxa-proof/docker.sock","unix:///run/user/1001/doxa-test-docker.sock"]{
+            assert!(reviewed_test_host_path(host,1001).is_some(),"{host}");
+        }
+        for host in ["unix:///run/user/1001/docker.sock","unix:///var/run/docker.sock","unix:///run/docker.sock",
+            "unix:///run/user/1000/doxa-proof/docker.sock","unix:///run/user/10010/doxa-proof/docker.sock",
+            "unix:///run/user/1001","unix:///run/user/1001/../1000/doxa.sock","unix:///run/user/1001/a//docker.sock",
+            "unix:///run/user/1001/./doxa.sock","unix:///run/user/1001/a%2fdocker.sock","tcp://localhost:2375","unix://run/user/1001/doxa.sock"]{
+            assert!(reviewed_test_host_path(host,1001).is_none(),"{host}");
+        }
+        assert!(reviewed_test_host_path("unix:///run/user/0/doxa-proof/docker.sock",0).is_none());
+    }
+    #[test]
+    fn reviewed_migration_socket_rejects_links_wrong_owner_and_public_permissions(){
+        let dir=tempfile::tempdir().unwrap();let root=fs::canonicalize(dir.path()).unwrap();let path=root.join("engine.sock");
+        fs::set_permissions(&root,fs::Permissions::from_mode(0o700)).unwrap();
+        let _listener=UnixListener::bind(&path).unwrap();let uid=unsafe{libc::geteuid()};
+        fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();private_test_socket(&path,uid).unwrap();
+        assert!(private_test_socket(&path,uid.wrapping_add(1)).is_err());
+        let link=root.join("linked.sock");std::os::unix::fs::symlink(&path,&link).unwrap();assert!(private_test_socket(&link,uid).is_err());
+        fs::set_permissions(&path,fs::Permissions::from_mode(0o666)).unwrap();assert!(private_test_socket(&path,uid).is_err());
+        fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();fs::set_permissions(&root,fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(private_test_socket(&path,uid).is_err());fs::set_permissions(&root,fs::Permissions::from_mode(0o700)).unwrap();
+        let regular=root.join("regular.sock");fs::write(&regular,b"fixture").unwrap();fs::set_permissions(&regular,fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(private_test_socket(&regular,uid).is_err());
+    }
     struct Environment(Vec<(&'static str,Option<OsString>)>);
     impl Environment{
         fn set(&mut self,key:&'static str,value:impl AsRef<std::ffi::OsStr>){
@@ -138,7 +188,9 @@ mod tests{
     fn rootless_frontend_roundtrip_keeps_clean_and_dirty_sessions_and_rolls_back_start_failure(){
         let image=std::env::var("DOXA_ISOLATION_TEST_IMAGE").expect("explicit reviewed worker image");
         let host=std::env::var("DOXA_ISOLATION_TEST_HOST").expect("explicit private test Engine");
-        assert!(host.starts_with("unix:///run/user/")&&!host.ends_with("/docker.sock"));
+        let uid=unsafe{libc::geteuid()};
+        let socket=reviewed_test_host_path(&host,uid).expect("explicit same-user dedicated rootless test Engine endpoint");
+        private_test_directory(Path::new(&format!("/run/user/{uid}")),uid).unwrap();private_test_socket(&socket,uid).unwrap();
         let daemon=fs::canonicalize(std::env::var_os("DOXA_DAEMON_BIN").expect("explicit built daemon")).unwrap();
         let mut environment=Environment(Vec::new());
         let dir=tempfile::tempdir().unwrap();let root=fs::canonicalize(dir.path()).unwrap();let home=root.join("owner");let runtime=root.join("runtime");
