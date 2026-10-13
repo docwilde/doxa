@@ -127,6 +127,31 @@ def child_setup(parent, tty=False):
         fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
 
+def failed_spawn(process, descriptor, original):
+    failure = {"pid": process.pid, "error": str(original), "teardown_error": None}
+    try:
+        if descriptor is not None:
+            if alive(descriptor): signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+        elif process.returncode is None:
+            # This direct child has never been waited/polled by another
+            # thread. Its PID remains reserved even if it has just exited.
+            process.kill()
+        process.wait(timeout=2)
+    except BaseException as cause:
+        failure["teardown_error"] = str(cause)
+    finally:
+        for file in (process.stdin, process.stdout, process.stderr):
+            if file is not None: file.close()
+    failure["returncode"] = process.returncode
+    if process.returncode is None:
+        # Preserve ownership for the orchestrator's cleanup retry. A
+        # constructor failure cannot leave an unrecorded background task.
+        failure.update(process=process, pidfd=descriptor)
+    elif descriptor is not None:
+        os.close(descriptor)
+    FAILED_SPAWNS.append(failure)
+
+
 def pin_spawned(process, uid, snapshot=proc, opener=os.pidfd_open):
     """Pin only a direct, still-unreaped Popen child; never a /proc selection."""
     descriptor = None
@@ -136,29 +161,7 @@ def pin_spawned(process, uid, snapshot=proc, opener=os.pidfd_open):
         require(identity["uids"] == [uid] * 4, "actual child UID differs")
         return descriptor, identity
     except BaseException as original:
-        failure = {"pid": process.pid, "error": str(original), "teardown_error": None}
-        try:
-            if descriptor is not None:
-                if alive(descriptor): signal.pidfd_send_signal(descriptor, signal.SIGKILL)
-            elif process.returncode is None:
-                # This direct child has never been waited/polled by another
-                # thread. Its PID remains reserved even if it has just exited.
-                process.kill()
-            process.wait(timeout=2)
-        except BaseException as cause:
-            failure["teardown_error"] = str(cause)
-        finally:
-            for file in (process.stdin, process.stdout, process.stderr):
-                if file is not None: file.close()
-        failure["returncode"] = process.returncode
-        if process.returncode is None:
-            # Preserve ownership for the orchestrator's cleanup retry. A
-            # constructor failure cannot leave an unrecorded background task.
-            failure.update(process=process, pidfd=descriptor)
-            FAILED_SPAWNS.append(failure)
-        else:
-            if descriptor is not None: os.close(descriptor)
-            FAILED_SPAWNS.append(failure)
+        failed_spawn(process, descriptor, original)
         raise
 
 
@@ -176,12 +179,16 @@ class Child:
             user=uid, group=uid, extra_groups=[], close_fds=True, start_new_session=True,
             preexec_fn=lambda: child_setup(parent, tty is not None))
         self.pidfd, self.identity = pin_spawned(self.process, uid)
-        self.channels = []
-        for label in ("stdout", "stderr"):
-            file = getattr(self.process, label)
-            if file is not None:
-                os.set_blocking(file.fileno(), False)
-                self.channels.append((file.fileno(), label))
+        try:
+            self.channels = []
+            for label in ("stdout", "stderr"):
+                file = getattr(self.process, label)
+                if file is not None:
+                    os.set_blocking(file.fileno(), False)
+                    self.channels.append((file.fileno(), label))
+        except BaseException as original:
+            failed_spawn(self.process, self.pidfd, original)
+            raise
 
     def revalidate(self):
         if alive(self.pidfd):
@@ -604,7 +611,26 @@ def self_test():
         try: os.kill(process.pid, 0)
         except ProcessLookupError: pass
         else: raise AssertionError("failed constructor child was not reaped")
-    print("known-child UID-validation and pidfd-open failures killed/reaped; all pipes closed")
+    from unittest.mock import patch
+    spawned = []
+    original_popen = subprocess.Popen
+    def tracked_popen(*positional, **keywords):
+        # This source-only test keeps its current credentials; the actual
+        # disposable-guest Child path still uses explicit UID/GID/groups.
+        for key in ("user", "group", "extra_groups"): keywords.pop(key, None)
+        process = original_popen(*positional, **keywords)
+        spawned.append(process)
+        return process
+    with patch.object(subprocess, "Popen", tracked_popen), patch.object(os, "set_blocking", side_effect=OSError("injected pipe setup failure")):
+        try:
+            Child("test", [sys.executable, "-c", "import time; time.sleep(30)"], dict(os.environ), uid=os.geteuid())
+        except OSError:
+            pass
+        else:
+            raise AssertionError("pipe setup failure accepted")
+    require(len(spawned) == 1 and spawned[0].returncode is not None, "pipe setup failure left its actual child alive")
+    require(all(file.closed for file in (spawned[0].stdin, spawned[0].stdout, spawned[0].stderr)), "pipe setup failure left descriptors open")
+    print("known-child UID-validation, pidfd-open and pipe-setup failures killed/reaped; all pipes closed")
 
 
 if __name__ == "__main__":
