@@ -133,9 +133,10 @@ host daemon with that exact reserved ID, followed by frontend attach. With a
 private `DOXA_HOME` and runtime directory, for example:
 
 ```sh
-doxa-daemon-rs --session-id RESERVED_ID --runtime-dir PRIVATE_RUNTIME \
+DOXA_HOME=PRIVATE_HOME DOXA_RUNTIME_DIR=PRIVATE_RUNTIME \
+  doxa-daemon-rs --session-id RESERVED_ID --runtime-dir PRIVATE_RUNTIME \
   --cwd SOURCE_CHECKOUT --engine claude --isolation docker-hardened
-doxa attach RESERVED_ID
+DOXA_HOME=PRIVATE_HOME DOXA_RUNTIME_DIR=PRIVATE_RUNTIME doxa attach RESERVED_ID
 ```
 
 The daemon uses the caller's configured runtime directory/registry. A later
@@ -168,6 +169,11 @@ use anchored paths plus exact-file Landlock. Metadata reads use preopened
 `O_PATH` handles without file-content authority. Landlock ABI 5 or newer is
 required for those operations. The child returns bounded facts, reopens actual
 executables/artifacts after hashing and rechecks held init/namespace identities.
+The executable operation uses a fixed typed `/proc/init/exe` request, but its
+scalar-open filter is not a kernel pathname allowlist: compromised native
+reader code could read other DAC-readable files under the dropped Engine UID.
+It has no file-write, service or ROOT admission capability. Artifact operations
+have the narrower exact-file Landlock grant; these are distinct guarantees.
 It may inherit allocator locks when forked from the multithreaded gateway; it is
 not an exec-clean process. An absolute deadline refuses, kills and boundedly
 reaps a stalled child. Parent pidfd checks and parent-death signals bracket UID

@@ -241,7 +241,11 @@ retains every admission capability. Fixed executable reads deny `openat2` and
 filter scalar open flags; artifact reads use exact-file Landlock and a retained
 root anchor; metadata uses preopened `O_PATH` handles. The child cannot execute,
 connect, alter quotas or write files. Actual executable/artifact fresh reopening
-and retained init/namespace checks bracket hashing. The forked child may inherit
+and retained init/namespace checks bracket hashing. EXEC's fixed typed request
+is not a kernel pathname allowlist: compromised native reader code could read
+other DAC-readable paths as the dropped Engine UID. It retains no ROOT
+admission capability; artifact operations have exact-file Landlock grants.
+The forked child may inherit
 allocator locks from the multithreaded gateway; it is not exec-clean. Total
 deadlines, kill plus bounded reap and parent-pidfd/death-signal checks make a
 stalled or orphan-prone operation a refusal, including EOF before exit.
