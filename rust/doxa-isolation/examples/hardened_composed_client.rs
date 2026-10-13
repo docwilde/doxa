@@ -5,7 +5,10 @@ use serde_json::{json, Value};
 use std::{
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
-    os::{fd::AsRawFd, unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt}},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+    },
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{mpsc, Arc, Mutex},
@@ -22,29 +25,43 @@ fn checkpoint(file: &mut fs::File, case: &str) -> io::Result<()> {
     file.sync_all()
 }
 fn remaining(deadline: Instant, maximum: u64) -> io::Result<Duration> {
-    deadline.checked_duration_since(Instant::now())
+    deadline
+        .checked_duration_since(Instant::now())
         .map(|duration| duration.min(Duration::from_secs(maximum)))
         .ok_or_else(|| io::Error::other("shared composed proof deadline exceeded"))
 }
 fn write_bounded(input: &mut ChildStdin, mut bytes: &[u8], deadline: Instant) -> io::Result<()> {
     require(bytes.len() <= 65536, "fixture input exceeded bound")?;
-    let flags=unsafe {libc::fcntl(input.as_raw_fd(),libc::F_GETFL)};
-    if flags<0 || unsafe {libc::fcntl(input.as_raw_fd(),libc::F_SETFL,flags|libc::O_NONBLOCK)}<0 {
+    let flags = unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(input.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
         return Err(io::Error::last_os_error());
     }
     while !bytes.is_empty() {
-        remaining(deadline,1)?;
+        remaining(deadline, 1)?;
         match input.write(bytes) {
-            Ok(0)=>return Err(io::Error::other("fixture input closed")),
-            Ok(count)=>bytes=&bytes[count..],
-            Err(error) if matches!(error.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::Interrupted)=> {
-                let mut poll=libc::pollfd{fd:input.as_raw_fd(),events:libc::POLLOUT,revents:0};
-                let milliseconds=remaining(deadline,1)?.as_millis().max(1).min(1000) as i32;
-                if unsafe {libc::poll(&mut poll,1,milliseconds)}<0 && io::Error::last_os_error().kind()!=io::ErrorKind::Interrupted {
+            Ok(0) => return Err(io::Error::other("fixture input closed")),
+            Ok(count) => bytes = &bytes[count..],
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                let mut poll = libc::pollfd {
+                    fd: input.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let milliseconds = remaining(deadline, 1)?.as_millis().max(1).min(1000) as i32;
+                if unsafe { libc::poll(&mut poll, 1, milliseconds) } < 0
+                    && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+                {
                     return Err(io::Error::last_os_error());
                 }
-            },
-            Err(error)=>return Err(error),
+            }
+            Err(error) => return Err(error),
         }
     }
     Ok(())
@@ -111,10 +128,12 @@ impl Provider {
                 }
             }
         });
-        let errors=Arc::new(Mutex::new(Vec::new()));let store=errors.clone();
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let store = errors.clone();
         std::thread::spawn(move || {
-            let mut bytes=Vec::new();let _=stderr.take(65537).read_to_end(&mut bytes);
-            *store.lock().unwrap()=bytes;
+            let mut bytes = Vec::new();
+            let _ = stderr.take(65537).read_to_end(&mut bytes);
+            *store.lock().unwrap() = bytes;
         });
         Ok(Self {
             child,
@@ -127,10 +146,13 @@ impl Provider {
     fn receive(&self, expected: &str) -> io::Result<Value> {
         let value = self
             .output
-            .recv_timeout(remaining(self.deadline,45)?)
+            .recv_timeout(remaining(self.deadline, 45)?)
             .map_err(|_| {
-                let bytes=self.errors.lock().unwrap();
-                io::Error::other(format!("actual fixture provider response timed out or closed: {}",String::from_utf8_lossy(&bytes[..bytes.len().min(4096)])))
+                let bytes = self.errors.lock().unwrap();
+                io::Error::other(format!(
+                    "actual fixture provider response timed out or closed: {}",
+                    String::from_utf8_lossy(&bytes[..bytes.len().min(4096)])
+                ))
             })??;
         require(
             value["op"] == expected,
@@ -147,8 +169,9 @@ impl Provider {
             .input
             .as_mut()
             .ok_or_else(|| io::Error::other("provider input closed"))?;
-        let mut bytes=serde_json::to_vec(&value)?;bytes.push(b'\n');
-        write_bounded(input,&bytes,self.deadline)?;
+        let mut bytes = serde_json::to_vec(&value)?;
+        bytes.push(b'\n');
+        write_bounded(input, &bytes, self.deadline)?;
         self.receive(&op)
     }
     fn finish(&mut self) -> io::Result<()> {
@@ -174,7 +197,12 @@ impl Drop for Provider {
     }
 }
 
-fn git(manifest: &Manifest, arguments: &[&str], input: Option<&[u8]>, deadline: Instant) -> io::Result<Value> {
+fn git(
+    manifest: &Manifest,
+    arguments: &[&str],
+    input: Option<&[u8]>,
+    deadline: Instant,
+) -> io::Result<Value> {
     let mut original = Command::new("git");
     original.current_dir(&manifest.checkout).args(arguments);
     let mut command = doxa_isolation::workspace::command(original)?;
@@ -183,32 +211,71 @@ fn git(manifest: &Manifest, arguments: &[&str], input: Option<&[u8]>, deadline: 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn()?;
-    let stdout=child.stdout.take().ok_or_else(||io::Error::other("Git stdout absent"))?;
-    let stderr=child.stderr.take().ok_or_else(||io::Error::other("Git stderr absent"))?;
-    let out=std::thread::spawn(move|| {let mut bytes=Vec::new();stdout.take(256*1024+1).read_to_end(&mut bytes).map(|_|bytes)});
-    let err=std::thread::spawn(move|| {let mut bytes=Vec::new();stderr.take(65537).read_to_end(&mut bytes).map(|_|bytes)});
-    let deadline=deadline.min(Instant::now()+Duration::from_secs(45));
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("Git stdout absent"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("Git stderr absent"))?;
+    let out = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .take(256 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let err = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.take(65537).read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(45));
     if let Some(bytes) = input {
-        let written=write_bounded(&mut child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("Git stdin absent"))?,bytes,deadline);
-        if let Err(error)=written {let _=child.kill();let _=child.wait();return Err(error);}
+        let written = write_bounded(
+            &mut child
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("Git stdin absent"))?,
+            bytes,
+            deadline,
+        );
+        if let Err(error) = written {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
     } else {
         child.stdin.take();
     }
-    let status=loop {
-        if let Some(status)=child.try_wait()? {break status;}
-        if Instant::now()>=deadline {let _=child.kill();let _=child.wait();return Err(io::Error::other("bounded ROOT Git wait expired"));}
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other("bounded ROOT Git wait expired"));
+        }
         std::thread::sleep(Duration::from_millis(10));
     };
-    let stdout=out.join().map_err(|_|io::Error::other("Git output reader failed"))??;
-    let stderr=err.join().map_err(|_|io::Error::other("Git error reader failed"))??;
+    let stdout = out
+        .join()
+        .map_err(|_| io::Error::other("Git output reader failed"))??;
+    let stderr = err
+        .join()
+        .map_err(|_| io::Error::other("Git error reader failed"))??;
     require(
         stdout.len() <= 256 * 1024 && stderr.len() <= 65536,
         "Git fixture output exceeded bound",
     )?;
-    require(status.success(), &format!("actual ROOT workspace Git refused: {}",String::from_utf8_lossy(&stderr[..stderr.len().min(4096)])))?;
+    require(
+        status.success(),
+        &format!(
+            "actual ROOT workspace Git refused: {}",
+            String::from_utf8_lossy(&stderr[..stderr.len().min(4096)])
+        ),
+    )?;
     Ok(
         json!({"argv":arguments,"stdout":String::from_utf8_lossy(&stdout),"stderr_bytes":stderr.len(),"success":true}),
     )
@@ -231,13 +298,31 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
         std::env::remove_var(key);
     }
     std::env::set_var("DOXA_HOME", home);
-    let deadline=Instant::now()+Duration::from_secs(300);
-    let mut progress=OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(home.join("composed-progress.txt"))?;
-    let settings=home.join("isolation").join(sid).join("home/claude");
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(&settings)?;
-    let mut config=OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(settings.join("settings.json"))?;
-    config.write_all(SETTINGS)?;config.sync_all()?;drop(config);
-    checkpoint(&mut progress,"actual Runtime prepare with harmless settings")?;
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let mut progress = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(home.join("composed-progress.txt"))?;
+    let settings = home.join("isolation").join(sid).join("home/claude");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&settings)?;
+    let mut config = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(settings.join("settings.json"))?;
+    config.write_all(SETTINGS)?;
+    config.sync_all()?;
+    drop(config);
+    checkpoint(
+        &mut progress,
+        "actual Runtime prepare with harmless settings",
+    )?;
     let mut runtime = Runtime::prepare(
         home,
         sid,
@@ -253,7 +338,7 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
         .ok_or_else(|| io::Error::other("ROOT Runtime CID absent"))?;
     runtime.prepare_providers(&["claude".into(), "codex".into()])?;
     runtime.activate();
-    checkpoint(&mut progress,"actual Runtime ready and active")?;
+    checkpoint(&mut progress, "actual Runtime ready and active")?;
     let reviewed = Arc::new(Mutex::new(Vec::<Value>::new()));
     let review = reviewed.clone();
     let hook=HookBroker::start(move|event,manifest| {
@@ -273,16 +358,19 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
             Err(_)=>json!({"continue":false,"stopReason":"credential-free fixture source review refused"}),
         }
     })?.ok_or_else(||io::Error::other("actual ROOT HookBroker unavailable"))?;
-    checkpoint(&mut progress,"actual ROOT callback registered")?;
+    checkpoint(&mut progress, "actual ROOT callback registered")?;
     let result = (|| -> io::Result<Value> {
-        let mut codex = Provider::start(&manifest, "codex",deadline)?;
+        let mut codex = Provider::start(&manifest, "codex", deadline)?;
         let ready = codex.receive("ready")?;
         require(
             ready["family"] == "codex" && ready["owner_handshake"] == true,
             "actual protected Codex owner handshake absent",
         )?;
         doxa_isolation::check_turn_budget(&manifest)?;
-        checkpoint(&mut progress,"Codex protected owner handshake and concurrent guard")?;
+        checkpoint(
+            &mut progress,
+            "Codex protected owner handshake and concurrent guard",
+        )?;
         require(
             codex.child.try_wait()?.is_none(),
             "guard ended persistent provider",
@@ -306,7 +394,10 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
             fs::read(&copy.path)? == snapshot.bytes,
             "private review copy bytes differ",
         )?;
-        checkpoint(&mut progress,"actual source snapshot recheck and private review copy")?;
+        checkpoint(
+            &mut progress,
+            "actual source snapshot recheck and private review copy",
+        )?;
         let hook_result = codex.request(json!({"op":"hook","command":hook.command()}))?;
         require(
             hook_result["result"]["continue"] == true
@@ -317,7 +408,7 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
             reviewed.lock().unwrap().len() == 1,
             "actual ROOT callback handler count differs",
         )?;
-        checkpoint(&mut progress,"actual callback fixture-only source review")?;
+        checkpoint(&mut progress, "actual callback fixture-only source review")?;
         codex.request(json!({"op":"mutate"}))?;
         let mutation_refused = matches!(
             doxa_isolation::verify_provider_snapshot(&snapshot),
@@ -327,7 +418,7 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
             mutation_refused,
             "mutated actual source retained stale proof",
         )?;
-        checkpoint(&mut progress,"actual source mutation refused stale proof")?;
+        checkpoint(&mut progress, "actual source mutation refused stale proof")?;
         codex.request(json!({"op":"poison-git"}))?;
         // The broker retires each immutable view after its Git operation.
         // Observe the live readonly view from the concurrent provider while
@@ -366,7 +457,10 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
                 .is_some_and(|e| e == libc::EROFS as i64 || e == libc::EACCES as i64),
             "worker could write ROOT Git view",
         )?;
-        checkpoint(&mut progress,"readonly Root Git and malicious filter purity")?;
+        checkpoint(
+            &mut progress,
+            "readonly Root Git and malicious filter purity",
+        )?;
         let patch=b"diff --git a/plain.txt b/plain.txt\n--- a/plain.txt\n+++ b/plain.txt\n@@ -1 +1 @@\n-before\n+after\n";
         let apply = git(
             &manifest,
@@ -382,26 +476,31 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
             "ordinary ROOT apply or filter purity failed",
         )?;
         doxa_isolation::check_turn_budget(&manifest)?;
-        checkpoint(&mut progress,"ordinary Root Git apply and guard")?;
+        checkpoint(&mut progress, "ordinary Root Git apply and guard")?;
         codex.finish()?;
         drop(codex);
         drop(copy);
-        let mut claude = Provider::start(&manifest, "claude",deadline)?;
+        let mut claude = Provider::start(&manifest, "claude", deadline)?;
         let claude_ready = claude.receive("ready")?;
         require(
             claude_ready["family"] == "claude",
             "actual Claude fixture failed",
         )?;
-        use sha2::{Digest,Sha256};
-        require(claude_ready["settings"]["sha256"]==format!("{:x}",Sha256::digest(SETTINGS))
-            &&claude_ready["settings"]["bytes"]==SETTINGS.len()
-            &&claude_ready["settings"]["uid"]==1001
-            &&claude_ready["settings"]["mode"]==0o600
-            &&claude_ready["settings"]["marker"]=="composed-config-20261013",
-            "actual worker did not receive exact harmless private settings")?;
+        use sha2::{Digest, Sha256};
+        require(
+            claude_ready["settings"]["sha256"] == format!("{:x}", Sha256::digest(SETTINGS))
+                && claude_ready["settings"]["bytes"] == SETTINGS.len()
+                && claude_ready["settings"]["uid"] == 1001
+                && claude_ready["settings"]["mode"] == 0o600
+                && claude_ready["settings"]["marker"] == "composed-config-20261013",
+            "actual worker did not receive exact harmless private settings",
+        )?;
         doxa_isolation::check_turn_budget(&manifest)?;
         claude.finish()?;
-        checkpoint(&mut progress,"Claude actual worker settings digest and guard")?;
+        checkpoint(
+            &mut progress,
+            "Claude actual worker settings digest and guard",
+        )?;
         Ok(
             json!({"scope":"actual-root-runtime-client-credential-free","session_id":sid,"cid":cid,
             "policy_sha256":manifest.policy_hash,"runtime_prepared":true,"protected_codex_ready":ready,
@@ -413,13 +512,19 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
     })();
     drop(hook);
     let stopped = runtime.stop();
-    let mut report=match (result,stopped) {
-        (Ok(report),Ok(()))=>report,
-        (Err(operation),Err(cleanup))=>return Err(io::Error::other(format!("operation: {operation}; Runtime cleanup: {cleanup}"))),
-        (Err(operation),Ok(()))=>return Err(operation),
-        (Ok(_),Err(cleanup))=>return Err(io::Error::other(format!("Runtime cleanup: {cleanup}"))),
+    let mut report = match (result, stopped) {
+        (Ok(report), Ok(())) => report,
+        (Err(operation), Err(cleanup)) => {
+            return Err(io::Error::other(format!(
+                "operation: {operation}; Runtime cleanup: {cleanup}"
+            )))
+        }
+        (Err(operation), Ok(())) => return Err(operation),
+        (Ok(_), Err(cleanup)) => {
+            return Err(io::Error::other(format!("Runtime cleanup: {cleanup}")))
+        }
     };
-    checkpoint(&mut progress,"Runtime stopped first CID")?;
+    checkpoint(&mut progress, "Runtime stopped first CID")?;
     require(
         root_client::control(sid, "describe")?["status"] == "stopped",
         "ROOT stop was not current",
@@ -434,11 +539,11 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
     resumed.activate();
     doxa_isolation::check_turn_budget(resumed.manifest())?;
     resumed.stop()?;
-    checkpoint(&mut progress,"cold Runtime resume fresh CID guard stop")?;
+    checkpoint(&mut progress, "cold Runtime resume fresh CID guard stop")?;
     report["stopped"] = true.into();
     report["resumed_cid"] = json!(resumed_cid);
     report["resumed_and_stopped"] = true.into();
-    report["resume_scope"]="cold-runtime-new-lease-guard-stop".into();
+    report["resume_scope"] = "cold-runtime-new-lease-guard-stop".into();
     Ok(report)
 }
 
