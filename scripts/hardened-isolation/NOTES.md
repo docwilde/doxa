@@ -257,3 +257,13 @@ Tests cover private bounded storage, synthetic secret omission, busy/exit/ESRCH/
 deadline/wait labels, unsafe sink/link/scope rejection, injected write failure,
 original phase/refusal and concurrent busy-stop dispatch. No guest/rerun/bounds
 changes. Separate diagnostic commit precedes focused verification.
+
+Diagnostic sourcedbf43a81:86 focused tests pass0.965s, clean worktree and
+diff-check. Final broker SHA256
+4f6b59be1b4baf329b4eb641ef40654eea0d3096555c074b6418096e9955c2f5.
+Race artifact3511ac4c remains explicitly source292ef53c (pre-diagnostic); current
+suite includes the actual child/PIDFD race checks plus diagnostic regressions.
+Main independently accepted race8296 source with six supplied and three extra
+actual-child/PIDFD/socket cases under ResourceWarnings:error. Separate diagnostic
+review and fresh coordinator proof remain pending; no guest mutations/reruns or
+resource/admission changes were performed by this worker.
