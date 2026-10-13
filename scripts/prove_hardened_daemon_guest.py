@@ -56,6 +56,7 @@ class FixtureScreen:
         self.pending = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")("strict")
         self.bytes = self.controls = 0
+        self.finished = False
 
     @staticmethod
     def blank(): return [[" "] * 160 for _ in range(48)]
@@ -144,6 +145,7 @@ class FixtureScreen:
         else: raise RuntimeError("unsupported fixture screen-mutating control: " + final)
 
     def feed(self, data):
+        require(not self.finished, "fixture terminal data followed EOF")
         self.bytes += len(data)
         require(self.bytes <= MAX_TERMINAL, "fixture terminal bytes exceed bound")
         self.pending += self.decoder.decode(data, final=False)
@@ -182,6 +184,11 @@ class FixtureScreen:
         require(len(self.pending) <= 512, "fixture terminal pending control exceeds bound")
 
     def text(self): return "\n".join("".join(row).rstrip() for row in self.cells)
+
+    def finish(self):
+        require(not self.pending, "incomplete fixture terminal control at EOF")
+        self.decoder.decode(b"", final=True)
+        self.finished = True
 
 
 def require(condition, reason):
@@ -384,6 +391,11 @@ class Pump:
             if not data:
                 if child is None:
                     self.pty = None
+                    if self.screen_error is None:
+                        try: self.screen.finish()
+                        except (RuntimeError, UnicodeError) as cause:
+                            self.screen_error = str(cause)
+                            raise RuntimeError("fixture terminal EOF refused: " + self.screen_error) from cause
                 else:
                     child.channels = [(f, s) for f, s in child.channels if f != fd]
                 continue
@@ -673,6 +685,7 @@ def main(args):
         report.update(prompt=prompt, events=events, idle=idle, frontend_rendered=True, isolation_host_root_guard_turn=True)
         os.write(master, b"\x11")
         require(pump.exit(frontend, budget) == 0, "captured frontend did not exit after CtrlQ")
+        pump.wait(lambda: pump.pty is None, budget)
         obs.send(b"stop_if_idle\n")
         pump.wait(lambda: any(frame.get("type") == "reply" and frame.get("id") == 103 for frame in frames()), budget)
         stopped = next(frame for frame in frames() if frame.get("type") == "reply" and frame.get("id") == 103)
@@ -753,6 +766,10 @@ def main(args):
                 report["cleanup"]["root_stopped"] = True
             report["cleanup"].update(remaining_scoped_processes=0, sockets_absent=True, registry_absent=True)
         except BaseException as cause: cleanup_errors.append("scope census: " + str(cause))
+        if pump.pty is not None:
+            try: pump.wait(lambda: pump.pty is None, Budget(cleanup.left(2)))
+            except BaseException as cause: cleanup_errors.append("terminal EOF cleanup: " + str(cause))
+        report["cleanup"]["terminal_eof_complete"] = pump.screen.finished
         report["processes"] = [child.evidence() for child in pump.children]
         for child in pump.children:
             if alive(child.pidfd): cleanup_errors.append(child.name + " pidfd still live")
@@ -762,7 +779,7 @@ def main(args):
         if pump.screen_error is not None: cleanup_errors.append("terminal replay: " + pump.screen_error)
         report["cleanup"]["errors"] = cleanup_errors
         if body_error is not None: report["error"] = body_error
-        required = ["cid404", "cgroup_absent", "shared_engine_unchanged", "root_stopped", "sockets_absent", "registry_absent"]
+        required = ["cid404", "cgroup_absent", "shared_engine_unchanged", "root_stopped", "sockets_absent", "registry_absent", "terminal_eof_complete"]
         if body_error is None and not cleanup_errors and all(report["cleanup"].get(key) is True for key in required): report["status"] = "passed"
         private_new(args.output / "report.json", json.dumps(report, sort_keys=True, indent=2).encode() + b"\n")
         for child in pump.children: os.close(child.pidfd)
@@ -810,7 +827,23 @@ def screen_self_test():
     require("UID1000 frontend ROOT guard fixture 20261013" in whole.text(), "actual r3 prompt not reconstructed")
     require("Session ready" in whole.text() and "DOXA operations" not in whole.text(), "actual r3 opening view differs")
     replay(raw+b"\x1b]22;\x1b\\\x1b[?1049l", True)
+    for data, valid in ((b"valid UTF8 \xe7\x95\x8c", True), (b"\x1b[", False), (b"\xe2\x96", False)):
+        master, slave = os.openpty()
+        try:
+            os.set_blocking(master,False)
+            pump = Pump(); pump.pty = master
+            os.write(slave,data); os.close(slave); slave = None
+            try: pump.wait(lambda:pump.pty is None,Budget(2))
+            except RuntimeError:
+                require(not valid,"valid actual PTY EOF refused")
+            require(pump.pty is None and pump.screen.finished is valid, "actual PTY EOF finalization differs")
+            require((pump.screen_error is None) is valid, "actual PTY EOF error not retained")
+        finally:
+            os.close(master)
+            if slave is not None: os.close(slave)
+    whole.finish(); split.finish()
     print(json.dumps({"cursor_erase_space": "passed", "utf8_split_width": "passed", "control_byte_bounds": "passed",
+                      "actual_pty_eof_valid_partial_csi_utf8": "passed",
                       "actual_r3_bytes": len(raw), "actual_r3_sha256": hashlib.sha256(raw).hexdigest(),
                       "actual_r3_prompt_reconstructed": True, "actual_r3_controls": whole.controls}))
 
