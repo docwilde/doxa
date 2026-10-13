@@ -1,0 +1,76 @@
+{
+  "admissible_as_hardened": false,
+  "denied_index_mutations": [
+    [
+      "apply",
+      "--index",
+      "-"
+    ],
+    [
+      "apply",
+      "--cached",
+      "-"
+    ]
+  ],
+  "git_uid": 1001,
+  "git_version": "git version 2.53.0",
+  "metadata_bytes": 663,
+  "metadata_entries": 21,
+  "no_engine_api_calls": true,
+  "no_provider_calls": true,
+  "no_quota_installation": true,
+  "original_index_unchanged": true,
+  "root_metadata_readonly_single_link": true,
+  "root_uid": 0,
+  "safe_commands": [
+    [
+      "diff",
+      "--no-color"
+    ],
+    [
+      "status",
+      "--porcelain"
+    ],
+    [
+      "diff",
+      "--cached",
+      "HEAD"
+    ],
+    [
+      "ls-files",
+      "--cached"
+    ],
+    [
+      "rev-parse",
+      "--verify",
+      "HEAD"
+    ],
+    [
+      "merge-base",
+      "HEAD",
+      "HEAD"
+    ],
+    [
+      "apply",
+      "--check",
+      "-"
+    ],
+    [
+      "apply",
+      "-"
+    ]
+  ],
+  "safe_markers": [],
+  "scope": "actual-root-readonly-git-metadata-and-filter-regression",
+  "unsafe_apply_markers": [
+    "marker-clean",
+    "marker-smudge"
+  ],
+  "unsafe_clean_markers": [
+    "marker-clean"
+  ],
+  "unsafe_process_exit": 128,
+  "unsafe_process_marker": "marker-process",
+  "worker_view": "/run/doxa/session/git-safe/8b1bfc5dbf88a424eaadf7fb1443dc37",
+  "worktree_apply_changed_bytes": true
+}

@@ -37,9 +37,13 @@ and locally verified on 2026-10-11; beta.44 ships this scope through PR #249.
 - Recorded-response evaluation with development/holdout group separation,
   synthetic fixture generation, and a separately opted-in synthetic live smoke.
   Evaluator never executes workers or claims worker quality from routing labels.
-- Native only. Unsupported Docker, isolation migration, history auto-resume,
-  `/clear`/`/cd` inheritance, child/fleet inheritance and CLI handoffs
-  are refused or unavailable.
+- Reviewed automatic compaction is an explicit frozen config opt-in. Child
+  launches reserve disjoint durable dollar/call/spend allowances after human
+  review; fleet slots split the reviewed routing limits and run budget. History
+  restores the original config, decision service and ceiling. Router Docker
+  launch/migration uses the existing isolation boundary and complete canonical
+  checkpoint. `/clear`/`/cd` inheritance, external CLI handoffs and CLI summary
+  targets remain unavailable.
 
 The [operator guide](../jev-router.md) describes config, controls, failures,
 accounting and evaluation commands. An attempted Jev HTTP call with missing
@@ -126,12 +130,17 @@ usage-based cost are estimates, not live invoices.
   current router-label agreement does not establish these.
 - [x] Explicit reviewed managed compaction with separate summary context and
   durable aggregate accounting; local verification only.
-- [ ] Automatic compaction and broader long-history limits; real-task summary
-  quality and authenticated summary-provider verification.
+- [x] Opt-in automatic compaction through the existing canonical source-review
+  and durable-accounting path; one ordinary-turn boundary.
+- [ ] Broader long-history limits, real-task summary quality and authenticated
+  summary-provider verification.
 - [ ] First-class router derivation attribution in LORE; current compatibility
   uses the selected API provider while retaining router conversation proof.
-- [ ] Reviewed config/allowance propagation for child sessions, fleets, history
-  launches and Docker migration.
+- [x] Reviewed config/allowance propagation for child sessions, fleets and
+  history launches with disjoint durable allocations and unchanged resume spend.
+- [x] Integrated Docker migration checkpoint and disposable-host validation:
+  four clean/dirty GLM and Router round trips plus target-start rollback passed
+  with unchanged Router journals; no provider turn or hardened-origin claim.
 - [x] Internal authenticated Claude/protected Codex workers with bounded
   canonical history transfer, native permission/tool lifecycle and fail-closed
   recovery. Credential-free Linux local fixtures; no real-account quality claim.

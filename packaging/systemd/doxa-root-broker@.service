@@ -1,0 +1,26 @@
+[Unit]
+Description=Root-scoped DOXA hardened session broker %i
+After=network.target
+ConditionPathExists=/etc/doxa/hardened/%i.json
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/libexec/doxa/root_broker.py serve --policy /etc/doxa/hardened/%i.json
+Restart=no
+KillMode=control-group
+TimeoutStopSec=8s
+UMask=0077
+NoNewPrivileges=yes
+# Kernel quota mount identity requires the installed host mount namespace.
+PrivateTmp=no
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryMax=1G
+MemorySwapMax=0
+TasksMax=128
+LimitNOFILE=128
+
+[Install]
+WantedBy=multi-user.target

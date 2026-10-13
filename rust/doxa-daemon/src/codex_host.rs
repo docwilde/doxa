@@ -410,9 +410,18 @@ impl CodexHost {
         self.persist_thread_locked(thread_id, turn_incomplete)
     }
 
+    fn remember_rollout(&self, app: &AppServerDriver) {
+        if let Some(path) = app.rollout_path() {
+            *self.rollout_path.lock().unwrap() = Some(path.to_owned());
+        }
+    }
+
     fn persist_thread_locked(&self, thread_id: &str, turn_incomplete: bool) -> io::Result<()> {
         let mut rollout = self.rollout_path.lock().unwrap();
-        if rollout.as_ref().is_some_and(|path| codex_context::size(path, thread_id).is_none()) {
+        // App-server metadata can precede the provider's first rollout write.
+        // Persist its official path without granting read/review authority;
+        // every subsequent use still verifies the thread-bound source.
+        if self.transport == "exec" && rollout.as_ref().is_some_and(|path| codex_context::size(path, thread_id).is_none()) {
             *rollout = None;
         }
         if self.transport == "exec" && rollout.is_none() {
@@ -723,6 +732,7 @@ impl CodexHost {
                                     }
                                     *resume_thread = Some(app.thread_id().to_owned());
                                     options.resume_thread = resume_thread.clone();
+                                    self.remember_rollout(&app);
                                     if self.persist_thread(app.thread_id(), true).is_err() {
                                         thread_write_failed.set(true);
                                         token.cancel();
@@ -801,6 +811,7 @@ impl CodexHost {
                                 AppServerError::TimedOut => "Codex app-server turn timed out".to_owned(),
                                 _ => "Codex app-server protocol or process failed".to_owned(),
                             });
+                            if let Some(app) = active.as_ref() { self.remember_rollout(app); }
                             if outcome.is_err() && (!compact_blocked.get() || compact_cancelled_before_submission.get()) {
                                 if let Some(app) = active.as_mut() { runtime.block_on(app.shutdown()); }
                                 *active = None;
@@ -1026,6 +1037,7 @@ impl Host for CodexHost {
                     }
                     let selected = self.selection.lock().unwrap().clone();
                     app.set_selection(selected.0, selected.1);
+                    self.remember_rollout(&app);
                     *active = Some(app);
                 }
                 if active.as_ref().is_none_or(|app| app.thread_id() != expected) {

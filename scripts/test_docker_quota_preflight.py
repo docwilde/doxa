@@ -125,10 +125,24 @@ class QuotaPreflightTests(unittest.TestCase):
         (self.root / "cache").symlink_to(self.root / "home", target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "symlink"):
             inspect(self.root, self.mountinfo(), self.project)
+        self.assertTrue((self.root / "cache").is_symlink())
+        self.assertEqual(list((self.root / "home").iterdir()), [])
         (self.root / "cache").unlink()
-        (self.root / "cache").mkdir(mode=0o750)
+        (self.root / "cache").mkdir(mode=0o700)
+        (self.root / "cache").chmod(0o755)
+        before = sorted(p.name for p in self.root.iterdir())
         with self.assertRaisesRegex(ValueError, "mode 0700"):
             inspect(self.root, self.mountinfo(), self.project)
+        self.assertEqual((self.root / "cache").stat().st_mode & 0o777, 0o755)
+        self.assertEqual(list((self.root / "cache").iterdir()), [])
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), before)
+        (self.root / "cache").chmod(0o700)
+        report = inspect(self.root, self.mountinfo(), self.project)
+        self.assertTrue(report["capability_candidate"])
+        self.assertFalse(report["hard_enforcement_verified"])
+        self.assertEqual((self.root / "cache").stat().st_mode & 0o777, 0o700)
+        self.assertEqual(list((self.root / "cache").iterdir()), [])
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), before)
 
     def test_nested_host_mount_refuses_candidate_even_on_same_filesystem(self) -> None:
         nested = self.root / "checkout" / "nested"

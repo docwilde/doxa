@@ -85,6 +85,10 @@ fn live_pidfd(fd: &File) -> io::Result<()> {
 }
 
 pub(crate) fn pin_connector_sender(stream: &UnixStream) -> io::Result<ConnectorSenderPin> {
+    pin_connector_sender_for_uid(stream, unsafe { libc::geteuid() })
+}
+
+pub(crate) fn pin_connector_sender_for_uid(stream: &UnixStream, expected_uid: libc::uid_t) -> io::Result<ConnectorSenderPin> {
     let mut cred: libc::ucred = unsafe { mem::zeroed() };
     let mut len = mem::size_of_val(&cred) as libc::socklen_t;
     if unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
@@ -92,7 +96,7 @@ pub(crate) fn pin_connector_sender(stream: &UnixStream) -> io::Result<ConnectorS
         return Err(io::Error::last_os_error());
     }
     if len as usize != mem::size_of_val(&cred) || cred.pid <= 0
-        || cred.uid != unsafe { libc::geteuid() } {
+        || cred.uid != expected_uid {
         return Err(error("guarded connector credentials are unavailable"));
     }
     let mut descriptor: libc::c_int = -1;

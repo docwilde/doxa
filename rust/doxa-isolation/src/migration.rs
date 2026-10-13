@@ -13,6 +13,9 @@ impl Migration {
         let previous:Manifest=serde_json::from_value(plan["manifest"].clone())?;
         let path=manifest_path(home,&previous.session_id)?;
         let current=read_manifest(&path)?;
+        if target==Profile::DockerHardened||current.profile==Profile::DockerHardened {
+            return Err(error("ROOT isolation migration requires a typed stopped-workspace export/import; the original session remains active"));
+        }
         if serde_json::to_value(&current)?!=plan["manifest"]||target.docker()==current.profile.docker(){
             return Err(error("isolation migration plan is stale or does not change backend"));
         }
@@ -43,6 +46,9 @@ impl Migration {
             if fingerprint(Path::new(path),self.plan["transcript_bytes"].as_u64().ok_or_else(||error("transcript size missing"))?)? != self.plan["transcript_sha256"]{
                 return Err(error("conversation checkpoint changed during provider shutdown"));
             }
+        }
+        if self.plan["launch"]["engine"] == "router" {
+            verify_router_checkpoint(&self.plan, &self.previous)?;
         }
         let root=self.path.parent().unwrap();
         let mut next=stopped.clone();
@@ -162,6 +168,200 @@ fn copy_checkout(source:&Path,destination:&Path)->io::Result<()> {
     File::open(destination)?.sync_all()
 }
 fn import_context(plan:&Value,previous:&Manifest,next:&mut Manifest)->io::Result<()> {provider_context(plan,previous,next,true)}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouterCheckpoint {
+    path: PathBuf,
+    bytes: u64,
+    sha256: String,
+    config_sha256: String,
+    ceiling_usd_micros: Option<u64>,
+    session_id: String,
+    #[serde(default)]
+    parent_allowance: Option<RouterParentAllowance>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouterParentAllowance { path: PathBuf, parent_session_id: String, projection_sha256: String }
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouterAllocation {
+    child_session_id: String, parent_session_id: String, config_sha256: String,
+    ceiling_usd_micros: u64, routing_calls: u64, routing_spend_usd_micros: u64,
+    model: String, permission: String,
+}
+
+fn canonical_projection(value: Value) -> Value {
+    match value {
+        Value::Object(rows) => {
+            let sorted: std::collections::BTreeMap<_, _> = rows.into_iter()
+                .map(|(key, value)| (key, canonical_projection(value))).collect();
+            Value::Object(sorted.into_iter().collect())
+        },
+        Value::Array(rows) => Value::Array(rows.into_iter().map(canonical_projection).collect()),
+        other => other,
+    }
+}
+
+/// Reconstruct startup's delegated bounds from current host accounting. A
+/// projection deliberately excludes ordinary parent counters, but those
+/// counters must still fit the remaining durable allowances at this read.
+fn current_router_allocations(journal: &Value, config: &doxa_router::Config) -> io::Result<(Option<RouterAllocation>, Vec<RouterAllocation>)> {
+    let inherited: Option<RouterAllocation> = serde_json::from_value(journal.get("inherited").cloned().unwrap_or(Value::Null))
+        .map_err(|_| error("Router inherited allowance is malformed"))?;
+    let allocations: Vec<RouterAllocation> = serde_json::from_value(journal.get("allocations").cloned().unwrap_or(json!([])))
+        .map_err(|_| error("Router delegated allowances are malformed"))?;
+    let identity = &journal["identity"];
+    let hash = config.hash()?;
+    let valid = |row: &RouterAllocation| valid_id(&row.child_session_id) && valid_id(&row.parent_session_id)
+        && row.config_sha256 == hash && row.ceiling_usd_micros > 0
+        && matches!(row.permission.as_str(), "default" | "auto")
+        && (row.model == "auto" || config.candidate(&row.model).is_some());
+    if inherited.as_ref().is_some_and(|row| !valid(row) || identity["session_id"] != row.child_session_id
+        || identity["ceiling_usd_micros"] != row.ceiling_usd_micros
+        || row.routing_calls > config.max_calls || row.routing_spend_usd_micros > config.max_spend_usd_micros) {
+        return Err(error("Router inherited allowance identity changed"));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    if allocations.len() > 64 || allocations.iter().any(|row| !valid(row)
+        || identity["session_id"] != row.parent_session_id || !ids.insert(row.child_session_id.clone())) {
+        return Err(error("Router delegated allowance identity changed"));
+    }
+    let number = |scope: &str, key: &str| journal[scope][key].as_u64()
+        .ok_or_else(|| error("Router delegated accounting is incomplete"));
+    let (calls, spend) = inherited.as_ref().map(|row| (row.routing_calls, row.routing_spend_usd_micros))
+        .unwrap_or((config.max_calls, config.max_spend_usd_micros));
+    let (calls, spend) = allocations.iter().try_fold((calls, spend), |(calls, spend), row|
+        calls.checked_sub(row.routing_calls).zip(spend.checked_sub(row.routing_spend_usd_micros))
+            .ok_or_else(|| error("Router delegated routing allowance overflows")))?;
+    let routed = number("router", "reserved_usd_micros")?.max(number("router", "actual_usd_micros")?);
+    let held = routed.checked_add(number("worker", "estimated_actual_usd_micros")?)
+        .and_then(|sum| sum.checked_add(journal["worker"]["retained_reservation_usd_micros"].as_u64()?))
+        .and_then(|sum| allocations.iter().try_fold(sum, |sum, row| sum.checked_add(row.ceiling_usd_micros)))
+        .ok_or_else(|| error("Router delegated aggregate allowance overflows"))?;
+    let ceiling = match &identity["ceiling_usd_micros"] {
+        Value::Null => None,
+        value => Some(value.as_u64().filter(|value| *value > 0).ok_or_else(|| error("Router aggregate ceiling is malformed"))?),
+    };
+    if number("router", "calls")? > calls || routed > spend || ceiling.is_some_and(|ceiling| held > ceiling) {
+        return Err(error("Router delegated accounting exceeds its durable allowance"));
+    }
+    Ok((inherited, allocations))
+}
+
+fn verify_router_parent(home: &Path, checkpoint: &RouterCheckpoint, journal: &Value, config: &doxa_router::Config) -> io::Result<()> {
+    let (inherited, _) = current_router_allocations(journal, config)?;
+    let Some(inherited) = inherited else {
+        if checkpoint.parent_allowance.is_some() { return Err(error("Router parent checkpoint has no inherited allowance")); }
+        return Ok(());
+    };
+    let descriptor = checkpoint.parent_allowance.as_ref().ok_or_else(|| error("Router child migration requires a current parent allowance"))?;
+    let expected = home.join("router").join(format!("{}.router.json", inherited.parent_session_id));
+    if descriptor.parent_session_id != inherited.parent_session_id || descriptor.path != expected
+        || descriptor.projection_sha256.len() != 64 || !descriptor.projection_sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+        return Err(error("Router parent checkpoint identity or path changed"));
+    }
+    let meta = fs::symlink_metadata(&expected)?;
+    if meta.mode() & 0o077 != 0 { return Err(error("Router parent journal is not private")); }
+    let parent: Value = serde_json::from_slice(&bytes(&expected, 256 * 1024)?)?;
+    if parent["version"] != 1 || parent["identity"]["engine"] != "router"
+        || parent["identity"]["session_id"] != inherited.parent_session_id
+        || parent["identity"]["config_sha256"] != checkpoint.config_sha256
+        || parent["router"]["accounting_unknown"] != false || parent["worker"]["accounting_unknown"] != false {
+        return Err(error("Router parent allowance is unverified"));
+    }
+    let (_, allocations) = current_router_allocations(&parent, config)?;
+    let row = allocations.iter().find(|row| row.child_session_id == checkpoint.session_id)
+        .ok_or_else(|| error("Router parent lost the child's durable allowance"))?;
+    if row != &inherited { return Err(error("Router parent changed the child's durable allowance")); }
+    let projection = canonical_projection(json!({"version":parent["version"],"identity":parent["identity"],
+        "allocation":row,"router_accounting_unknown":parent["router"]["accounting_unknown"],
+        "worker_accounting_unknown":parent["worker"]["accounting_unknown"]}));
+    if format!("{:x}", Sha256::digest(serde_json::to_vec(&projection)?)) != descriptor.projection_sha256 {
+        return Err(error("Router parent authority changed during provider shutdown"));
+    }
+    Ok(())
+}
+
+fn verify_router_checkpoint(plan: &Value, previous: &Manifest) -> io::Result<()> {
+    let checkpoint: RouterCheckpoint = serde_json::from_value(plan["router_checkpoint"].clone())
+        .map_err(|_| error("Router migration requires an exact host checkpoint"))?;
+    let home = previous.private_home.parent().and_then(Path::parent).and_then(Path::parent)
+        .ok_or_else(|| error("Router migration home is unavailable"))?;
+    let expected_path = home.join("router").join(format!("{}.router.json", previous.session_id));
+    if checkpoint.session_id != previous.session_id || checkpoint.path != expected_path
+        || checkpoint.bytes == 0 || checkpoint.bytes > 256 * 1024
+        || checkpoint.sha256.len() != 64 || !checkpoint.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        || checkpoint.config_sha256 != plan["launch"]["router_config_sha256"]
+        || checkpoint.ceiling_usd_micros == Some(0) {
+        return Err(error("Router migration checkpoint identity or ceiling changed"));
+    }
+    private_directory(expected_path.parent().unwrap(), false)?;
+    let meta = fs::symlink_metadata(&checkpoint.path)?;
+    if meta.mode() & 0o077 != 0 {
+        return Err(error("Router migration journal is not private"));
+    }
+    let content = bytes(&checkpoint.path, 256 * 1024)?;
+    if content.len() as u64 != checkpoint.bytes
+        || format!("{:x}", Sha256::digest(&content)) != checkpoint.sha256 {
+        return Err(error("Router checkpoint changed during provider shutdown"));
+    }
+    let journal: Value = serde_json::from_slice(&content)
+        .map_err(|_| error("Router migration journal is malformed"))?;
+    let config_path = plan["launch"]["router_config"].as_str().map(PathBuf::from)
+        .ok_or_else(|| error("Router migration configuration path is missing"))?;
+    if fs::canonicalize(&config_path)? != config_path || config_path.starts_with(&previous.checkout) {
+        return Err(error("Router migration configuration must be canonical and outside the checkout"));
+    }
+    let config = doxa_router::Config::load_with_model(&config_path, journal["config_model"].as_str())?;
+    if config.hash()? != checkpoint.config_sha256 || journal["version"] != 1
+        || journal["identity"]["engine"] != "router"
+        || journal["identity"]["session_id"] != previous.session_id
+        || journal["identity"]["config_sha256"] != checkpoint.config_sha256
+        || journal["identity"]["ceiling_usd_micros"] != json!(checkpoint.ceiling_usd_micros)
+        || journal["identity"]["accounting"] != "aggregate_upper_rates_v1"
+        || journal["identity"]["cwd"] != json!(previous.context_cwd.as_ref().unwrap_or(&previous.checkout))
+        || journal["incomplete"] != false || journal["router"]["accounting_unknown"] != false
+        || journal["worker"]["accounting_unknown"] != false
+        || !matches!(journal["permission"].as_str(), Some("default" | "auto"))
+        || ["pending_cli", "pending_compaction"].iter().any(|field| !journal[field].is_null()) {
+        return Err(error("Router migration requires complete matching session accounting"));
+    }
+    let number = |scope: &str, key: &str| journal[scope][key].as_u64()
+        .ok_or_else(|| error("Router migration accounting is incomplete"));
+    let calls = number("router", "calls")?;
+    if calls != number("router", "last_settled_call")? || calls > config.max_calls {
+        return Err(error("Router migration has unsettled routing calls"));
+    }
+    let routed = number("router", "reserved_usd_micros")?.max(number("router", "actual_usd_micros")?);
+    let held = routed.checked_add(number("worker", "estimated_actual_usd_micros")?)
+        .and_then(|total| total.checked_add(journal["worker"]["retained_reservation_usd_micros"].as_u64()?))
+        .ok_or_else(|| error("Router migration accounting overflows"))?;
+    let allocations = match journal.get("allocations") {
+        None => &[][..],
+        Some(Value::Array(rows)) => rows.as_slice(),
+        _ => return Err(error("Router migration child allowances are malformed")),
+    };
+    if allocations.len() > 64 { return Err(error("Router migration has too many child allowances")); }
+    let held = allocations.iter().try_fold(held, |total, row| {
+        if row["parent_session_id"] != previous.session_id || row["config_sha256"] != checkpoint.config_sha256 {
+            return Err(error("Router migration child allowance identity changed"));
+        }
+        total.checked_add(row["ceiling_usd_micros"].as_u64().filter(|value| *value > 0)
+            .ok_or_else(|| error("Router migration child allowance is invalid"))?)
+            .ok_or_else(|| error("Router migration child allowances overflow"))
+    })?;
+    if routed > config.max_spend_usd_micros
+        || checkpoint.ceiling_usd_micros.is_some_and(|ceiling| held > ceiling) {
+        return Err(error("Router migration accounting exceeds its reviewed ceiling"));
+    }
+    verify_router_parent(&home, &checkpoint, &journal, &config)?;
+    Ok(())
+}
+
 fn provider_context(plan:&Value,previous:&Manifest,next:&mut Manifest,copy:bool)->io::Result<()> {
     let engine=plan["launch"]["engine"].as_str().ok_or_else(||error("migration engine missing"))?;
     if engine=="codex"{
@@ -209,6 +409,11 @@ fn provider_context(plan:&Value,previous:&Manifest,next:&mut Manifest,copy:bool)
         }
         let cwd=if next.profile.docker(){PathBuf::from("/workspace")}else{next.checkout.clone()};
         if copy{write_copy(&next.private_home.join("claude/projects").join(slug(&cwd)).join(name),&content)?;}
+    }else if engine == "router" {
+        verify_router_checkpoint(plan, previous)?;
+        // Router owns one canonical host journal. Private CLI conversations
+        // are disposable views and never become its migration checkpoint.
+        next.provider_rollout = None;
     }else if !matches!(engine,"deepseek"|"glm"){return Err(error("unsupported isolation migration engine"));}
     Ok(())
 }
@@ -231,6 +436,137 @@ mod tests{
         manifest.profile=Profile::DockerOpen;manifest.policy_hash=policy.hash(manifest.profile);manifest.creation_policy_hash=manifest.policy_hash.clone();
         manifest.policy=Some(policy);manifest.context_cwd=Some(source.to_owned());manifest.state="stopped".into();
         write_manifest(&manifest_path(home,&manifest.session_id).unwrap(),&manifest).unwrap();manifest
+    }
+    fn router_plan(home: &Path, manifest: &Manifest) -> Value {
+        let config: doxa_router::Config = serde_json::from_str(
+            include_str!("../../doxa-router/fixtures/config.example.json")).unwrap();
+        let config_path = home.join("router-config.json");
+        fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let config_hash = config.hash().unwrap();
+        private_directory(&home.join("router"), true).unwrap();
+        let journal_path = home.join("router").join(format!("{}.router.json", manifest.session_id));
+        let journal = json!({"version":1,"identity":{"engine":"router","session_id":manifest.session_id,
+            "cwd":manifest.context_cwd.as_ref().unwrap_or(&manifest.checkout),"config_sha256":config_hash,
+            "ceiling_usd_micros":1000,"accounting":"aggregate_upper_rates_v1"},
+            "router":{"calls":1,"last_settled_call":1,"reserved_usd_micros":100,"actual_usd_micros":80,"accounting_unknown":false},
+            "worker":{"estimated_actual_usd_micros":30,"retained_reservation_usd_micros":0,"accounting_unknown":false},
+            "incomplete":false,"pending_cli":null,"pending_compaction":null,"permission":"default","allocations":[]});
+        fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let size = fs::metadata(&journal_path).unwrap().len();
+        json!({"manifest":manifest,"launch":{"engine":"router","router_config":config_path,"router_config_sha256":config_hash},
+            "router_checkpoint":{"path":journal_path,"bytes":size,"sha256":fingerprint(&journal_path,size).unwrap(),
+                "config_sha256":config_hash,"ceiling_usd_micros":1000,"session_id":manifest.session_id}})
+    }
+    #[test]
+    fn router_migration_preserves_host_journal_without_importing_private_cli_context() {
+        let temp = tempfile::tempdir().unwrap(); let root = fs::canonicalize(temp.path()).unwrap();
+        let source = root.join("source"); repository(&source);
+        let home = root.join("doxa"); let original = stopped_docker(&home, &source);
+        let plan = router_plan(&home, &original);
+        let journal = PathBuf::from(plan["router_checkpoint"]["path"].as_str().unwrap());
+        let before = fs::read(&journal).unwrap();
+        let mut migration = Migration::prepare(&home, plan, Profile::Native).unwrap();
+        let next = migration.commit().unwrap();
+        assert_eq!(next.checkout, original.checkout);
+        assert_eq!(next.context_cwd, original.context_cwd);
+        assert!(next.provider_rollout.is_none());
+        assert_eq!(fs::read(&journal).unwrap(), before);
+        assert!(!next.private_home.join("codex").exists());
+        assert!(!next.private_home.join("claude").exists());
+    }
+    fn router_child_plan(home: &Path, manifest: &Manifest) -> (Value, PathBuf) {
+        let mut plan = router_plan(home, manifest);
+        let journal_path = PathBuf::from(plan["router_checkpoint"]["path"].as_str().unwrap());
+        let mut child: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+        let row = json!({"child_session_id":manifest.session_id,"parent_session_id":"parent",
+            "config_sha256":plan["router_checkpoint"]["config_sha256"],"ceiling_usd_micros":1000,
+            "routing_calls":2,"routing_spend_usd_micros":1000,"model":"auto","permission":"default"});
+        child["inherited"] = row.clone();
+        fs::write(&journal_path,serde_json::to_vec(&child).unwrap()).unwrap();
+        let mut parent=child.clone(); parent["identity"]["session_id"]=json!("parent");
+        parent["identity"]["ceiling_usd_micros"]=json!(5000); parent["inherited"]=Value::Null;
+        parent["allocations"]=json!([row.clone()]);
+        let parent_path=home.join("router/parent.router.json");
+        fs::write(&parent_path,serde_json::to_vec(&parent).unwrap()).unwrap();
+        fs::set_permissions(&parent_path,fs::Permissions::from_mode(0o600)).unwrap();
+        let projection=canonical_projection(json!({"version":parent["version"],"identity":parent["identity"],
+            "allocation":row,"router_accounting_unknown":false,"worker_accounting_unknown":false}));
+        let size=fs::metadata(&journal_path).unwrap().len();
+        plan["router_checkpoint"]["bytes"]=json!(size);
+        plan["router_checkpoint"]["sha256"]=json!(fingerprint(&journal_path,size).unwrap());
+        plan["router_checkpoint"]["parent_allowance"]=json!({"path":parent_path,"parent_session_id":"parent",
+            "projection_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&projection).unwrap()))});
+        (plan,parent_path)
+    }
+    #[test]
+    fn router_parent_regular_accounting_can_advance_with_exact_child_allowance() {
+        let temp=tempfile::tempdir().unwrap();let root=fs::canonicalize(temp.path()).unwrap();
+        let source=root.join("source");repository(&source);let home=root.join("doxa");
+        let original=stopped_docker(&home,&source);let(plan,parent_path)=router_child_plan(&home,&original);
+        let mut migration=Migration::prepare(&home,plan,Profile::Native).unwrap();
+        let mut parent:Value=serde_json::from_slice(&fs::read(&parent_path).unwrap()).unwrap();
+        parent["worker"]["estimated_actual_usd_micros"]=json!(31);
+        fs::write(&parent_path,serde_json::to_vec(&parent).unwrap()).unwrap();
+        assert_eq!(migration.commit().unwrap().profile,Profile::Native);
+    }
+    #[test]
+    fn router_parent_unknown_or_changed_allocation_refuses_before_mutation() {
+        for change in ["unknown","row","bounds","path","missing"] {
+            let temp=tempfile::tempdir().unwrap();let root=fs::canonicalize(temp.path()).unwrap();
+            let source=root.join("source");repository(&source);let home=root.join("doxa");
+            let original=stopped_docker(&home,&source);let(mut plan,parent_path)=router_child_plan(&home,&original);
+            if change=="path" {plan["router_checkpoint"]["parent_allowance"]["path"]=json!(home.join("outside.json"));
+                assert!(Migration::prepare(&home,plan,Profile::Native).is_err());continue;}
+            if change=="missing" {plan["router_checkpoint"].as_object_mut().unwrap().remove("parent_allowance");
+                assert!(Migration::prepare(&home,plan,Profile::Native).is_err());continue;}
+            let mut migration=Migration::prepare(&home,plan,Profile::Native).unwrap();
+            let mut parent:Value=serde_json::from_slice(&fs::read(&parent_path).unwrap()).unwrap();
+            match change {"unknown"=>parent["worker"]["accounting_unknown"]=json!(true),
+                "row"=>parent["allocations"][0]["permission"]=json!("auto"),
+                _=>parent["worker"]["estimated_actual_usd_micros"]=json!(5000)};
+            fs::write(&parent_path,serde_json::to_vec(&parent).unwrap()).unwrap();
+            assert!(migration.commit().is_err(),"{change}");
+            assert_eq!(read_manifest(&manifest_path(&home,&original.session_id).unwrap()).unwrap().profile,original.profile);
+            assert_eq!(fs::read_to_string(source.join("tracked")).unwrap(),"base");
+        }
+    }
+    #[test]
+    fn changed_router_checkpoint_refuses_before_workspace_or_manifest_mutation() {
+        let temp = tempfile::tempdir().unwrap(); let root = fs::canonicalize(temp.path()).unwrap();
+        let source = root.join("source"); repository(&source);
+        let home = root.join("doxa"); let original = stopped_docker(&home, &source);
+        let plan = router_plan(&home, &original);
+        let journal = PathBuf::from(plan["router_checkpoint"]["path"].as_str().unwrap());
+        let mut migration = Migration::prepare(&home, plan, Profile::Native).unwrap();
+        fs::write(&journal, b"{}").unwrap();
+        assert!(migration.commit().unwrap_err().to_string().contains("Router checkpoint changed"));
+        assert_eq!(read_manifest(&manifest_path(&home, &original.session_id).unwrap()).unwrap().profile, original.profile);
+        assert_eq!(fs::read_to_string(source.join("tracked")).unwrap(), "base");
+    }
+    #[test]
+    fn router_migration_refuses_incomplete_unknown_or_changed_identity_even_with_current_hash() {
+        let temp = tempfile::tempdir().unwrap(); let root = fs::canonicalize(temp.path()).unwrap();
+        let source = root.join("source"); repository(&source);
+        let home = root.join("doxa"); let original = stopped_docker(&home, &source);
+        let plan = router_plan(&home, &original);
+        let journal_path = PathBuf::from(plan["router_checkpoint"]["path"].as_str().unwrap());
+        let original_journal: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+        for (pointer, value) in [
+            ("/incomplete", json!(true)), ("/worker/accounting_unknown", json!(true)),
+            ("/router/accounting_unknown", json!(true)), ("/router/last_settled_call", json!(0)),
+            ("/pending_cli", json!({"call":1})), ("/pending_compaction", json!({"turn":1})),
+            ("/identity/session_id", json!("sibling")), ("/identity/cwd", json!("/different")),
+            ("/identity/ceiling_usd_micros", json!(2000)), ("/allocations", json!("unverified")),
+        ] {
+            let mut journal = original_journal.clone(); *journal.pointer_mut(pointer).unwrap() = value;
+            fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+            let mut altered = plan.clone(); let size = fs::metadata(&journal_path).unwrap().len();
+            altered["router_checkpoint"]["bytes"] = json!(size);
+            altered["router_checkpoint"]["sha256"] = json!(fingerprint(&journal_path,size).unwrap());
+            assert!(Migration::prepare(&home, altered, Profile::Native).is_err(), "{pointer}");
+        }
     }
     #[test]
     fn clean_checkout_copy_keeps_source_and_independent_history(){

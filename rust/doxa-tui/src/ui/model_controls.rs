@@ -867,8 +867,8 @@ impl App {
                 if !form.model.trim().is_empty() {
                     options.model = Some(form.model.trim().to_owned());
                 }
-                if router && (!form.models.contains(&form.model) || form.isolation!=doxa_isolation::Profile::Native || form.router_config.is_none()) {
-                    self.notice="Router target or native isolation changed; session was not started".into();return true;
+                if router && (!form.models.contains(&form.model) || form.router_config.is_none()) {
+                    self.notice="Router target or reviewed config changed; session was not started".into();return true;
                 }
                 if router && !form.router_config.as_deref().is_some_and(|path|self.router_review_result(path)
                     .is_some_and(|review|review.ready() && review.current(path))) {

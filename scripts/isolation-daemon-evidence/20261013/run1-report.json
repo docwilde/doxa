@@ -1,0 +1,127 @@
+{
+  "cleanup": {
+    "errors": [],
+    "registry_absent": true,
+    "remaining_scoped_processes": 0,
+    "shared_engine_unchanged": true,
+    "sockets_absent": true
+  },
+  "daemon_source": "934661cd",
+  "engine_before": {
+    "config_sha256": "3a6774e75043931ce3dd1874bac3aabc86908a1bb21fe07c68eb7e46054f26c9",
+    "pid": 27821,
+    "socket": [
+      56,
+      688
+    ]
+  },
+  "error": "root-install failed: root isolation broker refused: [Errno 2] No such file or directory: '/run/doxa/hardened/root-daemon-20261013'\n",
+  "failed_spawns": [],
+  "live_provider_verified": false,
+  "paid_calls": 0,
+  "pins": {
+    "broker": "6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5",
+    "daemon": "bdab19e567fe3e7b337414933f64d90be5cd361c55434b482d1d1cd7e378b1aa",
+    "frontend": "5b4d8ef78eb7c42d84fe9c80f4220cdefdad6d2cad5987399dedc5497aa965c2",
+    "gateway": "18d1d633a67aee1dd1bfd67eaf5de82ebcc42dfb0ef112198c6691439de98fe9",
+    "image": "sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23",
+    "worker": "cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f"
+  },
+  "processes": [
+    {
+      "name": "git0",
+      "pgid": 74781,
+      "pid": 74781,
+      "pidfd_exited": true,
+      "ppid": 74780,
+      "returncode": 0,
+      "starttime": 1858969,
+      "state": "R",
+      "stderr": "",
+      "stdout": "",
+      "uids": [
+        1000,
+        1000,
+        1000,
+        1000
+      ]
+    },
+    {
+      "name": "git1",
+      "pgid": 74782,
+      "pid": 74782,
+      "pidfd_exited": true,
+      "ppid": 74780,
+      "returncode": 0,
+      "starttime": 1858970,
+      "state": "R",
+      "stderr": "",
+      "stdout": "",
+      "uids": [
+        1000,
+        1000,
+        1000,
+        1000
+      ]
+    },
+    {
+      "name": "git2",
+      "pgid": 74783,
+      "pid": 74783,
+      "pidfd_exited": true,
+      "ppid": 74780,
+      "returncode": 0,
+      "starttime": 1858970,
+      "state": "R",
+      "stderr": "",
+      "stdout": "",
+      "uids": [
+        1000,
+        1000,
+        1000,
+        1000
+      ]
+    },
+    {
+      "name": "quota-provision",
+      "pgid": 74786,
+      "pid": 74786,
+      "pidfd_exited": true,
+      "ppid": 74780,
+      "returncode": 0,
+      "starttime": 1858971,
+      "state": "R",
+      "stderr": "",
+      "stdout": "{\"admissible_as_hard_quota\":false,\"policy\":{\"bindings\":{\"broker\":{\"device\":1792,\"inode\":179,\"mount_id\":2147500504},\"cache\":{\"device\":1792,\"inode\":178,\"mount_id\":2147500504},\"checkout\":{\"device\":1792,\"inode\":174,\"mount_id\":2147500504},\"home\":{\"device\":1792,\"inode\":176,\"mount_id\":2147500504},\"root\":{\"device\":1792,\"inode\":8200,\"mount_id\":2147500504}},\"boot_id\":\"d606e7c5-c113-477e-b804-8449e367d706\",\"caller_uid\":1000,\"engine_gid\":1001,\"engine_uid\":1001,\"hard_limit_bytes\":67108864,\"project_id\":5011,\"root\":\"/srv/doxa-quota-proof/root-daemon-20261013\",\"security_contract_version\":1,\"session_id\":\"root-daemon-20261013\",\"version\":2,\"worker_binary_sha256\":\"cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f\",\"worker_image\":\"sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23\"},\"policy_identity\":{\"device\":64769,\"inode\":530227,\"sha256\":\"28a15ab4416f0701b149550fab545ab7f2acc32333bca09f794d3d1aff7bd755\"}}\n",
+      "uids": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "root-install",
+      "pgid": 74787,
+      "pid": 74787,
+      "pidfd_exited": true,
+      "ppid": 74780,
+      "returncode": 1,
+      "starttime": 1858973,
+      "state": "R",
+      "stderr": "root isolation broker refused: [Errno 2] No such file or directory: '/run/doxa/hardened/root-daemon-20261013'\n",
+      "stdout": "",
+      "uids": [
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "project_id": 5011,
+  "quota_provision": "{\"admissible_as_hard_quota\":false,\"policy\":{\"bindings\":{\"broker\":{\"device\":1792,\"inode\":179,\"mount_id\":2147500504},\"cache\":{\"device\":1792,\"inode\":178,\"mount_id\":2147500504},\"checkout\":{\"device\":1792,\"inode\":174,\"mount_id\":2147500504},\"home\":{\"device\":1792,\"inode\":176,\"mount_id\":2147500504},\"root\":{\"device\":1792,\"inode\":8200,\"mount_id\":2147500504}},\"boot_id\":\"d606e7c5-c113-477e-b804-8449e367d706\",\"caller_uid\":1000,\"engine_gid\":1001,\"engine_uid\":1001,\"hard_limit_bytes\":67108864,\"project_id\":5011,\"root\":\"/srv/doxa-quota-proof/root-daemon-20261013\",\"security_contract_version\":1,\"session_id\":\"root-daemon-20261013\",\"version\":2,\"worker_binary_sha256\":\"cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f\",\"worker_image\":\"sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23\"},\"policy_identity\":{\"device\":64769,\"inode\":530227,\"sha256\":\"28a15ab4416f0701b149550fab545ab7f2acc32333bca09f794d3d1aff7bd755\"}}\n",
+  "scope": "actual-uid1000-fixture-daemon-frontend-root-guard",
+  "session_id": "root-daemon-20261013",
+  "status": "failed"
+}

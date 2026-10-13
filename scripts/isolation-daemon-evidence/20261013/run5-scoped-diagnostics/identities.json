@@ -1,0 +1,75 @@
+{
+  "/etc/doxa/quota-enforced/root-daemon-r5-20261013.json": {
+    "dev": 64769,
+    "gid": 0,
+    "ino": 530241,
+    "mode": "0o600",
+    "mtime_ns": 1791878487494441915,
+    "nlink": 1,
+    "sha256": "1600d0aa2f4318e9717d9e62b97271d2e9c009c2ce59a752e842f288f2258cd1",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r5-20261013/broker-instance.json": {
+    "absent": true
+  },
+  "/run/doxa/hardened/root-daemon-r5-20261013/control-stop-failure.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 13308,
+    "mode": "0o600",
+    "mtime_ns": 1791878499694026015,
+    "nlink": 1,
+    "sha256": "3e3cd9be06d92e373ec1baf362cdde7c4c4201d5e8dc831604fc68f30da23f47",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r5-20261013/gateway-instance.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 13292,
+    "mode": "0o444",
+    "mtime_ns": 1791878492076493352,
+    "nlink": 1,
+    "sha256": "b77ed12bbe090d55dfda98d2b54979913200753a2f7319373a26484ce38ad53b",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r5-20261013/manifest.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 13312,
+    "mode": "0o600",
+    "mtime_ns": 1791878500169799851,
+    "nlink": 1,
+    "sha256": "d11321f1be8114633dc73f07d643013eae615f7a9d2064d5848dc434357e8e90",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r5-20261013/native-broker-check.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 13307,
+    "mode": "0o600",
+    "mtime_ns": 1791878499655801555,
+    "nlink": 1,
+    "sha256": "f261015d3c5b6fe4e63ef6ace65754162365f46b714bc7ed1687a1f4facf659e",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r5-20261013/native-serve.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 13310,
+    "mode": "0o600",
+    "mtime_ns": 1791878499734821895,
+    "nlink": 1,
+    "sha256": "87ee41b8112365141a8fe2ed9cbaca88dfaaa5636a234c2846f31189ccd34b74",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r5-20261013/native-stage-check.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 13309,
+    "mode": "0o600",
+    "mtime_ns": 1791878499733303238,
+    "nlink": 1,
+    "sha256": "045e9aec0b0534d46f695fe5bf8029221c5133afd0244b96c7842b74fdf4293a",
+    "uid": 0
+  }
+}

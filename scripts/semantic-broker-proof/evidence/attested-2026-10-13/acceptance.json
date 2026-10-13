@@ -1,0 +1,1274 @@
+{
+  "pins": {
+    "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+    "base_image": "rust@sha256:a86cada82e36ebd7a9bffed7548792c55a952fdb20718eea9278a936bcb76e62",
+    "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+    "client_sha256": "9b42f26995b438b92e312b533ebff5f90081288bc30fb9c8ea19a39630b1d6ef",
+    "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+    "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+    "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+    "public_key_hex": "95859ccf5911cefb76f919c1b26b1bf9956e602d1e252249388eead9c2b0d7d8"
+  },
+  "results": [
+    {
+      "case": "positive-1",
+      "elapsed_ms": 3418.6187589998553,
+      "passed": true,
+      "receipt": {
+        "analyzer_executable": {
+          "ctime_ns": 1791857131936175049,
+          "dev": 61,
+          "ino": 1261716,
+          "mode": 33261,
+          "mtime_ns": 1791856229000000000,
+          "namespaces": {
+            "mnt": 4026531832,
+            "pid": 4026531836,
+            "user": 4026532340
+          },
+          "sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+          "size": 42030328
+        },
+        "analyzer_exit_successful": true,
+        "analyzer_identity_stable": true,
+        "analyzer_reader_sha256": "c700862ff7ca7328cb096ccfd1f53c0d5dc66485f8c26096f004b176a387dead",
+        "analyzer_settings": {
+          "cachePriming": {
+            "numThreads": 1
+          },
+          "cargo": {
+            "autoreload": true,
+            "buildScripts": {
+              "enable": false
+            },
+            "noDeps": true
+          },
+          "checkOnSave": false,
+          "files": {
+            "watcher": "client"
+          },
+          "numThreads": 1,
+          "procMacro": {
+            "enable": false
+          }
+        },
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "attached_same_container": true,
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "10f0da5a45583d2ef8882862237cfa07a8044e173b58bd511b5e080ed9bdebcf",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "2432da8a55fb99d30266eea0418fde975a28f0eb82bcd5368a28b67e0d6b153c",
+        "effective_policy_verified": true,
+        "engine_identity_stable": true,
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "d5b54ba73346d3c97b6a2bc994f954c91391291171c8d4cd2a7a8eb345ab0561",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "quiescent": true,
+        "reader_exec_clean": true,
+        "request": {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "method": "textDocument/definition",
+          "params": {
+            "position": {
+              "character": 25,
+              "line": 1
+            },
+            "textDocument": {
+              "uri": "file:///home/doxa/semantic-source/plain/src/lib.rs"
+            }
+          }
+        },
+        "response": {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "result": [
+            {
+              "originSelectionRange": {
+                "end": {
+                  "character": 31,
+                  "line": 1
+                },
+                "start": {
+                  "character": 25,
+                  "line": 1
+                }
+              },
+              "targetRange": {
+                "end": {
+                  "character": 29,
+                  "line": 0
+                },
+                "start": {
+                  "character": 0,
+                  "line": 0
+                }
+              },
+              "targetSelectionRange": {
+                "end": {
+                  "character": 13,
+                  "line": 0
+                },
+                "start": {
+                  "character": 7,
+                  "line": 0
+                }
+              },
+              "targetUri": "file:///home/doxa/semantic-source/plain/src/lib.rs"
+            }
+          ]
+        },
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "attested"
+      },
+      "stderr": ""
+    },
+    {
+      "case": "positive-2",
+      "elapsed_ms": 3365.6426879997525,
+      "passed": true,
+      "receipt": {
+        "analyzer_executable": {
+          "ctime_ns": 1791857131936175049,
+          "dev": 61,
+          "ino": 1261716,
+          "mode": 33261,
+          "mtime_ns": 1791856229000000000,
+          "namespaces": {
+            "mnt": 4026531832,
+            "pid": 4026531836,
+            "user": 4026532340
+          },
+          "sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+          "size": 42030328
+        },
+        "analyzer_exit_successful": true,
+        "analyzer_identity_stable": true,
+        "analyzer_reader_sha256": "c700862ff7ca7328cb096ccfd1f53c0d5dc66485f8c26096f004b176a387dead",
+        "analyzer_settings": {
+          "cachePriming": {
+            "numThreads": 1
+          },
+          "cargo": {
+            "autoreload": true,
+            "buildScripts": {
+              "enable": false
+            },
+            "noDeps": true
+          },
+          "checkOnSave": false,
+          "files": {
+            "watcher": "client"
+          },
+          "numThreads": 1,
+          "procMacro": {
+            "enable": false
+          }
+        },
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "attached_same_container": true,
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "e4f993919c8e5a324391937d99a5fe229503ea318b7ebde13a3dd4a26721f9c5",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "3248a9280435a818a6ade768802953703a7e9dc9cd03c91b4f53914398683eb6",
+        "effective_policy_verified": true,
+        "engine_identity_stable": true,
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "622b08e77e04f5354541339f208c5c76a756c7ef8afcbb723bfac7c361d17b1d",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "quiescent": true,
+        "reader_exec_clean": true,
+        "request": {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "method": "textDocument/definition",
+          "params": {
+            "position": {
+              "character": 25,
+              "line": 1
+            },
+            "textDocument": {
+              "uri": "file:///home/doxa/semantic-source/plain/src/lib.rs"
+            }
+          }
+        },
+        "response": {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "result": [
+            {
+              "originSelectionRange": {
+                "end": {
+                  "character": 31,
+                  "line": 1
+                },
+                "start": {
+                  "character": 25,
+                  "line": 1
+                }
+              },
+              "targetRange": {
+                "end": {
+                  "character": 29,
+                  "line": 0
+                },
+                "start": {
+                  "character": 0,
+                  "line": 0
+                }
+              },
+              "targetSelectionRange": {
+                "end": {
+                  "character": 13,
+                  "line": 0
+                },
+                "start": {
+                  "character": 7,
+                  "line": 0
+                }
+              },
+              "targetUri": "file:///home/doxa/semantic-source/plain/src/lib.rs"
+            }
+          ]
+        },
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "attested"
+      },
+      "stderr": ""
+    },
+    {
+      "case": "positive-3",
+      "elapsed_ms": 3546.352380999906,
+      "passed": true,
+      "receipt": {
+        "analyzer_executable": {
+          "ctime_ns": 1791857131936175049,
+          "dev": 61,
+          "ino": 1261716,
+          "mode": 33261,
+          "mtime_ns": 1791856229000000000,
+          "namespaces": {
+            "mnt": 4026531832,
+            "pid": 4026531836,
+            "user": 4026532340
+          },
+          "sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+          "size": 42030328
+        },
+        "analyzer_exit_successful": true,
+        "analyzer_identity_stable": true,
+        "analyzer_reader_sha256": "c700862ff7ca7328cb096ccfd1f53c0d5dc66485f8c26096f004b176a387dead",
+        "analyzer_settings": {
+          "cachePriming": {
+            "numThreads": 1
+          },
+          "cargo": {
+            "autoreload": true,
+            "buildScripts": {
+              "enable": false
+            },
+            "noDeps": true
+          },
+          "checkOnSave": false,
+          "files": {
+            "watcher": "client"
+          },
+          "numThreads": 1,
+          "procMacro": {
+            "enable": false
+          }
+        },
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "attached_same_container": true,
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "af3e7ec525a2c245e47b29595a3daa589099f1cd3814bd5fa0bc33e23954fb50",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "4a131e09003a2348328453a41573a67365f819cddf3a60a2559829be98cda447",
+        "effective_policy_verified": true,
+        "engine_identity_stable": true,
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "29b693f3abe6f0b90152376c18b928b380a05f91070bdee5057525eabb5bb430",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "quiescent": true,
+        "reader_exec_clean": true,
+        "request": {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "method": "textDocument/definition",
+          "params": {
+            "position": {
+              "character": 25,
+              "line": 1
+            },
+            "textDocument": {
+              "uri": "file:///home/doxa/semantic-source/plain/src/lib.rs"
+            }
+          }
+        },
+        "response": {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "result": [
+            {
+              "originSelectionRange": {
+                "end": {
+                  "character": 31,
+                  "line": 1
+                },
+                "start": {
+                  "character": 25,
+                  "line": 1
+                }
+              },
+              "targetRange": {
+                "end": {
+                  "character": 29,
+                  "line": 0
+                },
+                "start": {
+                  "character": 0,
+                  "line": 0
+                }
+              },
+              "targetSelectionRange": {
+                "end": {
+                  "character": 13,
+                  "line": 0
+                },
+                "start": {
+                  "character": 7,
+                  "line": 0
+                }
+              },
+              "targetUri": "file:///home/doxa/semantic-source/plain/src/lib.rs"
+            }
+          ]
+        },
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "attested"
+      },
+      "stderr": ""
+    },
+    {
+      "case": "positive-4",
+      "elapsed_ms": 3406.503581999914,
+      "passed": true,
+      "receipt": {
+        "analyzer_executable": {
+          "ctime_ns": 1791857131936175049,
+          "dev": 61,
+          "ino": 1261716,
+          "mode": 33261,
+          "mtime_ns": 1791856229000000000,
+          "namespaces": {
+            "mnt": 4026531832,
+            "pid": 4026531836,
+            "user": 4026532340
+          },
+          "sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+          "size": 42030328
+        },
+        "analyzer_exit_successful": true,
+        "analyzer_identity_stable": true,
+        "analyzer_reader_sha256": "c700862ff7ca7328cb096ccfd1f53c0d5dc66485f8c26096f004b176a387dead",
+        "analyzer_settings": {
+          "cachePriming": {
+            "numThreads": 1
+          },
+          "cargo": {
+            "autoreload": true,
+            "buildScripts": {
+              "enable": false
+            },
+            "noDeps": true
+          },
+          "checkOnSave": false,
+          "files": {
+            "watcher": "client"
+          },
+          "numThreads": 1,
+          "procMacro": {
+            "enable": false
+          }
+        },
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "attached_same_container": true,
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "f5521d0aa68fd58e8bac26e98841d6c68f2045ee265f1ffff589c5cf4696de1b",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "1a853a08edc607971efe8fc6118316d293b5f57aa35414d36a61a87bc687cb58",
+        "effective_policy_verified": true,
+        "engine_identity_stable": true,
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "e2705f1cc2b04ad2074a61c928717eba66b883fea2c3b932238b6a682e2ea3cb",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "quiescent": true,
+        "reader_exec_clean": true,
+        "request": {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "method": "textDocument/definition",
+          "params": {
+            "position": {
+              "character": 25,
+              "line": 1
+            },
+            "textDocument": {
+              "uri": "file:///home/doxa/semantic-source/plain/src/lib.rs"
+            }
+          }
+        },
+        "response": {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "result": [
+            {
+              "originSelectionRange": {
+                "end": {
+                  "character": 31,
+                  "line": 1
+                },
+                "start": {
+                  "character": 25,
+                  "line": 1
+                }
+              },
+              "targetRange": {
+                "end": {
+                  "character": 29,
+                  "line": 0
+                },
+                "start": {
+                  "character": 0,
+                  "line": 0
+                }
+              },
+              "targetSelectionRange": {
+                "end": {
+                  "character": 13,
+                  "line": 0
+                },
+                "start": {
+                  "character": 7,
+                  "line": 0
+                }
+              },
+              "targetUri": "file:///home/doxa/semantic-source/plain/src/lib.rs"
+            }
+          ]
+        },
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "attested"
+      },
+      "stderr": ""
+    },
+    {
+      "case": "positive-5",
+      "elapsed_ms": 3397.8126390002217,
+      "passed": true,
+      "receipt": {
+        "analyzer_executable": {
+          "ctime_ns": 1791857131936175049,
+          "dev": 61,
+          "ino": 1261716,
+          "mode": 33261,
+          "mtime_ns": 1791856229000000000,
+          "namespaces": {
+            "mnt": 4026531832,
+            "pid": 4026531836,
+            "user": 4026532340
+          },
+          "sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+          "size": 42030328
+        },
+        "analyzer_exit_successful": true,
+        "analyzer_identity_stable": true,
+        "analyzer_reader_sha256": "c700862ff7ca7328cb096ccfd1f53c0d5dc66485f8c26096f004b176a387dead",
+        "analyzer_settings": {
+          "cachePriming": {
+            "numThreads": 1
+          },
+          "cargo": {
+            "autoreload": true,
+            "buildScripts": {
+              "enable": false
+            },
+            "noDeps": true
+          },
+          "checkOnSave": false,
+          "files": {
+            "watcher": "client"
+          },
+          "numThreads": 1,
+          "procMacro": {
+            "enable": false
+          }
+        },
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "attached_same_container": true,
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "422921d09a7d0c6b52df660ad5c3134cb12ccbbf966fe56968da54df37717a22",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "3b10addb03b0822f1caaff520a2f7c214994894eadbe762dfe1fbe51c5279465",
+        "effective_policy_verified": true,
+        "engine_identity_stable": true,
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "5651f1fe9b0261fa92942c5a53e98e7e997c0d11112821c4e1a3353b0db5da61",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "quiescent": true,
+        "reader_exec_clean": true,
+        "request": {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "method": "textDocument/definition",
+          "params": {
+            "position": {
+              "character": 25,
+              "line": 1
+            },
+            "textDocument": {
+              "uri": "file:///home/doxa/semantic-source/plain/src/lib.rs"
+            }
+          }
+        },
+        "response": {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "result": [
+            {
+              "originSelectionRange": {
+                "end": {
+                  "character": 31,
+                  "line": 1
+                },
+                "start": {
+                  "character": 25,
+                  "line": 1
+                }
+              },
+              "targetRange": {
+                "end": {
+                  "character": 29,
+                  "line": 0
+                },
+                "start": {
+                  "character": 0,
+                  "line": 0
+                }
+              },
+              "targetSelectionRange": {
+                "end": {
+                  "character": 13,
+                  "line": 0
+                },
+                "start": {
+                  "character": 7,
+                  "line": 0
+                }
+              },
+              "targetUri": "file:///home/doxa/semantic-source/plain/src/lib.rs"
+            }
+          ]
+        },
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "attested"
+      },
+      "stderr": ""
+    },
+    {
+      "case": "actual-pids-policy-drift",
+      "elapsed_ms": 1176.724128999922,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "f7ad8380b6a03b1fff17d78f88a097d92268776d1f676b19231e6023eeb310f3",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "dd4815a8571402bebfcb58ddfbd519877cc61d08811d701aa9995d6b702a02c7",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "effective Docker policy drift: PidsLimit",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "b8864ad3165653c9ba6fec119fe2bd15e86e58208ecdfc239b28594a44b37fe6",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-kernel-nofile-drift-with-matching-engine-metadata",
+      "elapsed_ms": 1303.1617189999452,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "3a785f95fb78b9d88fd2b63affce1f4e0dc5c7f0ab26d707afe73890468588b0",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "f6e6739ea24929b56a294b0bf28283016970a26d17641c6745a0125b636db1d3",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "effective file descriptor limit differs",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "cd44308ead9bb90d41aed2e117db844d2ef8d123ddaeb3b34c353898e1ea6842",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-immutable-source-write-denial",
+      "elapsed_ms": 1199.3550970000797,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "abe968c7a61d9d6c1db49eb9dfd96b146e7d262d35fcf12f4e03847e7c11b6cb",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "bc98e36a0a744b0b8b303f42240de0d769ba3dcffa6bc3a6f62fcc2a3b29438a",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "proof stopped after actual immutable source denials",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "9e75d5f6dff5b5db16445040f9a0ad872786e30acf6a3d5c790ee88185fa9d3f",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "immutable-source-owner-and-writes",
+      "client_status": 1,
+      "container_status": 2,
+      "mode": "0o444",
+      "passed": true,
+      "uid": 0
+    },
+    {
+      "case": "actual-lost-create-response",
+      "elapsed_ms": 984.9214770001709,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "3b3d9e19f76059d198f6b41c52aef12bab01f300da21bd10ebceb8ebf0745179",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "8b4f35faeea38fe000256611b822844b1dba906b3fec2b07ad0dcaa295cdff48",
+        "create_response_recovered": true,
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "injected lost reply AFTER actual creation",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "d4cdb011505337a8d98d2da40e4c1d3357f831823609ce89779a737c0c039f5b",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-empty-create-response",
+      "elapsed_ms": 991.8838449998475,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "2aecfaa2db8223318ee88e97325d9122b6e71fdb7d6dec7336bb95576dac1d8e",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "7a7cd94fea7d4a4fa82d8ad41fedbe065319389b143d5f3e292c2611dedcf854",
+        "create_response_recovered": true,
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "invalid created container ID",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "892f6a21c3154175d2569c21cf28816aafe40233139f897b14b2ba0fcc72457f",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-same-daemon-fd-wrong-container-id",
+      "elapsed_ms": 1569.6460519998254,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "57dee70682d4c1859befaf2100eca20e9e7b6c091853deb5790e89a02be19bd7",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "42fbbf9aacd48174bbcc88b67ba89e5dd040d13d7924a4f5a92283541dbe6b26",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "attach pre-inspect container ID drift",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "a10cdcc74fda5e74b307d90396efc025c4e018bd1d9b6c412015a6ec59968ebc",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-reader-pin-drift",
+      "elapsed_ms": 1193.857785000091,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "a2c4af7c7ed34fc1d3e5f9258c41ec9806b96a4b612af59a62d72d549d5650ac",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "c312e9c77689ddbdc1d1a43ab69662a778390f4edae845a99f1998985067f113",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "reviewed reader helper changed: reader",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "c85c7c57fed6b8e78b5640fe88ff460d9af8cac099a53d1c74ccf4dacde99ee1",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-reader-output",
+      "elapsed_ms": 1221.6004840001915,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "6d458ec840e4ef1d7b7efc15011445c883ca353e8f86e33488f2cc97e3c82565",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "c5c61f52435c6ff8c83b5b272d49fe65245a2a8b4cc2c4261b66174b01908a3f",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "analyzer reader helper output bound",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "5f2022f2040c4d18f6f3559e1d73907be977fa3e4fdb1c115054856112df7cdc",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-reader-output-reaped",
+      "child_status": -9,
+      "passed": true
+    },
+    {
+      "case": "actual-reader-timeout",
+      "elapsed_ms": 3193.2492179998917,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "c58c02c65dc67bf43cd4cdc1bab79f2804d0fe73b916f9678a794c2aa51ce20f",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "abfd2c4a96c69305db37934bf23d297ed0f92d0e0695e6c8e6ef1597f692e9da",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "analyzer reader helper deadline",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "5c86d9f5abca26bb30c14a4ac530533bad495a2b8840a8603ae953057b39809d",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-reader-timeout-reaped",
+      "child_status": -9,
+      "passed": true
+    },
+    {
+      "case": "actual-reader-namespace",
+      "elapsed_ms": 1204.449557999851,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "09e59b6f7c62acea78cfc6e48418175c7533f70ca88deed1d1cb3aead6d363aa",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "f7937491086d13ff95ffa71838c8c3e68ad274ff4dcf2cd813a8d6139118a733",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "held analyzer executable bytes/namespace differ",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "94664ffbc663b9983371502a91213f968121d84f4f7fe3b99b3a3544e187a794",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-reader-namespace-reaped",
+      "child_status": 0,
+      "passed": true
+    },
+    {
+      "case": "actual-reader-cancel",
+      "elapsed_ms": 1283.6573270001281,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "3fad8959a259c9fcab5224092908705b23f4e5cb37e3eec9de3829b8b92adfbc",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "3632db27b0cbab3e61c145ee0210d31f62a6ae2efdcc9c73e8b2da247db8c8e6",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "semantic client cancelled",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "ab98e1f570f6b65dacd07259cd0ccf8146f3c595253f8c9fb85532bb6e1aa859",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-reader-cancel-reaped",
+      "child_status": -9,
+      "passed": true
+    },
+    {
+      "case": "actual-analyzer-busy-notification",
+      "elapsed_ms": 3107.983584000067,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_latest_status": {
+          "health": "ok",
+          "quiescent": false
+        },
+        "analyzer_messages": [
+          {
+            "id": 1,
+            "method": "None"
+          },
+          {
+            "id": null,
+            "method": "experimental/serverStatus"
+          },
+          {
+            "id": null,
+            "method": "experimental/serverStatus"
+          },
+          {
+            "id": null,
+            "method": "experimental/serverStatus"
+          }
+        ],
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "analyzer_stderr": "",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "7ab3af7d61d66d7a0e130082ed7df9171f18198df9f16505be55f1c3840e7504",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "6457bce1b5dbb1b946b70a5ee6ce6ff5f0acb9d08644d213e18c822394e83f3e",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "analyzer quiescence/health drift",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "4851a1dfa09cde746247519e86aea36264ab69baf23ecfd73279f5ea27c0f82e",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-analyzer-shutdown-error",
+      "elapsed_ms": 3351.444734999859,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_executable": {
+          "ctime_ns": 1791857131936175049,
+          "dev": 61,
+          "ino": 1261716,
+          "mode": 33261,
+          "mtime_ns": 1791856229000000000,
+          "namespaces": {
+            "mnt": 4026531832,
+            "pid": 4026531836,
+            "user": 4026532340
+          },
+          "sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+          "size": 42030328
+        },
+        "analyzer_identity_stable": true,
+        "analyzer_latest_status": {
+          "health": "ok",
+          "message": null,
+          "quiescent": true
+        },
+        "analyzer_messages": [
+          {
+            "id": 1,
+            "method": "None"
+          },
+          {
+            "id": null,
+            "method": "experimental/serverStatus"
+          },
+          {
+            "id": null,
+            "method": "experimental/serverStatus"
+          },
+          {
+            "id": 3,
+            "method": "None"
+          },
+          {
+            "id": 4,
+            "method": "None"
+          }
+        ],
+        "analyzer_reader_sha256": "c700862ff7ca7328cb096ccfd1f53c0d5dc66485f8c26096f004b176a387dead",
+        "analyzer_settings": {
+          "cachePriming": {
+            "numThreads": 1
+          },
+          "cargo": {
+            "autoreload": true,
+            "buildScripts": {
+              "enable": false
+            },
+            "noDeps": true
+          },
+          "checkOnSave": false,
+          "files": {
+            "watcher": "client"
+          },
+          "numThreads": 1,
+          "procMacro": {
+            "enable": false
+          }
+        },
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "analyzer_stderr": "",
+        "attached_same_container": true,
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "1624667876d0c26f0c10f5e1de591a5f57576c7bbe77ca98413887d5a55a8b5b",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "76e0d903d5c773709e62f20681aac926b5e87c014d7db80dcb6b4d6814304f15",
+        "effective_policy_verified": true,
+        "engine_identity_stable": true,
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "analyzer shutdown failed",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "6ee1442a1cc06bc1e8675e4c571d060fcb68d463b121192fc1cff9142ba5570e",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "quiescent": true,
+        "reader_exec_clean": true,
+        "request": {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "method": "textDocument/definition",
+          "params": {
+            "position": {
+              "character": 25,
+              "line": 1
+            },
+            "textDocument": {
+              "uri": "file:///home/doxa/semantic-source/plain/src/lib.rs"
+            }
+          }
+        },
+        "response": {
+          "id": 3,
+          "jsonrpc": "2.0",
+          "result": [
+            {
+              "originSelectionRange": {
+                "end": {
+                  "character": 31,
+                  "line": 1
+                },
+                "start": {
+                  "character": 25,
+                  "line": 1
+                }
+              },
+              "targetRange": {
+                "end": {
+                  "character": 29,
+                  "line": 0
+                },
+                "start": {
+                  "character": 0,
+                  "line": 0
+                }
+              },
+              "targetSelectionRange": {
+                "end": {
+                  "character": 13,
+                  "line": 0
+                },
+                "start": {
+                  "character": 7,
+                  "line": 0
+                }
+              },
+              "targetUri": "file:///home/doxa/semantic-source/plain/src/lib.rs"
+            }
+          ]
+        },
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-analyzer-client-disconnect",
+      "elapsed_ms": 1358.5154799998236,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_latest_status": null,
+        "analyzer_messages": [
+          {
+            "id": 1,
+            "method": "None"
+          }
+        ],
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "analyzer_stderr": "",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "9011e327a01f3a1ceaf346089264b122656eb5345bc43db3633347c12fca2f6b",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "6df9d97609b708fe1f4290275b4846cb57b63ffa543d30a682963b9c0d264aba",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "semantic client cancelled or sent trailing challenge data",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "1836f780453c46ee81719b87739e56ad2d83bd4bb95136a96cf15684d387c794",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-stopped-analyzer-deadline",
+      "elapsed_ms": 1669.4631659997867,
+      "independent_absent": true,
+      "passed": true,
+      "receipt": {
+        "analyzer_latest_status": null,
+        "analyzer_messages": [],
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "analyzer_stderr": "",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "5f87522a1ccd6fcf7756508cfe29d35b41b406002296276c88e44e6200907804",
+        "cleanup_removed": true,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "ce5353a8fd9f8a89723add06c52eaa9bec6446f722b951244b04731bd20cf306",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "LSP session deadline",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "05d96b7ae9e4e4bca1199656912dd2aa8e0cf9b553b3937c9f956eb2bd755919",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "actual-cleanup-refusal",
+      "elapsed_ms": 2716.080667999904,
+      "independent_absent": null,
+      "passed": true,
+      "receipt": {
+        "analyzer_latest_status": {
+          "health": "ok",
+          "quiescent": false
+        },
+        "analyzer_messages": [
+          {
+            "id": 1,
+            "method": "None"
+          },
+          {
+            "id": null,
+            "method": "experimental/serverStatus"
+          },
+          {
+            "id": null,
+            "method": "experimental/serverStatus"
+          },
+          {
+            "id": null,
+            "method": "experimental/serverStatus"
+          }
+        ],
+        "analyzer_sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+        "analyzer_stderr": "",
+        "broker_sha256": "94044157e1f909b9158a2d205a56ef075eeab396b1c896558b0c5f8cd3ef7c69",
+        "challenge_sha256": "8a4646d646684d7e542ed1d4d42b6227fbd48c64173961c8e6dfa6d6d85f2cc5",
+        "cleanup_error": "injected actual-container cleanup refusal",
+        "cleanup_recovery_error": "injected actual-container cleanup refusal",
+        "cleanup_removed": false,
+        "config_sha256": "321cfce8df742a2aa85b83d6b07fc4506ed15463b94553c92ae6088072037fdf",
+        "container_id": "8316883ecbf52b5ff65be571e9ec5ee13098f1a4386c4bc7ce939f24bcbeeb42",
+        "engine_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "error": "analyzer quiescence/health drift",
+        "image_id": "sha256:03cc3523c7a1da94a4ff606417c1d5f269aa55ebdbffde4b9b6283048dc72803",
+        "nonce": "bfe9092f4518391613292a1b71eb3c472c89e300075e719ebbe4fcb1513235b2",
+        "policy": "immutable-root-snapshot-rootless-no-egress-v1",
+        "protocol": "doxa-semantic-attested-v1",
+        "snapshot_content_sha256": "68fe5ea0dcac89b18628a0b579d0f4613cf3865202c8daea450fc506be940f37",
+        "source_immutable": true,
+        "source_input_sha256": "5393b8b059c4900a9a525de6f01084629cb318c34a1317dd55a2966106e5d741",
+        "status": "unknown"
+      }
+    },
+    {
+      "case": "exact-admin-cleanup-after-refusal",
+      "container_id": "8316883ecbf52b5ff65be571e9ec5ee13098f1a4386c4bc7ce939f24bcbeeb42",
+      "passed": true
+    },
+    {
+      "case": "actual-held-engine-socket-replaced",
+      "error": "reviewed Engine socket replaced",
+      "passed": true
+    },
+    {
+      "case": "actual-doxa-signer-key-read",
+      "exit_status": 1,
+      "passed": true,
+      "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    open('/var/lib/doxa-semantic/signing-key.pem',\"rb\").read()\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nPermissionError: [Errno 13] Permission denied: '/var/lib/doxa-semantic/signing-key.pem'\n"
+    },
+    {
+      "case": "actual-doxa-broker-code-write",
+      "exit_status": 1,
+      "passed": true,
+      "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    open('/usr/local/lib/doxa-semantic/attested_broker.py',\"ab\").write(b\"x\")\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nPermissionError: [Errno 13] Permission denied: '/usr/local/lib/doxa-semantic/attested_broker.py'\n"
+    },
+    {
+      "case": "actual-doxa-broker-socket-replace",
+      "exit_status": 1,
+      "passed": true,
+      "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import os;os.unlink('/run/doxa-semantic/broker.sock')\n              ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nPermissionError: [Errno 13] Permission denied: '/run/doxa-semantic/broker.sock'\n"
+    },
+    {
+      "case": "actual-doxa-signer-fd-borrow",
+      "exit_status": 1,
+      "passed": true,
+      "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import os;os.listdir(\"/proc/36168/fd\")\n              ~~~~~~~~~~^^^^^^^^^^^^^^^^^^\nPermissionError: [Errno 13] Permission denied: '/proc/36168/fd'\n"
+    },
+    {
+      "case": "actual-doxa-direct-engine-connect",
+      "exit_status": 1,
+      "passed": true,
+      "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import socket;s=socket.socket(socket.AF_UNIX);s.connect('/run/user/1001/doxa-proof/docker.sock')\n                                                  ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nPermissionError: [Errno 13] Permission denied\n"
+    },
+    {
+      "case": "actual-same-engine-uid-fake-daemon",
+      "error": "same-UID fake Engine executable refused",
+      "passed": true
+    },
+    {
+      "case": "actual-doxa-fake-broker-signature",
+      "exit_status": 1,
+      "passed": true,
+      "stderr": "code graph: broker signature does not match the operator trust anchor\n"
+    },
+    {
+      "case": "actual-real-signed-receipt-replay",
+      "exit_status": 1,
+      "passed": true,
+      "stderr": "code graph: signed broker receipt differs from pin: nonce\n"
+    },
+    {
+      "case": "actual-fresh-signed-receipt-trailing-byte",
+      "exit_status": 1,
+      "passed": true,
+      "stderr": "code graph: trailing bytes after signed broker receipt\n"
+    },
+    {
+      "case": "actual-project-config-override",
+      "exit_status": 1,
+      "passed": true,
+      "stderr": "code graph: broker declined attestation: project-controlled executable/configuration override refused: .cargo/config.toml (cleanup_removed=false)\n"
+    },
+    {
+      "case": "no-retained-snapshots",
+      "count": 0,
+      "passed": true
+    }
+  ],
+  "scope": "disposable real Engine/analyzer; negatives never signed"
+}

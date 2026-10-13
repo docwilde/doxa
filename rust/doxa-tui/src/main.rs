@@ -117,7 +117,7 @@ remote tabs beside local tabs; /local selects an open local tab. Ctrl+R opens
 remote history, and PageUp at its top fetches older turns.
 
 New-session options: --engine codex|claude|deepseek|glm|router, --model NAME,
-  --router-config ABSOLUTE_PATH (router targets; native isolation only),
+  --router-config ABSOLUTE_PATH (reviewed router targets and compaction policy),
   --isolation native|docker-open|docker-offline,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.
 Codex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH.
@@ -221,6 +221,16 @@ fn run(args: &[String]) -> io::Result<()> {
                 return Ok(());
             }
             "codegraph" => {
+                if args.get(1).is_some_and(|arg| arg == "--semantic-broker") {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let answer = doxa_codegraph::semantic_attested::definition_cli(&args[1..]).map_err(invalid)?;
+                        println!("{}", answer);
+                        return Ok(());
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    return Err(invalid("attested codegraph broker requires Linux"));
+                }
                 if args.get(1).is_some_and(|arg| arg == "--stored") {
                     let (root, request) = doxa_codegraph::parse_cli(&args[2..]).map_err(invalid)?;
                     let (kind, path) = request.file_scope()

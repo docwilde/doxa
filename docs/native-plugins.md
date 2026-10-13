@@ -74,8 +74,8 @@ declare static commands.
 ## Executable package identity review
 
 The `native-plugin` commands let the owner inspect a proposed WebAssembly
-package and, on Linux, explicitly run a zero-grant prototype. They do not
-change the data-only `native_plugins` list or activate anything in the TUI.
+package and, on Linux, explicitly run a zero-grant package behind installed-host
+authority. They do not change the data-only `native_plugins` list.
 The command reads only the name you provide; it never searches a repository or
 enumerates packages.
 
@@ -107,23 +107,17 @@ thread so it cannot stall terminal input. A matching zero-grant review displays
 the exact CLI command below; the panel is a snapshot, and the CLI rechecks
 approval, bytes and inodes before its cgroup/Bubblewrap admission.
 
-`/native-plugin run demo` now opens a local lifecycle panel. Its background
-task validates exact owner approval, refuses every requested grant, and rechecks
-the reviewed bytes and inodes. The installed-host admission gate is closed, so
-this request reports why execution is unavailable and never starts the worker.
-Closing the panel or its tab, changing tabs, or exiting the window cancels the
-task and drops late results. Cancellation races with admission through one
-atomic fence: a cancelled preflight cannot later dispatch a worker, while an
-already admitted request blocks tab/window exit until its supervisor returns
-from its cleanup attempt. A stalled read before admission may outlive its panel
-but cannot cross that fence. This exit contract has local process-group tests;
-an installed-host proof of successful cgroup cleanup, including error paths,
-is still required before activation. A future installed-host acceptance policy must
-authenticate the current TUI/worker/Bubblewrap identities, delegated cgroup
-parent and membership, kernel namespace/egress enforcement, current-host proof
-freshness, and revocation independently of owner-editable config or a
-disposable-guest receipt. Until then, the explicit Linux CLI is the only
-grantless execution route; TUI execution stays disabled.
+`/native-plugin run demo` opens a local lifecycle panel. Its background task
+validates exact owner approval, refuses every requested grant, and rechecks the
+reviewed bytes and inodes. Execution also requires the enrolled operator's
+current signed permit for this running frontend. A missing, expired, revoked,
+wrong-instance or changed-host permit refuses dispatch. Closing the panel or
+its tab, changing tabs, or exiting the window cancels the task and drops late
+results. One atomic fence prevents a cancelled preflight from dispatching;
+once admitted, tab/window exit waits for the supervisor's cgroup cleanup.
+A stalled read before admission may outlive its panel but cannot cross the
+fence. Permit revocation and expiry also request cancellation while the worker
+is running. No code runs in the TUI process.
 
 `doxa native-plugin host-check` is a read-only operator inventory on Linux.
 It requires the running CLI to occupy a direct supervisor leaf beneath an
@@ -137,18 +131,12 @@ size and device/inode for the opened frontend, companion
 `doxa-plugin-worker` and `/usr/bin/bwrap` binaries. It does not create a
 cgroup, launch a worker or issue TUI authority.
 
-For an installed-host acceptance review, retain this report together with a
-fresh seven-case proof log and receipt from the **same** delegated host.
-Compare the report's worker and Bubblewrap digests with the receipt's
-`worker_sha256` and `bwrap_sha256`, and its delegated parent identity with
-`host.cgroup`. The acceptance must also bind the exact installed frontend
-binary and its current supervisor membership, exercise return, timeout,
-cancellation and error-path descendant cleanup, and define revocation before
-an authority issuer can be implemented. The existing proof command builds a
-worker from a clean checkout and records review evidence; neither its receipt
-nor a successful `host-check` activates the TUI.
+The read-only report and proof receipts are evidence only. A successful report
+or an owner package approval cannot authorize TUI execution. The separate
+activation workflow below reruns all nine installed-host cases before signing
+a short-lived permit for a specific running frontend.
 
-### Installed-host proof (review only)
+### Installed-host proof and operator activation
 
 The installed-host proof is an explicit operator command. Its `--check` mode
 observes the current delegated cgroup, runs a private Bubblewrap namespace
@@ -192,8 +180,95 @@ an owner-approved acceptance host with spare capacity. A receipt records
 sampled executable identities, cgroup identity and clean source identity.
 The pathname checks before and after the exercise are sequential, not an
 atomic snapshot or a promise that a binary cannot be replaced between cases.
-The nine-case installed-host run has not been performed. It remains
-non-authorizing; TUI requests still return `HostUnverified`.
+A `--run` without `--activate` stays review-only. Its receipt cannot be used
+as a permit, and there is no receipt-import activation command.
+
+To activate one running TUI after a fresh proof, first generate an Ed25519
+operator key outside the source checkout. Keep its PEM private (`0600`) and
+retain its public key for independent owner review:
+
+```sh
+umask 077
+openssl genpkey -algorithm ED25519 -out "$HOME/plugin-operator.pem"
+openssl pkey -in "$HOME/plugin-operator.pem" -pubout -outform DER | tail -c 32 | od -An -tx1
+```
+
+Join the 32 public-key bytes into 64 lowercase hexadecimal characters, review
+them, and explicitly enroll that operator in private `$DOXA_HOME/config.toml`:
+
+```toml
+[native_plugin_host]
+operator_public_key = "<64 lowercase hexadecimal public-key characters>"
+epoch = 1
+```
+
+The signing key is separate from owner package approval and is never passed to
+the worker. The operator and target TUI must run as the same non-root user in
+the same delegated supervisor leaf. Add these options to the complete `--run`
+command above, using a new receipt filename:
+
+```sh
+--activate --tui-pid <running-doxa-rs-pid> --home "$DOXA_HOME" \
+  --operator-key "$HOME/plugin-operator.pem" --lifetime-seconds 900
+```
+
+Activation requires Python 3.11+, OpenSSL Ed25519, all nine freshly passing
+cases, exact independently reviewed binary digests and unchanged clean source.
+It creates a separate signed file in private
+`$DOXA_HOME/native-plugin-authority/<pid>-<kernel-start-ticks>.json`. The signed
+payload binds UID, PID, kernel start time, boot ID, home device/inode, enrolled
+policy epoch, exact frontend/worker/Bubblewrap SHA-256 and opened device/inode,
+delegated parent and supervisor identities, all nine cases and proof-log hash.
+Its maximum lifetime is 900 seconds, measured against signed absolute
+`CLOCK_BOOTTIME` issuance and expiry on the pinned boot. The TUI verifies the signature and exact
+current identities before each launch, and the launcher verifies the opened
+worker and Bubblewrap descriptors against the permit again. Package bytes,
+owner allowlist and zero grants remain independently checked.
+
+Delete the permit to revoke this instance, increment `epoch` or remove/change
+the enrolled key to revoke all existing permits. Any owner config edit
+conservatively cancels an admitted run. Expiry or revocation is polled every
+20 ms while a worker runs, then the supervisor kills and removes its whole
+cgroup before the TUI accepts a result. Every new permit load and every running-worker check enforces its signed
+boot-clock expiry, so a wall-clock rollback cannot revive or extend a permit.
+An admitted run also has an `Instant` deadline. A new boot,
+process, installation, delegated cgroup or owner home requires a fresh proof
+and permit. Renewing a permit cancels an in-progress run that held the old file.
+
+This policy trusts the explicitly enrolled operator and the owner account.
+It does not defend against another malicious process with the same UID that
+can change configuration, signing keys or installed executables. It does not
+install delegation, start a root service or grant additional Wasm capabilities.
+
+For a disposable installed-host TUI exercise, the separate PTY driver creates
+its own private owner home, signing key, two approved zero-grant modules and
+fixture-engine sessions. It reruns the nine-case proof for each permit and
+tests refusal without a permit, return 17 through the real slash command,
+revocation of a running worker, panel/window cancellation, wrong-instance
+replay and expiry. It never contacts a provider or edits the owner's home:
+
+```sh
+DOXA_PLUGIN_DISPOSABLE_HOST=1 DOXA_PLUGIN_TUI_ACCEPTANCE=1 \
+  python3 scripts/plugin-installed-tui-proof.py \
+    --frontend /absolute/private/install/doxa-rs \
+    --daemon /absolute/private/install/doxa-daemon \
+    --receipt installed-tui-proof.json
+```
+
+Use the same private `TMPDIR`, real-disk `CARGO_TARGET_DIR`, clean source and
+delegated supervisor layout as the installed-host command. Each receipt name
+must be new. The driver writes the host receipts, bounded TUI log and a final
+receipt only after every lifecycle case succeeds. Its temporary activation
+keys and owner home are removed at exit.
+
+On 2026-10-13 this driver passed all eight cases against a private installed
+frontend on a disposable Ubuntu 26.04.1 guest with Bubblewrap 0.11.1 and cgroup
+v2. Its three required nine-case runs all passed, each removing every worker
+cgroup. The resource cases observed exactly 256 MiB aggregate memory with OOM
+kills, a PID peak of 16 with denial, and CPU throttling. The running TUI worker
+cgroups had real populated/PID observations before revocation or close and
+were gone after cleanup. This evidence covers that exact private installation;
+it does not provision the workstation or authorize a different running TUI.
 
 After reviewing both files and the requested grant, the owner can record the
 exact identity in private `$DOXA_HOME/config.toml`:
@@ -228,8 +303,8 @@ controllers enabled for its children. Each worker gets a sibling cgroup under
 that parent. Without this layout, admission fails closed before spawning the
 worker. A disposable delegated Ubuntu guest passed the seven-case acceptance
 fixture, including the approved Wasm worker, aggregate limits, namespace
-boundary and cleanup. TUI execution, nonempty grants, native shared
-libraries, scripts, provider backends, hooks and
+boundary and cleanup. TUI execution uses the separately signed operator permit.
+Nonempty grants, native shared libraries, scripts, provider backends, hooks and
 automatic startup remain unsupported.
 
 Cleanup treats `cgroup.events` as bounded evidence: it requires exactly one
@@ -314,5 +389,5 @@ device/inode, host details, seven observed cases and SHA-256 of the
 bounded test log. The terminal prints the receipt SHA-256; retain that line and
 the test log separately so reviewers can detect later receipt or log changes.
 This is operator evidence, not a signature or an activation token. No TUI code
-reads the receipt, and TUI execution remains disabled. A different installed
+reads the receipt; TUI execution requires the separate signed permit. A different installed
 host, worker build or cgroup fixture needs its own proof and review.

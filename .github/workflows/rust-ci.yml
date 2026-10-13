@@ -82,9 +82,18 @@ jobs:
           cargo +stable build --locked --package lore-core --bin lore-rs
       - name: Test native runtime, providers and interaction
         run: cargo +stable test --locked --workspace --features doxa-daemon/local-test-server,doxa-vendors/local-test-server
+      - name: Verify semantic broker refusal and helper cleanup
+        run: |
+          python3 -m venv "$RUNNER_TEMP/semantic-broker-tests"
+          "$RUNNER_TEMP/semantic-broker-tests/bin/python" -m pip install --disable-pip-version-check cryptography==46.0.5
+          "$RUNNER_TEMP/semantic-broker-tests/bin/python" -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_semantic_attested_broker.py -v
       - name: Check task, quota fixture and release installer
         run: |
+          python3 -W error::ResourceWarning scripts/hardened-isolation/test_root_broker.py -v
           python3 scripts/check_workflow_action_pins.py
+          python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_gallery_capture.py -v
           python3 scripts/build_gallery_site.py --output "$RUNNER_TEMP/doxa-gallery-site"
           sh -n scripts/install.sh task
           ./task help
@@ -111,6 +120,12 @@ jobs:
           python3 -W error::ResourceWarning scripts/test_docker_hard_quota_probe.py -v
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_plugin_delegated_host_proof.py -v
+          python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_plugin_installed_host_proof.py -v
+          python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_remote_platform_preflight.py -v
+          python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_android_recovery_ui.py -v
       - name: Smoke installed Rust launcher without a Python environment
         run: |
           smoke_dir=$(mktemp -d "$TMPDIR/install-XXXXXXXX")

@@ -93,8 +93,15 @@ mod tests {
     #[test]
     fn fixture_receipts_never_admit_a_live_session() {
         let manifest = manifest();
-        assert!(Profile::parse("docker-hardened").unwrap_err().to_string()
-            .contains("per-session kernel hard-quota"));
+        // Selecting a profile is not admission. A caller receipt cannot
+        // replace fixed ROOT installation or cause an Engine fallback.
+        if cfg!(target_os="linux") {
+            assert_eq!(Profile::parse("docker-hardened").unwrap(),Profile::DockerHardened);
+            let home=tempfile::tempdir().unwrap();
+            let id=format!("unprovisioned-{}",std::process::id());
+            assert!(crate::Runtime::prepare(home.path(),&id,std::path::Path::new("/missing-source"),Some(Profile::DockerHardened),false,None).is_err());
+            assert!(!home.path().join("isolation").exists());
+        } else {assert!(Profile::parse("docker-hardened").is_err());}
         assert!(require_session_hard_quota(&manifest, &receipt("/different/fixture", false))
             .unwrap_err().to_string().contains("different session tree"));
         assert!(require_session_hard_quota(&manifest,

@@ -18,7 +18,10 @@ def receive():
     if not line:
         raise SystemExit(0)
     value = json.loads(line)
-    record({"method": value.get("method"), "id": value.get("id")})
+    entry = {"method": value.get("method"), "id": value.get("id")}
+    if value.get("method") == "notifications/cancelled":
+        entry["cancelled_id"] = value["params"]["requestId"]
+    record(entry)
     return value
 
 
@@ -31,6 +34,11 @@ def tool(name):
 
 
 record({"pid": os.getpid(), "unrelated_env_present": "DOXA_MCP_UNRELATED" in os.environ})
+if mode == "slow_start_timeout":
+    # Cold interpreter startup exceeded the old 150 ms limit in macOS CI.
+    # Delay deterministically so Linux also exercises that startup condition.
+    time.sleep(0.35)
+    record({"startup_delay_ms": 350})
 request = receive()
 assert request["method"] == "initialize" and request["params"]["capabilities"] == {}
 if mode == "init_timeout":
@@ -82,7 +90,7 @@ while True:
             reply(request, result)
         page += 1
     elif request["method"] == "tools/call":
-        if mode == "timeout":
+        if mode in ("timeout", "slow_start_timeout"):
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             child = os.fork()
             if child == 0:

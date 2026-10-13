@@ -4,7 +4,7 @@ use doxa_codegraph::{Answer, Query};
 use doxa_codegraph::cache::Origin;
 use doxa_lore::CodegraphSnapshot;
 use std::sync::mpsc::{self, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn request(args: &str) -> Result<Query, &'static str> {
     let (kind, value) = args.trim().split_once(char::is_whitespace)
@@ -213,6 +213,9 @@ impl App {
                         .map_err(|_| "Code graph cache is unavailable".to_owned())?;
                     cache.query(&root, request).map(|(answer, origin)| {
                         let mut lines = answer_lines(&answer);
+                        if origin == Origin::Indexed {
+                            lines.insert(3, "Reused parsed declarations · complete source inventory rechecked; call sites reparsed".into());
+                        }
                         if origin == Origin::Revalidated {
                             lines.insert(3, "Reused syntax answer · Git paths and Rust/Python source hashes rechecked".into());
                         }
@@ -225,6 +228,38 @@ impl App {
         self.codegraph_pending = Some((id, cwd, receiver));
         self.input.clear();
         self.input_cursor = 0;
+    }
+
+    /// Prepare only the active local worktree, on one background worker.
+    /// Rapid switching is throttled; every explicit query independently
+    /// invalidates changed inventories before using any prepared facts.
+    pub(super) fn poll_codegraph_index(&mut self) {
+        if let Some(receiver) = &self.codegraph_index_pending {
+            match receiver.try_recv() {
+                Err(TryRecvError::Empty) => return,
+                _ => self.codegraph_index_pending = None,
+            }
+        }
+        if self.active_remote() || self.codegraph_pending.is_some() { return; }
+        let Some(id) = self.groups[self.active_group].active_id() else { return; };
+        let Some(root) = self.session_cwds.get(id).cloned() else { return; };
+        if self.codegraph_index_attempt.as_ref().is_some_and(|(previous, when)|
+            when.elapsed() < Duration::from_secs(if previous == &root { 300 } else { 30 })) {
+            return;
+        }
+        self.codegraph_index_attempt = Some((root.clone(), Instant::now()));
+        let cache = self.codegraph_cache.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            // Never enqueue behind an explicit viewer query. One scan at a
+            // time, no filesystem watchers and no persistent store authority.
+            let result = match cache.try_lock() {
+                Ok(mut cache) => cache.prepare(&root),
+                Err(_) => Err("Code graph index preparation deferred".into()),
+            };
+            let _ = sender.send(result);
+        });
+        self.codegraph_index_pending = Some(receiver);
     }
 
     pub(super) fn poll_codegraph(&mut self) -> bool {
@@ -362,6 +397,67 @@ mod tests {
             if !expected_reuse && lines.contains("changed") {
                 assert!(!lines.contains("original"));
             }
+        }
+    }
+
+    #[test]
+    fn automatic_preparation_is_off_input_path_and_preserves_incomplete_coverage() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(Command::new("git").args(["init", "-q"]).arg(root.path()).status().unwrap().success());
+        fs::write(root.path().join("lib.rs"), "fn original() {}\n").unwrap();
+        fs::write(root.path().join("broken.py"), "def broken(\n").unwrap();
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 96, 32); app.rail_visible = false;
+        app.groups[0].tabs.push("session".into());
+        app.session_cwds.insert("session".into(), root.path().to_path_buf());
+        app.input = "unsent prompt".into();
+        app.poll_codegraph_index();
+        assert!(app.codegraph_index_pending.is_some());
+        assert_eq!(app.input, "unsent prompt");
+        for _ in 0..100 {
+            app.poll_codegraph_index();
+            if app.codegraph_index_pending.is_none() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.codegraph_index_pending.is_none());
+        app.open_codegraph("file lib.rs");
+        for _ in 0..100 {
+            if app.poll_codegraph() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let lines=app.chip_info.as_ref().unwrap().lines.join("\n");
+        assert!(lines.contains("Reused parsed declarations"), "{lines}");
+        assert!(lines.contains("unparseable"), "{lines}");
+    }
+
+    #[test]
+    #[ignore = "explicit end-to-end codegraph benchmark; set DOXA_CODEGRAPH_BENCH_ROOT/FILE"]
+    fn measure_codegraph_viewer_latency() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let root = std::env::var_os("DOXA_CODEGRAPH_BENCH_ROOT").expect("benchmark root");
+        let file = std::env::var("DOXA_CODEGRAPH_BENCH_FILE").expect("benchmark file");
+        let mut app = App::default();
+        app.size=Rect::new(0,0,96,32); app.rail_visible=false;
+        app.groups[0].tabs.push("session".into());
+        app.session_cwds.insert("session".into(), std::path::PathBuf::from(root));
+        let mut terminal=Terminal::new(TestBackend::new(96,32)).unwrap();
+        let prepare=Instant::now(); app.poll_codegraph_index();
+        while app.codegraph_index_pending.is_some() {
+            assert!(prepare.elapsed()<Duration::from_secs(30));
+            app.poll_codegraph_index(); std::thread::sleep(Duration::from_millis(1));
+        }
+        println!("DOXA_CODEGRAPH_VIEWER_PREPARE_MS={:.3}",prepare.elapsed().as_secs_f64()*1000.0);
+        for round in 0..5 {
+            let started=Instant::now(); app.open_codegraph(&format!("file {file}"));
+            while app.codegraph_pending.is_some() {
+                assert!(started.elapsed()<Duration::from_secs(30));
+                app.poll_codegraph(); std::thread::sleep(Duration::from_millis(1));
+            }
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let lines=app.chip_info.as_ref().unwrap().lines.join("\n");
+            assert!(!lines.contains("Code graph error"), "{lines}");
+            println!("DOXA_CODEGRAPH_VIEWER_ROUND={} OPEN_POLL_RENDER_MS={:.3}",round+1,
+                started.elapsed().as_secs_f64()*1000.0);
         }
     }
 

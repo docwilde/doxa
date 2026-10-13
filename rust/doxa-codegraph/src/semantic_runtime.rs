@@ -45,7 +45,7 @@ struct AttachTransport {
 }
 
 #[cfg(target_os = "linux")]
-fn read_until(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant) -> Result<(), String> {
+pub(crate) fn read_until(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant) -> Result<(), String> {
     let mut offset = 0;
     while offset < bytes.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -59,7 +59,7 @@ fn read_until(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant) -> R
 }
 
 #[cfg(target_os = "linux")]
-fn write_until(stream: &mut UnixStream, bytes: &[u8], deadline: Instant) -> Result<(), String> {
+pub(crate) fn write_until(stream: &mut UnixStream, bytes: &[u8], deadline: Instant) -> Result<(), String> {
     let mut offset = 0;
     while offset < bytes.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());

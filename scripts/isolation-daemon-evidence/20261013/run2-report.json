@@ -1,0 +1,468 @@
+{
+  "actual_cgroup": "/user.slice/user-1001.slice/user@1001.service/user.slice/docker-6c1402a145ec77f1e51fa7437eb101058b6c41713377c32abddf2a7eb93284da.scope",
+  "cid": "6c1402a145ec77f1e51fa7437eb101058b6c41713377c32abddf2a7eb93284da",
+  "cleanup": {
+    "cgroup_absent": true,
+    "cid404": true,
+    "errors": [],
+    "registry_absent": true,
+    "remaining_scoped_processes": 0,
+    "root_stopped": true,
+    "shared_engine_unchanged": true,
+    "sockets_absent": true
+  },
+  "daemon_source": "934661cd",
+  "engine_before": {
+    "config_sha256": "3a6774e75043931ce3dd1874bac3aabc86908a1bb21fe07c68eb7e46054f26c9",
+    "pid": 27821,
+    "socket": [
+      56,
+      688
+    ]
+  },
+  "error": "shared proof deadline expired",
+  "failed_spawns": [],
+  "fixture_resume_rejected": {
+    "name": "fixture-resume-rejection",
+    "pgid": 75221,
+    "pid": 75221,
+    "pidfd_exited": true,
+    "ppid": 75212,
+    "returncode": 1,
+    "starttime": 1906147,
+    "state": "R",
+    "stderr": "doxa-daemon: Codex options require --engine codex\n",
+    "stdout": "",
+    "uids": [
+      1000,
+      1000,
+      1000,
+      1000
+    ]
+  },
+  "hello": {
+    "account": null,
+    "belief_count": null,
+    "billing": null,
+    "bypass_armed": false,
+    "can_set_model": false,
+    "can_set_permission_mode": false,
+    "cwd": "/srv/doxa-daemon-proof-r2-20261013/uid1000/state/isolation/root-daemon-r2-20261013/checkout",
+    "disabled_tools": null,
+    "doxa": "2.0.0-beta.50",
+    "effort": null,
+    "engine": "fixture",
+    "isolation": {
+      "can_set_isolation": false,
+      "checkout": "/srv/doxa-daemon-proof-r2-20261013/uid1000/state/isolation/root-daemon-r2-20261013/checkout",
+      "cpus": 1.0,
+      "credential_exposure": "only selected provider auth copied to private session home; visible to worker tools",
+      "disk_free_floor_bytes": 2147483648,
+      "disk_hard_limit_bytes": 67108864,
+      "disk_limit": "aggregate kernel project hard quota",
+      "disk_soft_limit_bytes": null,
+      "engine": "ROOT-controlled separate-UID rootless Docker",
+      "image": "sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23",
+      "label": "docker \u00b7 ROOT authority",
+      "memory_bytes": 536870912,
+      "mounts": [
+        "independent checkout",
+        "private home",
+        "private cache",
+        "session hook broker"
+      ],
+      "network": "fixed family ROOT egress gateway",
+      "pids": 128,
+      "profile": "docker-hardened",
+      "state": "ready"
+    },
+    "lore_enabled": false,
+    "lore_scrub": null,
+    "model": null,
+    "next_seq": 0,
+    "peer_history_bytes": null,
+    "peer_history_path": null,
+    "peer_history_scope": null,
+    "peer_tools_ready": false,
+    "pending_effort": null,
+    "pending_inputs": [],
+    "pending_inputs_complete": true,
+    "permission_mode": "default",
+    "proto": 1,
+    "queued": 0,
+    "remote_driver": null,
+    "running": false,
+    "session_id": "root-daemon-r2-20261013",
+    "transcript_bytes": null,
+    "transcript_path": null,
+    "transcript_seq": 0,
+    "type": "hello"
+  },
+  "host_init_pid": 75293,
+  "live_provider_verified": false,
+  "observer_records": [
+    {
+      "daemon": {
+        "pgid": 75222,
+        "pid": 75222,
+        "ppid": 75212,
+        "starttime": 1906147,
+        "state": "S",
+        "uids": [
+          1000,
+          1000,
+          1000,
+          1000
+        ]
+      },
+      "kind": "peer",
+      "pid": 75769,
+      "uid": 1000
+    },
+    {
+      "frame": {
+        "account": null,
+        "belief_count": null,
+        "billing": null,
+        "bypass_armed": false,
+        "can_set_model": false,
+        "can_set_permission_mode": false,
+        "cwd": "/srv/doxa-daemon-proof-r2-20261013/uid1000/state/isolation/root-daemon-r2-20261013/checkout",
+        "disabled_tools": null,
+        "doxa": "2.0.0-beta.50",
+        "effort": null,
+        "engine": "fixture",
+        "isolation": {
+          "can_set_isolation": false,
+          "checkout": "/srv/doxa-daemon-proof-r2-20261013/uid1000/state/isolation/root-daemon-r2-20261013/checkout",
+          "cpus": 1.0,
+          "credential_exposure": "only selected provider auth copied to private session home; visible to worker tools",
+          "disk_free_floor_bytes": 2147483648,
+          "disk_hard_limit_bytes": 67108864,
+          "disk_limit": "aggregate kernel project hard quota",
+          "disk_soft_limit_bytes": null,
+          "engine": "ROOT-controlled separate-UID rootless Docker",
+          "image": "sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23",
+          "label": "docker \u00b7 ROOT authority",
+          "memory_bytes": 536870912,
+          "mounts": [
+            "independent checkout",
+            "private home",
+            "private cache",
+            "session hook broker"
+          ],
+          "network": "fixed family ROOT egress gateway",
+          "pids": 128,
+          "profile": "docker-hardened",
+          "state": "ready"
+        },
+        "lore_enabled": false,
+        "lore_scrub": null,
+        "model": null,
+        "next_seq": 0,
+        "peer_history_bytes": null,
+        "peer_history_path": null,
+        "peer_history_scope": null,
+        "peer_tools_ready": false,
+        "pending_effort": null,
+        "pending_inputs": [],
+        "pending_inputs_complete": true,
+        "permission_mode": "default",
+        "proto": 1,
+        "queued": 0,
+        "remote_driver": null,
+        "running": false,
+        "session_id": "root-daemon-r2-20261013",
+        "transcript_bytes": null,
+        "transcript_path": null,
+        "transcript_seq": 0,
+        "type": "hello"
+      },
+      "kind": "frame"
+    },
+    {
+      "id": 101,
+      "kind": "request",
+      "method": "status"
+    },
+    {
+      "frame": {
+        "id": 101,
+        "ok": true,
+        "status": {
+          "account": null,
+          "belief_count": null,
+          "billing": null,
+          "can_set_model": false,
+          "can_set_permission_mode": false,
+          "cwd": "/srv/doxa-daemon-proof-r2-20261013/uid1000/state/isolation/root-daemon-r2-20261013/checkout",
+          "disabled_tools": null,
+          "effort": null,
+          "engine": "fixture",
+          "isolation": {
+            "can_set_isolation": false,
+            "checkout": "/srv/doxa-daemon-proof-r2-20261013/uid1000/state/isolation/root-daemon-r2-20261013/checkout",
+            "cpus": 1.0,
+            "credential_exposure": "only selected provider auth copied to private session home; visible to worker tools",
+            "disk_free_floor_bytes": 2147483648,
+            "disk_hard_limit_bytes": 67108864,
+            "disk_limit": "aggregate kernel project hard quota",
+            "disk_soft_limit_bytes": null,
+            "engine": "ROOT-controlled separate-UID rootless Docker",
+            "image": "sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23",
+            "label": "docker \u00b7 ROOT authority",
+            "memory_bytes": 536870912,
+            "mounts": [
+              "independent checkout",
+              "private home",
+              "private cache",
+              "session hook broker"
+            ],
+            "network": "fixed family ROOT egress gateway",
+            "pids": 128,
+            "profile": "docker-hardened",
+            "state": "ready"
+          },
+          "lore_enabled": false,
+          "lore_scrub": null,
+          "model": null,
+          "peer_tools_ready": false,
+          "pending_effort": null,
+          "permission_mode": "default",
+          "queued": 0,
+          "remote_driver": null,
+          "running": false,
+          "session_id": "root-daemon-r2-20261013"
+        },
+        "type": "reply"
+      },
+      "kind": "frame"
+    }
+  ],
+  "paid_calls": 0,
+  "pins": {
+    "broker": "6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5",
+    "daemon": "bdab19e567fe3e7b337414933f64d90be5cd361c55434b482d1d1cd7e378b1aa",
+    "frontend": "5b4d8ef78eb7c42d84fe9c80f4220cdefdad6d2cad5987399dedc5497aa965c2",
+    "gateway": "18d1d633a67aee1dd1bfd67eaf5de82ebcc42dfb0ef112198c6691439de98fe9",
+    "image": "sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23",
+    "worker": "cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f"
+  },
+  "processes": [
+    {
+      "name": "git0",
+      "pgid": 75213,
+      "pid": 75213,
+      "pidfd_exited": true,
+      "ppid": 75212,
+      "returncode": 0,
+      "starttime": 1906124,
+      "state": "R",
+      "stderr": "",
+      "stdout": "",
+      "uids": [
+        1000,
+        1000,
+        1000,
+        1000
+      ]
+    },
+    {
+      "name": "git1",
+      "pgid": 75214,
+      "pid": 75214,
+      "pidfd_exited": true,
+      "ppid": 75212,
+      "returncode": 0,
+      "starttime": 1906124,
+      "state": "R",
+      "stderr": "",
+      "stdout": "",
+      "uids": [
+        1000,
+        1000,
+        1000,
+        1000
+      ]
+    },
+    {
+      "name": "git2",
+      "pgid": 75215,
+      "pid": 75215,
+      "pidfd_exited": true,
+      "ppid": 75212,
+      "returncode": 0,
+      "starttime": 1906124,
+      "state": "R",
+      "stderr": "",
+      "stdout": "",
+      "uids": [
+        1000,
+        1000,
+        1000,
+        1000
+      ]
+    },
+    {
+      "name": "quota-provision",
+      "pgid": 75218,
+      "pid": 75218,
+      "pidfd_exited": true,
+      "ppid": 75212,
+      "returncode": 0,
+      "starttime": 1906125,
+      "state": "R",
+      "stderr": "",
+      "stdout": "{\"admissible_as_hard_quota\":false,\"policy\":{\"bindings\":{\"broker\":{\"device\":1792,\"inode\":189,\"mount_id\":2147500504},\"cache\":{\"device\":1792,\"inode\":188,\"mount_id\":2147500504},\"checkout\":{\"device\":1792,\"inode\":186,\"mount_id\":2147500504},\"home\":{\"device\":1792,\"inode\":187,\"mount_id\":2147500504},\"root\":{\"device\":1792,\"inode\":8201,\"mount_id\":2147500504}},\"boot_id\":\"d606e7c5-c113-477e-b804-8449e367d706\",\"caller_uid\":1000,\"engine_gid\":1001,\"engine_uid\":1001,\"hard_limit_bytes\":67108864,\"project_id\":5015,\"root\":\"/srv/doxa-quota-proof/root-daemon-r2-20261013\",\"security_contract_version\":1,\"session_id\":\"root-daemon-r2-20261013\",\"version\":2,\"worker_binary_sha256\":\"cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f\",\"worker_image\":\"sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23\"},\"policy_identity\":{\"device\":64769,\"inode\":530229,\"sha256\":\"811412548a9a68becef8b7074771b91ee76c64fd7cbfb9128502dce49306bcc8\"}}\n",
+      "uids": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "root-install",
+      "pgid": 75219,
+      "pid": 75219,
+      "pidfd_exited": true,
+      "ppid": 75212,
+      "returncode": 0,
+      "starttime": 1906127,
+      "state": "R",
+      "stderr": "",
+      "stdout": "{\"boot_id\": \"d606e7c5-c113-477e-b804-8449e367d706\", \"broker_exe\": \"/usr/bin/python3.14\", \"broker_exe_sha256\": \"52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41\", \"broker_script\": \"/usr/libexec/doxa/composed-runtime-r6-20261013-broker.py\", \"broker_sha256\": \"6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5\", \"broker_socket\": \"/run/doxa/hardened/root-daemon-r2-20261013/broker.sock\", \"broker_uid\": 0, \"caller_uid\": 1000, \"contract\": \"doxa-root-session-broker-v1\", \"policy_path\": \"/etc/doxa/hardened/root-daemon-r2-20261013.json\", \"policy_sha256\": \"0aae4d9063b722cd0166ea819a7e0195421d19a8986125001c7c233eef285d80\", \"session_id\": \"root-daemon-r2-20261013\"}\n",
+      "uids": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "root-broker",
+      "pgid": 75220,
+      "pid": 75220,
+      "pidfd_exited": true,
+      "ppid": 75212,
+      "returncode": 0,
+      "starttime": 1906137,
+      "state": "R",
+      "stderr": "",
+      "stdout": "",
+      "uids": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "fixture-resume-rejection",
+      "pgid": 75221,
+      "pid": 75221,
+      "pidfd_exited": true,
+      "ppid": 75212,
+      "returncode": 1,
+      "starttime": 1906147,
+      "state": "R",
+      "stderr": "doxa-daemon: Codex options require --engine codex\n",
+      "stdout": "",
+      "uids": [
+        1000,
+        1000,
+        1000,
+        1000
+      ]
+    },
+    {
+      "name": "daemon",
+      "pgid": 75222,
+      "pid": 75222,
+      "pidfd_exited": true,
+      "ppid": 75212,
+      "returncode": 0,
+      "starttime": 1906147,
+      "state": "R",
+      "stderr": "",
+      "stdout": "",
+      "uids": [
+        1000,
+        1000,
+        1000,
+        1000
+      ]
+    },
+    {
+      "name": "observer",
+      "pgid": 75769,
+      "pid": 75769,
+      "pidfd_exited": true,
+      "ppid": 75212,
+      "returncode": 1,
+      "starttime": 1907088,
+      "state": "R",
+      "stderr": "Traceback (most recent call last):\n  File \"/usr/libexec/doxa/daemon-proof-20261013/prove-hardened-daemon-r2.py\", line 657, in <module>\n    elif options.observer: observer(options)\n                           ~~~~~~~~^^^^^^^^^\n  File \"/usr/libexec/doxa/daemon-proof-20261013/prove-hardened-daemon-r2.py\", line 292, in observer\n    ready, _, _ = select.select([channel, 0], [], [], budget.left(.1))\n                                                      ~~~~~~~~~~~^^^^\n  File \"/usr/libexec/doxa/daemon-proof-20261013/prove-hardened-daemon-r2.py\", line 116, in left\n    require(left > 0, \"shared proof deadline expired\")\n    ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/libexec/doxa/daemon-proof-20261013/prove-hardened-daemon-r2.py\", line 44, in require\n    raise RuntimeError(reason)\nRuntimeError: shared proof deadline expired\n",
+      "stdout": "{\"daemon\": {\"pgid\": 75222, \"pid\": 75222, \"ppid\": 75212, \"starttime\": 1906147, \"state\": \"S\", \"uids\": [1000, 1000, 1000, 1000]}, \"kind\": \"peer\", \"pid\": 75769, \"uid\": 1000}\n{\"frame\": {\"account\": null, \"belief_count\": null, \"billing\": null, \"bypass_armed\": false, \"can_set_model\": false, \"can_set_permission_mode\": false, \"cwd\": \"/srv/doxa-daemon-proof-r2-20261013/uid1000/state/isolation/root-daemon-r2-20261013/checkout\", \"disabled_tools\": null, \"doxa\": \"2.0.0-beta.50\", \"effort\": null, \"engine\": \"fixture\", \"isolation\": {\"can_set_isolation\": false, \"checkout\": \"/srv/doxa-daemon-proof-r2-20261013/uid1000/state/isolation/root-daemon-r2-20261013/checkout\", \"cpus\": 1.0, \"credential_exposure\": \"only selected provider auth copied to private session home; visible to worker tools\", \"disk_free_floor_bytes\": 2147483648, \"disk_hard_limit_bytes\": 67108864, \"disk_limit\": \"aggregate kernel project hard quota\", \"disk_soft_limit_bytes\": null, \"engine\": \"ROOT-controlled separate-UID rootless Docker\", \"image\": \"sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23\", \"label\": \"docker \\u00b7 ROOT authority\", \"memory_bytes\": 536870912, \"mounts\": [\"independent checkout\", \"private home\", \"private cache\", \"session hook broker\"], \"network\": \"fixed family ROOT egress gateway\", \"pids\": 128, \"profile\": \"docker-hardened\", \"state\": \"ready\"}, \"lore_enabled\": false, \"lore_scrub\": null, \"model\": null, \"next_seq\": 0, \"peer_history_bytes\": null, \"peer_history_path\": null, \"peer_history_scope\": null, \"peer_tools_ready\": false, \"pending_effort\": null, \"pending_inputs\": [], \"pending_inputs_complete\": true, \"permission_mode\": \"default\", \"proto\": 1, \"queued\": 0, \"remote_driver\": null, \"running\": false, \"session_id\": \"root-daemon-r2-20261013\", \"transcript_bytes\": null, \"transcript_path\": null, \"transcript_seq\": 0, \"type\": \"hello\"}, \"kind\": \"frame\"}\n{\"id\": 101, \"kind\": \"request\", \"method\": \"status\"}\n{\"frame\": {\"id\": 101, \"ok\": true, \"status\": {\"account\": null, \"belief_count\": null, \"billing\": null, \"can_set_model\": false, \"can_set_permission_mode\": false, \"cwd\": \"/srv/doxa-daemon-proof-r2-20261013/uid1000/state/isolation/root-daemon-r2-20261013/checkout\", \"disabled_tools\": null, \"effort\": null, \"engine\": \"fixture\", \"isolation\": {\"can_set_isolation\": false, \"checkout\": \"/srv/doxa-daemon-proof-r2-20261013/uid1000/state/isolation/root-daemon-r2-20261013/checkout\", \"cpus\": 1.0, \"credential_exposure\": \"only selected provider auth copied to private session home; visible to worker tools\", \"disk_free_floor_bytes\": 2147483648, \"disk_hard_limit_bytes\": 67108864, \"disk_limit\": \"aggregate kernel project hard quota\", \"disk_soft_limit_bytes\": null, \"engine\": \"ROOT-controlled separate-UID rootless Docker\", \"image\": \"sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23\", \"label\": \"docker \\u00b7 ROOT authority\", \"memory_bytes\": 536870912, \"mounts\": [\"independent checkout\", \"private home\", \"private cache\", \"session hook broker\"], \"network\": \"fixed family ROOT egress gateway\", \"pids\": 128, \"profile\": \"docker-hardened\", \"state\": \"ready\"}, \"lore_enabled\": false, \"lore_scrub\": null, \"model\": null, \"peer_tools_ready\": false, \"pending_effort\": null, \"permission_mode\": \"default\", \"queued\": 0, \"remote_driver\": null, \"running\": false, \"session_id\": \"root-daemon-r2-20261013\"}, \"type\": \"reply\"}, \"kind\": \"frame\"}\n",
+      "uids": [
+        1000,
+        1000,
+        1000,
+        1000
+      ]
+    },
+    {
+      "name": "frontend",
+      "pgid": 75772,
+      "pid": 75772,
+      "pidfd_exited": true,
+      "ppid": 75212,
+      "returncode": -15,
+      "starttime": 1907107,
+      "state": "R",
+      "stderr": "",
+      "stdout": "",
+      "uids": [
+        1000,
+        1000,
+        1000,
+        1000
+      ]
+    }
+  ],
+  "project_id": 5015,
+  "quota_provision": "{\"admissible_as_hard_quota\":false,\"policy\":{\"bindings\":{\"broker\":{\"device\":1792,\"inode\":189,\"mount_id\":2147500504},\"cache\":{\"device\":1792,\"inode\":188,\"mount_id\":2147500504},\"checkout\":{\"device\":1792,\"inode\":186,\"mount_id\":2147500504},\"home\":{\"device\":1792,\"inode\":187,\"mount_id\":2147500504},\"root\":{\"device\":1792,\"inode\":8201,\"mount_id\":2147500504}},\"boot_id\":\"d606e7c5-c113-477e-b804-8449e367d706\",\"caller_uid\":1000,\"engine_gid\":1001,\"engine_uid\":1001,\"hard_limit_bytes\":67108864,\"project_id\":5015,\"root\":\"/srv/doxa-quota-proof/root-daemon-r2-20261013\",\"security_contract_version\":1,\"session_id\":\"root-daemon-r2-20261013\",\"version\":2,\"worker_binary_sha256\":\"cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f\",\"worker_image\":\"sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23\"},\"policy_identity\":{\"device\":64769,\"inode\":530229,\"sha256\":\"811412548a9a68becef8b7074771b91ee76c64fd7cbfb9128502dce49306bcc8\"}}\n",
+  "receipt": {
+    "boot_id": "d606e7c5-c113-477e-b804-8449e367d706",
+    "broker_exe": "/usr/bin/python3.14",
+    "broker_exe_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+    "broker_script": "/usr/libexec/doxa/composed-runtime-r6-20261013-broker.py",
+    "broker_sha256": "6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5",
+    "broker_socket": "/run/doxa/hardened/root-daemon-r2-20261013/broker.sock",
+    "broker_uid": 0,
+    "caller_uid": 1000,
+    "contract": "doxa-root-session-broker-v1",
+    "policy_path": "/etc/doxa/hardened/root-daemon-r2-20261013.json",
+    "policy_sha256": "0aae4d9063b722cd0166ea819a7e0195421d19a8986125001c7c233eef285d80",
+    "session_id": "root-daemon-r2-20261013"
+  },
+  "registry": {
+    "active": false,
+    "clients": 0,
+    "cwd": "/srv/doxa-daemon-proof-r2-20261013/uid1000/state/isolation/root-daemon-r2-20261013/checkout",
+    "daemon_socket": "/run/user/1000/df-r2-20261013/daemon-root-dae-75222.sock",
+    "engine": "fixture",
+    "heartbeat_at": "2026-10-13T06:52:41.779319Z",
+    "incarnation": "2f12bb6713d94bd7b3c7f0b225620336",
+    "parent_session_id": null,
+    "pid": 75222,
+    "repo_root": "/srv/doxa-daemon-proof-r2-20261013/uid1000/source",
+    "session_id": "root-daemon-r2-20261013",
+    "socket_path": "/run/user/1000/df-r2-20261013/peer-root-dae-75222.sock",
+    "started_at": "2026-10-13T06:52:41.779287Z",
+    "title": "fixture@source:2e942c0"
+  },
+  "scope": "actual-uid1000-fixture-daemon-frontend-root-guard",
+  "session_id": "root-daemon-r2-20261013",
+  "status": "failed"
+}

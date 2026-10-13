@@ -2,7 +2,16 @@
 use std::{io::{self, Read, Write}, os::{fd::AsRawFd, unix::{net::UnixStream, process::CommandExt}},
     process::{Command, Stdio}, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
 fn run() -> io::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let hardened_workspace=args.first().is_some_and(|arg|arg=="workspace-hardened");
+    if args.first().is_some_and(|arg| arg == "filter-probe") && args.len() == 1 {
+        println!("{}", doxa_isolation::worker_security::verify()?);
+        return Ok(());
+    }
+    if args.first().is_some_and(|arg| matches!(arg.as_str(), "hold-hardened" | "exec-hardened" | "workspace-hardened" | "probe-hardened" | "egress-proxy-hardened")) {
+        doxa_isolation::worker_security::install()?;
+        args[0] = args[0].trim_end_matches("-hardened").to_owned();
+    }
     match args.first().map(String::as_str) {
         Some("--version") if args.len()==1=>{println!("doxa-isolation-worker {}",env!("CARGO_PKG_VERSION"));Ok(())},
         Some("--self-test") if args.len()==1=>{
@@ -11,7 +20,30 @@ fn run() -> io::Result<()> {
             println!("doxa-isolation-worker self-test ok");Ok(())
         },
         Some("hold") if args.len() == 1 => loop { std::thread::park(); },
+        Some("workspace") if args.len() >= 2 => {
+            // The root broker has already validated the Git argv and cwd.
+            // Never accept a program, shell, or executable path from a caller.
+            let mut command=Command::new("/usr/bin/git");
+            if hardened_workspace {
+                let directory=std::env::var("GIT_DIR").map_err(|_|io::Error::other("ROOT Git view missing"))?;
+                let generation=directory.strip_prefix("/run/doxa/session/git-safe/").filter(|s|
+                    s.len()==32&&s.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)))
+                    .ok_or_else(||io::Error::other("ROOT Git view escaped fixed readonly metadata scope"))?;
+                command.env_clear().env("PATH","/usr/bin:/bin").env("HOME","/home/doxa")
+                    .env("GIT_DIR",format!("/run/doxa/session/git-safe/{generation}")).env("GIT_WORK_TREE","/workspace");
+                for(key,value) in [("GIT_CONFIG_NOSYSTEM","1"),("GIT_CONFIG_SYSTEM","/dev/null"),("GIT_CONFIG_GLOBAL","/dev/null"),
+                    ("GIT_ATTR_NOSYSTEM","1"),("GIT_NO_REPLACE_OBJECTS","1"),("GIT_OPTIONAL_LOCKS","0"),("GIT_CONFIG_COUNT","0"),
+                    ("GIT_CONFIG_PARAMETERS",""),("GIT_TERMINAL_PROMPT","0"),("GIT_ASKPASS","/bin/false"),("GIT_ALLOW_PROTOCOL","")] {
+                    command.env(key,value);
+                }
+            }
+            let status = command.args(&args[1..]).status()?;
+            if status.success() { Ok(()) } else { Err(io::Error::other("worker Git command failed")) }
+        },
         Some("egress-proxy") if args.len() == 2 => {
+            if matches!(args[1].as_str(), "claude" | "codex") {
+                return doxa_isolation::egress::serve_family_loopback_adapter(&args[1]);
+            }
             let port = args[1].parse().map_err(|_| io::Error::other("invalid fixture proxy port"))?;
             doxa_isolation::egress::serve_loopback_adapter(port)
         },

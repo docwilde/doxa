@@ -1,0 +1,35 @@
+{
+  "schema": "doxa-router-docker-migration-proof-v1",
+  "date": "2026-10-13",
+  "source_commit": "1804c28f5bcdffb2893ecbbd90bdd5dfd9332a26",
+  "fixture": "isolation_migration::tests::rootless_frontend_roundtrip_keeps_clean_and_dirty_sessions_and_rolls_back_start_failure",
+  "result": {
+    "passed": 1,
+    "failed": 0,
+    "duration_seconds": 6.88
+  },
+  "cases": [
+    "GLM clean",
+    "GLM dirty",
+    "Router clean",
+    "Router dirty"
+  ],
+  "assertions": [
+    "native to docker-offline to native",
+    "target-start failure restores original native session",
+    "staged versus working bytes and deleted/untracked/ignored source preserved",
+    "original repository and managed worktree preserved",
+    "Router journal byte identity and original four-dollar ceiling retained"
+  ],
+  "artifact_sha256": {
+    "daemon": "b12a90f65f0aff5112a7aa866adcf4bf7943600f38324ff6776c842213a5863f",
+    "tui_fixture": "80027e8f4be1b5dd3aff7dad48c8e06fb16b091a273f5040240513cf6cc32fe5"
+  },
+  "image": "sha256:4731728335627fecc61a608309838f67fd3be00ad0c10ffc9b99fa14a96cfc87",
+  "engine_uid": 1001,
+  "engine": "rootless Docker29.1.3",
+  "kernel": "7.0.0-34",
+  "provider_turns": 0,
+  "log_sha256": "ee132a086171da52ce8d878ee7a0cb2e8adc74820310d2b86c3148fad560b97e",
+  "limits": "Credential-free functional migration proof; no hardened authority or real-provider claim."
+}

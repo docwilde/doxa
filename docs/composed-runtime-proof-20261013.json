@@ -1,0 +1,1441 @@
+{
+  "attempts": [
+    {
+      "attempt": 2,
+      "report": {
+        "broker_sha256": "6a3dabbb3f0645558898b64072ec738161bc8304df3bf0793549893501382a12",
+        "cleanup": {},
+        "client_sha256": "14a67c6ce8efa0691783907916db27b660171f5e8f2bfb771d8422bf4e1cd261",
+        "engine_pid_before": null,
+        "engine_socket_before": null,
+        "error": "proof command failed: /usr/sbin/runuser: Error: Custom { kind: PermissionDenied, error: \"ROOT client operation refused, exceeded its bound or timed out\" }\n",
+        "gateway_sha256": "a35fa998f549ae21875634ebf44b659f3a54ef06054a9908576e2bb9e00297c0",
+        "git_support_sha256": {
+          "/usr/bin/git": "5516c9f362c29376ab9a499a33082f9f611941d8c75930c880e30ad109e39c9a",
+          "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0": "4a6b6b2078685b074869d75cb068664d7da6b3036df7bca0442b1bbbd4ac7e65",
+          "/usr/lib/x86_64-linux-gnu/libz.so.1": "47b61967895b30e8c0c6818dd633ffeb87711cf637c688f981896f0dd84ce23b"
+        },
+        "image": "sha256:021b83a835a2f49c985c64cb470a4c7128c3019469cedc07ff45e87d8afa7b24",
+        "live_provider_verified": false,
+        "paid_calls": 0,
+        "project_id": 5007,
+        "provider_sha256": "63df892313ba4cffa54186fc9b6aa2e5edec4c8dc429cc2cbc2933d487e4a5e6",
+        "receipt": {
+          "boot_id": "d606e7c5-c113-477e-b804-8449e367d706",
+          "broker_exe": "/usr/bin/python3.14",
+          "broker_exe_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+          "broker_script": "/usr/libexec/doxa/composed-root-broker-20261013.py",
+          "broker_sha256": "6a3dabbb3f0645558898b64072ec738161bc8304df3bf0793549893501382a12",
+          "broker_socket": "/run/doxa/hardened/composed-runtime-20261013/broker.sock",
+          "broker_uid": 0,
+          "caller_uid": 1000,
+          "contract": "doxa-root-session-broker-v1",
+          "policy_path": "/etc/doxa/hardened/composed-runtime-20261013.json",
+          "policy_sha256": "c19264151cda7e8f4b247791dcbbc67f2dfda59271b4caf546d53c82436e72fa",
+          "session_id": "composed-runtime-20261013"
+        },
+        "scope": "actual-composed-root-runtime-fixture",
+        "session_id": "composed-runtime-20261013",
+        "status": "failed",
+        "worker_sha256": "6e78c26b55eec3971e6ea8a8dd804649a13c0a437f25cfe3c729b4168a31abe0"
+      },
+      "verified_no_cid_cleanup": {
+        "engine_config_sha256": "3a6774e75043931ce3dd1874bac3aabc86908a1bb21fe07c68eb7e46054f26c9",
+        "engine_exe_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+        "engine_pid": 27821,
+        "engine_socket_identity": [
+          56,
+          688
+        ],
+        "fixed_container_status": 404,
+        "live_provider_verified": false,
+        "paid_calls": 0,
+        "policy_sha256": "c19264151cda7e8f4b247791dcbbc67f2dfda59271b4caf546d53c82436e72fa",
+        "preserved_root_quota_policy": true,
+        "project_id": 5007,
+        "root_manifest_present": false,
+        "scope": "composed5007-failed-before-create-cleanup",
+        "session_id": "composed-runtime-20261013"
+      }
+    },
+    {
+      "attempt": 3,
+      "report": {
+        "broker_sha256": "4ff9a871df8eab03fd4be94693564c3d4d7ef3f21470b040b5e82068ee7a81d9",
+        "cleanup": {
+          "cgroups": [],
+          "command_processes": [],
+          "container_census": 0,
+          "live_sockets": [],
+          "remaining_cgroups": [],
+          "remaining_processes": [],
+          "scoped_socket_files": []
+        },
+        "client_sha256": "b2a824f0ab543e6b9f259368092b911a357414d9cff2ceb77b0a21ca90262b0f",
+        "engine_pid_after": 27821,
+        "engine_pid_before": 27821,
+        "engine_pins": {
+          "api_version": "1.51",
+          "config_path": "/etc/doxa-proof/engine-daemon.json",
+          "config_sha256": "3a6774e75043931ce3dd1874bac3aabc86908a1bb21fe07c68eb7e46054f26c9",
+          "exe_path": "/usr/bin/dockerd",
+          "exe_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+          "gid": 1001,
+          "socket": "/run/user/1001/doxa-proof/docker.sock",
+          "uid": 1001
+        },
+        "engine_socket_after": [
+          56,
+          688
+        ],
+        "engine_socket_before": [
+          56,
+          688
+        ],
+        "error": "[Errno 17] File exists: '/etc/doxa/hardened'",
+        "gateway_sha256": "26f79db6a73905c6c1a665d039d7e48546dd28d1a8704e4f9ede2814e9474547",
+        "git_support_sha256": {
+          "/usr/bin/git": "5516c9f362c29376ab9a499a33082f9f611941d8c75930c880e30ad109e39c9a",
+          "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0": "4a6b6b2078685b074869d75cb068664d7da6b3036df7bca0442b1bbbd4ac7e65",
+          "/usr/lib/x86_64-linux-gnu/libz.so.1": "47b61967895b30e8c0c6818dd633ffeb87711cf637c688f981896f0dd84ce23b"
+        },
+        "image": "sha256:8eeaba2a849832f89d5fb1797a7da837797c272cfb532f7a99703414f3d50999",
+        "live_provider_verified": false,
+        "paid_calls": 0,
+        "project_id": 5010,
+        "provider_sha256": "05784a38b31c107d7f39310bb2d9068d20735a6bd2ceef6cc84e88690d9d6e84",
+        "scope": "actual-composed-root-runtime-fixture",
+        "session_id": "composed-runtime-r3-20261013",
+        "status": "failed",
+        "worker_sha256": "d0a7ae3e364ad8c99a6599b113a0f89751945895749381ee47d1b89cf44d7136"
+      }
+    },
+    {
+      "attempt": 4,
+      "report": {
+        "broker_sha256": "4ff9a871df8eab03fd4be94693564c3d4d7ef3f21470b040b5e82068ee7a81d9",
+        "cleanup": {
+          "8b11b3877ba54437e950028e4ae59925f3635952aa4d44ad9c98a71e4fa1d2e8": "404",
+          "broker_processes": {
+            "live_processes": [],
+            "processes": [
+              {
+                "group": 58398,
+                "pid": 58398,
+                "ppid": 58389,
+                "session": 58398,
+                "start": 1419703,
+                "uid": 0
+              },
+              {
+                "group": 58415,
+                "pid": 58415,
+                "ppid": 58398,
+                "session": 58415,
+                "start": 1419752,
+                "uid": 0
+              },
+              {
+                "group": 58416,
+                "pid": 58416,
+                "ppid": 58398,
+                "session": 58416,
+                "start": 1419903,
+                "uid": 0
+              },
+              {
+                "group": 58417,
+                "pid": 58417,
+                "ppid": 58398,
+                "session": 58417,
+                "start": 1420053,
+                "uid": 0
+              },
+              {
+                "group": 58535,
+                "pid": 58535,
+                "ppid": 58398,
+                "session": 58535,
+                "start": 1420573,
+                "uid": 0
+              },
+              {
+                "group": 58535,
+                "pid": 58536,
+                "ppid": 58535,
+                "session": 58535,
+                "start": 1421182,
+                "uid": 1001
+              },
+              {
+                "group": 58612,
+                "pid": 58612,
+                "ppid": 58398,
+                "session": 58612,
+                "start": 1421576,
+                "uid": 0
+              },
+              {
+                "group": 58535,
+                "pid": 58613,
+                "ppid": 58535,
+                "session": 58535,
+                "start": 1421774,
+                "uid": 1001
+              },
+              {
+                "group": 58612,
+                "pid": 58643,
+                "ppid": 58612,
+                "session": 58612,
+                "start": 1422195,
+                "uid": 1001
+              },
+              {
+                "group": 58535,
+                "pid": 58673,
+                "ppid": 58535,
+                "session": 58535,
+                "start": 1422366,
+                "uid": 1001
+              }
+            ],
+            "socket_paths": [
+              "/run/doxa/hardened/composed-runtime-r4-20261013/broker.sock",
+              "/run/doxa/hardened/composed-runtime-r4-20261013/gateway-status.sock",
+              "/srv/doxa-quota-proof/composed-runtime-r4-20261013/broker/egress-claude.sock",
+              "/srv/doxa-quota-proof/composed-runtime-r4-20261013/broker/egress-codex.sock",
+              "/srv/doxa-quota-proof/composed-runtime-r4-20261013/broker/hook.sock"
+            ]
+          },
+          "cgroups": [
+            "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/user.slice/docker-8b11b3877ba54437e950028e4ae59925f3635952aa4d44ad9c98a71e4fa1d2e8.scope"
+          ],
+          "command_processes": [
+            {
+              "live_processes": [],
+              "processes": [
+                {
+                  "group": 58399,
+                  "pid": 58399,
+                  "ppid": 58389,
+                  "session": 58399,
+                  "start": 1419708,
+                  "uid": 1000
+                },
+                {
+                  "group": 58399,
+                  "pid": 58411,
+                  "ppid": 58399,
+                  "session": 58399,
+                  "start": 1419743,
+                  "uid": 1000
+                }
+              ],
+              "socket_paths": []
+            },
+            {
+              "live_processes": [],
+              "processes": [
+                {
+                  "group": 58703,
+                  "pid": 58703,
+                  "ppid": 58389,
+                  "session": 58703,
+                  "start": 1422750,
+                  "uid": 1000
+                }
+              ],
+              "socket_paths": []
+            }
+          ],
+          "container_census": 0,
+          "errors": [
+            "scope census: owned process/cgroup/socket cleanup census is nonzero"
+          ],
+          "live_sockets": [],
+          "remaining_cgroups": [],
+          "remaining_processes": [],
+          "scoped_socket_files": [
+            "/run/doxa/hardened/composed-runtime-r4-20261013/gateway-status.sock",
+            "/srv/doxa-quota-proof/composed-runtime-r4-20261013/broker/egress-claude.sock",
+            "/srv/doxa-quota-proof/composed-runtime-r4-20261013/broker/hook.sock",
+            "/srv/doxa-quota-proof/composed-runtime-r4-20261013/broker/egress-codex.sock"
+          ],
+          "stop_status": "stopped"
+        },
+        "client_sha256": "ac2180b4cb18b670248fad6716a4cdc4fadee2064d4bd6b7dc8ed30e5733888d",
+        "engine_pid_after": 27821,
+        "engine_pid_before": 27821,
+        "engine_pins": {
+          "api_version": "1.51",
+          "config_path": "/etc/doxa-proof/engine-daemon.json",
+          "config_sha256": "3a6774e75043931ce3dd1874bac3aabc86908a1bb21fe07c68eb7e46054f26c9",
+          "exe_path": "/usr/bin/dockerd",
+          "exe_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+          "gid": 1001,
+          "socket": "/run/user/1001/doxa-proof/docker.sock",
+          "uid": 1001
+        },
+        "engine_socket_after": [
+          56,
+          688
+        ],
+        "engine_socket_before": [
+          56,
+          688
+        ],
+        "error": "proof command failed: /usr/libexec/doxa/composed-runtime-r4-20261013-client: Error: Custom { kind: PermissionDenied, error: \"ROOT client operation refused, exceeded its bound or timed out\" }\n",
+        "gateway_sha256": "26f79db6a73905c6c1a665d039d7e48546dd28d1a8704e4f9ede2814e9474547",
+        "git_support_sha256": {
+          "/usr/bin/git": "5516c9f362c29376ab9a499a33082f9f611941d8c75930c880e30ad109e39c9a",
+          "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0": "4a6b6b2078685b074869d75cb068664d7da6b3036df7bca0442b1bbbd4ac7e65",
+          "/usr/lib/x86_64-linux-gnu/libz.so.1": "47b61967895b30e8c0c6818dd633ffeb87711cf637c688f981896f0dd84ce23b"
+        },
+        "image": "sha256:8eeaba2a849832f89d5fb1797a7da837797c272cfb532f7a99703414f3d50999",
+        "live_provider_verified": false,
+        "paid_calls": 0,
+        "project_id": 5012,
+        "provider_sha256": "05784a38b31c107d7f39310bb2d9068d20735a6bd2ceef6cc84e88690d9d6e84",
+        "receipt": {
+          "boot_id": "d606e7c5-c113-477e-b804-8449e367d706",
+          "broker_exe": "/usr/bin/python3.14",
+          "broker_exe_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+          "broker_script": "/usr/libexec/doxa/composed-runtime-r4-20261013-broker.py",
+          "broker_sha256": "4ff9a871df8eab03fd4be94693564c3d4d7ef3f21470b040b5e82068ee7a81d9",
+          "broker_socket": "/run/doxa/hardened/composed-runtime-r4-20261013/broker.sock",
+          "broker_uid": 0,
+          "caller_uid": 1000,
+          "contract": "doxa-root-session-broker-v1",
+          "policy_path": "/etc/doxa/hardened/composed-runtime-r4-20261013.json",
+          "policy_sha256": "1694a6b972a01a378bcc484bf605c8282fd70f355cc3bdd43b65f76bfaea3f8e",
+          "session_id": "composed-runtime-r4-20261013"
+        },
+        "scope": "actual-composed-root-runtime-fixture",
+        "session_id": "composed-runtime-r4-20261013",
+        "status": "failed",
+        "worker_sha256": "d0a7ae3e364ad8c99a6599b113a0f89751945895749381ee47d1b89cf44d7136"
+      }
+    },
+    {
+      "attempt": 5,
+      "case_progress": [
+        "actual Runtime prepare with harmless settings",
+        "actual Runtime ready and active",
+        "actual ROOT callback registered",
+        "Codex protected owner handshake and concurrent guard",
+        "actual source snapshot recheck and private review copy",
+        "actual callback fixture-only source review",
+        "actual source mutation refused stale proof"
+      ],
+      "harness_sha256": "785671628be2e923003f77f2804d629d444fc7f32da19e0bbdb1fd4fb10d9d9d",
+      "input_archive_sha256": "9bef66a13a17550c4e990ca4a7b5646e56dd7f1d21c52ebdedcc0a0d71f33421",
+      "installed_policy": {
+        "authority": {
+          "path": "/usr/libexec/doxa/doxa-hardened-gateway-composed5013",
+          "sha256": "18d1d633a67aee1dd1bfd67eaf5de82ebcc42dfb0ef112198c6691439de98fe9"
+        },
+        "broker": {
+          "path": "/usr/libexec/doxa/composed-runtime-r5-20261013-broker.py",
+          "sha256": "a04d2d5d0fb3df93cb3201d2d3e1cb322829ed4ddc5d52938e17fe0a95a0056f"
+        },
+        "caller_uid": 1000,
+        "engine": {
+          "api_version": "1.51",
+          "config_path": "/etc/doxa-proof/engine-daemon.json",
+          "config_sha256": "3a6774e75043931ce3dd1874bac3aabc86908a1bb21fe07c68eb7e46054f26c9",
+          "exe_path": "/usr/bin/dockerd",
+          "exe_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+          "gid": 1001,
+          "socket": "/run/user/1001/doxa-proof/docker.sock",
+          "uid": 1001
+        },
+        "image": "sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23",
+        "limits": {
+          "cpu_period": 100000,
+          "cpu_quota": 100000,
+          "deadline_seconds": 300,
+          "disk_bytes": 67108864,
+          "memory_bytes": 536870912,
+          "operation_seconds": 120,
+          "output_bytes": 1048576,
+          "pids": 128,
+          "stdin_bytes": 1048576
+        },
+        "providers": {
+          "claude": {
+            "artifacts": {
+              "/usr/local/bin/claude": "05784a38b31c107d7f39310bb2d9068d20735a6bd2ceef6cc84e88690d9d6e84"
+            },
+            "egress": [
+              "example.com"
+            ],
+            "environment_keys": [],
+            "path": "/usr/local/bin/claude",
+            "proxy_port": 3128,
+            "sha256": "05784a38b31c107d7f39310bb2d9068d20735a6bd2ceef6cc84e88690d9d6e84"
+          },
+          "codex": {
+            "artifacts": {
+              "/opt/doxa/codex-provider/codex": "8e08726c5f12219925cf699c7491bf531d1dcc0673281a7107daa9b0516027ce",
+              "/opt/doxa/codex-provider/codex-app-server": "e898df90c9c2504f7b136621fc9efb1d91a5bd0d5e49cb8c52ffa854f9ff6666",
+              "/opt/doxa/codex-provider/codex-code-mode-host": "0b67732bafac28a05dfec86a0a48dd817172dc134c5745006b80f3706727d8a6",
+              "/opt/doxa/codex-provider/codex-code-mode-host-payload": "8dcd22a8d0defa6107e0b5650765c52cce006226cd5aa5655092611c3446831e",
+              "/opt/doxa/codex-provider/receipt.json": "4f49f7671a79fee82ada0ab21bbaaa2b513562af086af4ee8636021173ba937a",
+              "/usr/local/bin/codex": "05784a38b31c107d7f39310bb2d9068d20735a6bd2ceef6cc84e88690d9d6e84"
+            },
+            "egress": [
+              "example.com"
+            ],
+            "environment_keys": [],
+            "path": "/usr/local/bin/codex",
+            "proxy_port": 3129,
+            "sha256": "05784a38b31c107d7f39310bb2d9068d20735a6bd2ceef6cc84e88690d9d6e84"
+          }
+        },
+        "root": "/srv/doxa-quota-proof/composed-runtime-r5-20261013",
+        "session_id": "composed-runtime-r5-20261013",
+        "version": 1,
+        "worker": {
+          "path": "/usr/local/bin/doxa-isolation-worker",
+          "sha256": "cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f"
+        }
+      },
+      "report": {
+        "broker_sha256": "a04d2d5d0fb3df93cb3201d2d3e1cb322829ed4ddc5d52938e17fe0a95a0056f",
+        "cleanup": {
+          "5bffd31600f67a34e1ef295080381d161f9c8f2b984896fc4d064ca5250530d4": "404",
+          "broker_processes": {
+            "live_processes": [],
+            "processes": [
+              {
+                "group": 70309,
+                "pid": 70309,
+                "ppid": 70177,
+                "session": 70309,
+                "start": 1778201,
+                "uid": 0
+              },
+              {
+                "group": 70448,
+                "pid": 70448,
+                "ppid": 70309,
+                "session": 70448,
+                "start": 1778607,
+                "uid": 0
+              },
+              {
+                "group": 70555,
+                "pid": 70555,
+                "ppid": 70309,
+                "session": 70555,
+                "start": 1778718,
+                "uid": 0
+              },
+              {
+                "group": 70685,
+                "pid": 70685,
+                "ppid": 70309,
+                "session": 70685,
+                "start": 1778876,
+                "uid": 0
+              },
+              {
+                "group": 70803,
+                "pid": 70803,
+                "ppid": 70309,
+                "session": 70803,
+                "start": 1779001,
+                "uid": 0
+              },
+              {
+                "group": 71091,
+                "pid": 71091,
+                "ppid": 70309,
+                "session": 71091,
+                "start": 1779422,
+                "uid": 0
+              },
+              {
+                "group": 71183,
+                "pid": 71183,
+                "ppid": 70309,
+                "session": 71183,
+                "start": 1779472,
+                "uid": 0
+              }
+            ],
+            "socket_paths": [
+              "/run/doxa/hardened/composed-runtime-r5-20261013/broker.sock",
+              "/run/doxa/hardened/composed-runtime-r5-20261013/gateway-status.sock",
+              "/srv/doxa-quota-proof/composed-runtime-r5-20261013/broker/egress-claude.sock",
+              "/srv/doxa-quota-proof/composed-runtime-r5-20261013/broker/egress-codex.sock",
+              "/srv/doxa-quota-proof/composed-runtime-r5-20261013/broker/hook.sock"
+            ]
+          },
+          "cgroups": [
+            "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/user.slice/docker-5bffd31600f67a34e1ef295080381d161f9c8f2b984896fc4d064ca5250530d4.scope"
+          ],
+          "command_processes": [
+            {
+              "live_processes": [],
+              "processes": [
+                {
+                  "group": 70310,
+                  "pid": 70310,
+                  "ppid": 70177,
+                  "session": 70310,
+                  "start": 1778209,
+                  "uid": 1000
+                },
+                {
+                  "group": 70310,
+                  "pid": 70322,
+                  "ppid": 70310,
+                  "session": 70310,
+                  "start": 1778244,
+                  "uid": 1000
+                },
+                {
+                  "group": 70310,
+                  "pid": 70646,
+                  "ppid": 70310,
+                  "session": 70310,
+                  "start": 1778797,
+                  "uid": 1000
+                },
+                {
+                  "group": 70310,
+                  "pid": 70681,
+                  "ppid": 70310,
+                  "session": 70310,
+                  "start": 1778853,
+                  "uid": 1000
+                },
+                {
+                  "group": 70310,
+                  "pid": 70799,
+                  "ppid": 70310,
+                  "session": 70310,
+                  "start": 1778988,
+                  "uid": 1000
+                },
+                {
+                  "group": 70310,
+                  "pid": 70894,
+                  "ppid": 70310,
+                  "session": 70310,
+                  "start": 1779068,
+                  "uid": 1000
+                },
+                {
+                  "group": 70310,
+                  "pid": 70900,
+                  "ppid": 70310,
+                  "session": 70310,
+                  "start": 1779108,
+                  "uid": 1000
+                },
+                {
+                  "group": 70310,
+                  "pid": 71035,
+                  "ppid": 70310,
+                  "session": 70310,
+                  "start": 1779206,
+                  "uid": 1000
+                },
+                {
+                  "group": 70310,
+                  "pid": 71041,
+                  "ppid": 70310,
+                  "session": 70310,
+                  "start": 1779261,
+                  "uid": 1000
+                },
+                {
+                  "group": 70310,
+                  "pid": 71079,
+                  "ppid": 70310,
+                  "session": 70310,
+                  "start": 1779326,
+                  "uid": 1000
+                },
+                {
+                  "group": 70310,
+                  "pid": 71086,
+                  "ppid": 70310,
+                  "session": 70310,
+                  "start": 1779391,
+                  "uid": 1000
+                },
+                {
+                  "group": 70310,
+                  "pid": 71296,
+                  "ppid": 70310,
+                  "session": 70310,
+                  "start": 1779604,
+                  "uid": 1000
+                }
+              ],
+              "socket_paths": [
+                "/run/user/1000/doxa-hooks/review-aAdScQ/callback.sock"
+              ]
+            },
+            {
+              "live_processes": [],
+              "processes": [
+                {
+                  "group": 71335,
+                  "pid": 71335,
+                  "ppid": 70177,
+                  "session": 71335,
+                  "start": 1779657,
+                  "uid": 1000
+                }
+              ],
+              "socket_paths": []
+            }
+          ],
+          "container_census": 0,
+          "live_sockets": [],
+          "remaining_cgroups": [],
+          "remaining_processes": [],
+          "scoped_socket_files": [],
+          "stop_status": "stopped"
+        },
+        "client_sha256": "ac2180b4cb18b670248fad6716a4cdc4fadee2064d4bd6b7dc8ed30e5733888d",
+        "engine_pid_after": 27821,
+        "engine_pid_before": 27821,
+        "engine_pins": {
+          "api_version": "1.51",
+          "config_path": "/etc/doxa-proof/engine-daemon.json",
+          "config_sha256": "3a6774e75043931ce3dd1874bac3aabc86908a1bb21fe07c68eb7e46054f26c9",
+          "exe_path": "/usr/bin/dockerd",
+          "exe_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+          "gid": 1001,
+          "socket": "/run/user/1001/doxa-proof/docker.sock",
+          "uid": 1001
+        },
+        "engine_socket_after": [
+          56,
+          688
+        ],
+        "engine_socket_before": [
+          56,
+          688
+        ],
+        "error": "proof command failed: /usr/libexec/doxa/composed-runtime-r5-20261013-client: Error: Custom { kind: Other, error: \"actual ROOT workspace Git refused: fatal: unexpected line in /run/doxa/session/git-safe/5890d35545e549b7e242f9795a14f063/packed-refs: \\ndoxa isolation worker: worker Git command failed\\n\" }\n",
+        "gateway_sha256": "18d1d633a67aee1dd1bfd67eaf5de82ebcc42dfb0ef112198c6691439de98fe9",
+        "git_support_sha256": {
+          "/usr/bin/git": "5516c9f362c29376ab9a499a33082f9f611941d8c75930c880e30ad109e39c9a",
+          "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0": "4a6b6b2078685b074869d75cb068664d7da6b3036df7bca0442b1bbbd4ac7e65",
+          "/usr/lib/x86_64-linux-gnu/libz.so.1": "47b61967895b30e8c0c6818dd633ffeb87711cf637c688f981896f0dd84ce23b"
+        },
+        "image": "sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23",
+        "live_provider_verified": false,
+        "paid_calls": 0,
+        "project_id": 5013,
+        "provider_sha256": "05784a38b31c107d7f39310bb2d9068d20735a6bd2ceef6cc84e88690d9d6e84",
+        "receipt": {
+          "boot_id": "d606e7c5-c113-477e-b804-8449e367d706",
+          "broker_exe": "/usr/bin/python3.14",
+          "broker_exe_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+          "broker_script": "/usr/libexec/doxa/composed-runtime-r5-20261013-broker.py",
+          "broker_sha256": "a04d2d5d0fb3df93cb3201d2d3e1cb322829ed4ddc5d52938e17fe0a95a0056f",
+          "broker_socket": "/run/doxa/hardened/composed-runtime-r5-20261013/broker.sock",
+          "broker_uid": 0,
+          "caller_uid": 1000,
+          "contract": "doxa-root-session-broker-v1",
+          "policy_path": "/etc/doxa/hardened/composed-runtime-r5-20261013.json",
+          "policy_sha256": "5ea969083393e6b37e5bd9453b9e8a01339e097d42169610321f37dc404716b4",
+          "session_id": "composed-runtime-r5-20261013"
+        },
+        "scope": "actual-composed-root-runtime-fixture",
+        "session_id": "composed-runtime-r5-20261013",
+        "status": "failed",
+        "worker_sha256": "cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f"
+      },
+      "root_broker_log": "",
+      "root_manifest_after_cleanup": {
+        "boot_id": "d606e7c5-c113-477e-b804-8449e367d706",
+        "cid": "5bffd31600f67a34e1ef295080381d161f9c8f2b984896fc4d064ca5250530d4",
+        "engine_pid": 27821,
+        "engine_socket_dev": 56,
+        "engine_socket_ino": 688,
+        "gateway_pid": null,
+        "host_init_pid": 70381,
+        "policy_sha256": "5ea969083393e6b37e5bd9453b9e8a01339e097d42169610321f37dc404716b4",
+        "session_id": "composed-runtime-r5-20261013",
+        "status": "stopped",
+        "version": 1
+      },
+      "source_packed_refs": "# pack-refs with: peeled fully-peeled sorted \n"
+    },
+    {
+      "attempt": 6,
+      "case_progress": [
+        "actual Runtime prepare with harmless settings",
+        "actual Runtime ready and active",
+        "actual ROOT callback registered",
+        "Codex protected owner handshake and concurrent guard",
+        "actual source snapshot recheck and private review copy",
+        "actual callback fixture-only source review",
+        "actual source mutation refused stale proof",
+        "readonly Root Git and malicious filter purity",
+        "ordinary Root Git apply and guard",
+        "Claude actual worker settings digest and guard",
+        "Runtime stopped first CID",
+        "cold Runtime resume fresh CID guard stop"
+      ],
+      "harness_sha256": "785671628be2e923003f77f2804d629d444fc7f32da19e0bbdb1fd4fb10d9d9d",
+      "input_archive_sha256": "4480bce2f101e55b836bb1f7080a50a81d00f6a250fe4595f19c7271088f699e",
+      "installed_policy": {
+        "authority": {
+          "path": "/usr/libexec/doxa/doxa-hardened-gateway-composed5014",
+          "sha256": "18d1d633a67aee1dd1bfd67eaf5de82ebcc42dfb0ef112198c6691439de98fe9"
+        },
+        "broker": {
+          "path": "/usr/libexec/doxa/composed-runtime-r6-20261013-broker.py",
+          "sha256": "6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5"
+        },
+        "caller_uid": 1000,
+        "engine": {
+          "api_version": "1.51",
+          "config_path": "/etc/doxa-proof/engine-daemon.json",
+          "config_sha256": "3a6774e75043931ce3dd1874bac3aabc86908a1bb21fe07c68eb7e46054f26c9",
+          "exe_path": "/usr/bin/dockerd",
+          "exe_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+          "gid": 1001,
+          "socket": "/run/user/1001/doxa-proof/docker.sock",
+          "uid": 1001
+        },
+        "image": "sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23",
+        "limits": {
+          "cpu_period": 100000,
+          "cpu_quota": 100000,
+          "deadline_seconds": 300,
+          "disk_bytes": 67108864,
+          "memory_bytes": 536870912,
+          "operation_seconds": 120,
+          "output_bytes": 1048576,
+          "pids": 128,
+          "stdin_bytes": 1048576
+        },
+        "providers": {
+          "claude": {
+            "artifacts": {
+              "/usr/local/bin/claude": "05784a38b31c107d7f39310bb2d9068d20735a6bd2ceef6cc84e88690d9d6e84"
+            },
+            "egress": [
+              "example.com"
+            ],
+            "environment_keys": [],
+            "path": "/usr/local/bin/claude",
+            "proxy_port": 3128,
+            "sha256": "05784a38b31c107d7f39310bb2d9068d20735a6bd2ceef6cc84e88690d9d6e84"
+          },
+          "codex": {
+            "artifacts": {
+              "/opt/doxa/codex-provider/codex": "8e08726c5f12219925cf699c7491bf531d1dcc0673281a7107daa9b0516027ce",
+              "/opt/doxa/codex-provider/codex-app-server": "e898df90c9c2504f7b136621fc9efb1d91a5bd0d5e49cb8c52ffa854f9ff6666",
+              "/opt/doxa/codex-provider/codex-code-mode-host": "0b67732bafac28a05dfec86a0a48dd817172dc134c5745006b80f3706727d8a6",
+              "/opt/doxa/codex-provider/codex-code-mode-host-payload": "8dcd22a8d0defa6107e0b5650765c52cce006226cd5aa5655092611c3446831e",
+              "/opt/doxa/codex-provider/receipt.json": "4f49f7671a79fee82ada0ab21bbaaa2b513562af086af4ee8636021173ba937a",
+              "/usr/local/bin/codex": "05784a38b31c107d7f39310bb2d9068d20735a6bd2ceef6cc84e88690d9d6e84"
+            },
+            "egress": [
+              "example.com"
+            ],
+            "environment_keys": [],
+            "path": "/usr/local/bin/codex",
+            "proxy_port": 3129,
+            "sha256": "05784a38b31c107d7f39310bb2d9068d20735a6bd2ceef6cc84e88690d9d6e84"
+          }
+        },
+        "root": "/srv/doxa-quota-proof/composed-runtime-r6-20261013",
+        "session_id": "composed-runtime-r6-20261013",
+        "version": 1,
+        "worker": {
+          "path": "/usr/local/bin/doxa-isolation-worker",
+          "sha256": "cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f"
+        }
+      },
+      "installed_quota_policy": {
+        "bindings": {
+          "broker": {
+            "device": 1792,
+            "inode": 143,
+            "mount_id": 2147500504
+          },
+          "cache": {
+            "device": 1792,
+            "inode": 137,
+            "mount_id": 2147500504
+          },
+          "checkout": {
+            "device": 1792,
+            "inode": 134,
+            "mount_id": 2147500504
+          },
+          "home": {
+            "device": 1792,
+            "inode": 136,
+            "mount_id": 2147500504
+          },
+          "root": {
+            "device": 1792,
+            "inode": 8199,
+            "mount_id": 2147500504
+          }
+        },
+        "boot_id": "d606e7c5-c113-477e-b804-8449e367d706",
+        "caller_uid": 1000,
+        "engine_gid": 1001,
+        "engine_uid": 1001,
+        "hard_limit_bytes": 67108864,
+        "project_id": 5014,
+        "root": "/srv/doxa-quota-proof/composed-runtime-r6-20261013",
+        "security_contract_version": 1,
+        "session_id": "composed-runtime-r6-20261013",
+        "version": 2,
+        "worker_binary_sha256": "cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f",
+        "worker_image": "sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23"
+      },
+      "report": {
+        "broker_sha256": "6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5",
+        "cases_completed": true,
+        "cleanup": {
+          "30315fe202c411b5bebc5a024ff3ad9b70c6b024a0b647fef587f0b05e9b627a": "404",
+          "466035ac8b3127e1396e3907035a09c9b5e70f1da8c6171958319fbd2bc18a97": "404",
+          "broker_processes": {
+            "live_processes": [],
+            "processes": [
+              {
+                "group": 71967,
+                "pid": 71967,
+                "ppid": 71958,
+                "session": 71967,
+                "start": 1831750,
+                "uid": 0
+              },
+              {
+                "group": 72102,
+                "pid": 72102,
+                "ppid": 71967,
+                "session": 72102,
+                "start": 1832157,
+                "uid": 0
+              },
+              {
+                "group": 72211,
+                "pid": 72211,
+                "ppid": 71967,
+                "session": 72211,
+                "start": 1832269,
+                "uid": 0
+              },
+              {
+                "group": 72342,
+                "pid": 72342,
+                "ppid": 71967,
+                "session": 72342,
+                "start": 1832426,
+                "uid": 0
+              },
+              {
+                "group": 72461,
+                "pid": 72461,
+                "ppid": 71967,
+                "session": 72461,
+                "start": 1832550,
+                "uid": 0
+              },
+              {
+                "group": 72749,
+                "pid": 72749,
+                "ppid": 71967,
+                "session": 72749,
+                "start": 1832971,
+                "uid": 0
+              },
+              {
+                "group": 72841,
+                "pid": 72841,
+                "ppid": 71967,
+                "session": 72841,
+                "start": 1833021,
+                "uid": 0
+              },
+              {
+                "group": 72959,
+                "pid": 72959,
+                "ppid": 71967,
+                "session": 72959,
+                "start": 1833200,
+                "uid": 0
+              },
+              {
+                "group": 73051,
+                "pid": 73051,
+                "ppid": 71967,
+                "session": 73051,
+                "start": 1833254,
+                "uid": 0
+              },
+              {
+                "group": 73168,
+                "pid": 73168,
+                "ppid": 71967,
+                "session": 73168,
+                "start": 1833459,
+                "uid": 0
+              },
+              {
+                "group": 73260,
+                "pid": 73260,
+                "ppid": 71967,
+                "session": 73260,
+                "start": 1833507,
+                "uid": 0
+              },
+              {
+                "group": 73377,
+                "pid": 73377,
+                "ppid": 71967,
+                "session": 73377,
+                "start": 1833665,
+                "uid": 0
+              },
+              {
+                "group": 73474,
+                "pid": 73474,
+                "ppid": 71967,
+                "session": 73474,
+                "start": 1833780,
+                "uid": 0
+              },
+              {
+                "group": 73591,
+                "pid": 73591,
+                "ppid": 71967,
+                "session": 73591,
+                "start": 1833903,
+                "uid": 0
+              },
+              {
+                "group": 73932,
+                "pid": 73932,
+                "ppid": 71967,
+                "session": 73932,
+                "start": 1834528,
+                "uid": 0
+              },
+              {
+                "group": 74039,
+                "pid": 74039,
+                "ppid": 71967,
+                "session": 74039,
+                "start": 1834640,
+                "uid": 0
+              },
+              {
+                "group": 74134,
+                "pid": 74134,
+                "ppid": 71967,
+                "session": 74134,
+                "start": 1834716,
+                "uid": 0
+              }
+            ],
+            "socket_paths": [
+              "/run/doxa/hardened/composed-runtime-r6-20261013/broker.sock",
+              "/run/doxa/hardened/composed-runtime-r6-20261013/gateway-status.sock",
+              "/srv/doxa-quota-proof/composed-runtime-r6-20261013/broker/egress-claude.sock",
+              "/srv/doxa-quota-proof/composed-runtime-r6-20261013/broker/egress-codex.sock",
+              "/srv/doxa-quota-proof/composed-runtime-r6-20261013/broker/hook.sock"
+            ]
+          },
+          "cgroups": [
+            "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/user.slice/docker-30315fe202c411b5bebc5a024ff3ad9b70c6b024a0b647fef587f0b05e9b627a.scope",
+            "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/user.slice/docker-466035ac8b3127e1396e3907035a09c9b5e70f1da8c6171958319fbd2bc18a97.scope"
+          ],
+          "command_processes": [
+            {
+              "live_processes": [],
+              "processes": [
+                {
+                  "group": 71968,
+                  "pid": 71968,
+                  "ppid": 71958,
+                  "session": 71968,
+                  "start": 1831757,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 71980,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1831791,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 72303,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1832347,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 72338,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1832402,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 72457,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1832537,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 72552,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1832618,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 72558,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1832657,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 72693,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1832755,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 72699,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1832810,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 72737,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1832875,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 72744,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1832941,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 72954,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1833167,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 73163,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1833429,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 73373,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1833652,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 73468,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1833755,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 73587,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1833891,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 73682,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1833996,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 73716,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1834043,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 73811,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1834147,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 74130,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1834703,
+                  "uid": 1000
+                },
+                {
+                  "group": 71968,
+                  "pid": 74225,
+                  "ppid": 71968,
+                  "session": 71968,
+                  "start": 1834762,
+                  "uid": 1000
+                }
+              ],
+              "socket_paths": [
+                "/run/user/1000/doxa-hooks/review-fCZnYw/callback.sock"
+              ]
+            },
+            {
+              "live_processes": [],
+              "processes": [
+                {
+                  "group": 74260,
+                  "pid": 74260,
+                  "ppid": 71958,
+                  "session": 74260,
+                  "start": 1834857,
+                  "uid": 1000
+                }
+              ],
+              "socket_paths": []
+            }
+          ],
+          "container_census": 0,
+          "live_sockets": [],
+          "remaining_cgroups": [],
+          "remaining_processes": [],
+          "scoped_socket_files": [],
+          "stop_status": "stopped"
+        },
+        "client": {
+          "actual_hook": {
+            "op": "hook",
+            "result": {
+              "continue": true,
+              "fixtureApproved": true
+            },
+            "returncode": 0,
+            "stderr_bytes": 0
+          },
+          "body_elapsed_ms": 30586,
+          "callback_reviews": [
+            {
+              "fixture_approval_only": true,
+              "review_private": true,
+              "session_id": "composed-runtime-r6-20261013",
+              "source_proof": {
+                "boot_id": "d606e7c5-c113-477e-b804-8449e367d706",
+                "bytes": 264,
+                "chunk_sha256": "a14d645638084714dd7fa7e0b1ee148a69667ff5d8670d4fdef86bddef70b22e",
+                "cid": "466035ac8b3127e1396e3907035a09c9b5e70f1da8c6171958319fbd2bc18a97",
+                "family": "codex",
+                "offset": 0,
+                "policy_sha256": "2c65be7ae393e3febbeeb4c2cd96ce0ab18c27f1d88737c62cb2c058f46558f6",
+                "protocol": "doxa-root-session-broker-v1",
+                "session_id": "composed-runtime-r6-20261013",
+                "sha256": "a14d645638084714dd7fa7e0b1ee148a69667ff5d8670d4fdef86bddef70b22e",
+                "size": 264,
+                "source": {
+                  "ctime": 1791873616,
+                  "ctime_nsec": 313515074,
+                  "device": 1792,
+                  "inode": 182,
+                  "mtime": 1791873616,
+                  "mtime_nsec": 313515074,
+                  "relative": "codex/sessions/rollout-composed.jsonl",
+                  "sha256": "a14d645638084714dd7fa7e0b1ee148a69667ff5d8670d4fdef86bddef70b22e",
+                  "size": 264,
+                  "thread": "composed-thread-20261013"
+                },
+                "status": "snapshot"
+              }
+            }
+          ],
+          "cid": "466035ac8b3127e1396e3907035a09c9b5e70f1da8c6171958319fbd2bc18a97",
+          "claude_ready": {
+            "family": "claude",
+            "op": "ready",
+            "owner_handshake": false,
+            "pid": 70,
+            "settings": {
+              "bytes": 46,
+              "marker": "composed-config-20261013",
+              "mode": 384,
+              "sha256": "2a640f0306cf55f991321ca0e537fc940244ffaed504e02eb0b0f9bfe5a06fe3",
+              "uid": 0
+            },
+            "uid": 0
+          },
+          "git_apply": {
+            "argv": [
+              "apply",
+              "--whitespace=nowarn",
+              "-"
+            ],
+            "stderr_bytes": 0,
+            "stdout": "",
+            "success": true
+          },
+          "git_diff": {
+            "argv": [
+              "--no-pager",
+              "diff",
+              "--no-ext-diff",
+              "--no-textconv",
+              "--find-renames",
+              "--unified=3",
+              "HEAD",
+              "--"
+            ],
+            "stderr_bytes": 0,
+            "stdout": "diff --git a/filtered.txt b/filtered.txt\nindex 5ed54b3..0897d03 100644\n--- a/filtered.txt\n+++ b/filtered.txt\n@@ -1 +1 @@\n-safe initial fixture\n+changed with untrusted filter config\n",
+            "success": true
+          },
+          "git_markers": {
+            "diff_marker": false,
+            "filter_marker": false,
+            "op": "markers",
+            "plain": "after\n"
+          },
+          "git_readonly": {
+            "errno": 13,
+            "generation": "ac6d4d1a776d32f566b5b61af6f08bac",
+            "op": "write-git-view"
+          },
+          "git_status": {
+            "argv": [
+              "-c",
+              "core.quotepath=false",
+              "status",
+              "--porcelain"
+            ],
+            "stderr_bytes": 0,
+            "stdout": " M filtered.txt\n",
+            "success": true
+          },
+          "guard_during_persistent_stdio": true,
+          "live_provider_verified": false,
+          "local_pipe_deadline_scope": "host-pidfd-supervisor360s; Git-command-exit45s; body-pass-oracle300s",
+          "paid_calls": 0,
+          "policy_sha256": "2c65be7ae393e3febbeeb4c2cd96ce0ab18c27f1d88737c62cb2c058f46558f6",
+          "private_review_copy": true,
+          "protected_codex_ready": {
+            "family": "codex",
+            "op": "ready",
+            "owner_handshake": true,
+            "pid": 39,
+            "settings": null,
+            "uid": 0
+          },
+          "resume_scope": "cold-runtime-new-lease-guard-stop",
+          "resumed_and_stopped": true,
+          "resumed_cid": "30315fe202c411b5bebc5a024ff3ad9b70c6b024a0b647fef587f0b05e9b627a",
+          "runtime_prepared": true,
+          "scope": "actual-root-runtime-client-credential-free",
+          "session_id": "composed-runtime-r6-20261013",
+          "snapshot": {
+            "boot_id": "d606e7c5-c113-477e-b804-8449e367d706",
+            "bytes": 264,
+            "chunk_sha256": "a14d645638084714dd7fa7e0b1ee148a69667ff5d8670d4fdef86bddef70b22e",
+            "cid": "466035ac8b3127e1396e3907035a09c9b5e70f1da8c6171958319fbd2bc18a97",
+            "family": "codex",
+            "offset": 0,
+            "policy_sha256": "2c65be7ae393e3febbeeb4c2cd96ce0ab18c27f1d88737c62cb2c058f46558f6",
+            "protocol": "doxa-root-session-broker-v1",
+            "session_id": "composed-runtime-r6-20261013",
+            "sha256": "a14d645638084714dd7fa7e0b1ee148a69667ff5d8670d4fdef86bddef70b22e",
+            "size": 264,
+            "source": {
+              "ctime": 1791873616,
+              "ctime_nsec": 313515074,
+              "device": 1792,
+              "inode": 182,
+              "mtime": 1791873616,
+              "mtime_nsec": 313515074,
+              "relative": "codex/sessions/rollout-composed.jsonl",
+              "sha256": "a14d645638084714dd7fa7e0b1ee148a69667ff5d8670d4fdef86bddef70b22e",
+              "size": 264,
+              "thread": "composed-thread-20261013"
+            },
+            "status": "snapshot"
+          },
+          "source_mutation_refused": true,
+          "stopped": true,
+          "worker_uid_namespace": "container-user-namespace UID0 mapped to hostEngineUID1001"
+        },
+        "client_sha256": "ac2180b4cb18b670248fad6716a4cdc4fadee2064d4bd6b7dc8ed30e5733888d",
+        "client_stdout": "{\"paid_calls\":0,\"scope\":\"actual-root-runtime-client-credential-free\",\"session_id\":\"composed-runtime-r6-20261013\",\"status\":\"passed\"}\n",
+        "engine_pid_after": 27821,
+        "engine_pid_before": 27821,
+        "engine_pins": {
+          "api_version": "1.51",
+          "config_path": "/etc/doxa-proof/engine-daemon.json",
+          "config_sha256": "3a6774e75043931ce3dd1874bac3aabc86908a1bb21fe07c68eb7e46054f26c9",
+          "exe_path": "/usr/bin/dockerd",
+          "exe_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+          "gid": 1001,
+          "socket": "/run/user/1001/doxa-proof/docker.sock",
+          "uid": 1001
+        },
+        "engine_socket_after": [
+          56,
+          688
+        ],
+        "engine_socket_before": [
+          56,
+          688
+        ],
+        "gateway_sha256": "18d1d633a67aee1dd1bfd67eaf5de82ebcc42dfb0ef112198c6691439de98fe9",
+        "git_support_sha256": {
+          "/usr/bin/git": "5516c9f362c29376ab9a499a33082f9f611941d8c75930c880e30ad109e39c9a",
+          "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0": "4a6b6b2078685b074869d75cb068664d7da6b3036df7bca0442b1bbbd4ac7e65",
+          "/usr/lib/x86_64-linux-gnu/libz.so.1": "47b61967895b30e8c0c6818dd633ffeb87711cf637c688f981896f0dd84ce23b"
+        },
+        "host_settings": {
+          "bytes": 46,
+          "device": 1792,
+          "gid": 1001,
+          "identity_namespace": "host",
+          "inode": 185,
+          "matches_actual_worker": true,
+          "mode": 384,
+          "nlink": 1,
+          "sha256": "2a640f0306cf55f991321ca0e537fc940244ffaed504e02eb0b0f9bfe5a06fe3",
+          "uid": 1001
+        },
+        "image": "sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23",
+        "live_provider_verified": false,
+        "paid_calls": 0,
+        "project_id": 5014,
+        "provider_sha256": "05784a38b31c107d7f39310bb2d9068d20735a6bd2ceef6cc84e88690d9d6e84",
+        "receipt": {
+          "boot_id": "d606e7c5-c113-477e-b804-8449e367d706",
+          "broker_exe": "/usr/bin/python3.14",
+          "broker_exe_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+          "broker_script": "/usr/libexec/doxa/composed-runtime-r6-20261013-broker.py",
+          "broker_sha256": "6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5",
+          "broker_socket": "/run/doxa/hardened/composed-runtime-r6-20261013/broker.sock",
+          "broker_uid": 0,
+          "caller_uid": 1000,
+          "contract": "doxa-root-session-broker-v1",
+          "policy_path": "/etc/doxa/hardened/composed-runtime-r6-20261013.json",
+          "policy_sha256": "2c65be7ae393e3febbeeb4c2cd96ce0ab18c27f1d88737c62cb2c058f46558f6",
+          "session_id": "composed-runtime-r6-20261013"
+        },
+        "scope": "actual-composed-root-runtime-fixture",
+        "session_id": "composed-runtime-r6-20261013",
+        "status": "passed",
+        "worker_sha256": "cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f"
+      },
+      "root_broker_log": "",
+      "root_gateway_instance": {
+        "boot_id": "d606e7c5-c113-477e-b804-8449e367d706",
+        "cid": "30315fe202c411b5bebc5a024ff3ad9b70c6b024a0b647fef587f0b05e9b627a",
+        "contract": "doxa-root-gateway-instance-v1",
+        "exe_path": "/usr/libexec/doxa/doxa-hardened-gateway-composed5014",
+        "exe_sha256": "18d1d633a67aee1dd1bfd67eaf5de82ebcc42dfb0ef112198c6691439de98fe9",
+        "pid": 73932,
+        "policy_sha256": "2c65be7ae393e3febbeeb4c2cd96ce0ab18c27f1d88737c62cb2c058f46558f6",
+        "session_id": "composed-runtime-r6-20261013",
+        "socket_dev": 28,
+        "socket_ino": 12051,
+        "start_time": 1834528
+      },
+      "root_manifest_after_cleanup": {
+        "boot_id": "d606e7c5-c113-477e-b804-8449e367d706",
+        "cid": "30315fe202c411b5bebc5a024ff3ad9b70c6b024a0b647fef587f0b05e9b627a",
+        "engine_pid": 27821,
+        "engine_socket_dev": 56,
+        "engine_socket_ino": 688,
+        "gateway_pid": null,
+        "host_init_pid": 73866,
+        "policy_sha256": "2c65be7ae393e3febbeeb4c2cd96ce0ab18c27f1d88737c62cb2c058f46558f6",
+        "session_id": "composed-runtime-r6-20261013",
+        "status": "stopped",
+        "version": 1
+      },
+      "rust_example_sha256": "da2b288b68aed1e937eff3725fa18d7d2bcab2a55ce13d92f77c4e8c0ae3fafa",
+      "source_commits": {
+        "broker_packed_refs": [
+          "b63e8ea32be10eaeeb042223a96fd86bd640dbe5",
+          "d79c206fae080861af46e6149248bce2b3fedf4a"
+        ],
+        "harness_policy_window": "3ae429072ce70089c864dd7844d5153cc63ee30d",
+        "native_release": "f9b6d0891d1535ba3b5226d1f182b78ca7744ad1",
+        "native_status_deadline": "de51ab391d3e0bb827bcbb95ed6ed6e3fee19dfd",
+        "rust_namespace_settings": "ced3981872877163cbd2c07148a17696aca8d0aa"
+      },
+      "staged_input_sha256": {
+        "/root/isolation-proof/composed-code-r6-20261013/git-support/file0": "5516c9f362c29376ab9a499a33082f9f611941d8c75930c880e30ad109e39c9a",
+        "/root/isolation-proof/composed-code-r6-20261013/git-support/file1": "4a6b6b2078685b074869d75cb068664d7da6b3036df7bca0442b1bbbd4ac7e65",
+        "/root/isolation-proof/composed-code-r6-20261013/git-support/file2": "47b61967895b30e8c0c6818dd633ffeb87711cf637c688f981896f0dd84ce23b",
+        "/root/isolation-proof/composed-code-r6-20261013/git-support/manifest.json": "7f1e9839983a911cfc1c09c774b251ec39aa162993c5ef21c97d6407e1a4c93b",
+        "/root/isolation-proof/composed-code-r6-20261013/hardened_composed_client": "ac2180b4cb18b670248fad6716a4cdc4fadee2064d4bd6b7dc8ed30e5733888d",
+        "/root/isolation-proof/composed-code-r6-20261013/prove_hardened_composed_guest.py": "785671628be2e923003f77f2804d629d444fc7f32da19e0bbdb1fd4fb10d9d9d",
+        "/root/isolation-proof/composed-code-r6-20261013/root_broker.py": "6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5",
+        "/usr/libexec/doxa/doxa-hardened-gateway-composed5014": "18d1d633a67aee1dd1bfd67eaf5de82ebcc42dfb0ef112198c6691439de98fe9",
+        "/usr/libexec/doxa/doxa-isolation-worker-composed5014": "cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f"
+      }
+    }
+  ],
+  "canonical_human_review_verified": false,
+  "complete": true,
+  "daemon_frontend_verified": false,
+  "paid_calls": 0,
+  "remaining": "Composed Runtime fixture scope passed. Cold resume proves a fresh lease, live guard and stop, without provider checkpoint/session conservation. Daemon/frontend proof is separate and pending; real vendor providers, owner credentials and canonical human review remain outside this credential-free fixture scope.",
+  "runtime_fixture_verified": true,
+  "scope": "disposable-root-runtime-composition-fixture",
+  "vendor_provider_verified": false,
+  "version": 1
+}

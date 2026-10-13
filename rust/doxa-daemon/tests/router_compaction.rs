@@ -51,9 +51,21 @@ impl Server {
     }
     fn posts(&self) -> Vec<Value> {self.requests.lock().unwrap().iter().filter(|row|row["method"]=="POST").map(|row|row["body"].clone()).collect()}
 }
-impl Drop for Server {fn drop(&mut self) {self.stop.store(true,Ordering::Release);self.task.take().unwrap().join().unwrap();}}
+impl Drop for Server {fn drop(&mut self) {self.stop.store(true,Ordering::Release);let joined=self.task.take().unwrap().join();if !thread::panicking(){assert!(joined.is_ok(),"fixture server failed");}}}
 
 struct Env { root: tempfile::TempDir }
+impl Drop for Env {
+    fn drop(&mut self) {
+        for runtime in [self.path().join("run"),self.path().join("run-resume"),self.path().join("fleets/router-fleet/rt")] {
+            for entry in fs::read_dir(runtime.join("registry")).into_iter().flatten().filter_map(Result::ok) {
+                if entry.path().extension().is_none_or(|extension|extension!="json"){continue;}
+                if let Some(path)=fs::read(entry.path()).ok().and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok()).and_then(|value|value["daemon_socket"].as_str().map(str::to_owned)) {
+                    if let Ok(mut socket)=UnixStream::connect(path){let _=writeln!(socket,"{}",json!({"type":"call","id":99999,"method":"stop","params":{}}));}
+                }
+            }
+        }
+    }
+}
 impl Env {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
@@ -88,6 +100,7 @@ impl Env {
         if let Some(model)=model {cmd.args(["--model",model]);}
         if router_key {cmd.env("TYPESAFE_API_KEY","local-jev-fixture-key");}
         cmd.env("PATH","/usr/bin:/bin").env("HOME",self.path().join("home")).env("DOXA_HOME",self.path().join("doxa"))
+            .env("TMPDIR",std::env::var_os("TMPDIR").unwrap())
             .env("LORE_ROOT",self.path().join("lore")).env("LORE_PROJECTS_DIR",self.path().join("projects")).env("LORE_SKILLS_DIR",self.path().join("skills"))
             .env("LORE_DISABLE_SYNC","1").env("DOXA_LORE_RS",self.path().join("review-worker")).env("REVIEW_CAPTURE",self.path().join("review.json"))
             .env("REVIEW_MODE",review).env("SOURCE_PATH",self.project().join("compact.jsonl"))
@@ -115,6 +128,190 @@ impl Daemon {
     fn stop(mut self) {self.call("stop",json!({}));wait(||self.child.try_wait().unwrap().is_some());}
 }
 impl Drop for Daemon {fn drop(&mut self) {let _=self.child.kill();let _=self.child.wait();}}
+
+#[test]
+fn automatic_compaction_reviews_before_the_worker_and_keeps_one_terminal_boundary() {
+    let env=Env::new();let path=env.path().join("router.json");
+    let mut config:Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();config["auto_compact_percent"]=json!(80);fs::write(&path,config.to_string()).unwrap();
+    let mut ordinary=0;
+    let server=Server::new(move|body| {
+        let text=if summary(body) {"AUTOMATIC REVIEWED SUMMARY".into()} else {ordinary+=1;if ordinary==1 {"past public detail ".repeat(2000)} else {"followup answer".into()}};
+        (response(body,&text),Duration::ZERO)
+    });
+    let mut daemon=env.daemon(&server,false,Some("ds"),"approve",false);
+    assert_eq!(daemon.prompt("original user")["data"]["is_error"],false);
+    let originals=env.originals();daemon.start("followup user");let mut frames=Vec::new();
+    loop {let frame=receive(&mut daemon.reader);let terminal=matches!(frame["event"]["type"].as_str(),Some("turn_done"|"turn_refused"));frames.push(frame);if terminal {break;}}
+    assert_eq!(frames.last().unwrap()["event"]["data"]["is_error"],false,"{frames:?}");
+    assert_eq!(frames.iter().filter(|row|row["event"]["type"]=="turn_done").count(),1);
+    assert!(frames.iter().any(|row|row["event"]["type"]=="router_auto_compaction_started"));
+    assert!(frames.iter().any(|row|row["event"]["type"]=="router_auto_compaction_finished" && row["event"]["data"]["is_error"]==false));
+    let posts=server.posts();assert_eq!(posts.len(),3);assert!(summary(&posts[1]));assert!(posts[2].to_string().contains("AUTOMATIC REVIEWED SUMMARY"));
+    assert!(!posts[2].to_string().contains("past public detail"));assert!(env.originals().0.starts_with(&originals.0));
+    assert_eq!(env.state()["pinned"],"ds");assert_eq!(env.state()["router"]["calls"],0);assert_eq!(env.state()["receipts"][1]["operation"],"compact");
+    assert_eq!(env.state()["worker"]["input_tokens"],9);
+    daemon.stop();let mut resumed=env.daemon(&server,true,None,"approve",false);
+    assert_eq!(resumed.prompt("after resume")["data"]["is_error"],false);assert_eq!(server.posts().len(),4);resumed.stop();
+}
+
+#[test]
+fn automatic_compaction_disabled_denied_or_unknown_usage_withholds_the_ordinary_turn() {
+    for mode in ["disabled","deny","unknown"] {
+        let env=Env::new();let path=env.path().join("router.json");
+        let mut config:Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();config["auto_compact_percent"]=json!(80);fs::write(&path,config.to_string()).unwrap();
+        let server=Server::new(move|body| {
+            if summary(body) && mode=="unknown" {return (format!("data: {}\n\ndata: [DONE]\n\n",json!({"model":body["model"],"choices":[{"finish_reason":"stop","delta":{"content":"unaccounted summary"}}]})),Duration::ZERO);}
+            (response(body,&"past public detail ".repeat(2000)),Duration::ZERO)
+        });
+        let mut daemon=env.daemon(&server,false,Some("ds"),if mode=="deny"{"deny"}else{"approve"},mode=="disabled");
+        assert_eq!(daemon.prompt("original")["data"]["is_error"],false);let originals=env.originals();
+        assert_eq!(daemon.prompt("withheld ordinary turn")["type"],"turn_refused");assert_eq!(env.originals(),originals);
+        assert_eq!(server.posts().len(),if mode=="unknown"{2}else{1});
+        assert_eq!(env.state()["worker"]["accounting_unknown"],mode=="unknown");
+        if mode=="unknown" {assert!(env.state()["pending_compaction"].is_object());assert_eq!(daemon.prompt("do not retry")["type"],"turn_refused");assert_eq!(server.posts().len(),2);}
+        daemon.stop();
+    }
+}
+
+#[test]
+fn routed_worker_spawns_a_reviewed_real_child_with_its_own_worktree_and_disjoint_durable_allowance() {
+    let env=Env::new();
+    let git=|args:&[&str]|{let output=Command::new("git").args(args).current_dir(env.cwd()).env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_NOSYSTEM","1").output().unwrap();assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));};
+    git(&["init"]);fs::write(env.cwd().join("tracked"),"original checkout").unwrap();git(&["add","tracked"]);
+    git(&["-c","user.name=Fixture","-c","user.email=fixture@example.invalid","commit","-m","feat: router spawn fixture"]);
+    fs::write(env.path().join("doxa/config.toml"),"spawn_sessions=true\nworktree_per_session=true\nlore=false\n").unwrap();
+    fs::set_permissions(env.path().join("doxa/config.toml"),fs::Permissions::from_mode(0o600)).unwrap();
+    let mut parent_posts=0;
+    let server=Server::new(move|body| {
+        if body["model"]=="deepseek-flash" {parent_posts+=1;if parent_posts==1 {
+            assert!(body["tools"].as_array().unwrap().iter().any(|row|row["function"]["name"]=="spawn_session"));
+            return (format!("data: {}\n\ndata: [DONE]\n\n",json!({"model":body["model"],"choices":[{"finish_reason":"tool_calls","delta":{"tool_calls":[{"index":0,"id":"spawn-reviewed-child","function":{"name":"spawn_session","arguments":json!({"task":"Review a dummy task in your own worktree","model":"glm"}).to_string()}}]}}],"usage":{"prompt_tokens":3,"completion_tokens":4}})),Duration::ZERO);
+        }}
+        (response(body,if body["model"]=="deepseek-flash"{"parent finished"}else{"child finished"}),Duration::ZERO)
+    });
+    let mut daemon=env.daemon(&server,false,Some("ds"),"approve",false);daemon.start("Delegate the dummy task");let mut spawn_reviewed=false;
+    loop {let frame=receive(&mut daemon.reader);
+        if frame["event"]["type"]=="needs_input" {
+            if frame["event"]["data"]["kind"]=="spawn" {
+                spawn_reviewed=true;let body=frame["event"]["data"]["body"].as_str().unwrap();
+                assert!(body.contains("Reviewed Router config:"));assert!(body.contains("Child tracked ceiling:"));
+                let state=env.state();assert_eq!(state["incomplete"],true);assert!(state["worker"]["retained_reservation_usd_micros"].as_u64().unwrap()>0);assert!(state["allocations"].as_array().unwrap().is_empty());
+            }
+            daemon.id+=1;send(&mut daemon.socket,json!({"type":"call","id":daemon.id,"method":"answer_needs_input","params":{"id":frame["event"]["data"]["id"],"answer":{"decision":"allow"}}}));
+        }
+        if matches!(frame["event"]["type"].as_str(),Some("turn_done"|"turn_refused")) {assert_eq!(frame["event"]["data"]["is_error"],false,"{frame}");break;}
+    }
+    assert!(spawn_reviewed);let state=env.state();let allocation=&state["allocations"][0];let child_id=allocation["child_session_id"].as_str().unwrap();
+    let child_record=env.path().join("run/registry").join(format!("{child_id}.json"));let registry:Value=serde_json::from_slice(&fs::read(&child_record).unwrap()).unwrap();
+    assert_eq!(registry["parent_session_id"],"compact");assert_eq!(registry["engine"],"router");
+    let parent_registry:Value=serde_json::from_slice(&fs::read(env.path().join("run/registry/compact.json")).unwrap()).unwrap();
+    assert_ne!(registry["cwd"],parent_registry["cwd"]);assert_ne!(registry["cwd"],json!(env.cwd()));
+    let child_journal=env.path().join("doxa/router").join(format!("{child_id}.router.json"));
+    wait(||{let state:Value=serde_json::from_slice(&fs::read(&child_journal).unwrap()).unwrap();state["turn"]==1 && state["incomplete"]==false});
+    let mut child_socket=UnixStream::connect(registry["daemon_socket"].as_str().unwrap()).unwrap();child_socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut child_reader=BufReader::new(child_socket.try_clone().unwrap());let hello=receive(&mut child_reader);assert_eq!(hello["model"],"glm");
+    send(&mut child_socket,json!({"type":"attach","cursor":null}));
+    let deadline=Instant::now()+Duration::from_secs(10);let mut request_id=101;
+    loop {
+        send(&mut child_socket,json!({"type":"call","id":request_id,"method":"get_state","params":{}}));
+        let state=loop{let frame=receive(&mut child_reader);if frame["id"]==request_id{break frame;}};
+        if state["running"]==false{break;}
+        assert!(Instant::now()<deadline,"child must finish its admitted dummy task");request_id+=1;thread::sleep(Duration::from_millis(5));
+    }
+    let child:Value=serde_json::from_slice(&fs::read(&child_journal).unwrap()).unwrap();assert_eq!(child["inherited"],*allocation);
+    assert_eq!(child["identity"]["config_sha256"],state["identity"]["config_sha256"]);assert_eq!(child["identity"]["ceiling_usd_micros"],allocation["ceiling_usd_micros"]);
+    assert_eq!(child["worker"]["input_tokens"],3);assert_eq!(child["worker"]["output_tokens"],4);
+    assert!(state["worker"]["estimated_actual_usd_micros"].as_u64().unwrap()+allocation["ceiling_usd_micros"].as_u64().unwrap()<=2_000_000);
+    assert_eq!(registry["repo_root"],parent_registry["repo_root"]);
+    let projects=fs::read_dir(env.path().join("projects")).unwrap().filter_map(Result::ok).map(|entry|entry.path())
+        .filter(|project|project.join("compact.messages.json").exists()).collect::<Vec<_>>();assert_eq!(projects.len(),1);
+    let child_messages:Value=serde_json::from_slice(&fs::read(projects[0].join(format!("{child_id}.messages.json"))).unwrap()).unwrap();
+    assert!(child_messages["messages"][0]["content"].as_str().unwrap().contains("[SPAWNED SESSION]"));assert!(child_messages.to_string().contains("Review a dummy task"));
+    request_id+=1;send(&mut child_socket,json!({"type":"call","id":request_id,"method":"stop","params":{}}));loop {if receive(&mut child_reader)["id"]==request_id{break;}}wait(||!child_record.exists());
+    assert_eq!(server.posts().len(),3);daemon.stop();let mut resumed=env.daemon(&server,true,None,"approve",false);
+    assert_eq!(env.state()["allocations"],state["allocations"]);assert_eq!(resumed.call("get_settings",json!({}))["model"],"ds");resumed.stop();
+}
+
+#[test]
+fn automatic_compaction_cancelled_during_review_submits_neither_summary_nor_worker() {
+    let env=Env::new();let path=env.path().join("router.json");let mut config:Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();config["auto_compact_percent"]=json!(80);fs::write(path,config.to_string()).unwrap();
+    let server=Server::new(|body|(response(body,&"past public detail ".repeat(2000)),Duration::ZERO));let mut daemon=env.daemon(&server,false,Some("ds"),"wait",false);
+    assert_eq!(daemon.prompt("original")["data"]["is_error"],false);daemon.start("cancelled followup");
+    loop {let frame=receive(&mut daemon.reader);if frame["event"]["type"]=="router_auto_compaction_started" {break;}}
+    wait(||env.path().join("review.json").exists());daemon.interrupt();assert_eq!(daemon.finish()["type"],"turn_refused");assert_eq!(server.posts().len(),1);
+    assert!(env.state()["pending_compaction"].is_null());assert_eq!(env.state()["incomplete"],false);daemon.stop();
+}
+
+#[test]
+fn actual_router_fleet_start_and_controller_resume_keep_disjoint_limits_without_redelivery() {
+    const MODE:&str="DOXA_ROUTER_FLEET_FIXTURE_MODE";
+    if let Ok(mode)=std::env::var(MODE) {
+        let root=PathBuf::from(std::env::var_os("DOXA_ROUTER_FLEET_FIXTURE_ROOT").unwrap());
+        if mode=="start" {
+            let args=vec!["--pool".into(),"router:ds".into(),"--router-config".into(),root.join("router.json").to_str().unwrap().into(),
+                "--prompt".into(),"Complete the bounded dummy task".into(),"--sessions".into(),"2".into(),"--run-budget".into(),"4".into(),
+                "--root".into(),root.join("fleets").to_str().unwrap().into(),"--run-id".into(),"router-fleet".into(),
+                "--cwd".into(),root.join("workspace").to_str().unwrap().into(),"--isolation".into(),"native".into(),"--quiet-dwell".into(),"3".into(),
+                "--quiescence-timeout".into(),"20".into(),"--force".into(),"--memory-off".into(),"2".into()];
+            doxa_tui::fleet_control::start(&args).unwrap();
+        } else {doxa_tui::fleet_control::resume(&root.join("fleets"),"router-fleet").unwrap();}
+        return;
+    }
+    let env=Env::new();fs::write(env.path().join("doxa/config.toml"),"lore=false\nworktree_per_session=false\n").unwrap();
+    let settled=|state:&Value|state["turn"].as_u64().is_some_and(|turn|turn>=1) && state["incomplete"]==false
+        && state["receipts"].as_array().and_then(|rows|rows.last()).is_some_and(|receipt|receipt["turn"]==state["turn"]);
+    let initial=Arc::new(Mutex::new(None));let observed=initial.clone();let journals=env.path().join("doxa/router");
+    let server=Server::with_catalog(|body|(response(body,"completed dummy fleet task"),Duration::from_millis(500)),move||{
+        if observed.lock().unwrap().is_some(){return;}
+        let idle=fs::read_dir(&journals).unwrap().filter_map(Result::ok).find_map(|entry|
+            fs::read(entry.path()).ok().and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok())
+                .filter(|state|state["turn"]==0 && state["incomplete"]==false));
+        if let Some(idle)=idle {
+            *observed.lock().unwrap()=Some(idle);
+            // Eligibility precedes the turn increment. Hold this real catalog
+            // reply briefly so initial idle state overlaps fleet monitoring.
+            thread::sleep(Duration::from_millis(300));
+        }
+    });
+    let wrapper=env.path().join("fleet-daemon");let quote=|text:&str|format!("'{}'",text.replace('\'',"'\\''"));
+    fs::write(&wrapper,format!("#!/bin/sh\nexec {} --vendor-endpoint {} \"$@\"\n",quote(env!("CARGO_BIN_EXE_doxa-daemon")),quote(&server.endpoint))).unwrap();fs::set_permissions(&wrapper,fs::Permissions::from_mode(0o700)).unwrap();
+    let launch=|mode:&str| {
+        let mut cmd=Command::new(std::env::current_exe().unwrap());cmd.env_clear()
+            .args(["--exact","actual_router_fleet_start_and_controller_resume_keep_disjoint_limits_without_redelivery","--nocapture"])
+            .env(MODE,mode).env("DOXA_ROUTER_FLEET_FIXTURE_ROOT",env.path()).env("PATH","/usr/bin:/bin")
+            .env("HOME",env.path().join("home")).env("DOXA_HOME",env.path().join("doxa")).env("DOXA_DAEMON_BIN",&wrapper)
+            .env("LORE_ROOT",env.path().join("lore")).env("LORE_PROJECTS_DIR",env.path().join("projects")).env("LORE_SKILLS_DIR",env.path().join("skills"))
+            .env("DOXA_LORE","0").env("DOXA_WORKTREE","0").env("DOXA_LORE_RS",std::env::var_os("DOXA_LORE_RS").unwrap())
+            .env("TMPDIR",std::env::var_os("TMPDIR").unwrap()).env("LORE_DISABLE_SYNC","1").env("LORE_DISABLE_REVIEW","1")
+            .env("DEEPSEEK_API_KEY","fleet-fixture-key").env("ZAI_API_KEY","fleet-fixture-key")
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap()
+    };
+    let mut controller=launch("start");let manifest=env.path().join("fleets/router-fleet/manifest.json");
+    wait(||{if controller.try_wait().unwrap().is_some(){let mut error=String::new();controller.stderr.take().unwrap().read_to_string(&mut error).unwrap();panic!("fleet startup: {error}");}
+        fs::read(&manifest).ok().and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok()).is_some_and(|value|value["phase"]=="monitoring")});
+    controller.kill().unwrap();controller.wait().unwrap();
+    let before:Value=serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();assert_eq!(before["slots"].as_array().unwrap().len(),2);
+    let mut routing_calls=0;let mut routing_spend=0;let mut identities=Vec::new();
+    for slot in before["slots"].as_array().unwrap() {
+        let path=Path::new(slot["router_config"].as_str().unwrap());let config=doxa_router::Config::load(path).unwrap();routing_calls+=config.max_calls;routing_spend+=config.max_spend_usd_micros;
+        assert_eq!(slot["router_config_sha256"],config.hash().unwrap());
+        let id=slot["session_id"].as_str().unwrap();let journal=env.path().join("doxa/router").join(format!("{id}.router.json"));
+        wait(||settled(&serde_json::from_slice::<Value>(&fs::read(&journal).unwrap()).unwrap()));
+        let state:Value=serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();assert_eq!(state["identity"]["ceiling_usd_micros"],2_000_000);assert_eq!(state["worker"]["input_tokens"],3);assert_eq!(state["turn"],1);
+        identities.push((id.to_owned(),state["worker"].clone(),state["router"].clone()));
+    }
+    let idle=initial.lock().unwrap().clone().expect("catalog must observe the delayed initial Router journal");
+    assert_eq!(idle["turn"],0);assert_eq!(idle["incomplete"],false);assert!(!settled(&idle),"initial idle is not a completed dispatched turn");
+    assert_eq!(routing_calls,8);assert_eq!(routing_spend,10000);assert_eq!(server.posts().len(),2);
+    let mut resumed=launch("resume");wait(||resumed.try_wait().unwrap().is_some());let status=resumed.wait().unwrap();
+    if !status.success(){let mut error=String::new();resumed.stderr.take().unwrap().read_to_string(&mut error).unwrap();panic!("fleet resume: {error}");}
+    let after:Value=serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();assert_eq!(after["phase"],"finished");assert_eq!(after["live"],false);
+    for (id,worker,router) in identities {
+        let state:Value=serde_json::from_slice(&fs::read(env.path().join("doxa/router").join(format!("{id}.router.json"))).unwrap()).unwrap();
+        assert_eq!(state["worker"],worker);assert_eq!(state["router"],router);assert_eq!(state["turn"],1);
+    }
+    assert_eq!(server.posts().len(),2);
+}
 
 #[test]
 fn managed_router_compaction_preserves_originals_mode_and_last_target_then_resumes_across_provider_switch() {

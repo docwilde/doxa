@@ -292,10 +292,15 @@ mod tests {
     fn only_reads_private_owner_owned_regular_files() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cases.jsonl");
-        fs::write(&path, fixture()).unwrap();
+        let input = fixture();
+        fs::write(&path, &input).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(evaluate_file(&path, &model()).is_err());
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o644);
+        assert_eq!(fs::read_to_string(&path).unwrap(), input);
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(evaluate_file(&path, &model()).unwrap().holdout.messages, 2);
+        assert_eq!(fs::read_to_string(&path).unwrap(), input);
         let link = dir.path().join("link.jsonl");
         std::os::unix::fs::symlink(&path, &link).unwrap();
         assert!(evaluate_file(&link, &model()).is_err());

@@ -2,6 +2,15 @@ use doxa_codegraph::{query_cli, semantic_producer::plan_rust_analyzer, semantic_
 
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    #[cfg(target_os = "linux")]
+    if args.first().is_some_and(|arg| arg == "--semantic-broker") {
+        let result = doxa_codegraph::semantic_attested::definition_cli(&args);
+        match result {
+            Ok(status) => println!("{}", status),
+            Err(error) => { eprintln!("code graph: {error}"); std::process::exit(1); }
+        }
+        return;
+    }
     if args.first().is_some_and(|arg| arg == "--semantic-probe") {
         let result = match args.as_slice() {
             [_, root_flag, root, image_flag, image, host_flag, host]

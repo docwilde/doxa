@@ -1,0 +1,18 @@
+{
+  "admissible_as_hardened": false,
+  "caller_cannot_open_engine_socket": true,
+  "caller_uid": 1000,
+  "engine_config_sha256": "3a6774e75043931ce3dd1874bac3aabc86908a1bb21fe07c68eb7e46054f26c9",
+  "engine_exe_sha256": "8f1c19d27e182ce6c82ddfd900d596195b0fd9d6740a9ff1ccac584e04355cb0",
+  "engine_info_read": true,
+  "engine_instance_unchanged": true,
+  "engine_pid": 27821,
+  "engine_rootless": true,
+  "engine_socket_dev": 56,
+  "engine_socket_ino": 688,
+  "engine_uid": 1001,
+  "exact_kernel_peer_pidfd": true,
+  "root_uid": 0,
+  "same_engine_uid_fake_executable_refused": true,
+  "scope": "read-only-Engine-and-negative-peer-primitive"
+}

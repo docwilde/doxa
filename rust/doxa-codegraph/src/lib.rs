@@ -20,7 +20,10 @@ use syn::visit::{self, Visit};
 pub mod semantic_evidence;
 pub mod semantic_producer;
 pub mod semantic_runtime;
+#[cfg(target_os = "linux")]
+pub mod semantic_attested;
 pub mod cache;
+mod index;
 mod rust_bounds;
 #[cfg(target_os = "linux")]
 mod whole_scan;
@@ -406,7 +409,7 @@ fn verify_parsed_source_hashes<'a>(root: &Path, language: &str, started: Instant
 }
 
 type SourceBytes = (String, String, u128);
-type RawBytes = (Vec<u8>, String, u128);
+type RawBytes = (Vec<u8>, String, u128, u32);
 
 struct SourceReadRequest {
     root: PathBuf,
@@ -440,11 +443,11 @@ impl SourceReader {
         Ok(Self { requests, disabled: false })
     }
 
+    #[cfg(test)]
     fn read(&mut self, root: &Path, relative: &str, deadline: Duration) -> Result<SourceBytes, String> {
-        let (bytes, sha, read_unix_ms) = self.read_request(root, relative,
-            MAX_SOURCE_BYTES, deadline, None)?;
+        let (bytes, sha, time, _) = self.read_request(root, relative, MAX_SOURCE_BYTES, deadline, None)?;
         let content = String::from_utf8(bytes).map_err(|_| "non-UTF-8 source")?;
-        Ok((content, sha, read_unix_ms))
+        Ok((content, sha, time))
     }
 
     fn read_request(&mut self, root: &Path, relative: &str, max_bytes: u64,
@@ -477,6 +480,10 @@ impl SourceReader {
 static SOURCE_READER: OnceLock<Result<Mutex<SourceReader>, String>> = OnceLock::new();
 
 fn file_bytes(root: &Path, relative: &str) -> Result<SourceBytes, String> {
+    file_bytes_observed(root, relative).map(|(content, sha, time, _)| (content, sha, time))
+}
+
+fn file_bytes_observed(root: &Path, relative: &str) -> Result<(String, String, u128, u32), String> {
     let deadline = Instant::now() + MAX_SOURCE_READ_TIME;
     let reader = SOURCE_READER.get_or_init(|| SourceReader::new().map(Mutex::new))
         .as_ref().map_err(Clone::clone)?;
@@ -498,7 +505,9 @@ fn file_bytes(root: &Path, relative: &str) -> Result<SourceBytes, String> {
     if remaining.is_zero() {
         return Err("source reader wait exceeded two-second deadline; no partial source read".into());
     }
-    reader.read(root, relative, remaining)
+    let (bytes, sha, time, mode) = reader.read_request(root, relative, MAX_SOURCE_BYTES, remaining, None)?;
+    let content = String::from_utf8(bytes).map_err(|_| "non-UTF-8 source")?;
+    Ok((content, sha, time, mode))
 }
 
 #[cfg(target_os = "linux")]
@@ -518,7 +527,7 @@ fn file_digest(root: &Path, relative: &str, max_bytes: u64) -> Result<(String, u
     };
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() { return Err("source reader wait exceeded two-second deadline".into()); }
-    let (bytes, digest, _) = reader.read_request(root, relative, max_bytes, remaining, None)?;
+    let (bytes, digest, _, _) = reader.read_request(root, relative, max_bytes, remaining, None)?;
     Ok((digest, bytes.len() as u64))
 }
 
@@ -601,12 +610,13 @@ fn read_file_bytes(root: &Path, relative: &str, max_bytes: u64) -> Result<RawByt
     file.by_ref().take(max_bytes + 1).read_to_end(&mut bytes).map_err(|e| format!("file read: {e}"))?;
     let after = file.metadata().map_err(|e| format!("file metadata after read: {e}"))?;
     if bytes.len() as u64 > max_bytes || metadata.len() != after.len()
-        || metadata.modified().ok() != after.modified().ok() {
+        || metadata.modified().ok() != after.modified().ok() || metadata.mode() != after.mode()
+        || metadata.dev() != after.dev() || metadata.ino() != after.ino() {
         return Err("file changed during read or exceeded read limit".into());
     }
     let sha = format!("{:x}", Sha256::digest(&bytes));
     let read_unix_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
-    Ok((bytes, sha, read_unix_ms))
+    Ok((bytes, sha, read_unix_ms, metadata.mode() & 0o7777))
 }
 
 /// Recheck one recorded Rust or Python source without following symlinks in any path
@@ -1332,8 +1342,16 @@ fn query_with_pre_rehash(root: &Path, request: Query,
 
 fn query_with_rehash_hooks(root: &Path, request: Query,
     before_rehash: impl FnOnce(&Path), between_rehashes: impl FnOnce(&Path)) -> Result<Answer, String> {
+    query_with_index_and_hooks(root, request, None, before_rehash, between_rehashes)
+}
+
+fn query_with_index_and_hooks(root: &Path, request: Query,
+    mut index: Option<&mut index::SyntaxIndex>,
+    before_rehash: impl FnOnce(&Path), between_rehashes: impl FnOnce(&Path)) -> Result<Answer, String> {
     let root = worktree_root(root)?;
     let paths = listed_files(&root)?;
+    let scan_started = Instant::now();
+    if let Some(index) = index.as_deref_mut() { index.begin(&paths); }
     let (kind, value) = match request {
         Query::File(value) => ("file", value), Query::Symbol(value) => ("symbol", value),
         Query::Imports(value) => ("imports", value), Query::Calls(value) => ("calls", value),
@@ -1364,19 +1382,32 @@ fn query_with_rehash_hooks(root: &Path, request: Query,
     let mut requested_modules = None;
     let rust_call_query = kind == "calls" && source_language(&value) == Some("rust");
     for path in &paths {
+        if scan_started.elapsed() >= MAX_FINAL_REHASH_TIME {
+            return Err("code graph parsing exceeded ten-second scan limit; no partial answer".into());
+        }
         match source_language(&path) {
             Some("rust") => {
-                let (content, sha, read_unix_ms) = match file_bytes(&root, &path) {
+                let (content, sha, read_unix_ms, mode) = match file_bytes_observed(&root, &path) {
                     Ok(result) => result,
                     Err(reason) => { answer.coverage.skipped.add(&path, reason); answer.coverage.rust_skipped_files += 1; source_facts.insert(path.clone(), SourceFact::Skipped); rust_scan_complete = false; if path == &value { answer.status = "skipped".into(); } continue; }
                 };
                 total = total.saturating_add(content.len() as u64);
                 if total > MAX_TOTAL_SOURCE_BYTES { return Err("Rust source scan exceeded 64 MiB; no partial answer".into()); }
-                let parsed = match parse_rust(&content, &path, &sha, read_unix_ms,
-                    kind == "calls" && path == &value) {
+                if let Some(index) = index.as_deref_mut() { index.observe(path, &sha, mode); }
+                let collect_calls = kind == "calls" && path == &value;
+                let cached = if !collect_calls && kind != "modules" {
+                    index.as_deref_mut().and_then(|index| index.rust(path, &sha))
+                } else { None };
+                let tombstone = index.as_deref_mut().and_then(|index| index.error(path, &sha));
+                let parsed = match tombstone.map(Err).or_else(|| cached.map(Ok)).unwrap_or_else(||
+                    parse_rust(&content, &path, &sha, read_unix_ms, collect_calls)) {
                     Ok(result) => result,
-                    Err(reason) => { answer.coverage.unparseable.add(&path, reason); answer.coverage.rust_unparseable_files += 1; source_facts.insert(path.clone(), SourceFact::Unparseable); rust_scan_complete = false; if path == &value { answer.status = "unparseable".into(); } continue; }
+                    Err(reason) => { if let Some(index) = index.as_deref_mut() { index.remember_error(path, &sha, &reason); } answer.coverage.unparseable.add(&path, reason); answer.coverage.rust_unparseable_files += 1; source_facts.insert(path.clone(), SourceFact::Unparseable); rust_scan_complete = false; if path == &value { answer.status = "unparseable".into(); } continue; }
                 };
+                if let Some(index) = index.as_deref_mut() {
+                    index.remember(path, &sha, &parsed.symbols, &parsed.imports,
+                        parsed.macro_items, parsed.unsupported_syntax);
+                }
                 source_facts.insert(path.clone(), SourceFact::Parsed { sha256: sha.clone(), read_unix_ms });
                 if path == &value && kind != "symbol" {
                     answer.requested_source_sha256 = Some(sha.clone());
@@ -1423,7 +1454,7 @@ fn query_with_rehash_hooks(root: &Path, request: Query,
                 let started = *python_scan_started.get_or_insert_with(Instant::now);
                 let remaining = MAX_PYTHON_SCAN_TIME.saturating_sub(started.elapsed());
                 if remaining.is_zero() { return Err("Python source scan exceeded ten-second limit; no partial answer".into()); }
-                let (content, sha, read_unix_ms) = match file_bytes(&root, path) {
+                let (content, sha, read_unix_ms, mode) = match file_bytes_observed(&root, path) {
                     Ok(result) => result,
                     Err(reason) => {
                         answer.coverage.skipped.add(path, reason);
@@ -1437,13 +1468,22 @@ fn query_with_rehash_hooks(root: &Path, request: Query,
                 if python_total > MAX_TOTAL_SOURCE_BYTES {
                     return Err("Python source scan exceeded 64 MiB; no partial answer".into());
                 }
-                let parsed = match parse_python(&content, path, &sha, read_unix_ms, remaining,
-                    path == &value && kind == "calls", path == &value && kind == "modules") {
+                if let Some(index) = index.as_deref_mut() { index.observe(path, &sha, mode); }
+                let collect_calls = path == &value && kind == "calls";
+                let collect_modules = path == &value && kind == "modules";
+                let cached = if !collect_calls && !collect_modules {
+                    index.as_deref_mut().and_then(|index| index.python(path, &sha))
+                } else { None };
+                let tombstone = index.as_deref_mut().and_then(|index| index.error(path, &sha));
+                let parsed = match tombstone.map(Err).or_else(|| cached.map(Ok)).unwrap_or_else(||
+                    parse_python(&content, path, &sha, read_unix_ms, remaining,
+                        collect_calls, collect_modules)) {
                     Ok(result) => result,
                     Err(reason) => {
                         if started.elapsed() >= MAX_PYTHON_SCAN_TIME {
                             return Err("Python source scan exceeded ten-second limit; no partial answer".into());
                         }
+                        if let Some(index) = index.as_deref_mut() { index.remember_error(path, &sha, &reason); }
                         answer.coverage.unparseable.add(path, reason);
                         answer.coverage.python_unparseable_files += 1;
                         python_scan_complete = false;
@@ -1451,6 +1491,9 @@ fn query_with_rehash_hooks(root: &Path, request: Query,
                         continue;
                     }
                 };
+                if let Some(index) = index.as_deref_mut() {
+                    index.remember(path, &sha, &parsed.symbols, &parsed.imports, 0, 0);
+                }
                 answer.coverage.parsed_python_files += 1;
                 python_facts.insert(path.clone(), (sha.clone(), read_unix_ms));
                 if path == &value && kind != "symbol" {
@@ -1534,26 +1577,33 @@ fn query_with_rehash_hooks(root: &Path, request: Query,
     // queries pass a no-op. This still cannot provide an atomic worktree view.
     let final_started = Instant::now();
     before_rehash(&root);
+    if let Some(index) = index.as_deref() { index.verify(&root, final_started)?; } else {
     verify_parsed_source_hashes(&root, "Rust", final_started, source_facts.iter().filter_map(|(path, fact)| {
         let SourceFact::Parsed { sha256, .. } = fact else { return None; };
         Some((path.as_str(), sha256.as_str()))
     }))?;
     verify_parsed_source_hashes(&root, "Python", final_started, python_facts.iter()
         .map(|(path, (sha, _))| (path.as_str(), sha.as_str())))?;
+    }
     // An early Rust file can change while the later Python pass is reading,
     // and vice versa if a writer is racing the scan. Repeat the full supported
     // source set before returning; the result remains a non-atomic observation.
     between_rehashes(&root);
+    if let Some(index) = index.as_deref() { index.verify(&root, final_started)?; } else {
     verify_parsed_source_hashes(&root, "Rust", final_started, source_facts.iter().filter_map(|(path, fact)| {
         let SourceFact::Parsed { sha256, .. } = fact else { return None; };
         Some((path.as_str(), sha256.as_str()))
     }))?;
     verify_parsed_source_hashes(&root, "Python", final_started, python_facts.iter()
         .map(|(path, (sha, _))| (path.as_str(), sha.as_str())))?;
+    }
     // Check the complete Git inventory immediately before returning. A file
     // added or removed during parsing or candidate processing must not leave
     // a purportedly complete digest or candidate set in a successful answer.
     require_stable_listing(&root, &paths)?;
+    if let Some(index) = index {
+        index.finish(&paths, answer.coverage.rust_skipped_files == 0 && answer.coverage.python_skipped_files == 0);
+    }
     Ok(answer)
 }
 
@@ -2223,7 +2273,7 @@ mod tests {
         let mut file = unsafe { File::from_raw_fd(fd) };
         file.write_all(content).unwrap();
         drop(file);
-        let (bytes, digest, _) = read_file_bytes(root.path(), &relative, MAX_SOURCE_BYTES).unwrap();
+        let (bytes, digest, _, _) = read_file_bytes(root.path(), &relative, MAX_SOURCE_BYTES).unwrap();
         assert_eq!(bytes, content);
         assert_eq!(digest, format!("{:x}", Sha256::digest(content)));
         assert!(read_file_bytes(root.path(), &relative, content.len() as u64 - 1).is_err(),

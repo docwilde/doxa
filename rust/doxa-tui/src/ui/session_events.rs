@@ -963,6 +963,23 @@ impl App {
                         });
                         true
                     }
+                    "router_auto_compaction_started" => {
+                        if self.session_identity.get(&id).and_then(|pair|pair.0.as_deref())!=Some("router")
+                            || data["automatic"]!=true || data["operation"]!="compact" || data["compaction_semantics"]!="doxa_managed_summary" {return false;}
+                        self.session_telemetry.entry(id.clone()).or_default().compaction=
+                            super::session_telemetry::CompactionStatus::from_value(&data["compaction"]);
+                        self.session_activity.entry(id.clone()).or_default().0=true;
+                        self.apply_update(DaemonUpdate::Status{id,text:"Reviewing automatic compaction".into()});
+                        true
+                    }
+                    "router_auto_compaction_finished" => {
+                        if self.session_identity.get(&id).and_then(|pair|pair.0.as_deref())!=Some("router")
+                            || data["automatic"]!=true || data["operation"]!="compact" || data["compaction_semantics"]!="doxa_managed_summary" {return false;}
+                        self.session_telemetry.entry(id.clone()).or_default().update_billing(data);
+                        self.session_activity.entry(id.clone()).or_default().0=true;
+                        self.apply_update(DaemonUpdate::Status{id,text:if data["is_error"]==false{"Running after reviewed compaction"}else{"Automatic compaction paused"}.into()});
+                        true
+                    }
                     "lore_review_completed" if data["before"] == "compaction" => {
                         if self.session_identity.get(&id).and_then(|pair|pair.0.as_deref()) != Some("router")
                             || !self.sessions.iter().any(|session|session.id == id) { return false; }

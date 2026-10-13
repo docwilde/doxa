@@ -5,6 +5,7 @@
 - [Choose a profile](#choose-a-profile)
 - [Configure the local Engine](#configure-the-local-engine)
 - [Resource limits and disk monitoring](#resource-limits-and-disk-monitoring)
+- [ROOT-controlled hardened sessions](#root-controlled-hardened-sessions)
 - [Change a running session](#change-a-running-session)
 - [Boundary and recovery](#boundary-and-recovery)
 - [Integration smoke](#integration-smoke)
@@ -64,7 +65,7 @@ unavailable until daemon-host and worker proofs run in the admission path.
 
 ## Resource limits and disk monitoring
 
-Defaults are 4 GiB memory, 2 CPUs and 256 processes. Set docker_memory_bytes,
+For `docker-open` and `docker-offline`, defaults are 4 GiB memory, 2 CPUs and 256 processes. Set docker_memory_bytes,
 docker_cpus and docker_pids for your workload. The worker verifies their
 effective ceilings in its private cgroup namespace before use. For **new Docker sessions**, `docker_disk_soft_limit_bytes` defaults
 to 20 GiB and `docker_disk_free_floor_bytes` to 2 GiB. Set them in private
@@ -86,31 +87,12 @@ samples, and another process can consume host space after a check. **These
 are monitored turn gates, not a hard filesystem quota.** Keep session data
 on real disk.
 
-Docker's writable-layer `--storage-opt size` does not bound these host bind
-mounts. A hard per-session disk quota needs an administrator to enable project
-quota accounting and enforcement on the backing filesystem, assign a unique
-project ID to each private session tree, set a hard block limit, and verify
-that writes through every bind source hit that limit. For XFS, that means a
-`prjquota` mount and project setup/limit with `xfs_quota`; owner-only rootless
-Docker cannot silently provision this. Hard quotas remain an open stage.
-The [hard-quota fixture guide](hard-quota-preflight.md) covers read-only
-descriptor-bound XFS checks for project identity, inheritance, bounded
-existing data-bind descendants and the exact enforced block limit, plus a
-bounded, opt-in rootless container write probe
-for an administrator-prepared fixture. A successful fixture `EDQUOT`
-receipt is never production admission; per-session quota provisioning,
-restart/remount verification and a reviewed runtime admission path remain open.
-An opt-in privileged helper can read the exact administrator-pinned project
-limit and five directory identities for a separate trusted caller UID. It
-always returns `admissible_as_hard_quota=false`. A read-only host client caps
-the response at 4 KiB and can verify its root-owned endpoint and exact saved
-session identity. The helper is not installed or called by the session launcher.
-The current same-UID controller and worker layout
-cannot use that trust split without further work.
-`docker-hardened` requests fail with that explicit gate; there is no fallback.
-See [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/),
-[Docker's storage option requirements](https://docs.docker.com/reference/cli/docker/container/run/),
-and [XFS project quotas](https://man7.org/linux/man-pages/man8/xfs_quota.8.html).
+Docker's writable-layer storage limit does not bound host bind mounts. The
+legacy profiles retain monitored soft limits. A Linux `docker-hardened` session
+instead uses the independently installed ROOT quota and broker described below;
+its caller mirror is never used to measure or authorize worker disk usage.
+Historical [quota fixture receipts](hard-quota-preflight.md) and advisory helper
+results remain non-authorizing.
 
 Each worker receives exactly its independent Git checkout, private home,
 private cache and session hook endpoint. It has no host home, main checkout,
@@ -121,6 +103,142 @@ unprivileged host Engine owner, and a real write probe verifies this mapping.
 CLI credentials are copied only for the selected provider; tools in that
 container can read those credentials. Canonical DOXA transcripts, LORE,
 approvals and peer routing remain in the host daemon.
+
+## ROOT-controlled hardened sessions
+
+`docker-hardened` uses a separate unprivileged Engine identity and an
+administrator-installed policy for one reserved session ID. The caller cannot
+open the Engine socket or access its data group. The caller's checkout and home
+are private staging/review mirrors; the actual four binds live under the
+ROOT-controlled quota tree. Staging sends bounded typed bytes through ROOT IPC.
+Provider CLI/catalog launches stage the selected prepared home again, with no
+full-home copy or host-filesystem fallback.
+
+An administrator must first prepare an enforcing ext4 project-quota filesystem,
+allocate the session's project ID, install reviewed quota/native broker binaries
+and the isolated Python broker, and pin the image, worker/provider artifacts,
+Engine executable, explicit configuration, separate UIDs, exact DNS egress and
+finite resource limits. The Engine socket is Engine-owned `0600`; its config and
+all ROOT policy/code ancestors exclude non-ROOT writers. See the
+[quota provisioning guide](root-controlled-quota.md) and
+[ROOT broker installation/protocol guide](../scripts/hardened-isolation/README.md).
+Installation receipts and public instance files pin scope/code/process identity;
+they do not authorize a container. Every prepare/resume and provider/workspace
+operation requires fresh native kernel authority. Persistent provider turns use
+a live ROOT guard rather than advisory disk monitoring.
+
+Because a policy reserves one ID, ordinary New Session generation cannot
+provision a different ID implicitly. The supported operator entry point is the
+host daemon with that exact reserved ID, followed by frontend attach. With a
+private `DOXA_HOME` and runtime directory, for example:
+
+```sh
+DOXA_HOME=PRIVATE_HOME DOXA_RUNTIME_DIR=PRIVATE_RUNTIME \
+  doxa-daemon-rs --session-id RESERVED_ID --runtime-dir PRIVATE_RUNTIME \
+  --cwd SOURCE_CHECKOUT --engine claude --isolation docker-hardened
+DOXA_HOME=PRIVATE_HOME DOXA_RUNTIME_DIR=PRIVATE_RUNTIME doxa attach RESERVED_ID
+```
+
+The daemon uses the caller's configured runtime directory/registry. A later
+restart uses the same daemon arguments with `--resume true`; ROOT rechecks and
+retires the previous scope before preparing a fresh CID over retained data.
+A missing session policy refuses before creating a caller checkout or invoking
+an Engine. Do not put this profile into a default that generates unprovisioned
+IDs. The root broker service is an explicit administrator operation, never a
+launcher side effect. Its unit shares the installation mount namespace so boot
+and unique mount pins remain meaningful.
+
+ROOT shutdown reserves a gate for new work and waits for already admitted
+provider/workspace transports to settle within the installed operation deadline.
+It releases the state lock while waiting so those transports can finish their
+cleanup. New turns, execution, staging, prepare/resume and hook registration are
+refused while the gate is pending. Existing transports, snapshots and hook
+unregistration can finish. Timeout, disconnect or cleanup refusal retains the
+gate; an explicit typed ROOT stop retry must finish before prepare/resume can
+proceed. A `stop_if_idle` acknowledgement precedes this cleanup; the daemon's
+clean exit confirms its completion. See the
+[broker lifecycle contract](../scripts/hardened-isolation/README.md).
+
+The native gateway holds Engine/init pidfds, immutable ROOT files and quota
+descriptors. It checks exact inspect on its pinned Engine connection, private
+namespaces, finite effective cgroups, all worker thread filters and descriptors,
+and the physical ROOT listener behind each permitted broker socket. Every frame
+segment has kernel sender credentials/pidfd matching the connector. Distinct
+UIDs, an immutable private PID namespace, read-only cgroup controls, closed
+namespace/control descriptors and the mandatory worker syscall filter exclude
+worker-initiated migration; sequential cgroup observations are never described
+as an atomic send-time measurement. Host, sibling, delegated-descriptor and
+changed-device origins are refusal cases. No caller-supplied `ready` or fixture
+flag replaces these checks.
+
+Rootless FUSE image reads use a bounded child in the pinned init **user**
+namespace. ROOT retains Engine, cgroup, socket and quota authority. The child
+closes control descriptors, clears groups/capabilities, sets no-new-privileges
+and non-dumpable state, and uses a default-deny syscall filter. Executable reads
+permit scalar-flag read-only opens and deny `openat2`; fixed image artifact reads
+use anchored paths plus exact-file Landlock. Metadata reads use preopened
+`O_PATH` handles without file-content authority. Landlock ABI 5 or newer is
+required for those operations. The child returns bounded facts, reopens actual
+executables/artifacts after hashing and rechecks held init/namespace identities.
+The executable operation uses a fixed typed `/proc/init/exe` request, but its
+scalar-open filter is not a kernel pathname allowlist: compromised native
+reader code could read other DAC-readable files under the dropped Engine UID.
+It has no file-write, service or ROOT admission capability. Artifact operations
+have the narrower exact-file Landlock grant; these are distinct guarantees.
+It may inherit allocator locks when forked from the multithreaded gateway; it is
+not an exec-clean process. An absolute deadline refuses, kills and boundedly
+reaps a stalled child. Parent pidfd checks and parent-death signals bracket UID
+transitions; EOF cannot turn into an unbounded wait.
+
+Codex snapshots identify the actual Engine-owned original rollout, including
+full bytes/hash and filesystem identity. Review uses a separate caller-owned
+`0700` directory and `0600` file. The host callback authenticates the ROOT
+process through its independently published instance, live pidfd/start time,
+fresh nonce and per-segment sender identity. Core rechecks both the review copy
+and the original after approval and before the compact RPC; the native relay
+reopens the original again before answering the worker hook. A copied file alone
+cannot approve a changed original. Workspace Git uses bounded ROOT-generated
+readonly metadata on the existing broker mount, excluding tenant configuration,
+filters/hooks/includes/replacements and submodule traversal. Ordinary apply may
+change working files; `--cached` and `--index` are refused.
+Metadata is built in a ROOT-private directory on the same quota filesystem,
+then published/retired atomically. An existing fixed ROOT `0600` lock coordinates
+exclusive publication with bounded shared native quota audits. Its presence
+grants no authority; missing, changed or contended installation fails closed.
+
+Disposable proof scope is recorded beside each receipt. Project quota
+aggregate/EDQUOT, container/Engine restart and source-remount checks, real ELF32
+ioctl refusal, actual UID1000-to-ROOT broker authentication and actual UID1001 Git
+filter-marker checks have passed. The
+[credential-free exact-origin run6](../scripts/isolation-authority-evidence/20261013/RUN.md)
+also passed kernel checks, inside/private-PTY frames and six refusal cases, with
+exact container/cgroup/socket cleanup. It reports diagnostics only. The
+[composed Runtime receipt](composed-runtime-proof-20261013.json), attempt 6,
+passed actual prepare/activation, persistent Codex owner/guard handling, original
+source snapshot and private review-copy checks, a fixture approval callback,
+stale-source refusal, readonly Git metadata and filter rejection, ordinary apply,
+and staged Claude settings. Cold resume produced a fresh CID and passed its live
+guard and stop; it does not prove provider checkpoint or session conservation.
+The body completed in 30.6 seconds. Both exact CIDs returned 404 after teardown;
+owned processes, cgroups and physical/kernel sockets were absent and the shared
+Engine identity was unchanged. The separate
+[daemon/frontend run 6](../scripts/isolation-daemon-evidence/20261013/RUN.md)
+also passed. One actual UID1000 frontend prompt crossed the IsolationHost ROOT
+guard and produced the exact fixture start, text and done events, rendered
+response and idle status. The frontend reached complete PTY EOF, the daemon and
+owned broker exited cleanly, and ROOT stop confirmed the exact CID absent.
+Owned processes, cgroups, sockets and registry entries were absent after cleanup;
+the shared Engine was unchanged. The earlier failed attempts remain recorded.
+Historical passes never grant admission for a different image/policy. Canonical
+human approval, real Claude/Codex streaming, login/refresh, redirects and provider-specific alternate
+outbound behavior are not claimed by the dummy fixtures. TLS remains end-to-end;
+the gateway checks CONNECT/SNI/public addresses, not encrypted HTTP authority.
+
+Hardened/native or hardened/legacy-Docker migration is refused **before provider
+shutdown** until a typed stopped-workspace and transcript export/import is
+implemented. Source data remains available under its original policy. Explicit
+logout/deletion, changed adopted-snapshot replacement and arbitrary home writes
+also require separate reviewed operations.
 
 ## Change a running session
 
@@ -248,4 +366,5 @@ a 2xx `/` response and a nonempty body:
       network_none_provider_style_proxy_stream_denies_second_host_and_direct_fallback -- --ignored
 
 This is a standard-library client pattern, not actual Claude, Codex or vendor
-login/streaming evidence. The hardened profile remains unavailable.
+login/streaming evidence. The ROOT profile has a separate installed authority
+and composed verification path described above.

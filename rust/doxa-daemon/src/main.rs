@@ -271,11 +271,8 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
         if effort.is_some() || explicit_sandbox {
             return Err(invalid("router targets define their effort; sandbox overrides are unsupported"));
         }
-        if isolation.is_some_and(|profile|profile!=doxa_isolation::Profile::Native) {
-            return Err(invalid("router currently requires native isolation"));
-        }
-        if spawn_depth != 0 || parent_session_id.is_some() {
-            return Err(invalid("router child-session config inheritance is unavailable"));
+        if (spawn_depth != 0) != parent_session_id.is_some() {
+            return Err(invalid("router child sessions require reviewed parent lineage and depth"));
         }
         if resume && !explicit_session_id {return Err(invalid("router resume needs --session-id"));}
         let path=router_config.as_ref().filter(|path|path.is_absolute())
@@ -578,6 +575,10 @@ fn run() -> io::Result<()> {
         }
         _ => None,
     };
+    let router_ceiling=if options.engine==Engine::Router {
+        env::var("DOXA_SESSION_BUDGET_USD").ok().filter(|raw|!raw.trim().is_empty())
+            .map(|raw|doxa_router::usd_micros(&raw)).transpose()?
+    }else{None};
     let budget_home = env::var_os("DOXA_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".doxa"));
     if !budget_home.is_absolute() { return Err(invalid("DOXA home must be absolute")); }
@@ -590,17 +591,25 @@ fn run() -> io::Result<()> {
     let manage_fixture = options.engine == Engine::Fixture
         && env::var("DOXA_WORKTREE").is_ok_and(|value| value == "1");
     let isolation_home = doxa_isolation::home()?;
+    let mut router_config=if options.engine==Engine::Router {Some(doxa_router::Config::load_with_model(options.router_config.as_deref().expect("validated Router config"),env::var("DOXA_ROUTER_MODEL").ok().as_deref()).map_err(|_|invalid("router config is missing, unsafe, or invalid"))?)}else{None};
+    let router_config_hash=router_config.as_ref().map(doxa_router::Config::hash).transpose()?;
     let recorded_isolation = if options.resume {
         let path = doxa_isolation::manifest_path(&isolation_home, &options.session_id)?;
         if path.exists() { Some(doxa_isolation::read_manifest(&path)?.profile) } else { None }
     } else { None };
     let profile = options.isolation.or(recorded_isolation).unwrap_or(doxa_isolation::configured_profile(&isolation_home)?);
-    if options.engine==Engine::Router && profile!=doxa_isolation::Profile::Native {return Err(invalid("router currently requires native isolation"));}
     if recorded_isolation.is_some_and(|saved| saved != profile) { return Err(invalid("resume isolation differs from saved manifest")); }
     let mut isolation = if profile.docker() {
         let runtime = doxa_isolation::Runtime::prepare(&isolation_home, &options.session_id, &options.cwd,
             Some(profile), options.resume, options.base_branch.as_deref())?;
-        options.cwd = runtime.checkout().to_owned(); runtime.prepare_provider(options.engine.name())?; runtime.activate(); Some(runtime)
+        options.cwd = runtime.checkout().to_owned();
+        if let Some(config)=&router_config {
+            let families:Vec<String> = [(doxa_router::Provider::Claude,"claude"),(doxa_router::Provider::Codex,"codex")]
+                .into_iter().filter(|(provider,_)|config.candidates.iter().any(|row|row.provider==*provider))
+                .map(|(_,family)|family.to_owned()).collect();
+            runtime.prepare_providers(&families)?;
+        } else {runtime.prepare_provider(options.engine.name())?;}
+        runtime.activate(); Some(runtime)
     } else { None };
     let retained_private_checkout = recorded_isolation.is_some() && doxa_isolation::read_manifest(
         &doxa_isolation::manifest_path(&isolation_home,&options.session_id)?)?.context_cwd.is_some();
@@ -710,12 +719,16 @@ fn run() -> io::Result<()> {
             host
         }
         Engine::Router => {
-            let config=doxa_router::Config::load_with_model(options.router_config.as_deref().expect("validated router config"),env::var("DOXA_ROUTER_MODEL").ok().as_deref())
-                .map_err(|_|invalid("router config is missing, unsafe, or invalid"))?;
-            let host=Arc::new(RouterHost::new_with_cli(config,&options.cwd,&options.session_id,options.resume,ceiling,
+            let config=router_config.take().expect("validated Router configuration");
+            let host=Arc::new(RouterHost::new_with_cli(config,&options.cwd,&options.session_id,options.resume,router_ceiling,
                 router_cli::CliOptions {claude:options.claude_bin.clone(),codex:options.codex_bin.clone()},
+                options.parent_session_id.as_deref(),
                 #[cfg(feature="local-test-server")] options.vendor_endpoint.clone()).map_err(io::Error::other)?);
+            host.record_config_path(options.router_config.as_deref().expect("validated Router configuration path")).map_err(io::Error::other)?;
             if let Some(model)=options.model.as_deref() {
+                if !options.resume && options.parent_session_id.is_some() && host.initial_model().as_deref()!=Some(model) {
+                    return Err(invalid("Router child target differs from the reviewed parent allocation"));
+                }
                 host.call("set_model",&json!({"model":model})).map_err(io::Error::other)?;
             }
             options.model = host.initial_model();
@@ -725,6 +738,7 @@ fn run() -> io::Result<()> {
     let host: Arc<dyn Host> = match &isolation {
         Some(runtime) => Arc::new(isolation_host::IsolationHost::new(host, runtime.clone(),json!({
             "engine":options.engine.name(),"runtime":options.runtime,"linger":options.linger.as_secs_f64(),
+            "router_config":options.router_config,"router_config_sha256":router_config_hash,
             "home":isolation_home,"environment":(["DOXA_HOME","DOXA_PEER_LEDGER","DOXA_AGENT_PEER_SEND","LORE_STORE_DIR","LORE_DATA_DIR","LORE_RUNTIME_DIR"].into_iter().filter_map(|key|env::var(key).ok().map(|value|(key.to_owned(),json!(value)))).collect::<serde_json::Map<_,_>>()),
             "claude_home":doxa_claude::isolation::config_dir(),
             "codex_bin":options.codex_bin,"claude_bin":options.claude_bin,"sandbox":if options.engine==Engine::Codex {Some(match options.sandbox {
@@ -762,6 +776,8 @@ fn run() -> io::Result<()> {
     )?);
     let mut provider_args=Vec::new();
     provider_args.extend(["--isolation".into(), profile.key().into()]);
+    #[cfg(feature="local-test-server")]
+    if let Some(endpoint)=&options.vendor_endpoint {provider_args.extend(["--vendor-endpoint".into(),endpoint.clone()]);}
     if options.engine==Engine::Codex { if let Some(path)=&options.codex_bin {
         provider_args.extend(["--codex-bin".into(),path.to_str().ok_or_else(||invalid("Codex executable must be UTF-8 for child launch"))?.into()]);
         let sandbox=match options.sandbox {SandboxMode::ReadOnly=>"read-only",SandboxMode::WorkspaceWrite=>"workspace-write",SandboxMode::DangerFullAccess=>"danger-full-access"};
@@ -770,11 +786,15 @@ fn run() -> io::Result<()> {
     if let Some(path)=&options.claude_bin {
         provider_args.extend(["--claude-bin".into(),path.to_str().ok_or_else(||invalid("Claude executable must be UTF-8 for child launch"))?.into()]);
     }
-    if options.engine!=Engine::Router {peer_host.configure_spawner(session_spawn::SpawnConfig {
+    if options.engine==Engine::Router {
+        provider_args.extend(["--router-config".into(),options.router_config.as_ref().expect("validated Router config").to_str().ok_or_else(||invalid("Router config path must be UTF-8 for child launch"))?.into()]);
+        if let Some(path)=&options.codex_bin {provider_args.extend(["--codex-bin".into(),path.to_str().ok_or_else(||invalid("Codex executable must be UTF-8 for child launch"))?.into()]);}
+    }
+    peer_host.configure_spawner(session_spawn::SpawnConfig {
         executable:env::current_exe()?,engine:options.engine.name().into(),
         runtime:options.runtime.clone(),cwd:options.cwd.clone(),
         session_id:options.session_id.clone(),depth:options.spawn_depth,provider_args,
-    })?;}
+    })?;
     peer_host.connect_provider_tools();
     let host: Arc<dyn Host> = peer_host.clone();
     let session = Session {
@@ -964,9 +984,8 @@ mod tests {
         for (flag,value,expected) in [
             ("--effort","high","targets define their effort"),
             ("--sandbox","workspace-write","sandbox overrides"),
-            ("--isolation","docker-open","native isolation"),
-            ("--spawn-depth","1","config inheritance"),
-            ("--parent-session-id","parent-1","config inheritance"),
+            ("--spawn-depth","1","parent lineage"),
+            ("--parent-session-id","parent-1","parent lineage"),
             ("--resume","true","resume needs --session-id"),
         ] {
             let error=parse(&["--engine","router","--router-config","/missing/private.json",flag,value]).err().unwrap().to_string();

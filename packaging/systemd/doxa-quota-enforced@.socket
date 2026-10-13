@@ -1,0 +1,15 @@
+[Unit]
+Description=DOXA root-controlled project quota socket for session %i
+ConditionPathExists=/etc/doxa/quota-enforced/%i.json
+
+[Socket]
+ListenStream=/run/doxa/quota-enforced/%i.sock
+SocketUser=root
+SocketGroup=doxa-quota-readers
+SocketMode=0660
+DirectoryMode=0755
+Accept=no
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

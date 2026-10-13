@@ -94,6 +94,11 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
         if !value[key].is_null(){lines.push(format!("{label}: {}",value[key].as_str().map(str::to_owned).unwrap_or_else(||value[key].to_string())));}
     }
     if !value["auto_test"].is_null(){lines.push(format!("Automatic host tests after worker turns: {}",value["auto_test"]));}
+    if let Some(hash)=value["router_config_sha256"].as_str(){
+        lines.push(format!("Reviewed Router config SHA256: {hash}"));
+        lines.push(format!("Disjoint Router call/spend allocations (exact JSON): {}",value["router_allocations"]));
+        lines.push("Each slot receives its share of the existing run budget and routing limits. CLI provider charges remain unknown.".into());
+    }
     if value["test_recipe"].is_object(){let recipe=&value["test_recipe"];
         lines.push(format!("Host test argv (exact JSON): {}",recipe["argv"]));
         lines.push(format!("Host test working directory: {}",recipe["cwd_relative"]));

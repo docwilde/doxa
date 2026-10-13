@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import importlib.util
+import argparse
+import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -15,6 +19,10 @@ spec = importlib.util.spec_from_file_location("plugin_installed_host_proof", SCR
 assert spec is not None and spec.loader is not None
 proof = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(proof)
+driver_spec = importlib.util.spec_from_file_location("installed_tui_proof", SCRIPT.with_name("plugin-installed-tui-proof.py"))
+assert driver_spec is not None and driver_spec.loader is not None
+driver = importlib.util.module_from_spec(driver_spec)
+driver_spec.loader.exec_module(driver)
 
 
 class InstalledProofTests(unittest.TestCase):
@@ -126,6 +134,122 @@ class InstalledProofTests(unittest.TestCase):
         self.assertEqual((status, output), (0, b"ready\n"))
         self.assertEqual(len(pids), 1)
         self.assertGreater(pids[0], 0)
+
+    def test_activation_requires_fresh_run_and_explicit_instance(self) -> None:
+        with mock.patch.object(proof, "observe", side_effect=AssertionError("host probe ran")):
+            with mock.patch("sys.argv", [str(SCRIPT), "--check", "--frontend", str(self.root / "doxa-rs"),
+                                         "--activate"]):
+                with self.assertRaisesRegex(proof.common.ProofError, "fresh --run"):
+                    proof.main()
+
+    def test_signed_activation_is_separate_from_receipt_and_rejects_changed_binding(self) -> None:
+        key = self.root / "operator.pem"
+        subprocess.run(["/usr/bin/openssl", "genpkey", "-algorithm", "ED25519", "-out", str(key)],
+                       check=True, capture_output=True)
+        key.chmod(0o600)
+        public = subprocess.run(["/usr/bin/openssl", "pkey", "-in", str(key), "-pubout", "-outform", "DER"],
+                                check=True, capture_output=True).stdout[-32:].hex()
+        options = argparse.Namespace(operator_key=key, home=self.root, lifetime_seconds=20)
+        binding = {"instance": {"uid":os.geteuid(), "pid":42, "start_ticks":456,
+                   "boot_id":"a" * 36, "home_device":1, "home_inode":2},
+                   "policy":{"operator_public_key":public,"epoch":3}, "config_sha256":"c" * 64}
+        identity = {"device":1,"inode":2,"bytes":3,"sha256":"a" * 64}
+        installed = {"cgroup":{"parent":"/sys/fs/cgroup/delegated", "parent_device":1,
+                     "parent_inode":2,"supervisor_device":1,"supervisor_inode":3},
+                     **{role:identity for role in ("frontend","worker","bwrap")}}
+        cases = {name:{} for name in proof.common.PROOF_CASES | proof.EXTRA_CASES.keys()}
+        with mock.patch.object(proof, "activation_binding", return_value=binding):
+            proof.sign_activation(options,binding,installed,cases,b"fresh-nine-case-log")
+        permit_path = self.root / "native-plugin-authority/42-456.json"
+        self.assertEqual(permit_path.stat().st_mode & 0o777,0o600)
+        envelope = json.loads(permit_path.read_bytes())
+        payload = bytes.fromhex(envelope["payload_hex"])
+        permit = json.loads(payload)
+        self.assertEqual(permit["purpose"],proof.AUTHORITY_PURPOSE)
+        self.assertEqual(permit["instance"],binding["instance"])
+        self.assertEqual(permit["epoch"],3)
+        self.assertEqual(permit["cases"], sorted(cases))
+        self.assertEqual(permit["expires_at"] - permit["issued_at"],20)
+        self.assertEqual(permit["expires_boottime_ms"] - permit["issued_boottime_ms"],20000)
+        pubpath = self.root / "public.pem"
+        subprocess.run(["/usr/bin/openssl","pkey","-in",str(key),"-pubout","-out",str(pubpath)],
+                       capture_output=True,check=True)
+        payloadpath = self.root / "payload"
+        signaturepath = self.root / "signature"
+        payloadpath.write_bytes(payload)
+        signaturepath.write_bytes(bytes.fromhex(envelope["signature_hex"]))
+        verification = subprocess.run(["/usr/bin/openssl","pkeyutl","-verify","-rawin","-pubin",
+                         "-inkey",str(pubpath),"-in",str(payloadpath),"-sigfile",str(signaturepath)],
+                         capture_output=True)
+        self.assertEqual(verification.returncode,0)
+        with mock.patch.object(proof,"activation_binding", return_value={**binding,"config_sha256":"changed"}):
+            with self.assertRaisesRegex(proof.common.ProofError,"changed during proof"):
+                proof.sign_activation(options,binding,installed,cases,b"old-log")
+        with mock.patch.object(proof,"activation_binding", return_value=binding):
+            with self.assertRaisesRegex(proof.common.ProofError,"all nine fresh"):
+                proof.sign_activation(options,binding,installed,{"approved-wasm":{}},b"incomplete")
+            options.lifetime_seconds=901
+            with self.assertRaisesRegex(proof.common.ProofError,"1–900"):
+                proof.sign_activation(options,binding,installed,cases,b"log")
+
+    def test_private_operator_state_refuses_links_loose_mode_and_unbounded_data(self) -> None:
+        path = self.root / "state"
+        path.write_bytes(b"key-state")
+        path.chmod(0o600)
+        self.assertEqual(proof.private_read(path),b"key-state")
+        path.chmod(0o644)
+        with self.assertRaises(proof.common.ProofError):
+            proof.private_read(path)
+        path.chmod(0o600)
+        alias = self.root / "alias"
+        alias.symlink_to(path)
+        with self.assertRaises(OSError):
+            proof.private_read(alias)
+        with self.assertRaises(proof.common.ProofError):
+            proof.private_read(path,1)
+
+    def test_tui_screen_reconstructs_incremental_result_including_retained_letters(self) -> None:
+        screen = driver.Screen(3,80)
+        previous = "Checking exact zero-grant approval and installed-host admission"
+        expected = "Run refused: package preflight failed"
+        screen.feed(previous.encode())
+        for column, character in enumerate(expected.ljust(len(previous))):
+            if character != previous[column]:
+                # ratatui omits cells whose letters already match. Stripping
+                # these cursor moves would produce 'refusd' and 'filed'.
+                screen.feed(f"\x1b[1;{column+1}H{character}".encode())
+        self.assertIn(expected,screen.text())
+        utf8 = "\x1b[2;1H─".encode()
+        for byte in utf8:
+            screen.feed(bytes([byte]))
+        self.assertIn("─",screen.text())
+        screen.feed(b"\x1b[1;1H\x1b[2K")
+        self.assertNotIn(expected,screen.text())
+
+    def test_operator_reads_allow_atime_updates_but_reject_content_metadata_changes(self) -> None:
+        path = self.root / "private"
+        path.write_bytes(b"operator-state")
+        path.chmod(0o600)
+        actual = path.stat()
+        fields = {key:getattr(actual,key) for key in ("st_dev","st_ino","st_uid","st_mode","st_nlink",
+                  "st_size","st_mtime_ns","st_ctime_ns")}
+        before = SimpleNamespace(**fields,st_atime_ns=1)
+        after = SimpleNamespace(**fields,st_atime_ns=2)
+        with mock.patch.object(proof.os,"fstat",side_effect=(before,after)), mock.patch.object(Path,"lstat",return_value=after):
+            self.assertEqual(proof.private_read(path),b"operator-state")
+        changed = SimpleNamespace(**{**fields,"st_mtime_ns":fields["st_mtime_ns"]+1},st_atime_ns=2)
+        with mock.patch.object(proof.os,"fstat",side_effect=(before,changed)), mock.patch.object(Path,"lstat",return_value=changed):
+            with self.assertRaisesRegex(proof.common.ProofError,"changed during read"):
+                proof.private_read(path)
+
+    def test_tui_source_is_pinned_across_all_activations_and_receipt(self) -> None:
+        pinned = {"commit":"a" * 40,"tree":"b" * 40}
+        with mock.patch.object(driver.common,"source_identity",return_value=pinned):
+            driver.require_source(pinned)
+        for changed in ({**pinned,"commit":"c" * 40},{**pinned,"tree":"d" * 40}):
+            with mock.patch.object(driver.common,"source_identity",return_value=changed):
+                with self.assertRaisesRegex(driver.common.ProofError,"source changed"):
+                    driver.require_source(pinned)
 
 
 if __name__ == "__main__":

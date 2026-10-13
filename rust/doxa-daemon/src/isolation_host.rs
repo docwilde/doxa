@@ -13,12 +13,14 @@ impl IsolationHost {
         let snapshot=self.inner.transcript_snapshot().map_err(|e|e.to_string())?;
         let fingerprint=snapshot.as_ref().map(|(path,bytes)|doxa_isolation::migration::fingerprint(path,*bytes)).transpose().map_err(|e|e.to_string())?;
         let runtime=self.runtime.lock().unwrap();
-        Ok(json!({"manifest":runtime.manifest(),"launch":self.launch,
+        let mut plan=json!({"manifest":runtime.manifest(),"launch":self.launch,
             "transcript_path":snapshot.as_ref().map(|(path,_)|path),
             "transcript_bytes":snapshot.as_ref().map(|(_,bytes)|bytes),
             "transcript_sha256":fingerprint,
             "model":self.inner.initial_model(),"effort":self.inner.initial_effort(),
-            "permission_mode":self.inner.initial_permission_mode()}))
+            "permission_mode":self.inner.initial_permission_mode()});
+        if self.launch["engine"]=="router" {plan["router_checkpoint"]=self.inner.call("router_migration_checkpoint",&json!({}))?;}
+        Ok(plan)
     }
 }
 
@@ -57,7 +59,7 @@ impl Host for IsolationHost {
         if method=="isolation_migration_stop"{
             let plan=self.migration_plan()?;
             if params["confirmed"]!=true||params["expected"]!=plan{return Err("isolation migration snapshot changed; review it again".into());}
-            if matches!(self.launch["engine"].as_str(),Some("glm"|"deepseek")){
+            if matches!(self.launch["engine"].as_str(),Some("glm"|"deepseek"|"router")){
                 self.inner.call("checkpoint_for_migration",&json!({}))?;
             }
             self.inner.call("stop",&json!({}))?;
@@ -101,7 +103,7 @@ impl IsolationHost {
             // the transport launch independently checks the actual container.
             if let Err(error) = doxa_isolation::active().and_then(|manifest|
                 manifest.ok_or_else(||doxa_isolation::error("Docker session manifest unavailable"))
-                    .and_then(|manifest|doxa_isolation::check_disk_budget(&manifest).map(|_|()))) {
+                    .and_then(|manifest|doxa_isolation::check_turn_budget(&manifest))) {
                 emit(json!({"type":"turn_refused","data":{"message":error.to_string()}})); return;
             }
         }

@@ -63,8 +63,12 @@ fn safe_file(path: &Path, sessions: &Path) -> Option<File> {
 fn matches_thread(file: &mut File, thread_id: &str) -> bool {
     let mut first = vec![0; MAX_META_BYTES];
     let Ok(n) = file.read(&mut first) else { return false; };
-    let Some(end) = first[..n].iter().position(|byte| *byte == b'\n') else { return false; };
-    let Ok(frame) = serde_json::from_slice::<Value>(&first[..end]) else { return false; };
+    header_matches_thread(&first[..n], thread_id)
+}
+
+fn header_matches_thread(bytes: &[u8], thread_id: &str) -> bool {
+    let Some(end) = bytes.iter().position(|byte| *byte == b'\n') else { return false; };
+    let Ok(frame) = serde_json::from_slice::<Value>(&bytes[..end]) else { return false; };
     frame["type"] == "session_meta" && frame["payload"]["id"] == thread_id
 }
 
@@ -119,7 +123,17 @@ pub(crate) fn find(thread_id: &str, started: SystemTime) -> Option<PathBuf> {
 }
 
 pub(crate) fn size(path: &Path, thread_id: &str) -> Option<u64> {
-    size_in(path, thread_id, &codex_sessions()?)
+    if !doxa_engines::codex_driver::valid_thread_id(thread_id) { return None; }
+    match doxa_isolation::snapshot_provider_file(path, 0, MAX_META_BYTES, Some(thread_id)).ok()? {
+        Some(snapshot) => {
+            let size = snapshot.proof["size"].as_u64()?;
+            if snapshot.bytes.len() != size.min(MAX_META_BYTES as u64) as usize
+                || !header_matches_thread(&snapshot.bytes, thread_id)
+                || !doxa_isolation::verify_provider_snapshot(&snapshot).ok()? { return None; }
+            Some(size)
+        },
+        None => size_in(path, thread_id, &codex_sessions()?),
+    }
 }
 
 fn size_in(path: &Path, thread_id: &str, sessions: &Path) -> Option<u64> {
@@ -132,7 +146,14 @@ fn size_in(path: &Path, thread_id: &str, sessions: &Path) -> Option<u64> {
 /// Parse only bytes appended during this successful turn. A missing or
 /// oversized append is unknown, never a stale prior-turn reading.
 pub(crate) fn read_since(path: &Path, thread_id: &str, before: u64) -> Option<Value> {
-    read_since_in(path, thread_id, before, &codex_sessions()?)
+    if !doxa_engines::codex_driver::valid_thread_id(thread_id) { return None; }
+    match doxa_isolation::snapshot_provider_file(path, before, MAX_NEW_BYTES as usize, Some(thread_id)).ok()? {
+        Some(snapshot) => {
+            let context = appended_context(&snapshot.bytes, before, snapshot.proof["size"].as_u64()?)?;
+            doxa_isolation::verify_provider_snapshot(&snapshot).ok()?.then_some(context)
+        },
+        None => read_since_in(path, thread_id, before, &codex_sessions()?),
+    }
 }
 
 fn read_since_in(path: &Path, thread_id: &str, before: u64, sessions: &Path) -> Option<Value> {
@@ -145,7 +166,12 @@ fn read_since_in(path: &Path, thread_id: &str, before: u64, sessions: &Path) -> 
     file.seek(SeekFrom::Start(before)).ok()?;
     let mut bytes = Vec::with_capacity(appended as usize);
     file.take(appended).read_to_end(&mut bytes).ok()?;
-    if bytes.len() != appended as usize { return None; }
+    appended_context(&bytes, before, after)
+}
+
+fn appended_context(bytes: &[u8], before: u64, after: u64) -> Option<Value> {
+    let appended = after.checked_sub(before)?;
+    if appended == 0 || appended > MAX_NEW_BYTES || bytes.len() != appended as usize { return None; }
     let mut latest = None;
     for line in bytes.split(|byte| *byte == b'\n') {
         let Ok(frame) = serde_json::from_slice::<Value>(line) else { continue; };
@@ -170,6 +196,25 @@ fn read_since_in(path: &Path, thread_id: &str, before: u64, sessions: &Path) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_provider_ranges_cannot_reuse_truncated_or_prior_context() {
+        let bytes = serde_json::to_vec(&json!({"type":"event_msg","payload":{"type":"token_count",
+            "info":{"last_token_usage":{"total_tokens":19000},"model_context_window":258400}}})).unwrap();
+        let before = 123;
+        let after = before + bytes.len() as u64;
+        assert_eq!(appended_context(&bytes, before, after).unwrap()["ctx_tokens"], 7000);
+        assert!(appended_context(&bytes[..bytes.len()-1], before, after).is_none());
+        assert!(appended_context(&bytes, before, before).is_none());
+        assert!(appended_context(&bytes, before, before-1).is_none());
+        assert!(appended_context(&bytes, before, before+MAX_NEW_BYTES+1).is_none());
+        assert!(appended_context(&bytes, u64::MAX, 0).is_none());
+        let mut compacted = bytes.clone(); compacted.extend_from_slice(b"\n{\"type\":\"compacted\"}\n");
+        assert!(appended_context(&compacted, before, before+compacted.len() as u64).is_none());
+        assert!(!header_matches_thread(&bytes, "thread-1"));
+        assert!(!header_matches_thread(b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-2\"}}\n", "thread-1"));
+        assert!(header_matches_thread(b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-1\"}}\n", "thread-1"));
+    }
 
     #[test]
     fn codex_0156_rollout_context_uses_last_not_cumulative_and_is_turn_bounded() {

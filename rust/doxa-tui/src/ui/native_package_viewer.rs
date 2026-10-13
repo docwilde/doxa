@@ -1,11 +1,11 @@
-//! Explicit, read-only package review in the TUI. Execution remains in the
-//! separately gated Linux CLI until the installed TUI host passes acceptance.
+//! Explicit, read-only package review. A separate instance-bound installed-host
+//! permit is required before a TUI run can start the isolated worker.
 use super::{App, ChipInfo};
 use crate::native_plugins::packages::Review;
 use std::path::Path;
 use std::sync::mpsc::{self, TryRecvError};
 
-const USAGE: &str = "Usage: /native-plugin preflight NAME | run NAME (TUI host admission disabled)";
+const USAGE: &str = "Usage: /native-plugin preflight NAME | run NAME (signed installed-host authority required)";
 
 enum Request<'a> { Preflight(&'a str), Run(&'a str) }
 
@@ -24,13 +24,13 @@ fn review_lines(review: &Review) -> Vec<String> {
     let mut lines = review.report().lines().map(str::to_owned).collect::<Vec<_>>();
     lines.push(String::new());
     if review.owner_approved && review.requested_grants.is_empty() {
-        lines.push("Eligible for explicit grantless Linux CLI run only, on an accepted delegated host:".into());
+        lines.push("Eligible for explicit zero-grant execution on an accepted delegated Linux host:".into());
         lines.push(format!("doxa native-plugin run {} --grantless-prototype", review.name));
         lines.push("The CLI rechecks owner approval, bytes and inodes immediately before cgroup/Bubblewrap admission.".into());
     } else {
         lines.push("Execution unavailable: exact owner approval and zero requested grants are required.".into());
     }
-    lines.push("This is a read-only snapshot. TUI execution remains disabled pending installed-host acceptance.".into());
+    lines.push("This is a read-only snapshot. TUI run requires a current signed operator permit for this instance.".into());
     lines
 }
 
@@ -156,7 +156,7 @@ mod tests {
         let lines = finished(&mut app);
         assert!(lines.iter().any(|line| line.contains("exact identity and grants match")));
         assert!(lines.iter().any(|line| line == "doxa native-plugin run demo --grantless-prototype"));
-        assert!(lines.iter().any(|line| line.contains("TUI execution remains disabled")));
+        assert!(lines.iter().any(|line| line.contains("current signed operator permit")));
         assert!(app.local_shell_jobs.is_empty() && app.pending_prompts.is_empty());
     }
 

@@ -1,0 +1,23 @@
+{
+  "admissible_as_hardened": false,
+  "client_exit": 0,
+  "client_uid": 1000,
+  "diagnostic": null,
+  "fresh_root_nonce_challenge": true,
+  "no_engine_api_calls": true,
+  "reply": {
+    "admission": "requires-live-composed-native-check",
+    "cid": null,
+    "policy_sha256": "42c506b61dc8d09baa780d75879b7a6fa87765c7a2de48c85f3e54a9b5ae278a",
+    "protocol": "doxa-root-session-broker-v1",
+    "session_id": "root-client-proof-47165",
+    "status": "unprepared"
+  },
+  "root_broker_pid": 47166,
+  "root_instance_pid": 47166,
+  "root_instance_start_time": 856669,
+  "root_owned_instance": true,
+  "root_proc_exe_errno": 13,
+  "root_proc_stat_start_time": 856669,
+  "scope": "actual-unprivileged-client-root-instance-attestation"
+}

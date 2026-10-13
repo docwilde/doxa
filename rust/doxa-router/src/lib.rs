@@ -64,6 +64,36 @@ pub struct Config {
     pub max_spend_usd_micros: u64,
     pub max_input_bytes: usize,
     pub deadline_ms: u64,
+    /// Explicit reviewed opt-in, part of the frozen configuration identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_percent: Option<u8>,
+}
+
+/// Parse the operator's USD ceiling without a floating point round trip. Drop
+/// fractions smaller than one USD micro; never round an allowance upward.
+pub fn usd_micros(value:&str)->io::Result<u64> {
+    let value=value.trim().strip_prefix('+').unwrap_or(value.trim());
+    if value.is_empty() || value.len()>128 {return Err(invalid("invalid Router session ceiling"));}
+    let (mantissa,exponent)=if let Some(index)=value.find(['e','E']) {
+        (&value[..index],value[index+1..].parse::<i32>().map_err(|_|invalid("invalid Router session ceiling"))?)
+    }else{(value,0)};
+    let mut fraction=None;let mut digits=String::new();
+    for byte in mantissa.bytes() {
+        if byte==b'.' && fraction.is_none(){fraction=Some(0_i64);continue;}
+        if !byte.is_ascii_digit(){return Err(invalid("invalid Router session ceiling"));}
+        digits.push(byte as char);if let Some(count)=&mut fraction{*count+=1;}
+    }
+    let digits=digits.trim_start_matches('0');
+    if digits.is_empty(){return Err(invalid("invalid Router session ceiling"));}
+    let scale=i64::from(exponent)+6-fraction.unwrap_or(0);
+    let micros=if scale>=0 {
+        if scale>19 || digits.len() as i64+scale>20{return Err(invalid("Router session ceiling overflows"));}
+        digits.parse::<u64>().ok().and_then(|amount|amount.checked_mul(10_u64.pow(scale as u32)))
+    }else {
+        let count=digits.len() as i64+scale;
+        if count<=0 {None}else{digits[..count as usize].parse::<u64>().ok()}
+    };
+    micros.filter(|micros|*micros>0).ok_or_else(||invalid("invalid Router session ceiling"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -195,7 +225,8 @@ impl Config {
             || !(2..=16).contains(&self.candidates.len()) || !self.confidence_threshold.is_finite()
             || !(0.0..=1.0).contains(&self.confidence_threshold) || !(1..=10_000).contains(&self.max_calls)
             || !(1..=1_000_000).contains(&self.max_spend_usd_micros)
-            || !(512..=24*1024).contains(&self.max_input_bytes) || !(100..=12_000).contains(&self.deadline_ms) {
+            || !(512..=24*1024).contains(&self.max_input_bytes) || !(100..=12_000).contains(&self.deadline_ms)
+            || self.auto_compact_percent.is_some_and(|percent| !(50..=95).contains(&percent)) {
             return Err(invalid("invalid pinned router configuration or limits"));
         }
         let mut ids = BTreeSet::new();

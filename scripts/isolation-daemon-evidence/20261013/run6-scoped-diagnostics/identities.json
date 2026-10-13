@@ -1,0 +1,78 @@
+{
+  "/etc/doxa/hardened/root-daemon-r6-20261013.json": {
+    "dev": 64769,
+    "gid": 0,
+    "ino": 530248,
+    "mode": "0o444",
+    "mtime_ns": 1791880192048559744,
+    "nlink": 1,
+    "sha256": "2a8b12caff244cd2b506e7ed7b3e6767c61aeee58eb9f12e79aa1764c89ac9e6",
+    "uid": 0
+  },
+  "/etc/doxa/quota-enforced/root-daemon-r6-20261013.json": {
+    "dev": 64769,
+    "gid": 0,
+    "ino": 530247,
+    "mode": "0o600",
+    "mtime_ns": 1791880191946569129,
+    "nlink": 1,
+    "sha256": "f7659109cf23edde195b5a3eba22f25f788f39ae594a970a8566535bc9fdb0e2",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r6-20261013/broker-instance.json": {
+    "absent": true
+  },
+  "/run/doxa/hardened/root-daemon-r6-20261013/control-stop-failure.json": {
+    "absent": true
+  },
+  "/run/doxa/hardened/root-daemon-r6-20261013/gateway-instance.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 13569,
+    "mode": "0o444",
+    "mtime_ns": 1791880196374618807,
+    "nlink": 1,
+    "sha256": "3243c43ef4b7d650f539863373a8202a921981820f31e968cd65a62338350b39",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r6-20261013/manifest.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 13592,
+    "mode": "0o600",
+    "mtime_ns": 1791880205455537378,
+    "nlink": 1,
+    "sha256": "49152b25ec2a08da55b938f63881db55df6bc1a311b123ba79b28ffb6dd6ef14",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r6-20261013/native-broker-check.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 13589,
+    "mode": "0o600",
+    "mtime_ns": 1791880204217249011,
+    "nlink": 1,
+    "sha256": "2a8dfb5407c6f7ede741f98c139a293119d92a85167796caf3b5c174ad150af3",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r6-20261013/native-serve.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 13590,
+    "mode": "0o600",
+    "mtime_ns": 1791880205024211245,
+    "nlink": 1,
+    "sha256": "df5adcfd1ec44a8e136d4e56ff8653e4b20866df771b7836f25a12c4ca850da6",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r6-20261013/native-stage-check.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 13588,
+    "mode": "0o600",
+    "mtime_ns": 1791880203832720322,
+    "nlink": 1,
+    "sha256": "c28e563f699f3b8436b6a1922f4def7bb7265435c703e84c843c685fa4e0ebc4",
+    "uid": 0
+  }
+}

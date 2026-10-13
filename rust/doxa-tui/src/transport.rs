@@ -451,19 +451,27 @@ mod deadline_tests {
             let listener = UnixListener::bind(&path).unwrap();
             assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
             let held = UnixStream::connect(&path).unwrap();
-            // Bound a regression too: closing the listener releases an old
-            // blocking connect, rather than leaving the test runner hung.
+            // Keep the backlog full until the connection attempt has returned.
+            // CI scheduling can delay either thread beyond the hello timeout;
+            // a timed listener close plus elapsed-time assertion cannot prove
+            // which event released the client. The channel proves ordering.
+            let (completed, completion) = std::sync::mpsc::channel();
             let release = std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(300)); drop(listener); drop(held);
+                // Unblock a broken, blocking client so the test can fail and
+                // join its threads. This is only a fixture watchdog; production
+                // connect/hello deadlines retain their original values.
+                let forced = completion.recv_timeout(Duration::from_secs(2)).is_err();
+                drop(listener); drop(held);
+                forced
             });
-            let started = Instant::now();
-            let failed = if restore { DaemonClient::connect_for_restore(&path).is_err() }
-                else { DaemonClient::connect(&path, None).is_err() };
-            let elapsed = started.elapsed(); release.join().unwrap();
-            assert!(failed);
-            let limit = if cfg!(target_os = "macos") { Duration::from_millis(350) }
-                else { Duration::from_millis(150) };
-            assert!(elapsed < limit, "connect waited for backlog release: {elapsed:?}");
+            let error = if restore { DaemonClient::connect_for_restore(&path).err() }
+                else { DaemonClient::connect(&path, None).err() };
+            let _ = completed.send(());
+            assert!(!release.join().unwrap(), "connect waited for the fixture watchdog to release the backlog");
+            assert!(matches!(&error, Some(TransportError::Timeout))
+                || cfg!(target_os = "macos") && matches!(&error, Some(TransportError::Io(error))
+                    if error.kind() == io::ErrorKind::ConnectionRefused),
+                "expected a full-backlog refusal while the listener was held: {error:?}");
         }
     }
     #[test]

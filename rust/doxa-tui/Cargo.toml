@@ -1,6 +1,6 @@
 [package]
 name = "doxa-tui"
-version = "2.0.0-beta.50"
+version = "2.0.0-beta.51"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -58,4 +58,5 @@ tempfile = "3"
 wat = "=1.261.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ring = "=0.17.14"
 signal-hook = "=0.3.18"

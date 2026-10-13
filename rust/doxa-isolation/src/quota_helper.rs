@@ -285,6 +285,58 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 #[cfg(target_os = "linux")]
 pub fn serve_systemd_socket(policy_path: &Path) -> io::Result<()> {
     let policy = load_root_policy(policy_path)?;
+    let (listener, pinned_path, queued) = activated_listener(&policy.socket_path)?;
+    // The request contains no bytes. A connection selects exactly the one
+    // administrator-pinned policy loaded at startup.
+    for stream in queued { serve_checked_peer(&policy, &pinned_path, stream)?; }
+    for incoming in listener.incoming() {
+        serve_checked_peer(&policy, &pinned_path, incoming?)?;
+    }
+    Ok(())
+}
+
+/// Requestless inspection of the separately provisioned v2 policy. The
+/// caller cannot supply paths, limits, project IDs or receipts. The response
+/// remains non-authorizing: only the root Engine gateway can combine the
+/// retained quota capabilities with its live worker security contract.
+#[cfg(target_os = "linux")]
+pub fn serve_enforced_systemd_socket(id: &str) -> io::Result<()> {
+    use crate::quota_install::enforcement::load_root_enforcement_policy;
+    let installed = load_root_enforcement_policy(id)?;
+    let socket_path = Path::new("/run/doxa/quota-enforced").join(format!("{id}.sock"));
+    let (listener, pinned_path, queued) = activated_listener(&socket_path)?;
+    let respond = |mut stream: UnixStream| -> io::Result<()> {
+        let visible = verify_socket_path(&socket_path)?;
+        let old = pinned_path.metadata()?; let now = visible.metadata()?;
+        if (old.dev(), old.ino()) != (now.dev(), now.ino()) {
+            return Err(error("enforced quota socket pathname changed after activation"));
+        }
+        if peer_uid(&stream)? != installed.policy.caller_uid { return Ok(()); }
+        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+        let snapshot = installed.verify_for_gateway().ok();
+        let mut response = serde_json::to_vec(&serde_json::json!({
+            "version": 3, "session_id": installed.policy.session_id,
+            "root": installed.policy.root, "policy_identity": installed.identity,
+            "boot_id": installed.policy.boot_id,
+            "kernel_quota_verified": snapshot.is_some(), "admissible_as_hard_quota": false,
+            "project_id": snapshot.as_ref().map(|s| s.quota.project_id),
+            "hard_limit_bytes": snapshot.as_ref().map(|s| s.quota.hard_limit_bytes),
+            "mount_id": snapshot.as_ref().map(|s| s.quota.mount_id),
+            "security_contract_version": installed.policy.security_contract_version
+        }))?;
+        response.push(b'\n');
+        // A caller closing early cannot terminate the activated service.
+        let _ = stream.write_all(&response);
+        Ok(())
+    };
+    for stream in queued { respond(stream)?; }
+    for incoming in listener.incoming() { respond(incoming?)?; }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn activated_listener(socket_path: &Path) -> io::Result<(UnixListener, File, Vec<UnixStream>)> {
+    if unsafe { libc::geteuid() } != 0 { return Err(error("quota helper activation requires root")); }
     if std::env::var("LISTEN_PID").ok().and_then(|value| value.parse::<u32>().ok()) != Some(std::process::id())
         || std::env::var("LISTEN_FDS").as_deref() != Ok("1") {
         return Err(error("quota helper requires one systemd socket activation descriptor"));
@@ -313,18 +365,12 @@ pub fn serve_systemd_socket(policy_path: &Path) -> io::Result<()> {
         return Err(error("quota helper activation socket has unsafe type or access"));
     }
     let listener = unsafe { UnixListener::from_raw_fd(3) };
-    if listener.local_addr()?.as_pathname() != Some(policy.socket_path.as_path()) {
+    if listener.local_addr()?.as_pathname() != Some(socket_path) {
         return Err(error("quota helper activation socket differs from administrator policy"));
     }
-    let pinned_path = verify_socket_path(&policy.socket_path)?;
-    let queued = challenge_listener_path(&listener, &policy.socket_path)?;
-    // The request contains no bytes. A connection selects exactly the one
-    // administrator-pinned policy loaded at startup.
-    for stream in queued { serve_checked_peer(&policy, &pinned_path, stream)?; }
-    for incoming in listener.incoming() {
-        serve_checked_peer(&policy, &pinned_path, incoming?)?;
-    }
-    Ok(())
+    let pinned_path = verify_socket_path(socket_path)?;
+    let queued = challenge_listener_path(&listener, socket_path)?;
+    Ok((listener, pinned_path, queued))
 }
 
 #[cfg(target_os = "linux")]
@@ -447,6 +493,11 @@ fn respond_to_peer(policy: &QuotaHelperPolicy, mut stream: UnixStream) -> io::Re
 
 #[cfg(not(target_os = "linux"))]
 pub fn serve_systemd_socket(_: &Path) -> io::Result<()> {
+    Err(error("quota helper requires Linux"))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn serve_enforced_systemd_socket(_: &str) -> io::Result<()> {
     Err(error("quota helper requires Linux"))
 }
 

@@ -212,8 +212,18 @@ mod tests {
         fs::write(&data_path, &input).unwrap();
         fs::write(&gate_path, &gate_input).unwrap();
         fs::set_permissions(&data_path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&gate_path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(evaluate_file(&data_path, &model(), &gate_path).is_err());
+        assert_eq!(fs::metadata(&gate_path).unwrap().permissions().mode() & 0o777, 0o644);
+        assert_eq!(fs::read_to_string(&data_path).unwrap(), input);
+        assert_eq!(fs::read_to_string(&gate_path).unwrap(), gate_input);
         fs::set_permissions(&gate_path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&data_path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(evaluate_file(&data_path, &model(), &gate_path).is_err());
+        assert_eq!(fs::metadata(&data_path).unwrap().permissions().mode() & 0o777, 0o644);
+        assert_eq!(fs::read_to_string(&data_path).unwrap(), input);
+        assert_eq!(fs::read_to_string(&gate_path).unwrap(), gate_input);
+        fs::set_permissions(&data_path, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(evaluate_file(&data_path, &model(), &gate_path).unwrap().passed);
         assert_eq!(fs::read_to_string(&data_path).unwrap(), input);
         assert_eq!(fs::read_to_string(&gate_path).unwrap(), gate_input);

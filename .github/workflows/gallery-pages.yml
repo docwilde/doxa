@@ -8,6 +8,9 @@ on:
       - assets/shots/**
       - rust/doxa-tui/Cargo.toml
       - scripts/build_gallery_site.py
+      - scripts/generate_gallery_pages.py
+      - scripts/gallery_capture.py
+      - scripts/tests/test_gallery_capture.py
       - .github/workflows/gallery-pages.yml
   workflow_dispatch:
 
@@ -27,6 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Validate declared capture provenance
+        run: TMPDIR="$RUNNER_TEMP" python3 -W error::ResourceWarning -m unittest discover -s scripts/tests -p test_gallery_capture.py -v
       - name: Package only gallery source and selected screenshots
         run: python3 scripts/build_gallery_site.py --output "$RUNNER_TEMP/gallery-site"
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4

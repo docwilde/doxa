@@ -454,7 +454,7 @@ impl App {
             }
             lines.push(Line::styled(
                 format!(" {} Isolation: [{} ▾]{}",if form.field==prompt_field-1{'›'}else{' '},form.isolation.label(),
-                    if form.engine==launch::Engine::Router {" · native · worker command permissions reviewed separately"} else {" · Click/Enter choose"}),
+                    if form.engine==launch::Engine::Router {" · worker command permissions reviewed separately"} else {" · Click/Enter choose"}),
                 chooser_row_style(form.field==prompt_field-1),
             ));
             lines.push(Line::styled(
@@ -1002,7 +1002,7 @@ impl App {
         }
         if matches!(
             info.kind,
-            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "isolation" | "routing" | "compaction" | "native_plugin" | "native_status"
+            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "isolation" | "routing" | "compaction" | "native_plugin" | "native_status" | "native_package" | "native_package_run"
         ) {
             let current = self.groups[self.active_group].active_id().and_then(|id| {
                 self.session_cwds

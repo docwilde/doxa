@@ -1,5 +1,5 @@
-//! Lifecycle seam for an explicit grantless TUI request. No installed-host
-//! admission authority exists yet, so production requests stop before dispatch.
+//! Lifecycle seam for an explicit grantless TUI request behind an enrolled
+//! operator's short-lived, instance-bound installed-host authority.
 use super::{App, ChipInfo};
 use crate::native_plugins::{self, packages, InstalledHostAuthority};
 use std::io;
@@ -48,8 +48,8 @@ impl RunOutcome {
 
 /// A disposable-guest receipt is evidence for that guest, not an authority for
 /// the installed TUI's parent process, cgroup delegation, and worker identity.
-fn installed_host_admission() -> Result<InstalledHostAuthority, RunOutcome> {
-    native_plugins::installed_host_authority().map_err(|_| RunOutcome::HostUnverified)
+fn installed_host_admission(home: &Path) -> Result<InstalledHostAuthority, RunOutcome> {
+    native_plugins::installed_host_authority(home).map_err(|_| RunOutcome::HostUnverified)
 }
 
 fn recheck_and_admit<G>(home: &Path, review: &packages::Review, cancel: &AtomicBool, gate: G) -> Result<InstalledHostAuthority, RunOutcome>
@@ -183,8 +183,9 @@ impl App {
             self.notice = "Enlarge active pane to inspect native package request".into();
             return;
         }
+        let authority_home = home.to_owned();
         match PendingRun::spawn(owner, home.to_owned(), name.to_owned(),
-            installed_host_admission, crate::native_plugins::run_reviewed_grantless_package) {
+            move || installed_host_admission(&authority_home), crate::native_plugins::run_reviewed_grantless_package) {
             Ok(run) => {
                 self.native_package_run = Some(run);
                 self.input.clear();
@@ -284,13 +285,28 @@ mod tests {
     }
 
     #[test]
-    fn production_admission_never_dispatches_even_exact_approved_package() {
+    fn production_admission_refuses_approved_package_without_operator_permit() {
         let home = fixture(true, &[]);
         let cancel = AtomicBool::new(false);
         let outcome = check_and_dispatch(home.path(), "demo", &cancel, &AtomicU8::new(CHECKING),
-            installed_host_admission, |_, _, _, _| panic!("worker dispatch must stay closed"));
+            || installed_host_admission(home.path()), |_, _, _, _| panic!("unverified host must stay closed"));
         assert_eq!(outcome, RunOutcome::HostUnverified);
         assert_eq!(outcome.lines().len(), 1);
+    }
+
+    #[test]
+    fn package_result_and_preflight_panels_render_their_actual_lines() {
+        use ratatui::{backend::TestBackend, Terminal};
+        for kind in [RUN_KIND, "native_package"] {
+            let mut app = App::default();
+            app.handle(Event::Resize(100, 30));
+            app.chip_info = Some(ChipInfo { kind, label:"demo".into(),
+                lines:vec!["Isolated plugin returned 17".into()],scroll:0,owner:None });
+            let mut terminal = Terminal::new(TestBackend::new(100,30)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let painted = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect::<String>();
+            assert!(painted.contains("Isolated plugin returned 17"),"{kind} hid the result body");
+        }
     }
 
     #[test]

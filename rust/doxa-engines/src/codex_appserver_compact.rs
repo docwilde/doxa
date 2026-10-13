@@ -27,8 +27,9 @@ impl AppServerDriver {
             other => other?,
         };
         if result["thread"]["id"] != thread { return Err(AppServerError::Protocol("compact source belongs to a different thread")); }
-        let path = result["thread"]["path"].as_str().map(std::path::PathBuf::from)
+        let path = provider_rollout_path(&result["thread"]["path"])
             .ok_or(AppServerError::CompactionBlocked)?;
+        self.rollout_path = Some(path.clone());
         let gate = self.compact_gate.as_ref().expect("verified gate");
         let job = gate.manual_review_job(&path).ok().flatten().ok_or(AppServerError::CompactionBlocked)?;
         let carrier = gate.pinned_carrier().map_err(|_| AppServerError::CompactionBlocked)?;
@@ -50,8 +51,10 @@ impl AppServerDriver {
         if cancel.is_cancelled() { return Err(AppServerError::CompactionCancelled); }
         // The private job cannot be created by adapter consumers. Recheck the
         // approved exact source immediately before submitting compaction.
-        if !job.unchanged().unwrap_or(false)
-            || self.compact_gate.as_ref().is_none_or(|gate| !gate.verified() || gate.pinned_carrier().is_err()) {
+        // Carrier hashing can be substantial. Recheck the source afterwards,
+        // as the final proof check before the bounded compact submission.
+        if self.compact_gate.as_ref().is_none_or(|gate| !gate.verified() || gate.pinned_carrier().is_err())
+            || !job.unchanged().unwrap_or(false) {
             return Err(AppServerError::CompactionBlocked);
         }
         if cancel.is_cancelled() { return Err(AppServerError::CompactionCancelled); }

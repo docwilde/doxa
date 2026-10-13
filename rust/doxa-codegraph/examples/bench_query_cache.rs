@@ -1,4 +1,4 @@
-//! Explicit, read-only alternating-query benchmark. No automatic indexing.
+//! Explicit alternating-query benchmark of answer and parsed-inventory reuse.
 use doxa_codegraph::{cache::{Origin, ReadOnlyQueryCache}, query, worktree_root, Answer, Query};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -84,8 +84,8 @@ fn run() -> Result<Value, String> {
                     return Err(format!("unexpected cache origin in {phase}"));
                 }
                 samples.push(json!({"round": round + 1, "query": answer.query,
-                    "elapsed_ms": elapsed_ms, "origin": if origin == Origin::Fresh { "fresh" }
-                        else { "revalidated" }, "answer_sha256_without_read_times": digest,
+                    "elapsed_ms": elapsed_ms, "origin": match origin { Origin::Fresh => "fresh",
+                        Origin::Indexed => "indexed", Origin::Revalidated => "revalidated" }, "answer_sha256_without_read_times": digest,
                     "observed_unix_ms": answer.observed_unix_ms}));
             }
         }

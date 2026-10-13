@@ -1,10 +1,11 @@
 //! Bounded, process-local reuse for repeated explicit syntax queries.
 //!
 //! A hit is still a bounded whole-source read: only parsing and answer
-//! assembly are reused. Nothing is persisted or promoted to semantic binding.
+//! assembly are reused. New query shapes automatically reuse one bounded
+//! parsed declaration inventory. Nothing is persisted or promoted to semantic binding.
 
-use super::{file_bytes, listed_files, query, scan_digest, source_language, worktree_root,
-    Answer, Query, MAX_FINAL_REHASH_TIME, MAX_TOTAL_SOURCE_BYTES};
+use super::{listed_files, query, scan_digest, source_language, worktree_root,
+    Answer, Query, file_bytes_observed, index::SyntaxIndex, query_with_index_and_hooks, MAX_FINAL_REHASH_TIME, MAX_TOTAL_SOURCE_BYTES};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::time::Instant;
@@ -13,10 +14,18 @@ const MAX_ENTRIES: usize = 8;
 const MAX_RETAINED_ANSWER_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Origin { Fresh, Revalidated }
+pub enum Origin { Fresh, Indexed, Revalidated }
+
+#[derive(Debug, Clone, Copy)]
+pub struct IndexStats {
+    pub files: usize,
+    pub rows: usize,
+    pub retained_bytes: usize,
+    pub unparseable_files: usize,
+}
 
 #[derive(Debug, PartialEq, Eq)]
-struct Fingerprint { listing: String, rust: String, python: String }
+struct Fingerprint { listing: String, rust: String, python: String, modes: String }
 
 #[derive(Debug)]
 struct Entry {
@@ -35,6 +44,7 @@ pub struct ReadOnlyQueryCache {
     fingerprint: Option<Fingerprint>,
     entries: VecDeque<Entry>,
     retained_answer_bytes: usize,
+    index: SyntaxIndex,
 }
 
 impl ReadOnlyQueryCache {
@@ -43,6 +53,7 @@ impl ReadOnlyQueryCache {
         self.fingerprint = None;
         self.entries.clear();
         self.retained_answer_bytes = 0;
+        self.index.clear();
     }
 
     fn remember(&mut self, request: Query, answer: &Answer) {
@@ -58,6 +69,15 @@ impl ReadOnlyQueryCache {
         self.entries.push_back(Entry { request, answer: answer.clone(), serialized_bytes });
     }
 
+    /// Automatically prepare one read-only inventory off the UI input path.
+    /// This has the same complete source/hash checks as an explicit query.
+    pub fn prepare(&mut self, root: &Path) -> Result<IndexStats, String> {
+        self.query(root, Query::Symbol("__doxa_index_prepare__".into()))?;
+        let (files, rows, retained_bytes, unparseable_files) = self.index.stats();
+        if files == 0 { return Err("complete readable source inventory unavailable or exceeds index bounds".into()); }
+        Ok(IndexStats { files, rows, retained_bytes, unparseable_files })
+    }
+
     pub fn query(&mut self, root: &Path, request: Query) -> Result<(Answer, Origin), String> {
         let root = match worktree_root(root) {
             Ok(root) => root,
@@ -70,46 +90,44 @@ impl ReadOnlyQueryCache {
             return query(&root, request).map(|answer| (answer, Origin::Fresh));
         }
         if self.root.as_ref() != Some(&root) { self.clear(); }
-        if !self.entries.is_empty() {
+        if let Some(index) = self.entries.iter().position(|entry| entry.request == request) {
             if fingerprint(&root).ok().as_ref() == self.fingerprint.as_ref() {
-                if let Some(index) = self.entries.iter().position(|entry| entry.request == request) {
                     let entry = self.entries.remove(index).expect("located cache entry");
                     let answer = entry.answer.clone();
                     self.entries.push_back(entry);
                     return Ok((answer, Origin::Revalidated));
-                }
             } else {
                 // Drift and failed source checks invalidate every answer from
                 // the old inventory, including answers for different files.
                 self.clear();
             }
         }
-        let fresh = (|| {
-            let before = listed_files(&root)?;
-            let answer = query(&root, request.clone())?;
-            Ok::<_, String>((before, answer))
-        })();
-        let (before, answer) = match fresh {
-            Ok(result) => result,
+        // Unlike an answer hit, a new query reads every supported source and
+        // performs both final rehash passes. The declaration index only avoids
+        // parsing unchanged files; requested call sites are always reparsed.
+        let answer = match query_with_index_and_hooks(&root, request.clone(),
+            Some(&mut self.index), |_| {}, |_| {}) {
+            Ok(answer) => answer,
             Err(error) => { self.clear(); return Err(error); }
         };
-        // Incomplete language scans cannot be reused: the fresh answer may
-        // legitimately report skipped or unparseable inputs, but a cache hit
-        // must have a complete source inventory for both languages.
-        if let (Some(rust), Some(python)) = (&answer.scan_input_sha256,
-            &answer.python_scan_input_sha256) {
-            if let Ok(current) = fingerprint(&root) {
-                let before_listing = scan_digest(b"doxa-codegraph-listed-paths-v1\0",
-                    before.iter().map(|path| (path.as_str(), "")));
-                if current.listing == before_listing
-                    && &current.rust == rust && &current.python == python {
-                    if self.fingerprint.as_ref() != Some(&current) { self.clear(); }
-                    self.root = Some(root);
-                    self.fingerprint = Some(current);
-                    self.remember(request, &answer);
-                    return Ok((answer, Origin::Fresh));
-                }
+        let origin = if self.index.reused_files > 0 { Origin::Indexed } else { Origin::Fresh };
+        if !self.index.listing.is_empty() {
+            let (rust, python, modes) = self.index.fingerprints();
+            let current = Fingerprint {
+                listing: scan_digest(b"doxa-codegraph-listed-paths-v1\0",
+                    self.index.listing.iter().map(|path| (path.as_str(), ""))), rust, python, modes,
+            };
+            if self.fingerprint.as_ref() != Some(&current) {
+                self.entries.clear(); self.retained_answer_bytes = 0;
             }
+            self.root = Some(root);
+            self.fingerprint = Some(current);
+            // Tombstones preserve incomplete coverage. They never make an
+            // incomplete language digest present or enable cached answers.
+            if answer.scan_input_sha256.is_some() && answer.python_scan_input_sha256.is_some() {
+                self.remember(request, &answer);
+            } else { self.entries.clear(); self.retained_answer_bytes = 0; }
+            return Ok((answer, origin));
         }
         self.clear();
         Ok((answer, Origin::Fresh))
@@ -126,6 +144,7 @@ fn fingerprint_with_pre_final_pass(root: &Path,
     let paths = listed_files(root)?;
     let mut rust = Vec::new();
     let mut python = Vec::new();
+    let mut modes = std::collections::BTreeMap::new();
     let mut rust_total = 0u64;
     let mut python_total = 0u64;
     for path in &paths {
@@ -137,12 +156,13 @@ fn fingerprint_with_pre_final_pass(root: &Path,
         if started.elapsed() >= MAX_FINAL_REHASH_TIME {
             return Err("cached code graph source check exceeded ten seconds".into());
         }
-        let (content, sha, _) = file_bytes(root, path)?;
+        let (content, sha, _, mode) = file_bytes_observed(root, path)?;
         *total = total.saturating_add(content.len() as u64);
         if *total > MAX_TOTAL_SOURCE_BYTES {
             return Err("cached code graph source check exceeded 64 MiB per language".into());
         }
         entries.push((path.as_str(), sha));
+        modes.insert(path.as_str(), format!("{mode:o}"));
     }
     // Repeat *both* languages after the first read. An early Rust edit during
     // the Python pass otherwise leaves the old Rust digest apparently valid.
@@ -155,12 +175,12 @@ fn fingerprint_with_pre_final_pass(root: &Path,
                 if started.elapsed() >= MAX_FINAL_REHASH_TIME {
                     return Err("cached code graph source check exceeded ten seconds".into());
                 }
-                let (content, actual, _) = file_bytes(root, path)?;
+                let (content, actual, _, mode) = file_bytes_observed(root, path)?;
                 total = total.saturating_add(content.len() as u64);
                 if total > MAX_TOTAL_SOURCE_BYTES {
                     return Err("cached code graph source check exceeded 64 MiB per language".into());
                 }
-                if &actual != expected {
+                if &actual != expected || modes.get(path).is_none_or(|expected| expected != &format!("{mode:o}")) {
                     return Err(format!("cached code graph source changed during recheck: {path}"));
                 }
             }
@@ -173,6 +193,7 @@ fn fingerprint_with_pre_final_pass(root: &Path,
         return Err("Git worktree listing changed during cached code graph source check".into());
     }
     Ok(Fingerprint {
+        modes: scan_digest(b"doxa-codegraph-source-modes-v1\0", modes.iter().map(|(path, mode)| (*path, mode.as_str()))),
         listing: scan_digest(b"doxa-codegraph-listed-paths-v1\0",
             paths.iter().map(|path| (path.as_str(), ""))),
         rust: scan_digest(b"doxa-rust-scan-input-v1\0",
@@ -231,7 +252,7 @@ mod tests {
         assert_eq!(origin, Origin::Fresh);
         assert_eq!(answer.coverage.enumerated_files, 3);
         let (_, origin) = cache.query(root.path(), Query::Symbol("first".into())).unwrap();
-        assert_eq!(origin, Origin::Fresh);
+        assert_eq!(origin, Origin::Indexed);
         let other = worktree();
         let (_, origin) = cache.query(other.path(), Query::Symbol("first".into())).unwrap();
         assert_eq!(origin, Origin::Fresh);
@@ -246,7 +267,7 @@ mod tests {
         let mut originals = Vec::new();
         for request in &queries {
             let (answer, origin) = cache.query(root.path(), request.clone()).unwrap();
-            assert_eq!(origin, Origin::Fresh);
+            assert_ne!(origin, Origin::Revalidated);
             originals.push(serde_json::to_value(answer).unwrap());
         }
         for (request, original) in queries.iter().zip(&originals) {
@@ -266,7 +287,7 @@ mod tests {
         assert_eq!(cache.query(root.path(), Query::Symbol("missing_0".into())).unwrap().1,
             Origin::Revalidated);
         assert_eq!(cache.query(root.path(), Query::Symbol("missing_1".into())).unwrap().1,
-            Origin::Fresh);
+            Origin::Indexed);
         assert_eq!(cache.entries.len(), MAX_ENTRIES);
     }
 
@@ -282,7 +303,7 @@ mod tests {
         let mut all_answer_bytes = 0;
         for file in 0..6 {
             let (answer, origin) = cache.query(root.path(), Query::File(format!("large_{file}.rs"))).unwrap();
-            assert_eq!(origin, Origin::Fresh);
+            assert_ne!(origin, Origin::Revalidated);
             all_answer_bytes += serde_json::to_vec(&answer).unwrap().len();
             assert!(cache.retained_answer_bytes <= MAX_RETAINED_ANSWER_BYTES);
             assert_eq!(cache.retained_answer_bytes,
@@ -291,7 +312,7 @@ mod tests {
         assert!(all_answer_bytes > MAX_RETAINED_ANSWER_BYTES);
         assert!(cache.entries.len() < 6);
         assert_eq!(cache.query(root.path(), Query::File("large_0.rs".into())).unwrap().1,
-            Origin::Fresh);
+            Origin::Indexed);
     }
 
     #[test]
@@ -309,7 +330,7 @@ mod tests {
         prime(&mut cache);
         fs::write(root.path().join("lib.rs"), "fn changed() {}\n").unwrap();
         assert_eq!(cache.query(root.path(), imports.clone()).unwrap().1, Origin::Fresh);
-        assert_eq!(cache.query(root.path(), file.clone()).unwrap().1, Origin::Fresh);
+        assert_eq!(cache.query(root.path(), file.clone()).unwrap().1, Origin::Indexed);
 
         // An ignored source entering the Git inventory changes the generation,
         // even when neither displayed query names that source.
@@ -319,7 +340,7 @@ mod tests {
         assert!(Command::new("git").args(["-C"]).arg(root.path())
             .args(["add", "-f", "hidden.rs"]).status().unwrap().success());
         assert_eq!(cache.query(root.path(), imports.clone()).unwrap().1, Origin::Fresh);
-        assert_eq!(cache.query(root.path(), file.clone()).unwrap().1, Origin::Fresh);
+        assert_eq!(cache.query(root.path(), file.clone()).unwrap().1, Origin::Indexed);
         fs::remove_file(root.path().join("lib.rs")).unwrap();
         assert_eq!(cache.query(root.path(), imports.clone()).unwrap().1, Origin::Fresh);
         assert!(cache.query(root.path(), file.clone()).is_err());
@@ -343,7 +364,7 @@ mod tests {
         assert!(cache.entries.is_empty());
         fs::write(root.path().join("service.py"), "def first(): pass\n").unwrap();
         assert_eq!(cache.query(root.path(), Query::File("lib.rs".into())).unwrap().1,
-            Origin::Fresh);
+            Origin::Indexed);
     }
 
     #[test]
@@ -353,13 +374,53 @@ mod tests {
         let mut cache = ReadOnlyQueryCache::default();
         let (_, first) = cache.query(root.path(), Query::File("lib.rs".into())).unwrap();
         let (_, second) = cache.query(root.path(), Query::File("lib.rs".into())).unwrap();
-        assert_eq!((first, second), (Origin::Fresh, Origin::Fresh));
+        assert_eq!((first, second), (Origin::Fresh, Origin::Indexed));
 
         fs::write(root.path().join("service.py"), "def first(): pass\n").unwrap();
         let error = fingerprint_with_pre_final_pass(root.path(), |root| {
             fs::write(root.join("lib.rs"), "fn late() {}\n").unwrap();
         }).err().unwrap();
         assert!(error.contains("source changed during recheck: lib.rs"), "{error}");
+    }
+
+    #[test]
+    fn automatic_index_retains_tombstones_without_complete_language_claims() {
+        let root = worktree();
+        fs::write(root.path().join("service.py"), "def broken(\n").unwrap();
+        let mut cache = ReadOnlyQueryCache::default();
+        let stats = cache.prepare(root.path()).unwrap();
+        assert_eq!((stats.files, stats.unparseable_files), (2, 1));
+        let (answer, origin) = cache.query(root.path(), Query::Symbol("first".into())).unwrap();
+        assert_eq!(origin, Origin::Indexed);
+        assert_eq!(answer.rows.len(), 1);
+        assert!(answer.python_scan_input_sha256.is_none());
+        assert_eq!(answer.coverage.python_unparseable_files, 1);
+        assert!(cache.entries.is_empty());
+        fs::write(root.path().join("service.py"), "def repaired(): pass\n").unwrap();
+        let (repaired, _) = cache.query(root.path(), Query::Symbol("repaired".into())).unwrap();
+        assert!(repaired.python_scan_input_sha256.is_some());
+        assert_eq!(repaired.coverage.python_unparseable_files, 0);
+        assert_eq!(repaired.rows.len(), 1);
+    }
+
+    #[test]
+    fn indexed_tombstone_and_mode_are_rechecked_before_return() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = worktree();
+        fs::write(root.path().join("service.py"), "def broken(\n").unwrap();
+        let mut index = SyntaxIndex::default();
+        let error = query_with_index_and_hooks(root.path(), Query::Symbol("first".into()),
+            Some(&mut index), |_| {}, |root| {
+                fs::write(root.join("service.py"), "def changed(\n").unwrap();
+            }).unwrap_err();
+        assert!(error.contains("hash/mode changed"), "{error}");
+        let mut cache = ReadOnlyQueryCache::default();
+        fs::write(root.path().join("service.py"), "def first(): pass\n").unwrap();
+        let source = root.path().join("lib.rs");
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
+        cache.query(root.path(), Query::File("lib.rs".into())).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(cache.query(root.path(), Query::File("lib.rs".into())).unwrap().1, Origin::Fresh);
     }
 
     #[test]

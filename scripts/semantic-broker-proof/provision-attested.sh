@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Explicit guest/host provisioning; operator must review this script and pins.
+set -euo pipefail
+[[ $# == 3 && $EUID == 0 ]] || { echo 'usage(root): provision-attested.sh STAGING_DIR ENGINE_SOCKET DOXA_CODEGRAPH' >&2; exit 2; }
+staging_dir=$(realpath "$1")
+engine_socket=$2
+client_binary=$(realpath "$3")
+[[ -f "$staging_dir/rust-analyzer" && -f "$staging_dir/attested_broker.py" && -x "$client_binary" ]]
+install -d -o root -g root -m 0755 /usr/local/lib/doxa-semantic /var/lib/doxa-semantic /var/lib/doxa-semantic/snapshots /run/doxa-semantic
+install -o root -g root -m 0644 "$staging_dir/attested_broker.py" /usr/local/lib/doxa-semantic/attested_broker.py
+install -o root -g root -m 0644 "$staging_dir/read_analyzer.py" /usr/local/lib/doxa-semantic/read_analyzer.py
+install -o root -g root -m 0755 "$client_binary" /usr/local/bin/doxa-codegraph-proof
+install -d -o engine -g engine -m 0755 /home/engine/semantic-image
+install -o engine -g engine -m 0755 "$staging_dir/rust-analyzer" /home/engine/semantic-image/rust-analyzer
+engine_docker() { runuser -u engine -- env XDG_RUNTIME_DIR=/run/user/1001 docker --host "unix://$engine_socket" "$@"; }
+engine_docker pull rust:1.94.0-slim-bookworm
+base_image=$(engine_docker image inspect rust:1.94.0-slim-bookworm --format '{{index .RepoDigests 0}}')
+[[ $base_image == rust@sha256:* ]]
+cat > /home/engine/semantic-image/Dockerfile <<EOF
+FROM $base_image
+RUN rustup component add rust-src --toolchain 1.94.0
+ENV PATH=/usr/local/rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+COPY rust-analyzer /usr/local/bin/rust-analyzer
+ENTRYPOINT ["/usr/local/bin/rust-analyzer"]
+EOF
+chown engine:engine /home/engine/semantic-image/Dockerfile
+engine_docker build --network default --tag doxa-semantic-proof:reviewed /home/engine/semantic-image
+image_id=$(engine_docker image inspect doxa-semantic-proof:reviewed --format '{{.Id}}')
+[[ $image_id == sha256:* ]]
+python3 - "$engine_socket" "$image_id" "$staging_dir" "$base_image" <<'PY'
+import hashlib,json,pathlib,sys
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding,PrivateFormat,PublicFormat,NoEncryption
+socket,image,staging,base=sys.argv[1:]
+sha=lambda p:hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+key=Ed25519PrivateKey.generate()
+private=pathlib.Path('/var/lib/doxa-semantic/signing-key.pem')
+private.write_bytes(key.private_bytes(Encoding.PEM,PrivateFormat.PKCS8,NoEncryption()));private.chmod(0o600)
+config={'engine_socket':socket,'engine_uid':1001,'client_uid':1000,'image_id':image,
+    'engine_sha256':sha('/usr/bin/dockerd'),'analyzer_sha256':sha(staging+'/rust-analyzer'),
+    'snapshot_parent':'/var/lib/doxa-semantic/snapshots','signing_key':str(private),
+    'broker_socket':'/run/doxa-semantic/broker.sock','allowed_source_parent':'/home/doxa/semantic-source'}
+for name,path in [('nsenter','/usr/bin/nsenter'),('python','/usr/bin/python3'),('reader','/usr/local/lib/doxa-semantic/read_analyzer.py')]:
+    resolved=str(pathlib.Path(path).resolve());config[name+'_path']=resolved;config[name+'_sha256']=sha(resolved)
+path=pathlib.Path('/var/lib/doxa-semantic/config.json');path.write_text(json.dumps(config,sort_keys=True)+'\n');path.chmod(0o644)
+pins={name:config[name] for name in ['engine_sha256','analyzer_sha256','image_id']}
+pins.update(public_key_hex=key.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw).hex(),
+    broker_sha256=sha('/usr/local/lib/doxa-semantic/attested_broker.py'),config_sha256=sha(path),
+    base_image=base,client_sha256=sha('/usr/local/bin/doxa-codegraph-proof'))
+receipt=pathlib.Path('/var/lib/doxa-semantic/operator-pins.json');receipt.write_text(json.dumps(pins,sort_keys=True,indent=2)+'\n');receipt.chmod(0o644)
+print(json.dumps(pins,sort_keys=True))
+PY
+cat > /etc/systemd/system/doxa-semantic-proof.service <<'EOF'
+[Unit]
+Description=Explicit operator-provisioned DOXA semantic proof broker
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/lib/doxa-semantic/attested_broker.py --config /var/lib/doxa-semantic/config.json
+MemoryMax=2G
+MemorySwapMax=0
+CPUQuota=100%
+TasksMax=64
+UMask=0022
+Restart=no
+EOF
+systemctl daemon-reload
+systemctl start doxa-semantic-proof.service
+install -d -o doxa -g doxa -m 0755 /home/doxa/semantic-source /home/doxa/semantic-source/plain
+runuser -u doxa -- git init -q /home/doxa/semantic-source/plain
+cat > /home/doxa/semantic-source/plain/Cargo.toml <<'EOF'
+[package]
+name = "semantic_plain_fixture"
+version = "0.1.0"
+edition = "2021"
+EOF
+install -d -o doxa -g doxa -m 0755 /home/doxa/semantic-source/plain/src
+cat > /home/doxa/semantic-source/plain/src/lib.rs <<'EOF'
+pub fn target() -> u32 { 17 }
+pub fn caller() -> u32 { target() }
+EOF
+cat > /home/doxa/semantic-source/plain/Cargo.lock <<'EOF'
+# This file is automatically @generated by Cargo.
+version = 4
+[[package]]
+name = "semantic_plain_fixture"
+version = "0.1.0"
+EOF
+chown -R doxa:doxa /home/doxa/semantic-source/plain
+printf 'Review /var/lib/doxa-semantic/operator-pins.json and pass public_key_hex separately to the client.\n'

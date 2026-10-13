@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "session_id": "reviewed-session",
+  "caller_uid": 1000,
+  "engine": {
+    "uid": 1001,
+    "gid": 1001,
+    "socket": "/run/user/1001/docker.sock",
+    "exe_path": "/usr/bin/dockerd",
+    "exe_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "config_path": "/etc/doxa/engine.json",
+    "config_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "api_version": "1.51"
+  },
+  "root": "/srv/doxa/reviewed-session",
+  "image": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "worker": {
+    "path": "/usr/local/bin/doxa-isolation-worker",
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "providers": {
+    "claude": {
+      "path": "/usr/local/bin/claude",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "artifacts": {"/usr/local/bin/claude": "1111111111111111111111111111111111111111111111111111111111111111"},
+      "egress": ["api.anthropic.com"],
+      "proxy_port": 3128,
+      "environment_keys": ["ANTHROPIC_API_KEY", "LANG", "TERM", "LORE_SKIP", "CLAUDE_CODE_DISABLE_AUTO_MEMORY"]
+    }
+  },
+  "authority": {
+    "path": "/usr/libexec/doxa/doxa-hardened-gateway",
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "broker": {
+    "path": "/usr/libexec/doxa/root_broker.py",
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "limits": {
+    "memory_bytes": 1073741824,
+    "cpu_quota": 100000,
+    "cpu_period": 100000,
+    "pids": 64,
+    "disk_bytes": 1073741824,
+    "output_bytes": 8388608,
+    "stdin_bytes": 8388608,
+    "deadline_seconds": 600,
+    "operation_seconds": 120
+  }
+}

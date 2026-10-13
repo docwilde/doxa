@@ -586,6 +586,7 @@ fn run_loop_with_remote(
         changed |= app.poll_fleet();
         changed |= app.poll_diff();
         changed |= app.poll_codegraph();
+        app.poll_codegraph_index();
         changed |= app.poll_auto_diff();
         changed |= app.poll_history();
         changed |= app.poll_resume();
