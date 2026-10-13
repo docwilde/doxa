@@ -373,6 +373,7 @@ pub struct ProvisionRequest {
 }
 
 fn create_directory(parent: &File, name: &str, gid: u32, mode: u32) -> io::Result<File> {
+    let mode: libc::mode_t = mode.try_into().map_err(|_| error("unsupported provisioning directory mode"))?;
     let name = CString::new(name).map_err(|_| error("unsafe provisioning directory name"))?;
     if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } < 0 {
         return Err(io::Error::last_os_error());
