@@ -129,3 +129,9 @@ CID/Engine and active count before releasing state lock for copy; scoped/native
 revalidation precedes short publication and exec, with state->shared->EX lock
 order. Meaningful held-copy guard responsiveness and changed-scope refusal
 regressions added. Frozen running guest broker/policy bytes were not changed.
+
+Narrow final source236c0dbd:55 focused tests passed0.733s, clean status and
+diff-check. Broker SHA256 is4ff9a871df8eab03fd4be94693564c3d4d7ef3f21470b040b5e82068ee7a81d9.
+Parent will reprove these final bytes in a fresh composed scope. Earlier actual
+atomic/client guest evidence331355b7 remains explicitly tied to prior source;
+no frozen guest policy, broker or global Engine state was changed for this fix.
