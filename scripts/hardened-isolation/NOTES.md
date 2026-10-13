@@ -209,3 +209,15 @@ The new actual normal annotated-tag case exposed existing peeled-row regex
 `[\x5e]`: bytes escaping made an invalid negated character class, raising a
 PatternError for valid peeled refs. Validate the OID suffix after the already
 checked literal caret instead. Added malformed peeled-OID refusal fixture.
+
+Packed-ref sourceb63e8ea3+d79c206f:75 focused tests pass0.955s, clean worktree
+and diff-check. Four actual local Git view inventories execute14 reviewed
+readonly commands in total: status/diff/HEAD on each; normal packed refs also
+verify topic and peeled annotated tag. Empty/header-only/fully filtered refs
+produce zero bytes, normal validated rows remain intact, malformed peeled OID
+refuses, and source packed/index bytes plus readonly view files stay unchanged.
+These fixtures substitute ROOT/quota metadata and prove Git file compatibility,
+not native authority or live containment. Broker SHA256
+6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5.
+Fresh composed5014 remains pending parent review/freeze; no guest commands or
+mutations were performed, and frozen R5 evidence remains source-scoped.
