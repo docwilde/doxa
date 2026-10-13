@@ -54,7 +54,7 @@ pub struct Authority {
 /// binds the exact bytes decoded here; it is not a caller's assertion.
 pub fn load_root_policy(path:&Path)->io::Result<(Policy,String)> {
     require_root()?;
-    let (pinned,bytes)=pin_json(path,64*1024,Instant::now()+Duration::from_secs(3))?;
+    let (pinned,bytes)=pin_json(path,64*1024,JsonMode::PublicPolicy,Instant::now()+Duration::from_secs(3))?;
     let policy:Policy=serde_json::from_slice(&bytes).map_err(|_|error("administrator policy has invalid or unknown fields"))?;
     policy.validate()?;
     Ok((policy,pinned.sha256))
@@ -88,10 +88,10 @@ impl Authority {
     pub fn load(policy_path:&Path,manifest_path:&Path,engine_pidfd:RawFd)->io::Result<Self> {
         require_root()?;
         let deadline=Instant::now()+Duration::from_secs(30);
-        let (policy_file,bytes)=pin_json(policy_path,64*1024,deadline)?;
+        let (policy_file,bytes)=pin_json(policy_path,64*1024,JsonMode::PublicPolicy,deadline)?;
         let policy:Policy=serde_json::from_slice(&bytes).map_err(|_|error("administrator policy has invalid or unknown fields"))?;
         policy.validate()?;
-        let (_,bytes)=pin_json(manifest_path,16*1024,deadline)?;
+        let (_,bytes)=pin_json(manifest_path,16*1024,JsonMode::PrivateManifest,deadline)?;
         let manifest:RootManifest=serde_json::from_slice(&bytes).map_err(|_|error("ROOT manifest has invalid or unknown fields"))?;
         manifest.validate(&policy,&policy_file.sha256)?;
         if boot_id()?!=manifest.boot_id {return Err(error("ROOT manifest belongs to another kernel boot"));}
@@ -129,7 +129,7 @@ impl Authority {
         require_root()?;
         let deadline=Instant::now()+Duration::from_secs(self.policy.limits.operation_seconds);
         self.policy_file.revalidate(deadline)?;
-        let (_,bytes)=pin_json(&self.manifest_path,16*1024,deadline)?;
+        let (_,bytes)=pin_json(&self.manifest_path,16*1024,JsonMode::PrivateManifest,deadline)?;
         let current:RootManifest=serde_json::from_slice(&bytes).map_err(|_|error("ROOT manifest changed to an invalid shape"))?;
         current.validate(&self.policy,&self.policy_sha256)?;
         let mut core=current;core.gateway_pid=self.manifest.gateway_pid;core.status=self.manifest.status.clone();
@@ -332,8 +332,20 @@ fn hash_file(file:&File,max:u64,deadline:Instant)->io::Result<String> {
     if Identity::of(file)?!=before||total!=before.len{return Err(error("authority artifact changed during hash"));}
     Ok(format!("{:x}",hash.finalize()))
 }
-fn pin_json(path:&Path,max:u64,deadline:Instant)->io::Result<(PinnedFile,Vec<u8>)> {
-    let file=root_file(path,max,true)?;let identity=Identity::of(&file)?;let bytes=read_bytes(&file,max)?;remaining(deadline)?;
+#[derive(Clone,Copy)]
+enum JsonMode {PublicPolicy,PrivateManifest}
+fn check_json_mode(file:&File,mode:JsonMode)->io::Result<()> {
+    // The installed policy is public so the ordinary caller can pin the same
+    // administrator bytes. Runtime manifests remain private to ROOT.
+    let expected=match mode {JsonMode::PublicPolicy=>0o444,JsonMode::PrivateManifest=>0o600};
+    if file.metadata()?.mode()&0o7777!=expected {
+        return Err(error("ROOT JSON input does not have its fixed public policy/private manifest mode"));
+    }Ok(())
+}
+fn pin_json(path:&Path,max:u64,mode:JsonMode,deadline:Instant)->io::Result<(PinnedFile,Vec<u8>)> {
+    let file=root_file(path,max,matches!(mode,JsonMode::PrivateManifest))?;
+    check_json_mode(&file,mode)?;
+    let identity=Identity::of(&file)?;let bytes=read_bytes(&file,max)?;remaining(deadline)?;
     if Identity::of(&file)?!=identity{return Err(error("ROOT input changed while loading"));}
     let sha256=format!("{:x}",Sha256::digest(&bytes));
     Ok((PinnedFile{path:path.to_owned(),file,identity,sha256},bytes))
@@ -1056,6 +1068,17 @@ fn caller_groups(uid:u32)->io::Result<(u32,Vec<u32>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_policy_and_private_manifest_require_their_distinct_fixed_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let file=tempfile::NamedTempFile::new().unwrap();
+        for (bits,public,private) in [(0o444,true,false),(0o600,false,true),
+            (0o644,false,false),(0o400,false,false),(0o640,false,false),(0o4444,false,false)] {
+            file.as_file().set_permissions(fs::Permissions::from_mode(bits)).unwrap();
+            assert_eq!(check_json_mode(file.as_file(),JsonMode::PublicPolicy).is_ok(),public);
+            assert_eq!(check_json_mode(file.as_file(),JsonMode::PrivateManifest).is_ok(),private);
+        }
+    }
     #[test]
     fn stateless_device_requires_actual_character_rdev() {
         let file=File::open("/dev/zero").unwrap();
