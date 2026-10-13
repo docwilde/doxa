@@ -24,17 +24,20 @@ import time
 
 PROVIDER = r'''#!/usr/bin/env python3
 """Immutable credential-free composed proof fixture; no provider/network API."""
-import errno,json,os,shlex,socket,subprocess,sys
+import errno,json,os,shlex,socket,subprocess,sys,threading,time
 from pathlib import Path
 THREAD='composed-thread-20261013'
 ROLLOUT=Path('/home/doxa/codex/sessions/rollout-composed.jsonl')
 FAMILY=Path(sys.argv[0]).name
+WATCH=None
+WATCH_DONE=threading.Event()
 def emit(op,**fields):print(json.dumps(dict(op=op,**fields),sort_keys=True),flush=True)
 def private(path,data):
     path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
     with os.fdopen(fd,'wb') as out:out.write(data);out.flush();os.fsync(out.fileno())
 def main():
+    global WATCH
     if sys.argv[1:]==['--version']:print('credential-free composed '+FAMILY);return
     if sys.argv[1:]!=['stream']:raise RuntimeError('fixture accepts only stream or --version')
     owner=None
@@ -75,13 +78,28 @@ def main():
         elif op=='markers':
             emit(op,filter_marker=Path('/workspace/git-filter-marker').exists(),diff_marker=Path('/workspace/git-diff-marker').exists(),
                  plain=Path('/workspace/plain.txt').read_text())
+        elif op=='watch-git-view':
+            def watch():
+                global WATCH
+                deadline=time.monotonic()+30
+                while time.monotonic()<deadline:
+                    try:views=list(Path('/run/doxa/session/git-safe').iterdir())
+                    except FileNotFoundError:views=[]
+                    for view in views:
+                        if not view.is_dir() or not (view/'config').exists():continue
+                        try:
+                            fd=os.open(view/'config',os.O_WRONLY|os.O_APPEND|os.O_NOFOLLOW)
+                            os.write(fd,b'worker mutation');os.close(fd);code=None
+                        except FileNotFoundError:continue
+                        except OSError as cause:code=cause.errno
+                        WATCH={'errno':code,'generation':view.name};WATCH_DONE.set();return
+                    time.sleep(.005)
+                WATCH_DONE.set()
+            threading.Thread(target=watch,daemon=True).start();emit(op,started=True)
         elif op=='write-git-view':
-            views=list(Path('/run/doxa/session/git-safe').iterdir())
-            if len(views)!=1:raise RuntimeError('fixture requires current one ROOT Git view')
-            try:
-                fd=os.open(views[0]/'config',os.O_WRONLY|os.O_APPEND|os.O_NOFOLLOW);os.write(fd,b'worker mutation');os.close(fd);code=None
-            except OSError as cause:code=cause.errno
-            emit(op,errno=code)
+            WATCH_DONE.wait(35)
+            if WATCH is None:raise RuntimeError('no active published ROOT Git view observed')
+            emit(op,**WATCH)
         else:raise RuntimeError('unknown fixture operation')
 def re_cap(value):return len(value)==48 and all(char in '0123456789abcdef' for char in value)
 if __name__=='__main__':main()

@@ -263,6 +263,10 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
             "mutated actual source retained stale proof",
         )?;
         codex.request(json!({"op":"poison-git"}))?;
+        // The broker retires each immutable view after its Git operation.
+        // Observe the live readonly view from the concurrent provider while
+        // ROOT checks it before starting the actual Git process.
+        codex.request(json!({"op":"watch-git-view"}))?;
         let status = git(
             &manifest,
             &["-c", "core.quotepath=false", "status", "--porcelain"],
