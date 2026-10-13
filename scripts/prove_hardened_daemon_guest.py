@@ -444,7 +444,7 @@ def main(args):
         obs.send(b"status\n")
         pump.wait(lambda: any(frame.get("type") == "reply" and frame.get("id") == 102 for frame in frames()), budget)
         idle = next(frame for frame in frames() if frame.get("type") == "reply" and frame.get("id") == 102)
-        require(idle["ok"] and idle["result"]["status"]["running"] is False and idle["result"]["status"]["queued"] == 0, "exact fixture daemon not idle")
+        require(idle["ok"] and idle["status"]["running"] is False and idle["status"]["queued"] == 0, "exact fixture daemon not idle")
         report.update(prompt=prompt, events=events, idle=idle, frontend_rendered=True, isolation_host_root_guard_turn=True)
         os.write(master, b"\x11")
         require(pump.exit(frontend, budget) == 0, "captured frontend did not exit after CtrlQ")
