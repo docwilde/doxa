@@ -185,8 +185,14 @@ in three fixed ROOT600 files under the private runtime directory:
 `native-broker-check.json`, `native-stage-check.json`, `native-serve.json`.
 These capture native diagnostics only, never provider stdio or provider secret
 environment, and are neither client receipts nor admission evidence.
-All post-launch pipe/PIDFD/drainer setup is inside owned-child cleanup guards;
-setup failure kills/reaps the child with bounded waits and closes descriptors.
+All post-launch pipe/PIDFD/drainer setup is inside owned-child cleanup guards.
+If a bounded kill/reap or descriptor cleanup fails, ROOT retains the helper
+process object, PIDFD and remaining pipes in a private ledger; the gateway keeps
+its process, PIDFD, drainer and exact socket pins. New lifecycle/admission is
+quarantined until `stop` or independent cleanup reclaims those retained pins.
+CID removal still proceeds, but no stopped receipt is issued while helper
+cleanup is uncertain. Quiesced shutdown keeps ownership across bounded retries;
+systemd's control-group stop remains the forced service termination boundary.
 Native helpers do not rely on a context-manager implicit unbounded child wait.
 
 `prove_git_safe_guest.py` executes actual Git as UID1001 with malicious source

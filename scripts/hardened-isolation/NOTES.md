@@ -158,3 +158,25 @@ same ROOT manifest policy/SID/boot/current authority, owned helper retirement,
 oldCID404 and controlled Engine pin precede fresh CID; data is retained without
 staging, while cleanup-required/stale scope stays refused. All edits remain
 source-only; running guest broker/policy/Engine state were not changed.
+
+Final code0eed8db9:67 focused tests passed0.830s; clean status/diff-check.
+Broker SHA256 a33f76cde9a64297cacbecff64862b4db8db65ed036633bfe163ea682fcd5638.
+Actual child injection covers helper pipe setup, gateway PIDFD allocation and
+stderr drainer allocation failures with bounded kill/reap and descriptor closure.
+Fresh composed5013 is coordinator-owned and pending review/freeze; prior actual
+guest evidence remains tied to its exact earlier source, with no promotion of
+failed/mutable fixture receipts or altered frozen5012 artifacts.
+
+Independent review reopened uncertain native child teardown: failed bounded
+kill/reap could clear gateway ownership and helper pipes despite a live child.
+New private helper ledger retains Popen/PIDFD/remaining descriptors; gateway
+retains its process/PIDFD/drainer/socket pins until verified exit and scoped
+endpoint cleanup. Admission/lifecycle is quarantined; stop/cleanup retries only
+retained pins, still removes exactCID, and preserves cleanup-required until all
+owned helpers close. Quiesced shutdown retains ownership across bounded retries.
+Stopped manifest version now requires exact integer1, including initial load
+and prepare, refusing JSONtrue/1.0 before normalization. Added actual benign
+child injected teardown-failure/retry regressions plus lifecycle quarantine and
+malformed stopped-version fixtures. Source-only; guest5013 remains held and
+frozen5012 broker/policy/Engine artifacts remain untouched. Committing before
+focused verification as required by the isolation skill.

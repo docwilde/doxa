@@ -621,7 +621,7 @@ def atomic_root_write(path, data, mode):
         temporary.unlink(missing_ok=True)
 
 
-def kill_owned_child(child):
+def kill_owned_child(child, timeout=2):
     # wait() may already have reaped a refused child. Its numerical PID can then
     # be reused, so never signal that process group after a completed wait.
     if child.returncode is None:
@@ -629,7 +629,7 @@ def kill_owned_child(child):
             os.killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        child.wait(timeout=2)
+        child.wait(timeout=timeout)
 
 
 class NativeStderr:
@@ -694,10 +694,14 @@ class Broker:
         self.gateway_parents = {}
         self.gateway_stderr = None
         self.gateway_start_error = None
+        self.gateway_teardown_pending = False
+        self.native_children_lock = threading.RLock()
+        self.failed_native_children = []
         self.adapters = {}
         if self.manifest_path.exists():
             self.manifest = strict_json(read_regular(self.manifest_path, root=True))
-            require(self.manifest.get("policy_sha256") == self.policy_sha256
+            require(type(self.manifest.get("version")) is int and self.manifest["version"]==1
+                    and self.manifest.get("policy_sha256") == self.policy_sha256
                     and self.manifest.get("session_id") == self.policy["session_id"]
                     and self.manifest.get("boot_id") == boot_id(), "root manifest authority is stale")
 
@@ -723,6 +727,7 @@ class Broker:
         """Live ROOT authority check for a new turn on a persistent transport."""
         cid = None
         try:
+            self.require_native_clear()
             require(not self.closing.is_set(), "root broker is closing")
             cid = self.identity()
             require(self.manifest["status"] == "ready", "session admission is not ready")
@@ -734,6 +739,7 @@ class Broker:
             raise
 
     def preflight(self):
+        self.require_native_clear()
         p = self.policy
         require(sha(read_regular(self.policy_path, root=True, readonly=True)) == self.policy_sha256, "root policy changed")
         for name in ("authority", "broker"):
@@ -761,12 +767,56 @@ class Broker:
                 "stderr_bytes":total,"stderr_truncated":total>MAX_NATIVE_STDERR,"error":str(error)[:256] if error else None}
         atomic_root_write(path,compact(record)+b"\n",0o600)
 
+    def native_quarantined(self):
+        return bool(getattr(self,"failed_native_children",())) or getattr(self,"gateway_teardown_pending",False)
+
+    def require_native_clear(self):
+        require(not self.native_quarantined(),"owned native child cleanup is uncertain; ROOT cleanup retry required")
+
+    def retain_native_child(self,owned):
+        with self.native_children_lock:
+            if owned not in self.failed_native_children:self.failed_native_children.append(owned)
+
+    def release_native_child(self,owned):
+        child=owned["child"]
+        require(child.returncode is not None,"owned native child has not been reaped")
+        if owned["pidfd"] is not None:
+            require(select.select([owned["pidfd"]],[],[],0)[0],"owned native child PIDFD has not exited")
+        for pipe in (child.stdout,child.stderr):
+            if pipe is not None and not pipe.closed:pipe.close()
+        if owned["pidfd"] is not None:
+            os.close(owned["pidfd"]);owned["pidfd"]=None
+
+    def record_native_child(self,owned):
+        try:self.native_diagnostic(*owned["scope"],owned["child"].pid,owned["child"].returncode,
+                                   bytes(owned["diagnostic"]),owned["total"],owned["error"])
+        except Exception:pass
+
+    def retry_native_children(self,deadline):
+        """Only retained process objects/FDs can be reclaimed after uncertain teardown."""
+        if not getattr(self,"failed_native_children",()):return
+        with self.native_children_lock:
+            for owned in list(self.failed_native_children):
+                try:
+                    deadline.check()
+                    kill_owned_child(owned["child"],timeout=max(.001,min(2,deadline.end-time.monotonic())))
+                    self.release_native_child(owned)
+                except Exception as error:
+                    owned["error"]=error;self.record_native_child(owned)
+                    continue
+                self.record_native_child(owned)
+                self.failed_native_children.remove(owned)
+            require(not self.failed_native_children,"owned native helpers still require ROOT cleanup retry")
+
     def run_native(self,command,deadline,operation,phase,family,refusal,pass_fds=()):
-        output=bytearray();diagnostic=bytearray();total=0;failure=None
+        self.require_native_clear()
+        output=bytearray();diagnostic=bytearray();total=0;failure=None;retained=False
         child=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                               env={"PATH":"/usr/bin:/bin","LANG":"C","TMPDIR":str(self.state_dir)},
                               pass_fds=pass_fds,start_new_session=True)
+        owned={"child":child,"pidfd":None,"scope":(operation,phase,family),"diagnostic":diagnostic,"total":0,"error":None}
         try:
+            owned["pidfd"]=os.pidfd_open(child.pid)
             pipes={child.stdout.fileno():"stdout",child.stderr.fileno():"stderr"}
             for fd in pipes:os.set_blocking(fd,False)
             while pipes:
@@ -783,12 +833,20 @@ class Broker:
             deadline.check();code=child.wait(timeout=max(.001,deadline.end-time.monotonic()));deadline.check()
             require(code==0,refusal+" (exit="+str(code)+")")
         except BaseException as error:
-            failure=error;kill_owned_child(child);raise
+            failure=error
+            try:kill_owned_child(child)
+            except BaseException as teardown:
+                failure=teardown;self.retain_native_child(owned);retained=True;raise
+            raise
         finally:
             # No Popen context-manager unbounded wait after failed setup.
-            child.stdout.close();child.stderr.close()
-            try:self.native_diagnostic(operation,phase,family,child.pid,child.returncode,bytes(diagnostic),total,failure)
-            except Exception:pass
+            owned["total"]=total;owned["error"]=failure
+            try:
+                if not retained:
+                    try:self.release_native_child(owned)
+                    except BaseException as error:
+                        owned["error"]=error;self.retain_native_child(owned);raise
+            finally:self.record_native_child(owned)
         return bytes(output)
 
     def native_check(self, deadline, phase, family="none"):
@@ -838,6 +896,7 @@ class Broker:
         return result
 
     def hook_control(self, request, deadline):
+        self.require_native_clear()
         op = request["op"]
         fields = {"v", "session_id", "op", "client_pid", "capability"} | ({"socket"} if op == "register_hook" else set())
         keys(request, fields)
@@ -880,12 +939,14 @@ class Broker:
                 os.close(fd)
 
     def gateway_live(self):
+        self.require_native_clear()
         require(self.gateway is not None and self.gateway.poll() is None and self.gateway_pidfd is not None
                 and not select.select([self.gateway_pidfd], [], [], 0)[0], "root native gateway is unavailable")
         require(sha_file(f"/proc/{self.gateway.pid}/exe") == self.policy["authority"]["sha256"],
                 "root native gateway executable drift")
 
     def start_gateway(self, deadline):
+        self.require_native_clear()
         if self.gateway is not None:
             self.gateway_live()
             return
@@ -914,24 +975,8 @@ class Broker:
             self.gateway_live()
         except BaseException as error:
             self.gateway_start_error=error
-            try:
-                if self.gateway_pidfd is not None and not select.select([self.gateway_pidfd],[],[],0)[0]:
-                    try:self.capture_gateway_sockets()
-                    except Exception:pass
-                kill_owned_child(self.gateway)
-                if self.gateway_pidfd is not None:
-                    try:self.remove_gateway_sockets()
-                    except Exception:pass  # Retained physical endpoint makes subsequent cleanup refuse.
-            finally:
-                data,total=(b"",0)
-                try:
-                    if self.gateway_stderr is not None:data,total=self.gateway_stderr.finish()
-                finally:
-                    self.gateway.stderr.close();self.gateway_stderr=None
-                    if self.gateway_pidfd is not None:os.close(self.gateway_pidfd);self.gateway_pidfd=None
-                try:self.native_diagnostic("serve","startup","none",self.gateway.pid,self.gateway.returncode,data,total,error)
-                except Exception:pass
-                self.gateway=None
+            self.gateway_teardown_pending=True
+            self.close_gateway()
             raise
 
     def gateway_socket_paths(self):
@@ -993,33 +1038,48 @@ class Broker:
             for fd in held.values():os.close(fd)
 
     def close_gateway(self):
-        failure=None
-        if self.gateway is not None:
-            try:
-                if self.gateway_pidfd is not None and not select.select([self.gateway_pidfd],[],[],0)[0]:self.capture_gateway_sockets()
-            except Exception as error:failure=error
-            if self.gateway.poll() is None:
+        failure=None;data,total=(b"",0)
+        try:
+            if self.gateway is not None:
                 try:
-                    os.killpg(self.gateway.pid, signal.SIGTERM)
-                    self.gateway.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    os.killpg(self.gateway.pid, signal.SIGKILL)
-                    self.gateway.wait(timeout=1)
-            require(self.gateway_pidfd is not None and select.select([self.gateway_pidfd],[],[],0)[0],"owned gateway PIDFD has not exited")
-            if getattr(self,"gateway_stderr",None) is not None:
-                data,total=self.gateway_stderr.finish();self.gateway_stderr=None
-                try:self.native_diagnostic("serve","closed","none",self.gateway.pid,self.gateway.returncode,data,total,failure or self.gateway_start_error)
+                    if self.gateway_pidfd is not None and not select.select([self.gateway_pidfd],[],[],0)[0]:self.capture_gateway_sockets()
+                except Exception as error:failure=error
+                if getattr(self,"gateway_teardown_pending",False):kill_owned_child(self.gateway)
+                elif self.gateway.poll() is None:
+                    try:
+                        os.killpg(self.gateway.pid, signal.SIGTERM)
+                        self.gateway.wait(timeout=1)
+                    except subprocess.TimeoutExpired:kill_owned_child(self.gateway)
+                require(self.gateway.returncode is not None,"owned gateway has not been reaped")
+                if self.gateway_pidfd is not None:
+                    require(select.select([self.gateway_pidfd],[],[],0)[0],"owned gateway PIDFD has not exited")
+                if getattr(self,"gateway_stderr",None) is not None:
+                    data,total=self.gateway_stderr.finish();self.gateway_stderr=None
+                elif self.gateway.stderr is not None and not self.gateway.stderr.closed:self.gateway.stderr.close()
+                try:self.native_diagnostic("serve","closed","none",self.gateway.pid,self.gateway.returncode,data,total,
+                                           failure or getattr(self,"gateway_start_error",None))
                 except Exception:pass
-            if failure is None:self.remove_gateway_sockets()
-            if failure is not None:raise failure
-            self.gateway = None
-        else:
-            self.check_unknown_gateway_sockets()
-            require(not any(path.exists() or path.is_symlink() for path,_,_ in self.gateway_socket_paths()),
-                    "untracked gateway endpoints require ROOT cleanup")
-        if self.gateway_pidfd is not None:
-            os.close(self.gateway_pidfd)
-            self.gateway_pidfd = None
+                if failure is not None:raise failure
+                if self.gateway_pidfd is not None:self.remove_gateway_sockets()
+                else:
+                    self.check_unknown_gateway_sockets()
+                    require(not any(path.exists() or path.is_symlink() for path,_,_ in self.gateway_socket_paths()),
+                            "gateway endpoints lack a captured PIDFD; ROOT cleanup required")
+            else:
+                self.check_unknown_gateway_sockets()
+                require(not any(path.exists() or path.is_symlink() for path,_,_ in self.gateway_socket_paths()),
+                        "untracked gateway endpoints require ROOT cleanup")
+            if self.gateway_pidfd is not None:
+                os.close(self.gateway_pidfd);self.gateway_pidfd=None
+            self.gateway=None;self.gateway_teardown_pending=False
+        except BaseException as error:
+            self.gateway_teardown_pending=True
+            if self.gateway is not None:
+                if getattr(self,"gateway_stderr",None) is not None:data,total=self.gateway_stderr.snapshot()
+                try:self.native_diagnostic("serve","teardown-pending","none",self.gateway.pid,self.gateway.returncode,data,total,error)
+                except Exception:pass
+            # Keep the Popen, PIDFD, drainer and all remaining socket/pipe pins.
+            raise
 
     def start_adapter(self, deadline, family):
         if family in self.adapters:
@@ -1088,6 +1148,8 @@ class Broker:
     def prepare(self, deadline):
         self.preflight()
         require(not (self.state_dir / "uncertain-create.json").exists(), "uncertain create requires root reconciliation")
+        if self.manifest is not None:
+            require(type(self.manifest.get("version")) is int and self.manifest["version"]==1,"ROOT manifest version is malformed")
         self.stage_check(deadline, "before", "none")
         require(self.manifest is None or self.manifest["status"] == "stopped", "session already has a root manifest; use resume")
         _, info = self.engine.request(deadline, "GET", "/info")
@@ -1136,7 +1198,7 @@ class Broker:
                 cid=None
                 raise Refused("ROOT cleanup-required scope needs verified operator reconciliation")
             if self.manifest is not None and self.manifest.get("status")=="stopped":
-                require(self.manifest.get("version")==1 and self.manifest.get("session_id")==self.policy["session_id"]
+                require(type(self.manifest.get("version")) is int and self.manifest["version"]==1 and self.manifest.get("session_id")==self.policy["session_id"]
                         and self.manifest.get("policy_sha256")==self.policy_sha256 and self.manifest.get("boot_id")==boot_id()
                         and hash_value(self.manifest.get("cid")),"stopped manifest differs from installed ROOT scope")
                 self.close_gateway();self.close_adapters()
@@ -1210,6 +1272,8 @@ class Broker:
     def cleanup(self, cid):
         """Independent bounded teardown; helper failures never skip CID removal."""
         helpers_closed = True
+        try:self.retry_native_children(Deadline(3))
+        except Exception:helpers_closed = False
         try:self.close_gateway()
         except Exception:helpers_closed = False
         try:self.close_adapters()
@@ -1229,6 +1293,13 @@ class Broker:
         return False
 
     def stop(self, deadline):
+        if self.native_quarantined():
+            if self.manifest is not None:
+                require(self.cleanup(self.manifest["cid"]),"owned native child cleanup retry is uncertain")
+            else:
+                self.retry_native_children(Deadline(3));self.close_gateway();self.close_adapters()
+            self.require_native_clear()
+            return self.describe()
         if self.manifest is None or self.manifest["status"] == "stopped":
             return self.describe()
         cid = self.manifest["cid"]
@@ -1250,6 +1321,7 @@ class Broker:
             raise
 
     def exec_start(self, deadline, cmd, env=(), cwd="/workspace"):
+        self.require_native_clear()
         require(cmd[0] == WORKER and len(cmd) >= 2 and cmd[1] in {"probe-hardened", "filter-probe", "exec-hardened", "workspace-hardened", "egress-proxy-hardened"}, "mandatory wrapped exec entrypoint")
         channel = self.engine.connect(deadline)
         try:
@@ -1391,6 +1463,7 @@ class Broker:
         require(not self.active_provider and self.active_workspace == 0, "session transport is active; lifecycle/staging requires idle")
 
     def transport_live(self):
+        self.require_native_clear()
         require(not self.closing.is_set(), "root broker is closing")
         self.gateway_live()
 
@@ -2049,8 +2122,21 @@ def serve(policy_path):
         stop_at = time.monotonic()+6
         for worker in remaining: worker.join(max(0, stop_at-time.monotonic()))
         with broker.state_lock:
-            if broker.manifest is not None and broker.manifest.get("status") != "stopped":
+            if broker.manifest is not None and (broker.manifest.get("status") != "stopped" or broker.native_quarantined()):
                 broker.cleanup(broker.manifest["cid"])
+            elif broker.native_quarantined():
+                try:broker.retry_native_children(Deadline(3));broker.close_gateway();broker.close_adapters()
+                except Exception:pass
+        # Quiesced shutdown retains ownership until bounded retries verify exit.
+        # The service manager can forcibly stop the complete service cgroup;
+        # voluntarily exiting here would forget live ROOT children and pins.
+        while broker.native_quarantined():
+            with broker.state_lock:
+                if broker.manifest is not None:broker.cleanup(broker.manifest["cid"])
+                else:
+                    try:broker.retry_native_children(Deadline(3));broker.close_gateway();broker.close_adapters()
+                    except Exception:pass
+            select.select([],[],[],.2)
         (broker.state_dir/"broker-instance.json").unlink(missing_ok=True)
         if endpoint.exists() and (endpoint.stat().st_dev, endpoint.stat().st_ino) == identity:
             endpoint.unlink()

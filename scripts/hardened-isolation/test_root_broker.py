@@ -362,7 +362,108 @@ class NativeDiagnosticTests(unittest.TestCase):
     def fixture(self):
         broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy_sha256="3"*64
         broker.state_dir=Path(os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))).resolve()
+        broker.native_children_lock=threading.RLock();broker.failed_native_children=[];broker.gateway_teardown_pending=False
         broker.native_diagnostic=Mock();return broker
+
+    def test_uncertain_helper_retains_actual_child_pidfd_pipes_and_retry_reaps(self):
+        broker=self.fixture();command=[sys.executable,"-I","-c","import time;time.sleep(10)"]
+        children=[];original=subprocess.Popen
+        def launch(*args,**kwargs):
+            child=original(*args,**kwargs);children.append(child);return child
+        try:
+            with patch.object(b.subprocess,"Popen",side_effect=launch),patch.object(b.os,"set_blocking",side_effect=OSError("setup failure")),\
+                 patch.object(b,"kill_owned_child",side_effect=subprocess.TimeoutExpired(command,.01)):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    broker.run_native(command,b.Deadline(1),"stage-check","before","none","native refused")
+            self.assertEqual(len(broker.failed_native_children),1);owned=broker.failed_native_children[0]
+            child=children[0];fd=owned["pidfd"]
+            self.assertIs(owned["child"],child);self.assertIsNone(child.poll());os.fstat(fd)
+            self.assertFalse(child.stdout.closed);self.assertFalse(child.stderr.closed)
+            self.assertFalse(b.select.select([fd],[],[],0)[0]);self.assertTrue(broker.native_quarantined())
+            with patch.object(b.subprocess,"Popen") as spawn:
+                with self.assertRaisesRegex(b.Refused,"cleanup is uncertain"):
+                    broker.run_native(command,b.Deadline(1),"stage-check","before","none","native refused")
+                spawn.assert_not_called()
+            with patch.object(b,"kill_owned_child",side_effect=subprocess.TimeoutExpired(command,.01)):
+                with self.assertRaises(b.Refused):broker.retry_native_children(b.Deadline(.1))
+            self.assertEqual(broker.failed_native_children,[owned]);os.fstat(fd);self.assertFalse(child.stderr.closed)
+            broker.retry_native_children(b.Deadline(1))
+            self.assertEqual(child.returncode,-9);self.assertEqual(broker.failed_native_children,[])
+            self.assertTrue(child.stdout.closed);self.assertTrue(child.stderr.closed);self.assertFalse(broker.native_quarantined())
+            with self.assertRaises(OSError):os.fstat(fd)
+            broker.require_native_clear()
+        finally:
+            for child in children:
+                if child.poll() is None:b.kill_owned_child(child)
+            if broker.failed_native_children:broker.retry_native_children(b.Deadline(1))
+
+    def test_uncertain_gateway_retains_actual_process_pidfd_drainer_and_retry_reaps(self):
+        broker=self.fixture();broker.gateway=None;broker.gateway_pidfd=None;broker.gateway_stderr=None
+        broker.gateway_socket_paths=Mock(return_value=[]);broker.check_unknown_gateway_sockets=Mock()
+        broker.capture_gateway_sockets=Mock();broker.remove_gateway_sockets=Mock()
+        broker.gateway_live=Mock(side_effect=b.Refused("injected startup refusal"))
+        broker.policy_path="/unused";broker.manifest_path=Path("/unused");broker.engine=Mock()
+        rd,wr=os.pipe();broker.engine.pidfd=rd;children=[];original=subprocess.Popen
+        def launch(*args,**kwargs):
+            child=original([sys.executable,"-I","-c","import time;time.sleep(10)"],**kwargs);children.append(child);return child
+        try:
+            with patch.object(b.subprocess,"Popen",side_effect=launch),\
+                 patch.object(b,"kill_owned_child",side_effect=subprocess.TimeoutExpired("owned gateway",.01)):
+                with self.assertRaises(subprocess.TimeoutExpired):broker.start_gateway(b.Deadline(1))
+            child=children[0];fd=broker.gateway_pidfd;drain=broker.gateway_stderr
+            self.assertIs(broker.gateway,child);self.assertIsNone(child.poll());os.fstat(fd)
+            self.assertFalse(child.stderr.closed);self.assertTrue(drain.thread.is_alive());self.assertTrue(broker.native_quarantined())
+            for action in [lambda:broker.start_gateway(b.Deadline(1)),broker.preflight,broker.transport_live]:
+                with self.assertRaisesRegex(b.Refused,"cleanup is uncertain"):action()
+            with patch.object(b,"kill_owned_child",side_effect=subprocess.TimeoutExpired("owned gateway",.01)):
+                with self.assertRaises(subprocess.TimeoutExpired):broker.close_gateway()
+            self.assertIs(broker.gateway,child);self.assertEqual(broker.gateway_pidfd,fd);self.assertIs(broker.gateway_stderr,drain)
+            os.fstat(fd);self.assertFalse(child.stderr.closed)
+            broker.close_gateway()
+            self.assertEqual(child.returncode,-9);self.assertTrue(child.stderr.closed);self.assertFalse(drain.thread.is_alive())
+            self.assertIsNone(broker.gateway);self.assertIsNone(broker.gateway_pidfd);self.assertFalse(broker.native_quarantined())
+            broker.remove_gateway_sockets.assert_called_once()
+            with self.assertRaises(OSError):os.fstat(fd)
+        finally:
+            for child in children:
+                if child.poll() is None:b.kill_owned_child(child)
+            if broker.gateway is not None:broker.close_gateway()
+            os.close(rd);os.close(wr)
+
+    def test_uncertain_child_quarantine_stop_retries_without_new_admission(self):
+        broker=self.fixture();broker.gateway_teardown_pending=True;broker.manifest=None
+        broker.close_gateway=Mock(side_effect=lambda:setattr(broker,"gateway_teardown_pending",False))
+        broker.close_adapters=Mock();broker.describe=Mock(return_value={"status":"unprepared"})
+        self.assertEqual(broker.stop(b.Deadline(1)),{"status":"unprepared"})
+        self.assertFalse(broker.native_quarantined());broker.close_gateway.assert_called_once();broker.close_adapters.assert_called_once()
+
+    def test_actual_retained_helper_cleanup_stays_required_until_stop_retry_reaps(self):
+        broker=self.fixture();command=[sys.executable,"-I","-c","import time;time.sleep(10)"]
+        broker.manifest={"cid":"2"*64,"status":"ready"};broker.manifest_path=Path("/unused-root-manifest")
+        broker.close_gateway=Mock();broker.close_adapters=Mock();broker.engine=Mock()
+        broker.engine.request.return_value=(404,{})
+        broker.persist=Mock(side_effect=lambda cid,status:broker.manifest.update(status=status))
+        try:
+            with patch.object(b.os,"set_blocking",side_effect=OSError("setup failure")),\
+                 patch.object(b,"kill_owned_child",side_effect=subprocess.TimeoutExpired(command,.01)):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    broker.run_native(command,b.Deadline(1),"stage-check","before","none","native refused")
+            owned=broker.failed_native_children[0];child=owned["child"];fd=owned["pidfd"]
+            with patch.object(b,"kill_owned_child",side_effect=subprocess.TimeoutExpired(command,.01)),patch.object(b,"atomic_root_write"):
+                self.assertFalse(broker.cleanup("2"*64))
+            self.assertEqual(broker.manifest["status"],"cleanup-required");self.assertIsNone(child.poll());os.fstat(fd)
+            broker.persist.assert_not_called();self.assertEqual(broker.failed_native_children,[owned])
+            self.assertEqual([c.args[1:3] for c in broker.engine.request.call_args_list],
+                             [("DELETE","/containers/"+"2"*64+"?force=1&v=1"),("GET","/containers/"+"2"*64+"/json")])
+            self.assertEqual(broker.stop(b.Deadline(1))["status"],"stopped")
+            self.assertEqual(child.returncode,-9);self.assertFalse(broker.native_quarantined());self.assertTrue(child.stdout.closed)
+            self.assertTrue(child.stderr.closed);self.assertEqual(broker.failed_native_children,[])
+            with self.assertRaises(OSError):os.fstat(fd)
+        finally:
+            if broker.failed_native_children:
+                for owned in broker.failed_native_children:
+                    if owned["child"].poll() is None:b.kill_owned_child(owned["child"])
+                broker.retry_native_children(b.Deadline(1))
 
     def test_stderr_flood_does_not_deadlock_and_retains_bounded_reason_exit(self):
         broker=self.fixture();command=[sys.executable,"-I","-c","import os;os.write(2,b'x'*(4*1024*1024));os.write(1,b'{}');raise SystemExit(7)"]
@@ -599,7 +700,7 @@ class LifecycleReconciliationTests(unittest.TestCase):
         broker.stage.assert_not_called();broker.cleanup.assert_not_called();broker.close_gateway.assert_called_once();broker.close_adapters.assert_called_once()
 
     def test_stopped_resume_rejects_stale_scope_authority_and_cleanup_required(self):
-        for field,value in [("policy_sha256","5"*64),("boot_id","stale"),("session_id","another"),("status","cleanup-required")]:
+        for field,value in [("version",True),("version",1.0),("policy_sha256","5"*64),("boot_id","stale"),("session_id","another"),("status","cleanup-required")]:
             broker=self.stopped_fixture();broker.manifest[field]=value
             with self.assertRaises(b.Refused):broker.resume(b.Deadline(1))
             broker.prepare.assert_not_called();broker.stage.assert_not_called();broker.cleanup.assert_not_called();broker.engine.connect.assert_not_called()
@@ -613,6 +714,13 @@ class LifecycleReconciliationTests(unittest.TestCase):
         with patch.object(b,"Engine",return_value=fresh):self.assertEqual(broker.resume(b.Deadline(1))["cid"],"4"*64)
         self.assertIs(broker.engine,fresh);fresh.connect.assert_called_once();old.close.assert_called_once()
         fresh.request.assert_called_once();broker.stage.assert_not_called()
+
+    def test_prepare_rejects_bool_and_float_root_manifest_version_before_stage(self):
+        for version in (True,1.0):
+            broker=self.stopped_fixture();broker.manifest["version"]=version;broker.state_dir=Path("/unused-state")
+            broker.prepare=b.Broker.prepare.__get__(broker);broker.stage_check=Mock()
+            with self.assertRaisesRegex(b.Refused,"manifest version"):broker.prepare(b.Deadline(1))
+            broker.stage_check.assert_not_called();broker.engine.request.assert_not_called()
 
     def test_guard_revalidates_active_provider_without_idle_requirement(self):
         broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy_sha256="3"*64
