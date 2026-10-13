@@ -1,26 +1,19 @@
 # Per-session Docker isolation for DOXA Rust
 
-Status: **Linux implementation shipped in 2.0.0-beta.10**. Native, Docker with
-open egress and Docker with no network are implemented; the TUI shows the
-host-verified profile. See [the operator guide](../session-isolation.md) and
-[reviewed image packaging](../../containers/session/README.md) for current
-settings and commands. A bounded allocated-block scan now gates launches,
-resumes, migrations and new turns against a saved soft ceiling and host
-free-space floor. The chip reports usage as monitoring, not a hard quota.
-Hard quotas still require administrator-managed filesystem project quotas and
-verified enforcement across bind mounts. The [operator fixture guide](../hard-quota-preflight.md)
-includes a read-only project-inheritance preflight and an opt-in bounded
-rootless-container `EDQUOT` probe. Neither authorizes production hard-quota
-admission. New Docker sessions request a private
-cgroup namespace, and the worker checks actual cgroup v2 memory, swap, CPU and
-PID ceilings before admission and each CLI provider turn. Beta.16 adds an opt-in
-rootless restricted-egress transport smoke; it does not verify production cgroup
-or hard-quota enforcement. Hardened egress, macOS Docker Desktop,
-remote Engines and a containerized controller remain open.
-A [read-only remote Engine fixture preflight](../remote-engine-preflight.md)
-checks the evidence shape for rootless identity, private broker transport,
-daemon-host mount ownership and effective cgroup limits. Its output never
-authorizes remote or Docker Desktop admission.
+Status: Linux `native`, `docker-open` and `docker-offline` remain available.
+The Linux ROOT-controlled `docker-hardened` implementation now routes lifecycle,
+staging, CLI/catalog execution, snapshots, Git and persistent-turn checks through
+an independently installed scoped broker. Its actual four binds use enforcing
+project quota; the caller's independent mirror is not worker filesystem authority.
+See [the operator guide](../session-isolation.md#root-controlled-hardened-sessions),
+[quota provisioning](../root-controlled-quota.md), and the
+[ROOT broker protocol/package](../../scripts/hardened-isolation/README.md).
+Disposable exact-origin and composed lifecycle proof remains in progress;
+individual fixture receipts and static `ready` flags cannot activate it.
+Legacy profiles retain their monitored soft ceiling/free-space gates.
+Remote Engines, Docker Desktop and containerized controllers remain unavailable.
+The [remote preflight](../remote-engine-preflight.md) is evidence-shape checking,
+not admission.
 
 Target: Linux first. This
 spec covers both a DOXA controller running on the host and a DOXA controller
@@ -230,98 +223,55 @@ and write. An authenticated exact Engine/container observation and real
 provider-flow and post-handshake movement tests remain necessary before
 hardened admission.
 
-No production profile starts the gateway or injects proxy variables yet.
-The reserved hardened gateway entry point requires a ready offline manifest
-and an exact per-session hard-quota proof. Current fixture receipts cannot
-authorize it; even a changed receipt flag is refused until a live kernel
-limit/restart verifier exists. A Linux XFS/ext4 read-only verifier checks the four
-exact session directories, bounded existing descendants in the three data
-binds, only the expected owner-private broker sockets, and the effective
-project hard limit through open descriptors. A rootless controller can be
-denied the XFS/ext4 project-limit query (`EPERM`/`EACCES`); hardened admission
-then refuses. An uninstalled read-only helper now binds an administrator-owned
-policy to the exact session tree and passed a disposable 21-case QEMU fixture;
-it requires distinct trusted caller and tree-owner UIDs and always refuses
-hardened admission. A host client now caps the helper response at 4 KiB and
-verifies the root-owned endpoint, kernel server UID and exact saved session
-root and checkout identity before accepting advisory evidence. The disposable guest runner now
-contains four additional client identity cases, all passed in a disposable
-QEMU guest. An inactive systemd socket/service package and read-only
-installation preflight are staged for administrator review. The preflight
-requires an independently reviewed helper SHA-256. A disposable ext4 quota
-guest passed 32 helper/client/install cases while keeping admission
-closed. Installed-host systemd and session
-launcher integration remain open. The socket
-inventory also permits zero sockets and does not tie a visible socket inode
-to the live host listener. Exact live endpoint identity, broker peer/protocol
-attestation, and production EDQUOT/restart/remount proof remain open. The
-Codex compaction hook broker now checks the connecting Unix peer's rootless
-owner UID, accepts one bounded `PreCompact` frame with a session-private
-transcript path, and bounds its response. A disposable local Unix-socket test
-also demonstrates the remaining gap: a same-UID host client with the bearer
-capability passes those checks. Before hardened admission, bind every broker
-connection to the exact inspected container and live process namespace,
-reject host/sibling/changed-container peers, and rerun the protocol tests
-after worker, daemon and Engine restart. The Linux origin probe obtains
-`SO_PEERPIDFD`, cross-checks the pinned connector against `SO_PEERCRED`, and
-observes its PID namespace and cgroup v2 path. It rejects host-scope
-candidates, but an inherited-descriptor test proves that the pidfd still
-names the original connector when another process writes the frame. No
-production hook broker calls this probe.
+The ROOT profile starts the independently pinned native gateway and fixed
+family loopback adapters through the installed broker. It requires separate
+caller/Engine UIDs, an Engine-only socket, immutable ROOT executable/config and
+policy pins, exact same-connection inspect, finite effective private cgroups,
+all-thread mandatory seccomp, safe descriptor inventories, enforcing project
+quota and current physical ROOT endpoints. Kernel `SCM_PIDFD` and credentials
+must identify the pinned connector on every received segment. A worker cannot
+move between scopes: its PID namespace is immutable, cgroup controls are
+read-only, control/namespace descriptors are excluded, and mount/setns/unshare,
+quota mutation and other escape syscalls are filtered. This is not a claim of
+atomic cgroup-at-send measurement. A ROOT-assisted move is not a worker
+capability and is not promoted into a positive origin receipt.
 
-A Linux frame reader now enables `SO_PASSPIDFD` and `SO_PASSCRED` before
-accepting a Docker hook socket; startup refuses the hook if either kernel
-option is unavailable. Its 65,536-byte and five-second-bounded `recvmsg` loop
-requires one kernel-supplied sender pidfd and credentials for every frame
-segment and refuses empty frames, stalled or mixed senders, missing control
-messages, and unsupported kernel options. An inherited socket test shows
-`SCM_PIDFD` names the child that sent bytes, while connect-time credentials
-name its parent. The production `HookBroker` now reads Docker hook frames
-through this path, including the existing `docker-open` and `docker-offline`
-profiles. A same-UID host writer can still pass. Gateway connector checks and
-per-message writer identity do not authenticate the Engine or bind the writer
-to the inspected container. An authenticated exact-container Engine observation,
-writer-to-container binding, process-movement proof and real provider hook
-compatibility remain necessary; startup must refuse hardened mode without them.
+Rootless FUSE reads use a child confined to the pinned user namespace; ROOT
+retains every admission capability. Fixed executable reads deny `openat2` and
+filter scalar open flags; artifact reads use exact-file Landlock and a retained
+root anchor; metadata uses preopened `O_PATH` handles. The child cannot execute,
+connect, alter quotas or write files. Actual executable/artifact fresh reopening
+and retained init/namespace checks bracket hashing. The forked child may inherit
+allocator locks from the multithreaded gateway; it is not exec-clean. Total
+deadlines, kill plus bounded reap and parent-pidfd/death-signal checks make a
+stalled or orphan-prone operation a refusal, including EOF before exit.
 
-The [disposable egress-origin guest](../../scripts/egress-origin-guest/README.md)
-exercises the production connector pidfd check across real guest PID
-namespaces, cgroups and init replacement. It does not run Docker or
-authenticate an Engine-reported PID, so the hardened gate stays closed.
-The opt-in disposable quota fixture can compare aggregate writes through all
-three data binds and recheck EDQUOT after restarting the same container. A
-separate disposable four-bind guest proof retained EDQUOT on ext4 after an
-Engine restart and source remount, with a working read-only broker socket;
-an XFS control returned ENOSPC instead. The ext4 descriptor-bound syscall
-branch passed a privileged read-only query against the disposable ext4
-project-quota mount, while a rootless query, substituted root descriptor
-(including the same inode through a different bind mount), wrong project/limit,
-changed broker project and disabled enforcement all
-refused. The [fixture procedure](../hard-quota-preflight.md#disposable-read-only-kernel-query)
-is executable; it accepts caller-supplied policy and cannot serve as a
-production privileged helper or admission token.
-`docker-hardened` is explicitly refused at
-profile parsing, with no fallback. A credential-free rootless smoke can test
-Python `HTTPS_PROXY` streaming, denied second-host access and failed direct
-fallback for one selected upstream; it does not prove real provider behavior.
-Before a `docker-hardened` profile can be offered, run actual Claude, Codex
-and API-vendor streaming/login/refresh flows through the proxy in a rootless
-`network=none` container; verify that each provider honors the proxy for
-every outbound path, handles redirects without bypass, and cannot reach the
-network by any alternative route. Bind the allowlist to a reviewed per-session
-policy/manifest, audit resolver behavior and operational limits, and test
-gateway death/restart and resume across container lifecycle transitions.
-Because TLS is not intercepted, the gateway cannot check the encrypted HTTP
-authority or detect every form of domain fronting. Known ECH extensions are
-refused, but provider-specific destination behavior and future TLS extensions
-must be reviewed before claiming a hardened boundary. An opt-in, credential-free
-rootless fixture now checks the network-none worker's loopback adapter, a
-disallowed CONNECT, direct-IP failure and gateway-loss behavior. Permitted
-upstream traffic can be probed separately against one operator-selected,
-credential-free public HTTPS hostname with certificate verification, a denied
-CONNECT and direct-hostname bypass refusal. This ignored rootless test records
-transport evidence for that exact host and image only; provider flows, redirects,
-all alternate outbound paths and production admission still need live proof.
+Codex compaction crosses a separate caller callback authenticated by a
+ROOT-produced immutable instance, kernel peer pidfd/start time, fresh nonce and
+per-segment writer pidfds. Full original source identity/hash travels with raw
+bytes; review-copy identity remains separate. Core and the native relay recheck
+the original after review, with Core checking again immediately before compact.
+ROOT-generated readonly Git metadata excludes tenant execution configuration;
+its bounded tree shares the hard quota and existing readonly broker mount.
+
+Current empirical scopes include aggregate project EDQUOT through every data
+bind, persistence after container/Engine restart and source remount, real ELF32
+compat ioctl refusal, actual unprivileged ROOT-broker peer authentication, and
+actual Git clean/smudge/process marker rejection. Each receipt names its exact
+source/image/policy and limitations. Live exact-origin and full credential-free
+Runtime/provider/callback/Git/cleanup composition are separate acceptance runs
+and remain in progress. They do not claim real Claude/Codex streaming,
+authentication/refresh, redirects, all alternate outbound paths or encrypted
+HTTP authority. The earlier network-none/public-HTTPS and origin namespace
+fixtures remain historical transport observations only.
+
+An operator provisions one reserved session ID and starts the daemon with that
+ID, then attaches the frontend; new-session random IDs are not implicitly
+ROOT-provisioned. Every missing/mismatched/live failed authority check refuses
+without a direct Engine or native fallback. Hardened-to-native/legacy migration
+refuses before shutdown until a typed stopped-workspace/transcript export/import
+exists. Ordinary legacy migration remains separately tested; it cannot copy the
+hardened caller mirror as if it were the actual ROOT worker checkout.
 
 API vendor keys stay in the host supervisor; it performs provider HTTP calls
 or grants a narrowly scoped per-session provider proxy. Claude and Codex may
