@@ -77,10 +77,14 @@ the exact original decimal ceiling; no allowance is rounded upward. The saved
 config fixture runs in an environment-cleared subprocess with a mode-0700 home,
 so credential guards are exercised without accessing the owner's vault.
 
-The disposable Docker frontend fixture is extended to Router clean/dirty
-workspaces and target-start rollback, with byte-identical Router journals. It is
-an explicitly ignored host-dependent check and must run after integrating the
-paired isolation branch and supplying a reviewed disposable Engine/image.
+The disposable Docker frontend fixture passed on combined source `1804c28f`:
+**1 test, 4 clean/dirty GLM and Router cases, 6.88 seconds**. It performed
+native → docker-offline → native round trips and injected target-start failures,
+retaining staged/working/deleted/untracked/ignored files, the original repository,
+managed worktrees and byte-identical Router journals. It used a private rootless
+Docker 29.1.3 Engine, a reviewed content-addressed worker image and no provider
+turns. The [proof receipt](router-migration-2026-10-13.json) records source and
+binary identities.
 Native CLI/provider transport fixtures do not establish Docker worker origin or
 hardened admission. Those remain governed by the separate isolation proof.
 

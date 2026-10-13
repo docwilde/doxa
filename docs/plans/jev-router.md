@@ -138,8 +138,9 @@ usage-based cost are estimates, not live invoices.
   uses the selected API provider while retaining router conversation proof.
 - [x] Reviewed config/allowance propagation for child sessions, fleets and
   history launches with disjoint durable allocations and unchanged resume spend.
-- [ ] Integrated Docker migration checkpoint and disposable-host validation;
-  the Router daemon/frontend interface is implemented alongside isolation work.
+- [x] Integrated Docker migration checkpoint and disposable-host validation:
+  four clean/dirty GLM and Router round trips plus target-start rollback passed
+  with unchanged Router journals; no provider turn or hardened-origin claim.
 - [x] Internal authenticated Claude/protected Codex workers with bounded
   canonical history transfer, native permission/tool lifecycle and fail-closed
   recovery. Credential-free Linux local fixtures; no real-account quality claim.
