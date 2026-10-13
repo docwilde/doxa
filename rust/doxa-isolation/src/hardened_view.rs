@@ -339,12 +339,26 @@ mod tests {
     }
     #[test]
     fn parent_death_arm_rejects_an_already_reparented_helper() {
+        let mut pipe=[-1,-1];assert_eq!(unsafe{libc::pipe2(pipe.as_mut_ptr(),libc::O_CLOEXEC)},0);
+        let input=unsafe{File::from_raw_fd(pipe[0])};let output=unsafe{File::from_raw_fd(pipe[1])};
         let child=unsafe{libc::fork()};assert!(child>=0);
         if child==0 {
-            let actual=unsafe{libc::getppid()};
-            let ok=!arm_parent_death(actual.wrapping_add(1),None);
-            unsafe{libc::_exit(if ok{0}else{2});}
+            let original=unsafe{libc::getpid()};let orphan=unsafe{libc::fork()};
+            if orphan<0{unsafe{libc::_exit(2);}}
+            if orphan==0 {
+                unsafe{libc::close(pipe[0]);}
+                let deadline=Instant::now()+std::time::Duration::from_secs(1);
+                while unsafe{libc::getppid()}==original&&Instant::now()<deadline {
+                    unsafe{libc::poll(std::ptr::null_mut(),0,1);}
+                }
+                let ok=(unsafe{libc::getppid()})!=original&&!arm_parent_death(original,None);
+                let byte=[if ok{b'Y'}else{b'N'}];unsafe{libc::write(pipe[1],byte.as_ptr().cast(),1);libc::_exit(0);}
+            }
+            unsafe{libc::_exit(0);}
         }
+        drop(output);let mut p=libc::pollfd{fd:input.as_raw_fd(),events:libc::POLLIN,revents:0};
+        assert_eq!(unsafe{libc::poll(&mut p,1,2000)},1);
+        let mut byte=[0];(&input).read_exact(&mut byte).unwrap();assert_eq!(byte,[b'Y']);
         let mut status=0;assert_eq!(unsafe{libc::waitpid(child,&mut status,0)},child);assert_eq!(status,0);
     }
     #[test]
