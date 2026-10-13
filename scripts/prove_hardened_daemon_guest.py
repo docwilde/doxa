@@ -25,8 +25,8 @@ import sys
 import termios
 import time
 
-SID = "root-daemon-20261013"
-PROJECT = 5011
+SID = "root-daemon-r2-20261013"
+PROJECT = 5015
 DAEMON_SHA = "bdab19e567fe3e7b337414933f64d90be5cd361c55434b482d1d1cd7e378b1aa"
 FRONTEND_SHA = "5b4d8ef78eb7c42d84fe9c80f4220cdefdad6d2cad5987399dedc5497aa965c2"
 BROKER_SHA = "6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5"
@@ -368,9 +368,9 @@ def main(args):
     state = Path("/run/doxa/hardened") / SID
     quota_root = Path("/srv/doxa-quota-proof") / SID
     policy_path = Path("/etc/doxa/hardened") / (SID + ".json")
-    caller_base = Path("/srv/doxa-daemon-proof-20261013")
-    runtime = Path("/run/user/1000/df-20261013")
-    public_script = PUBLIC / "prove-hardened-daemon.py"
+    caller_base = Path("/srv/doxa-daemon-proof-r2-20261013")
+    runtime = Path("/run/user/1000/df-r2-20261013")
+    public_script = PUBLIC / "prove-hardened-daemon-r2.py"
     try:
         for path, digest in [(PUBLIC / "doxa-daemon", DAEMON_SHA), (PUBLIC / "doxa-rs", FRONTEND_SHA)]:
             m = path.lstat()
