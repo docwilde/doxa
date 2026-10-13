@@ -6,6 +6,7 @@ use doxa_runtime::{Host, PeerTurnOrigin};
 use doxa_vendors::{TurnLimits, Vendor};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest,Sha256};
 use std::time::Duration;
 use std::{fs, io::{self, Read, Write}, path::{Path, PathBuf},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -89,6 +90,16 @@ struct State {
     receipts: Vec<Value>,
 }
 fn manual_permission() -> String { "default".into() }
+fn canonical_value(value:Value)->Value {
+    match value {
+        Value::Object(rows)=>{
+            let mut sorted=rows.into_iter().collect::<Vec<_>>();sorted.sort_by(|left,right|left.0.cmp(&right.0));
+            Value::Object(sorted.into_iter().map(|(key,value)|(key,canonical_value(value))).collect())
+        },
+        Value::Array(rows)=>Value::Array(rows.into_iter().map(canonical_value).collect()),
+        value=>value,
+    }
+}
 impl State {
     fn held(&self) -> Option<u64> {
         self.router.reserved_usd_micros.max(self.router.actual_usd_micros)
@@ -270,18 +281,22 @@ impl RouterHost {
         let state=self.state.lock().unwrap();
         if state.unknown() || self.active.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {return Err("Router migration requires complete verified accounting".into());}
         Self::validate_allocations(&state,&self.config,self.ceiling_micros)?;
-        if let Some(inherited)=&state.inherited {
+        let parent_allowance=if let Some(inherited)=&state.inherited {
             let id=state.identity["session_id"].as_str().ok_or("Router migration session identity unavailable")?;
-            if Self::inheritance(&self.cwd,id,&inherited.parent_session_id,&self.config,self.ceiling_micros)?!=*inherited {
+            let (current,proof)=Self::inheritance_checkpoint(&self.cwd,id,&inherited.parent_session_id,&self.config,self.ceiling_micros)?;
+            if current!=*inherited {
                 return Err("Router migration inherited allowance or parent review changed".into());
             }
-        }
+            Some(proof)
+        }else{None};
         self.inner.routing_view("",self.config.max_input_bytes/2)?;
         let (bytes,proof)=doxa_engines::compact_hook::safe_read(&self.journal.path,JOURNAL_MAX as usize).map_err(|_|"Router migration journal is unsafe")?;
         let saved:Value=serde_json::from_slice(&bytes).map_err(|_|"Router migration journal is invalid")?;
         if serde_json::to_value(&*state).map_err(|_|"Router migration state unavailable")? != saved {return Err("Router migration journal changed externally".into());}
-        Ok(json!({"path":self.journal.path,"bytes":bytes.len(),"sha256":proof.json()["sha256"],
-            "config_sha256":state.identity["config_sha256"],"ceiling_usd_micros":self.ceiling_micros,"session_id":state.identity["session_id"]}))
+        let mut checkpoint=json!({"path":self.journal.path,"bytes":bytes.len(),"sha256":proof.json()["sha256"],
+            "config_sha256":state.identity["config_sha256"],"ceiling_usd_micros":self.ceiling_micros,"session_id":state.identity["session_id"]});
+        if let Some(parent)=parent_allowance {checkpoint["parent_allowance"]=parent;}
+        Ok(checkpoint)
     }
     fn save(&self, state: &mut State) -> Result<(), String> {
         if self.journal.write(state).is_err() {
@@ -291,7 +306,11 @@ impl RouterHost {
         Ok(())
     }
     fn inheritance(cwd:&Path,id:&str,parent:&str,config:&Config,ceiling:Option<u64>) -> Result<Allocation,String> {
-        let state=Journal::new(cwd,parent).and_then(|journal|journal.read()).map_err(|_|"Router parent allowance journal is unavailable")?;
+        Self::inheritance_checkpoint(cwd,id,parent,config,ceiling).map(|(allocation,_)|allocation)
+    }
+    fn inheritance_checkpoint(cwd:&Path,id:&str,parent:&str,config:&Config,ceiling:Option<u64>)->Result<(Allocation,Value),String> {
+        let journal=Journal::new(cwd,parent).map_err(|_|"Router parent allowance journal is unavailable")?;
+        let state=journal.read().map_err(|_|"Router parent allowance journal is unavailable")?;
         let hash=config.hash().map_err(|_|"Router config identity unavailable")?;
         if state.version!=1 || state.identity["engine"]!="router" || state.identity["session_id"]!=parent
             || state.identity["config_sha256"]!=hash || state.router.accounting_unknown || state.worker.accounting_unknown {
@@ -302,7 +321,13 @@ impl RouterHost {
             return Err("Router child config or ceiling differs from its reviewed allocation".into());
         }
         Self::validate_allocations(&state,config,state.identity["ceiling_usd_micros"].as_u64())?;
-        Ok(row)
+        // Stable authority projection: ordinary parent turn/cost/receipt
+        // counters may advance while this child's disjoint row stays exact.
+        // The paired migration gate must still recheck full current bounds.
+        let projection=canonical_value(json!({"version":state.version,"identity":state.identity,"allocation":row,
+            "router_accounting_unknown":state.router.accounting_unknown,"worker_accounting_unknown":state.worker.accounting_unknown}));
+        let bytes=serde_json::to_vec(&projection).map_err(|_|"Router parent allowance projection unavailable")?;
+        Ok((row,json!({"path":journal.path,"parent_session_id":parent,"projection_sha256":format!("{:x}",Sha256::digest(bytes))})))
     }
     fn routing_limits(state:&State,config:&Config)->Option<(u64,u64)> {
         let (calls,spend)=state.inherited.as_ref().map(|row|(row.routing_calls,row.routing_spend_usd_micros))

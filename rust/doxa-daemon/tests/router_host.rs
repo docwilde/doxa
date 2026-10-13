@@ -114,6 +114,7 @@ mod tests {
         let env=Env::new();let server=Server::new(|_,_|panic!("checkpoint must not call a provider"));
         let host=make_host(&env,config(),&server,false,Some(4.0));
         let checkpoint=host.call("router_migration_checkpoint",&json!({})).unwrap();assert_eq!(checkpoint["session_id"],"routed");
+        assert!(checkpoint.get("parent_allowance").is_none());
         assert_eq!(checkpoint["ceiling_usd_micros"],4_000_000);assert_eq!(checkpoint["path"],json!(env.journal()));
         assert_eq!(checkpoint["bytes"],fs::metadata(env.journal()).unwrap().len());
         assert_eq!(checkpoint["sha256"],doxa_isolation::migration::fingerprint(&env.journal(),checkpoint["bytes"].as_u64().unwrap()).unwrap());
@@ -162,6 +163,39 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(env.journal(),fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(wrapper.call("isolation_migration_plan",&json!({})).unwrap(),reviewed);
+        assert!(server.bodies().is_empty());parent.shutdown();child.shutdown();
+    }
+
+    #[test]
+    fn inherited_router_checkpoint_projection_is_stable_for_parent_counters_and_binds_review_and_known_accounting() {
+        let env=Env::new();let cfg=config();let server=Server::new(|_,_|panic!("parent projection must not call a provider"));
+        let parent=make_host(&env,cfg.clone(),&server,false,Some(4.0));
+        let review=parent.call("router_child_plan",&json!({"model":"ds"})).unwrap();
+        parent.call("router_child_admit",&json!({"child_session_id":"projection-child","review":review})).unwrap();
+        let child=RouterHost::new_with_cli(cfg,&env.cwd(),"projection-child",false,Some(2_000_000),super::router_cli::CliOptions::default(),Some("routed"),Some(server.endpoint.clone())).unwrap();
+        let before=child.call("router_migration_checkpoint",&json!({})).unwrap();let proof=&before["parent_allowance"];
+        assert_eq!(proof["path"],json!(env.journal()));assert_eq!(proof["parent_session_id"],"routed");
+        let original=env.state();
+        let projection=json!({"version":1,"identity":original["identity"],"allocation":original["allocations"][0],
+            "router_accounting_unknown":false,"worker_accounting_unknown":false});
+        use sha2::{Digest,Sha256};
+        assert_eq!(proof["projection_sha256"],format!("{:x}",Sha256::digest(serde_json::to_vec(&projection).unwrap())));
+        let mut advanced=original.clone();advanced["turn"]=json!(1);
+        advanced["router"]["calls"]=json!(1);advanced["router"]["last_settled_call"]=json!(1);
+        advanced["router"]["reserved_usd_micros"]=json!(5);advanced["router"]["actual_usd_micros"]=json!(3);
+        advanced["worker"]["input_tokens"]=json!(3);advanced["worker"]["output_tokens"]=json!(2);
+        advanced["worker"]["estimated_actual_usd_micros"]=json!(10);
+        advanced["receipts"]=json!([{"operation":"completed_parent_turn"}]);
+        fs::write(env.journal(),advanced.to_string()).unwrap();
+        assert_eq!(child.call("router_migration_checkpoint",&json!({})).unwrap(),before);
+        for (pointer,value) in [("/worker/accounting_unknown",json!(true)),("/router/accounting_unknown",json!(true)),
+            ("/allocations/0/permission",json!("auto")),("/allocations/0/routing_spend_usd_micros",json!(4999)),
+            ("/identity/config_sha256",json!("0".repeat(64)))] {
+            let mut drifted=advanced.clone();*drifted.pointer_mut(pointer).unwrap()=value;fs::write(env.journal(),drifted.to_string()).unwrap();
+            assert!(child.call("router_migration_checkpoint",&json!({})).is_err(),"{pointer}");
+        }
+        fs::write(env.journal(),original.to_string()).unwrap();
+        assert_eq!(child.call("router_migration_checkpoint",&json!({})).unwrap(),before);
         assert!(server.bodies().is_empty());parent.shutdown();child.shutdown();
     }
 
