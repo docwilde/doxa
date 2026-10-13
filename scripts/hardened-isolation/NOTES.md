@@ -180,3 +180,15 @@ child injected teardown-failure/retry regressions plus lifecycle quarantine and
 malformed stopped-version fixtures. Source-only; guest5013 remains held and
 frozen5012 broker/policy/Engine artifacts remain untouched. Committing before
 focused verification as required by the isolation skill.
+
+Retention source9424e586 + fixture correctiond3ec2f49:72 focused tests pass
+0.834s, clean diff-check/status. Initial run exposed the existing concurrent
+server Mock's unspecified quarantine method returning truthy indefinitely;
+fixture now explicitly models no native quarantine. Actual benign-child
+tests independently verify live helper/gateway process and PIDFD retention,
+open pipes/drainer, refusal of new admission, repeated uncertain teardown,
+confirmed retry reap and descriptor closure. CID removal/404 still occurs on
+helper failure without issuing stopped until the retained helper is reclaimed.
+Broker SHA256 a04d2d5d0fb3df93cb3201d2d3e1cb322829ed4ddc5d52938e17fe0a95a0056f.
+No guest commands or live artifacts were changed; final5013 composition is
+pending independent review and coordinator freeze.
