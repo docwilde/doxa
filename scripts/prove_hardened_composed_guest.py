@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import shlex
 import signal
 import stat
@@ -24,7 +25,7 @@ import time
 
 PROVIDER = r'''#!/usr/bin/env python3
 """Immutable credential-free composed proof fixture; no provider/network API."""
-import errno,json,os,shlex,socket,subprocess,sys,threading,time
+import errno,hashlib,json,os,shlex,socket,stat,subprocess,sys,threading,time
 from pathlib import Path
 THREAD='composed-thread-20261013'
 ROLLOUT=Path('/home/doxa/codex/sessions/rollout-composed.jsonl')
@@ -48,7 +49,15 @@ def main():
         lines=[{'timestamp':'2026-10-13T00:00:00Z','type':'session_meta','payload':{'id':THREAD,'cwd':'/workspace'}},
                {'timestamp':'2026-10-13T00:00:01Z','type':'event_msg','payload':{'type':'user_message','message':'credential-free fixture'}}]
         private(ROLLOUT,b''.join(json.dumps(row,sort_keys=True).encode()+b'\n' for row in lines))
-    emit('ready',family=FAMILY,pid=os.getpid(),uid=os.getuid(),owner_handshake=owner is not None)
+    settings=None
+    if FAMILY=='claude':
+        path=Path(os.environ['CLAUDE_CONFIG_DIR'])/'settings.json'
+        if str(path)!='/home/doxa/claude/settings.json':raise RuntimeError('fixed actual Claude home required')
+        data=path.read_bytes();meta=path.lstat()
+        if not stat.S_ISREG(meta.st_mode) or meta.st_nlink!=1:raise RuntimeError('actual settings single-link regular file required')
+        settings={'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data),'uid':meta.st_uid,'mode':stat.S_IMODE(meta.st_mode),
+                  'marker':json.loads(data)['fixture_marker']}
+    emit('ready',family=FAMILY,pid=os.getpid(),uid=os.getuid(),owner_handshake=owner is not None,settings=settings)
     for line in sys.stdin:
         if len(line)>65536:raise RuntimeError('fixture input bound')
         request=json.loads(line);op=request['op']
@@ -120,11 +129,91 @@ def write_new(path,data,mode=0o600,uid=0,gid=0):
         os.fchmod(target.fileno(),mode);os.fchown(target.fileno(),uid,gid)
         target.write(data);target.flush();os.fsync(target.fileno())
 
-def run(argv,timeout=60,environment=None):
-    result=subprocess.run(argv,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout)
-    require(len(result.stdout)<=256*1024 and len(result.stderr)<=256*1024,'bounded proof command output')
-    require(result.returncode==0,'proof command failed: '+str(argv[0])+': '+result.stderr.decode(errors='replace')[:4096])
-    return result.stdout
+def process_facts(pid):
+    fields=Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()
+    return {'pid':pid,'ppid':int(fields[1]),'group':int(fields[2]),'session':int(fields[3]),
+            'start':int(fields[19]),'uid':Path(f'/proc/{pid}').stat().st_uid}
+
+class OwnedProcesses:
+    """Retain kernel pidfds for our launcher and observed descendants only."""
+    def __init__(self,child):
+        self.child=child;self.pins={};self.sockets={}
+        self.pin(child.pid);self.capture()
+    def pin(self,pid):
+        before=process_facts(pid);fd=os.pidfd_open(pid)
+        try:
+            require(process_facts(pid)==before,'owned process identity changed while pinning')
+            self.pins[pid]=(fd,before)
+        except BaseException:os.close(fd);raise
+    def live(self):
+        result=[]
+        for pid,(fd,facts) in self.pins.items():
+            if select.select([fd],[],[],0)[0]:continue
+            actual=process_facts(pid)
+            require(actual['start']==facts['start'],'owned pidfd/starttime identity changed')
+            result.append(pid)
+        return result
+    def capture(self):
+        ancestors=set(self.live())
+        rows={}
+        for path in Path('/proc').iterdir():
+            if not path.name.isdecimal():continue
+            try:rows[int(path.name)]=process_facts(int(path.name))
+            except (FileNotFoundError,ProcessLookupError):pass
+        while True:
+            added={pid for pid,row in rows.items() if row['ppid'] in ancestors and pid not in self.pins}
+            if not added:break
+            for pid in added:
+                try:self.pin(pid);ancestors.add(pid)
+                except (FileNotFoundError,ProcessLookupError):rows.pop(pid,None)
+            require(len(self.pins)<=512,'owned proof process census exceeded bound')
+        inodes=set()
+        for pid in self.live():
+            try:
+                for fd in Path(f'/proc/{pid}/fd').iterdir():
+                    try:target=os.readlink(fd)
+                    except FileNotFoundError:continue
+                    match=re.fullmatch(r'socket:\[([0-9]+)\]',target)
+                    if match:inodes.add(match[1])
+            except FileNotFoundError:pass
+        for line in Path('/proc/net/unix').read_text().splitlines()[1:]:
+            fields=line.split(maxsplit=7)
+            if len(fields)==8 and fields[6] in inodes:self.sockets[fields[7]]=fields[6]
+    def terminate(self):
+        self.capture()
+        # pidfd_send_signal never targets a recycled numeric PID/group.
+        for pid in self.live():signal.pidfd_send_signal(self.pins[pid][0],signal.SIGTERM)
+        deadline=time.monotonic()+3
+        while self.live() and time.monotonic()<deadline:
+            self.capture();time.sleep(.02)
+        for pid in self.live():signal.pidfd_send_signal(self.pins[pid][0],signal.SIGKILL)
+        self.child.wait(timeout=3)
+        deadline=time.monotonic()+3
+        while self.live() and time.monotonic()<deadline:time.sleep(.02)
+        require(not self.live(),'owned proof process survived bounded pidfd teardown')
+    def receipt(self):
+        return {'processes':[facts for _,facts in self.pins.values()],'live_processes':self.live(),'socket_paths':sorted(self.sockets)}
+    def close(self):
+        for fd,_ in self.pins.values():os.close(fd)
+
+def run(argv,timeout=60,environment=None,observe=None,census=None,uid=None):
+    credentials={} if uid is None else {'user':uid,'group':uid,'extra_groups':[]}
+    child=subprocess.Popen(argv,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,**credentials)
+    owned=OwnedProcesses(child);deadline=time.monotonic()+timeout
+    try:
+        while True:
+            owned.capture()
+            if observe is not None:observe()
+            require(time.monotonic()<deadline,'owned proof command exceeded deadline: '+str(argv[0]))
+            try:stdout,stderr=child.communicate(timeout=min(.1,max(.001,deadline-time.monotonic())));break
+            except subprocess.TimeoutExpired:continue
+        require(len(stdout)<=256*1024 and len(stderr)<=256*1024,'bounded proof command output')
+        require(child.returncode==0,'proof command failed: '+str(argv[0])+': '+stderr.decode(errors='replace')[:4096])
+        return stdout
+    finally:
+        owned.terminate()
+        if census is not None:census.append(owned.receipt())
+        owned.close()
 
 def image_build(module,engine,args):
     entries=[('composed-provider.py',PROVIDER.encode(),0o755),('doxa-isolation-worker',args.worker.read_bytes(),0o755)]
@@ -175,6 +264,8 @@ def main():
     parser.add_argument('--gateway',type=Path,default=Path('/usr/libexec/doxa/doxa-hardened-gateway-isolation-proof'))
     parser.add_argument('--worker-sha256',required=True)
     parser.add_argument('--gateway-sha256',required=True)
+    parser.add_argument('--session-id',default='composed-runtime-r3-20261013')
+    parser.add_argument('--project-id',type=int,default=5010)
     parser.add_argument('--base-image',default='sha256:5eb3f63be16d9bd9d0794e52feb02534ca6c1d581d535c8d3adb3df012aa2eaa')
     parser.add_argument('--output',required=True,type=Path)
     args=parser.parse_args()
@@ -188,9 +279,11 @@ def main():
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     for path in [args.worker,args.gateway,args.client,args.broker_source,args.git_support/'manifest.json']:module.controlled(path)
     require(sha_file(args.worker)==args.worker_sha256 and sha_file(args.gateway)==args.gateway_sha256,'current reviewed worker/native binaries differ')
-    sid='composed-runtime-20261013';root=Path('/srv/doxa-quota-proof')/sid;state=Path('/run/doxa/hardened')/sid
-    caller=Path('/home/doxa/.composed-proof-20261013');installed=Path('/usr/libexec/doxa/composed-root-broker-20261013.py')
-    client=Path('/usr/libexec/doxa/hardened-composed-client-20261013')
+    sid=args.session_id
+    require(re.fullmatch(r'composed-runtime-r[3-9][0-9]*-20261013',sid) and 5010<=args.project_id<6000,'fresh reserved composed scope required')
+    root=Path('/srv/doxa-quota-proof')/sid;state=Path('/run/doxa/hardened')/sid
+    caller=Path('/home/doxa')/('.'+sid);installed=Path('/usr/libexec/doxa')/(sid+'-broker.py')
+    client=Path('/usr/libexec/doxa')/(sid+'-client')
     require(not root.exists() and not state.exists() and not caller.exists() and not installed.exists() and not client.exists(),'proof must not adopt existing session/artifacts')
     write_new(installed,args.broker_source.read_bytes(),0o444);write_new(client,args.client.read_bytes(),0o755)
     state.mkdir(mode=0o755,parents=True);os.chmod(state,0o755)
@@ -203,7 +296,7 @@ def main():
          'GIT_CONFIG_NOSYSTEM':'1','GIT_CONFIG_GLOBAL':'/dev/null','GIT_TERMINAL_PROMPT':'0'}
     for argv in [['git','init','-q',str(caller/'source')],['git','-C',str(caller/'source'),'add','.'],
                  ['git','-C',str(caller/'source'),'-c','user.name=Disposable Fixture','-c','user.email=fixture@example.invalid','commit','-qm','test: add credential-free fixture']]:
-        run(['runuser','-u','doxa','--',*argv],environment=env)
+        run(argv,environment=env,uid=1000)
     runtime=Path('/run/user/1000')
     if not runtime.exists():runtime.mkdir(mode=0o700);os.chown(runtime,1000,1000)
     require(runtime.stat().st_uid==1000 and stat.S_IMODE(runtime.stat().st_mode)==0o700,'caller runtime directory must be private')
@@ -217,10 +310,25 @@ def main():
         'limits':{'memory_bytes':512*1024*1024,'cpu_quota':100000,'cpu_period':100000,'pids':128,'disk_bytes':64*1024*1024,
             'output_bytes':1024*1024,'stdin_bytes':1024*1024,'deadline_seconds':300,'operation_seconds':30}}
     module.validate_policy(policy);engine=module.Engine(policy)
-    report={'scope':'actual-composed-root-runtime-fixture','session_id':sid,'project_id':5007,'paid_calls':0,'live_provider_verified':False,
+    connection=engine.connect(module.Deadline(10));connection.sock.close();engine.live()
+    report={'scope':'actual-composed-root-runtime-fixture','session_id':sid,'project_id':args.project_id,'paid_calls':0,'live_provider_verified':False,
         'worker_sha256':args.worker_sha256,'gateway_sha256':args.gateway_sha256,'broker_sha256':sha_file(installed),'client_sha256':sha_file(client),
-        'engine_pid_before':engine.pid,'engine_socket_before':engine.socket_identity,'cleanup':{}}
-    broker=None;log=None;owned_cids=[]
+        'engine_pid_before':engine.pid,'engine_socket_before':engine.socket_identity,'engine_pins':engine_config,'cleanup':{}}
+    broker=None;broker_owned=None;log=None;owned_cids=set();owned_cgroups=set();commands=[];failure=None
+    def observe_scope():
+        broker_owned.capture()
+        private=state/'manifest.json'
+        if private.exists():
+            row=module.strict_json(module.read_regular(private,root=True))
+            require(row.get('session_id')==sid and row.get('policy_sha256')==report['receipt']['policy_sha256'],'owned Root manifest scope changed')
+            cid=row.get('cid');require(re.fullmatch(r'[0-9a-f]{64}',cid or ''),'owned Root manifest CID invalid')
+            owned_cids.add(cid)
+            try:
+                for line in Path('/proc/'+str(row['host_init_pid'])+'/cgroup').read_text().splitlines():
+                    if line.startswith('0::/'):
+                        relative=line[4:];require('..' not in Path(relative).parts and cid in relative,'container cgroup scope differs')
+                        owned_cgroups.add('/sys/fs/cgroup/'+relative)
+            except FileNotFoundError:pass
     try:
         image,provider_sha,package,git_support=image_build(module,engine,args)
         policy['image']=image;policy['providers']['claude']['sha256']=provider_sha;policy['providers']['claude']['artifacts']['/usr/local/bin/claude']=provider_sha
@@ -228,7 +336,7 @@ def main():
             'environment_keys':[],'egress':['example.com'],'proxy_port':3129}
         module.validate_policy(policy);report.update(image=image,provider_sha256=provider_sha,git_support_sha256=git_support)
         provision=Path('/root/isolation-proof/quota-bin/doxa-quota-provision-family')
-        run([str(provision),'create',sid,str(root),'1000','1001','1001','5007','67108864',image,args.worker_sha256])
+        run([str(provision),'create',sid,str(root),'1000','1001','1001',str(args.project_id),'67108864',image,args.worker_sha256])
         source=args.output/'source-policy.json';write_new(source,json.dumps(policy,sort_keys=True).encode()+b'\n')
         policy_dir=Path('/etc/doxa/hardened');policy_dir.mkdir(mode=0o755,parents=True)
         destination=policy_dir/(sid+'.json');require(not destination.exists(),'installed policy must be fresh')
@@ -238,43 +346,78 @@ def main():
         log=(args.output/'root-broker.log').open('xb')
         broker=subprocess.Popen([python,'-I',str(installed),'serve','--policy',str(destination)],stdin=subprocess.DEVNULL,
             stdout=log,stderr=log,env={'PATH':'/usr/bin:/bin','LANG':'C'},start_new_session=True)
+        broker_owned=OwnedProcesses(broker)
         deadline=time.monotonic()+15
         while not (state/'broker-instance.json').exists():
+            broker_owned.capture()
             require(broker.poll() is None and time.monotonic()<deadline,'actual ROOT broker startup failed or timed out');time.sleep(.02)
-        outcome=run(['runuser','-u','doxa','--',str(client),str(caller/'state'),str(caller/'source'),sid,str(caller/'client-report.json')],
-            timeout=360,environment=env)
+        outcome=run([str(client),str(caller/'state'),str(caller/'source'),sid,str(caller/'client-report.json')],
+            timeout=360,environment=env,observe=observe_scope,census=commands,uid=1000)
         report['client_stdout']=outcome.decode();report['client']=json.loads((caller/'client-report.json').read_text())
         require(report['client']['runtime_prepared'] and report['client']['resumed_and_stopped'],'actual Runtime proof incomplete')
         for cid in [report['client']['cid'],report['client']['resumed_cid']]:
-            require(re.fullmatch(r'[0-9a-f]{64}',cid),'actual Runtime container identity invalid');owned_cids.append(cid)
+            require(re.fullmatch(r'[0-9a-f]{64}',cid),'actual Runtime container identity invalid');owned_cids.add(cid)
             engine.request(module.Deadline(10),'GET',f'/containers/{cid}/json',statuses=(404,))
             report['cleanup'][cid]='404'
         engine.live();require(engine.pid==report['engine_pid_before'] and engine.socket_identity==tuple(report['engine_socket_before']),'shared Engine changed during proof')
-        report['status']='passed'
+        report['cases_completed']=True
     except BaseException as cause:
-        report['status']='failed';report['error']=str(cause);raise
+        failure=cause;report['error']=str(cause)
     finally:
+        cleanup_errors=[]
         if broker is not None and broker.poll() is None:
             try:
-                run(['runuser','-u','doxa','--',str(Path(sys.executable).resolve()),'-I',str(installed),'client','--session-id',sid,'--op','stop'],environment=env)
-            except BaseException as cause:report['cleanup']['stop_error']=str(cause)
-            os.killpg(broker.pid,signal.SIGTERM)
-            try:broker.wait(timeout=5)
-            except subprocess.TimeoutExpired:os.killpg(broker.pid,signal.SIGKILL);broker.wait(timeout=5)
+                reply=json.loads(run([str(Path(sys.executable).resolve()),'-I',str(installed),'client','--session-id',sid,'--op','stop'],environment=env,observe=observe_scope,census=commands,uid=1000))
+                require(reply.get('status') in {'stopped','unprepared'} and reply.get('session_id')==sid and reply.get('policy_sha256')==report['receipt']['policy_sha256'],'Root cleanup stop reply scope differs')
+                report['cleanup']['stop_status']=reply['status']
+            except BaseException as cause:cleanup_errors.append('stop: '+str(cause))
+        if broker_owned is not None:
+            try:
+                broker_owned.terminate();report['cleanup']['broker_processes']=broker_owned.receipt()
+            except BaseException as cause:cleanup_errors.append('broker processes: '+str(cause))
         if log is not None:log.close()
-        private=state/'manifest.json'
-        # Diagnostic recovery only touches our manifest's exact labelled CID.
-        # It never starts/accepts a worker after a refused native gate.
-        if private.exists():
-            row=json.loads(private.read_text());cid=row.get('cid')
-            if isinstance(cid,str) and re.fullmatch(r'[0-9a-f]{64}',cid) and row.get('session_id')==sid:
+        try:
+            private=state/'manifest.json'
+            if private.exists():
+                row=module.strict_json(module.read_regular(private,root=True));cid=row.get('cid')
+                require(row.get('session_id')==sid and row.get('policy_sha256')==report.get('receipt',{}).get('policy_sha256') and re.fullmatch(r'[0-9a-f]{64}',cid or ''),'cleanup Rootmanifest scope differs')
+                owned_cids.add(cid)
+            # Recovery can delete only exact labelled CIDs and makes the
+            # receipt fail. It cannot turn failed Runtime cleanup into PASS.
+            for cid in sorted(owned_cids):
                 status,info=engine.request(module.Deadline(10),'GET',f'/containers/{cid}/json',statuses=(200,404))
                 if status==200:
                     labels=info.get('Config',{}).get('Labels',{})
                     require(labels.get('io.doxa.root-session')==sid and labels.get('io.doxa.root-policy')==report.get('receipt',{}).get('policy_sha256'),
                             'cleanup container label/policy differs')
-                    engine.request(module.Deadline(10),'DELETE',f'/containers/{cid}?force=1',statuses=(204,))
+                    cleanup_errors.append('Runtime left a container requiring diagnostic removal: '+cid)
+                    engine.request(module.Deadline(10),'DELETE',f'/containers/{cid}?force=1&v=1',statuses=(204,404))
                 engine.request(module.Deadline(10),'GET',f'/containers/{cid}/json',statuses=(404,));report['cleanup'][cid]='404'
+            engine.request(module.Deadline(10),'GET','/containers/doxa-hardened-'+sid+'/json',statuses=(404,))
+            _,all_containers=engine.request(module.Deadline(10),'GET','/containers/json?all=1')
+            require(not [row for row in all_containers if row.get('Labels',{}).get('io.doxa.root-session')==sid],'owned container census is nonzero')
+            deadline=time.monotonic()+3
+            while any(Path(path).exists() for path in owned_cgroups) and time.monotonic()<deadline:time.sleep(.02)
+            remaining_cgroups=[path for path in owned_cgroups if Path(path).exists()]
+            sockets=set(broker_owned.sockets if broker_owned is not None else ())
+            for row in commands:sockets.update(row['socket_paths'])
+            # Engine endpoint is shared, and is checked separately below.
+            sockets.discard(engine_config['socket'])
+            kernel_paths={row.split(maxsplit=7)[7] for row in Path('/proc/net/unix').read_text().splitlines()[1:] if len(row.split(maxsplit=7))==8}
+            live_sockets=sorted(sockets & kernel_paths)
+            scoped_socket_files=[str(p) for base in [state,root/'broker'] if base.exists() for p in base.rglob('*') if stat.S_ISSOCK(p.lstat().st_mode)]
+            engine.live();require(engine.pid==report['engine_pid_before'] and engine.socket_identity==tuple(report['engine_socket_before']),'shared Engine changed during cleanup')
+            report.update(engine_pid_after=engine.pid,engine_socket_after=engine.socket_identity)
+            report['cleanup'].update(command_processes=commands,cgroups=sorted(owned_cgroups),remaining_cgroups=remaining_cgroups,
+                live_sockets=live_sockets,scoped_socket_files=scoped_socket_files,container_census=0)
+            require(not remaining_cgroups and not live_sockets and not scoped_socket_files,'owned cgroup/socket cleanup census is nonzero')
+        except BaseException as cause:cleanup_errors.append('scope census: '+str(cause))
+        if broker_owned is not None:broker_owned.close()
+        if cleanup_errors:
+            report['cleanup']['errors']=cleanup_errors
+            if failure is None:failure=RuntimeError('; '.join(cleanup_errors))
+        report['status']='passed' if failure is None and report.get('cases_completed') is True else 'failed'
         write_new(args.output/'report.json',json.dumps(report,sort_keys=True,indent=2).encode()+b'\n')
+    if failure is not None:raise failure
 
 if __name__=='__main__':main()
