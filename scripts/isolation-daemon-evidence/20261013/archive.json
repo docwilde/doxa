@@ -1,0 +1,14 @@
+{
+  "archive": "daemon-frontend-proof-20261013.tar.gz",
+  "broker_sha256": "3305ba7bca32430837331e8613852b48ed486bacd2c35393ab0e27a48c616b7b",
+  "bytes": 94875,
+  "entries": 52,
+  "final_status": "passed",
+  "harness_sha256": "16b7a4921d020e36638a5ae88c23b4fcfa396d2fe35932cde2b2776e23a0f6df",
+  "project_id": 5019,
+  "raw_sha256": "2c07b798e20c2c6bd5e6639988ec44cdcc93c7b8aa999df28f955c47c8ac867d",
+  "report_sha256": "155baaa8744f6ae9a316fab0a191b95778ce5913028f50cedc09a2595561ed9e",
+  "scope": "actual-uid1000-fixture-daemon-frontend-root-guard",
+  "session_id": "root-daemon-r6-20261013",
+  "sha256": "aa1ce664f7bfc28011d67ac5f39fefff6e4e2e2084a1e11fb40796a7a4cd14b8"
+}

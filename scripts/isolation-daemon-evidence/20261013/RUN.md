@@ -97,3 +97,7 @@ The actual frontend turn passed every readiness, rendered-input, submission, eve
 The new ROOT diagnostic identifies operation `stop`, phase `dispatch-idle`, reason `busy-transport`, exception `Refused`, with no errno or nested cause. The last native workspace_exec check succeeded; the after-stage check was cancelled by its client. These are actual scope diagnostics, retained under `run5-scoped-diagnostics`. No extra request was sent during collection.
 
 Exact CID `7e5d4033d01df1d50c3c6ca3495cdca432e8b1a6b416a41e77fe42fb8bc94c30` returned 404. Every cleanup check passed with an empty error list: captured cgroup absent, ROOT stopped, all directly owned process pidfds exited, zero scope processes/sockets/registry entries, complete terminal EOF and unchanged Engine. Old templates, brokers, quota trees and failed receipts remain preserved. No further input or rerun occurred. This failure required the bounded quiescence fix subsequently verified by attempt 6; this attempt remains failed.
+
+## Public archive
+
+`daemon-frontend-proof-20261013.tar.gz` preserves all six attempts, raw traces, reached screens, scoped diagnostics, and the exact executed harness/final broker sources. SHA256: `aa1ce664f7bfc28011d67ac5f39fefff6e4e2e2084a1e11fb40796a7a4cd14b8`. The archive contains the evidence snapshot before its own checksum/sidecar was created. `archive.json` authenticates the package; the repository checksum manifest includes the archive and sidecar. This archive carries fixture evidence and the stated limits, not a vendor or canonical human acceptance claim.
