@@ -25,8 +25,8 @@ import sys
 import termios
 import time
 
-SID = "root-daemon-r2-20261013"
-PROJECT = 5015
+SID = "root-daemon-r3-20261013"
+PROJECT = 5016
 DAEMON_SHA = "bdab19e567fe3e7b337414933f64d90be5cd361c55434b482d1d1cd7e378b1aa"
 FRONTEND_SHA = "5b4d8ef78eb7c42d84fe9c80f4220cdefdad6d2cad5987399dedc5497aa965c2"
 BROKER_SHA = "6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5"
@@ -368,9 +368,9 @@ def main(args):
     state = Path("/run/doxa/hardened") / SID
     quota_root = Path("/srv/doxa-quota-proof") / SID
     policy_path = Path("/etc/doxa/hardened") / (SID + ".json")
-    caller_base = Path("/srv/doxa-daemon-proof-r2-20261013")
-    runtime = Path("/run/user/1000/df-r2-20261013")
-    public_script = PUBLIC / "prove-hardened-daemon-r2.py"
+    caller_base = Path("/srv/doxa-daemon-proof-r3-20261013")
+    runtime = Path("/run/user/1000/df-r3-20261013")
+    public_script = PUBLIC / "prove-hardened-daemon-r3.py"
     try:
         for path, digest in [(PUBLIC / "doxa-daemon", DAEMON_SHA), (PUBLIC / "doxa-rs", FRONTEND_SHA)]:
             m = path.lstat()
@@ -408,6 +408,15 @@ def main(args):
         caller = caller_base / "uid1000"; caller.mkdir(mode=0o700); os.chown(caller, 1000, 1000)
         for name in ("source", "home", "state"):
             p = caller / name; p.mkdir(mode=0o700); os.chown(p, 1000, 1000)
+        # Frozen frontend first_run.rs uses this ordinary completion marker;
+        # no setup/auth operation or skip environment is invoked by the fixture.
+        marker = caller / "state" / ".setup-done"
+        private_new(marker, b"", uid=1000)
+        marked = marker.lstat()
+        require(stat.S_ISREG(marked.st_mode) and marked.st_uid == marked.st_gid == 1000
+                and stat.S_IMODE(marked.st_mode) == 0o600 and marked.st_nlink == 1 and marked.st_size == 0,
+                "private first-run completion marker differs")
+        report["fixture_setup_marker"] = {"path": str(marker), "uid": marked.st_uid, "mode": "0600", "size": marked.st_size}
         require(Path("/run/user/1000").stat().st_uid == 1000 and stat.S_IMODE(Path("/run/user/1000").stat().st_mode) == 0o700,
                 "existing caller runtime parent must be private")
         runtime.mkdir(mode=0o700); os.chown(runtime, 1000, 1000)
@@ -470,7 +479,8 @@ def main(args):
         def frames(): return [row["frame"] for row in obs.records if row.get("kind") == "frame"]
         pump.wait(lambda: any(frame.get("type") == "hello" for frame in frames()) or not alive(obs.pidfd), budget)
         hello = next(frame for frame in frames() if frame.get("type") == "hello")
-        require(hello["isolation"]["profile"] == "docker-hardened" and hello["engine"] == "fixture", "daemon hello did not expose actual IsolationHost")
+        require(hello["isolation"]["profile"] == "docker-hardened" and hello["engine"] == "fixture"
+                and hello["lore_enabled"] is False, "daemon hello did not expose actual memory-disabled IsolationHost")
         report["hello"] = hello
         master, slave = os.openpty(); fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("4H", 48, 160, 0, 0))
         os.set_blocking(master, False); pump.pty = master
@@ -478,17 +488,27 @@ def main(args):
         os.close(slave); slave = None
         obs.send(b"status\n")
         pump.wait(lambda: any(frame.get("type") == "reply" and frame.get("id") == 101 for frame in frames()), budget)
-        # Wait for raw terminal mode and an actual frontend attach, not a sleep.
-        pump.wait(lambda: b"\x1b[?1049h" in pump.terminal and not (termios.tcgetattr(master)[3] & termios.ICANON), budget)
+        ansi = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
+        def visible(): return ansi.sub(b"", pump.terminal)
+        # Require the actual attached-session opening view before typing.
+        pump.wait(lambda: b"\x1b[?1049h" in pump.terminal and not (termios.tcgetattr(master)[3] & termios.ICANON)
+                  and b"Session ready" in visible() and b"Type a prompt below." in visible(), budget)
+        require(b"DOXA operations" not in visible(), "unexpected setup modal blocks fixture input")
+        report["frontend_input_ready"] = True
         prompt = "UID1000 frontend ROOT guard fixture 20261013"
-        os.write(master, prompt.encode() + b"\r")
+        data = prompt.encode()
+        require(os.write(master, data) == len(data), "fixture prompt write was short")
+        report["frontend_prompt_typed"] = True
+        pump.wait(lambda: data in visible(), budget)
+        report["frontend_prompt_rendered"] = True
+        require(os.write(master, b"\r") == 1, "fixture Enter write was short")
+        report["frontend_prompt_submitted"] = True
         pump.wait(lambda: any(frame.get("type") == "event" and frame["event"]["type"] in ("turn_done", "turn_refused") for frame in frames()), budget)
         events = [frame["event"] for frame in frames() if frame.get("type") == "event"]
         require(sum(event["type"] == "turn_started" for event in events) == 1 and sum(event["type"] == "turn_done" for event in events) == 1
                 and not any(event["type"] == "turn_refused" for event in events), "one frontend fixture turn did not terminate successfully")
         require("".join(event["data"].get("text", "") for event in events if event["type"] == "text_delta") == EXPECTED_TEXT,
                 "deterministic fixture output differs")
-        ansi = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
         pump.wait(lambda: EXPECTED_TEXT.encode() in ansi.sub(b"", pump.terminal), budget)
         obs.send(b"status\n")
         pump.wait(lambda: any(frame.get("type") == "reply" and frame.get("id") == 102 for frame in frames()), budget)
