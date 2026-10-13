@@ -111,6 +111,10 @@ jobs:
           python3 -W error::ResourceWarning scripts/test_docker_hard_quota_probe.py -v
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_plugin_delegated_host_proof.py -v
+          python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_remote_platform_preflight.py -v
+          python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_android_recovery_ui.py -v
       - name: Smoke installed Rust launcher without a Python environment
         run: |
           smoke_dir=$(mktemp -d "$TMPDIR/install-XXXXXXXX")
