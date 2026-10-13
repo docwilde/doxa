@@ -1445,7 +1445,7 @@ mod tests {
     use super::*;
 
     fn router_resume_hello(mode:&str)->Value {
-        json!({"type":"hello","proto":1,"engine":"router","session_id":"pending-router","next_seq":0,
+        json!({"type":"hello","proto":1,"engine":"router","session_id":"pending-router","cwd":"/repo","next_seq":0,
             "billing":{"mode":mode,"router_usage":{"accounting_unknown":false,"reserved_usd_micros":1250},
                 "worker_usage":{"accounting_unknown":false,"retained_reservation_usd_micros":50000},
                 "budget":{"accounting_unknown":true,"ceiling_usd":0.1,"aggregate_held_usd":0.05125}}})
