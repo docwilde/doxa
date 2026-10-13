@@ -383,6 +383,19 @@ def main():
             timeout=360,environment=env,observe=observe_scope,census=commands,uid=1000)
         report['client_stdout']=outcome.decode();report['client']=json.loads((caller/'client-report.json').read_text())
         require(report['client']['runtime_prepared'] and report['client']['resumed_and_stopped'],'actual Runtime proof incomplete')
+        settings=root/'home/claude/settings.json'
+        fd=os.open(settings,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK)
+        try:
+            before=os.fstat(fd)
+            require(stat.S_ISREG(before.st_mode) and before.st_uid==1001 and before.st_gid==1001 and stat.S_IMODE(before.st_mode)==0o600
+                    and before.st_nlink==1 and before.st_size<=65536,'host-namespace staged settings identity differs')
+            data=os.read(fd,65537);after=os.fstat(fd)
+            require(before==after and data==b'{"fixture_marker":"composed-config-20261013"}\n','actual host staged settings bytes changed/differ')
+            digest=hashlib.sha256(data).hexdigest()
+            require(report['client']['claude_ready']['settings']['sha256']==digest,'worker/host staged settings content differs')
+            report['host_settings']={'identity_namespace':'host','uid':before.st_uid,'gid':before.st_gid,'mode':stat.S_IMODE(before.st_mode),
+                'nlink':before.st_nlink,'device':before.st_dev,'inode':before.st_ino,'bytes':len(data),'sha256':digest,'matches_actual_worker':True}
+        finally:os.close(fd)
         for cid in [report['client']['cid'],report['client']['resumed_cid']]:
             require(re.fullmatch(r'[0-9a-f]{64}',cid),'actual Runtime container identity invalid');owned_cids.add(cid)
             engine.request(module.Deadline(10),'GET',f'/containers/{cid}/json',statuses=(404,))

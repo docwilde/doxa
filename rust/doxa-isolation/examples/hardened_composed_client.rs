@@ -507,17 +507,17 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
         let mut claude = Provider::start(&manifest, "claude", deadline)?;
         let claude_ready = claude.receive("ready")?;
         require(
-            claude_ready["family"] == "claude",
+            claude_ready["family"] == "claude" && claude_ready["uid"] == 0,
             "actual Claude fixture failed",
         )?;
         use sha2::{Digest, Sha256};
         require(
             claude_ready["settings"]["sha256"] == format!("{:x}", Sha256::digest(SETTINGS))
                 && claude_ready["settings"]["bytes"] == SETTINGS.len()
-                && claude_ready["settings"]["uid"] == 1001
+                && claude_ready["settings"]["uid"] == 0
                 && claude_ready["settings"]["mode"] == 0o600
                 && claude_ready["settings"]["marker"] == "composed-config-20261013",
-            "actual worker did not receive exact harmless private settings",
+            "actual worker user-namespace UID0 did not receive exact harmless private settings",
         )?;
         bounded(deadline, || doxa_isolation::check_turn_budget(&manifest))?;
         claude.finish()?;
@@ -531,7 +531,8 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
             "guard_during_persistent_stdio":true,"snapshot":snapshot.proof,"private_review_copy":true,
             "actual_hook":hook_result,"callback_reviews":reviewed.lock().unwrap().clone(),"source_mutation_refused":mutation_refused,
             "git_status":status,"git_diff":diff,"git_readonly":readonly,"git_apply":apply,"git_markers":after,
-            "claude_ready":claude_ready,"live_provider_verified":false,"paid_calls":0}),
+            "claude_ready":claude_ready,"worker_uid_namespace":"container-user-namespace UID0 mapped to hostEngineUID1001",
+            "live_provider_verified":false,"paid_calls":0}),
         )
     })();
     drop(hook);
