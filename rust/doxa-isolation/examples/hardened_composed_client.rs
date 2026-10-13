@@ -89,6 +89,7 @@ struct Provider {
 }
 impl Provider {
     fn start(manifest: &Manifest, family: &str, deadline: Instant) -> io::Result<Self> {
+        remaining(deadline, 1)?;
         let mut original = Command::new(format!("/usr/local/bin/{family}"));
         original.arg("stream").current_dir(&manifest.checkout);
         let mut command = doxa_isolation::isolate_command(original, family)?;
@@ -209,6 +210,7 @@ fn git(
     input: Option<&[u8]>,
     deadline: Instant,
 ) -> io::Result<Value> {
+    remaining(deadline, 1)?;
     let mut original = Command::new("git");
     original.current_dir(&manifest.checkout).args(arguments);
     let mut command = doxa_isolation::workspace::command(original)?;
@@ -357,7 +359,7 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
     checkpoint(&mut progress, "actual Runtime ready and active")?;
     let reviewed = Arc::new(Mutex::new(Vec::<Value>::new()));
     let review = reviewed.clone();
-    let hook=HookBroker::start(move|event,manifest| {
+    let hook=bounded(deadline,||HookBroker::start(move|event,manifest| {
         let checked=(||->io::Result<Value>{
             require(event["session_id"]==THREAD&&event["transcript_path"]==ROLLOUT,"callback actual event scope differs")?;
             let snapshot=bounded(deadline,||doxa_isolation::snapshot_provider_file(Path::new(ROLLOUT),0,LIMIT,Some(THREAD)))?
@@ -373,7 +375,7 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
             Ok(value)=>{review.lock().unwrap().push(value);json!({"continue":true,"fixtureApproved":true})},
             Err(_)=>json!({"continue":false,"stopReason":"credential-free fixture source review refused"}),
         }
-    })?.ok_or_else(||io::Error::other("actual ROOT HookBroker unavailable"))?;
+    }))?.ok_or_else(||io::Error::other("actual ROOT HookBroker unavailable"))?;
     checkpoint(&mut progress, "actual ROOT callback registered")?;
     let result = (|| -> io::Result<Value> {
         let mut codex = Provider::start(&manifest, "codex", deadline)?;
