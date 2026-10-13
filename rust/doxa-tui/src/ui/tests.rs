@@ -90,6 +90,23 @@ use super::*;
     }
 
     #[test]
+    fn router_automatic_compaction_progress_keeps_the_original_turn_busy_and_selection_unchanged() {
+        let mut app=App::default();app.handle(Event::Resize(150,40));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"route-1","engine":"router","model":"auto"}));
+        let event=|kind,data|json!({"type":"event","session_id":"route-1","event":{"type":kind,"data":data}});
+        let target=json!({"target_id":"ds-fixture","engine":"deepseek","model":"deepseek-flash","effort":"none","reviewed":false,"original_messages":12});
+        assert!(app.apply_daemon_frame(&event("router_auto_compaction_started",json!({"operation":"compact","automatic":true,"prompt":"/compact","compaction_semantics":"doxa_managed_summary","compaction":target}))));
+        assert_eq!(app.sessions[0].status,"Reviewing automatic compaction");assert_eq!(app.session_activity["route-1"].0,true);
+        assert!(!app.sessions[0].transcript.contains("/compact"));assert_eq!(app.session_identity["route-1"].1.as_deref(),Some("auto"));
+        assert!(app.apply_daemon_frame(&event("router_auto_compaction_finished",json!({"operation":"compact","automatic":true,"is_error":false,"compaction_semantics":"doxa_managed_summary","compaction":target,"session_cost_usd":0.125,"cost_is_estimate":true}))));
+        assert_eq!(app.session_activity["route-1"].0,true);assert_eq!(app.sessions[0].status,"Running after reviewed compaction");
+        assert_eq!(app.session_telemetry["route-1"].session_cost.as_deref(),Some("$0.1250 est"));
+        app.apply_daemon_frame(&event("turn_started",json!({"prompt":"Original user turn"})));app.apply_daemon_frame(&event("turn_done",json!({"is_error":false})));
+        assert_eq!(app.session_activity["route-1"].0,false);assert_eq!(app.sessions[0].status,"Ready");
+        assert_eq!(app.sessions[0].transcript.matches("Original user turn").count(),1);assert!(!app.sessions[0].transcript.contains("/compact"));
+    }
+
+    #[test]
     fn router_compaction_phases_keep_selection_and_ordinary_route_separate() {
         for (selection, summary_target, summary_engine, summary_model) in [
             ("auto", "ds-fixture", "deepseek", "deepseek-flash"),
@@ -186,13 +203,13 @@ use super::*;
     }
 
     #[test]
-    fn router_target_dropdown_selects_only_configured_ids_and_refuses_docker() {
+    fn router_target_dropdown_selects_only_configured_ids_and_supports_docker() {
         // Keep credentials/config environment scoped to this child test process.
         if std::env::var_os("DOXA_ROUTER_SETTINGS_TEST").is_none() {
             let home=tempfile::tempdir().unwrap();
             std::fs::set_permissions(home.path(),std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
             let output=std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact","ui::tests::router_target_dropdown_selects_only_configured_ids_and_refuses_docker"])
+                .args(["--exact","ui::tests::router_target_dropdown_selects_only_configured_ids_and_supports_docker"])
                 .env("DOXA_HOME",home.path()).env("DOXA_ROUTER_SETTINGS_TEST","1")
                 .env("TYPESAFE_API_KEY","router-settings-test-key")
                 .env_remove("DOXA_ENGINE").env_remove("DOXA_ROUTER_CONFIG")
@@ -251,6 +268,10 @@ use super::*;
         app.new_session.as_mut().unwrap().field=1;
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         app.new_session_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert_eq!(app.new_session.as_ref().unwrap().isolation,doxa_isolation::Profile::DockerOpen);
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.new_session_key(KeyEvent::new(KeyCode::Home,KeyModifiers::NONE));
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().isolation,doxa_isolation::Profile::Native);
         app.new_session.as_mut().unwrap().field=2;

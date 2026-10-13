@@ -117,7 +117,7 @@ remote tabs beside local tabs; /local selects an open local tab. Ctrl+R opens
 remote history, and PageUp at its top fetches older turns.
 
 New-session options: --engine codex|claude|deepseek|glm|router, --model NAME,
-  --router-config ABSOLUTE_PATH (router targets; native isolation only),
+  --router-config ABSOLUTE_PATH (reviewed router targets and compaction policy),
   --isolation native|docker-open|docker-offline,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.
 Codex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH.

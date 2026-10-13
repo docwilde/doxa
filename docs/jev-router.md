@@ -144,6 +144,14 @@ API price bounds; 1–10,000 routing calls; 1–1,000,000 USD micros of routing 
 candidate. Unknown caps or API prices cannot be entered as zero. Existing API
 configs keep their serialization/hash; omitted `billing` means `api`.
 
+Optional `auto_compact_percent` enables reviewed automatic compaction at a
+retained-context pressure threshold of 50–95 percent. For example,
+`"auto_compact_percent": 80` opts in at 80 percent of the selected summary
+target's configured input cap. It is absent by default and participates in the
+frozen config hash. Existing configs retain their previous hash when it is
+omitted. The pressure estimate includes the host's reserved memory and tool
+overhead; it is a conservative request-byte estimate, not a provider token count.
+
 Before each turn the host checks credentials, account catalog, model/effort,
 tools, retained history, context/output caps and aggregate allowance. Configured
 targets are policy candidates, not a claim that every account can use them.
@@ -253,8 +261,20 @@ The host requires completed LORE review of the canonical source before sending
 a bounded summary request. Disabled or unavailable review, stale source proof,
 ineligible target and budget refusal stop before a summary HTTP request. A
 verified managed summary becomes separate context for subsequent turns; the
-canonical messages and transcript originals remain intact. This does not add
-automatic compaction or unbounded long-history support.
+canonical messages and transcript originals remain intact.
+
+With `auto_compact_percent` configured, an ordinary turn first checks retained
+context pressure against the same pin/last-worker/fallback summary target. If
+the threshold is reached, it runs this exact source-review, bounded-summary and
+durable-accounting path before routing the original user turn. The pending user
+prompt alone does not trigger a paid summary. Automatic progress remains inside
+one daemon turn: the UI stays busy through review, summary and the ordinary
+worker, and displays the original user turn once. Receipts distinguish automatic
+from explicit compaction. Review refusal, cancellation, unavailable API target
+or uncertain summary usage withholds the ordinary worker. A CLI pin or last
+CLI worker still requires an explicitly selected eligible API summary target;
+automatic compaction does not silently switch providers. History and summary
+requests remain bounded; late compaction cannot recover an oversized source.
 
 The UI shows the source review and summary phases, then a separate summary
 target/provider/model/effort record with the original message count. Reattach
@@ -299,13 +319,53 @@ If a session ceiling was configured, resume must preserve that same ceiling;
 changing the allowance or config does not reset recorded spend. Keep the
 original `session_budget_usd`/`DOXA_SESSION_BUDGET_USD` setting when resuming.
 
-The history picker explains that explicit config is required for resume.
-Existing live router sessions can be attached normally. Automatic launch from
-history, `/clear`, `/cd`, child spawning and fleet config inheritance are
-unavailable in this slice. Docker isolation, isolation migration and external
-CLI handoffs are also unavailable. Internal authenticated CLI workers are
-supported within the canonical router session. Start a separate explicit session
-when those missing inheritance paths would otherwise be needed.
+History launches restore the saved private config path, frozen decision service,
+Auto/pin and exact original ceiling, including fleet per-slot configs. They check
+the current config hash and canonical project identity before launching. A
+different environment or Settings budget cannot create a fresh allowance for
+that historical conversation. Older journals without config provenance still
+require the original explicit config. Existing live sessions attach normally.
+
+With session spawning enabled, each Router spawn requires a complete human
+review of the exact task, target, config digest, native permission mode and child
+allowance. A finite parent ceiling is required. Before launch, the parent
+durably reserves half its remaining tracked dollar allowance and half its
+remaining routing-call and routing-spend allowances. The child validates that
+exact allocation, receives its own worktree, conversation and journal, and can
+allocate only within its own share. Changes to config, selection, permission or
+allowance during review refuse launch. Concurrent stale reviews cannot allocate
+the same allowance twice. Failed or interrupted startup retains the allocation;
+there is no automatic reclaim or uncertain replay. Ancestor held totals include
+all their child ceilings. Session cost estimates cover that session's own
+reported work; descendant charges are not presented as a known aggregate invoice.
+CLI provider charges remain excluded and unknown.
+
+Router fleet pools accept `--router-config ABSOLUTE_PATH` and require a finite
+`--run-budget`. The reviewed routing-call and routing-spend limits are split
+deterministically across assigned Router slots. Each slot gets a private frozen
+config and its existing disjoint share of the fleet dollar budget. The complete
+fleet review binds these configs; startup and controller resume verify each
+daemon's exact digest and original ceiling. Controller recovery observes the
+existing sessions and does not redeliver admitted prompts.
+
+Router sessions can use the existing native, docker-open and docker-offline
+profiles. Config, canonical history, reviews and allowance journals stay under
+the trusted host. Configured CLI families prepare their own credential snapshots
+and use the existing container transport, while API calls use the host transport
+and existing isolated workspace tools. Explicit idle backend migration binds the
+canonical transcript and complete Router journal fingerprint, preserves the
+logical project identity, original allowance and exact config, and starts fresh
+private CLI workers on later turns. Uncertain or pending work refuses migration.
+No internal CLI rollout is replayed as a new Router turn. Hardened admission is
+governed by the separate [isolation contract](session-isolation.md).
+
+`/clear`, `/cd`, external CLI handoffs and CLI summary targets remain unavailable.
+Real-account summary quality and provider/platform verification remain separate
+from the credential-free integration fixtures.
+
+See the [2026-10-13 integration verification record](router-integration-2026-10-13.md)
+for child/fleet recovery, automatic review failure boundaries and Docker proof
+requirements.
 
 ## Evaluation and evidence
 

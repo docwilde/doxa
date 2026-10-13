@@ -831,8 +831,9 @@ impl VendorHost {
         let selected_model = self.model.lock().unwrap().clone();
         let limits = *self.limits.lock().unwrap();
         let peer = self.peer_tools.lock().unwrap().clone();
+        let session=self.session_tools.lock().unwrap().clone();
         emit(json!({"type":"turn_started","data":{"prompt":prompt,
-            "vendor_tools":if !mcp_bindings.is_empty() { "native, external-mcp" } else { match (self.workspace_read, peer.is_some(), self.agent_tools.is_some()) {
+            "vendor_tools":if session.is_some(){"native, sessions"}else if !mcp_bindings.is_empty() { "native, external-mcp" } else { match (self.workspace_read, peer.is_some(), self.agent_tools.is_some()) {
                 (true, true, true) => "workspace-read, peers, lore", (true, false, true) => "workspace-read, lore",
                 (false, true, true) => "peers, lore", (false, false, true) => "lore",
                 (true, true, false) => "workspace-read, peers", (true, false, false) => "workspace-read",
@@ -842,7 +843,7 @@ impl VendorHost {
         let mut history = self.context_messages(&saved_history);
         history.insert(0, self.system_message());
         let scrub_tool = |value: &str| self.scrub(value);
-        let tools_enabled = self.workspace_read || peer.is_some() || self.agent_tools.is_some() || !mcp_bindings.is_empty();
+        let tools_enabled = self.workspace_read || peer.is_some() || self.agent_tools.is_some() || session.is_some() || !mcp_bindings.is_empty();
         let output = std::cell::RefCell::new(&mut *emit);
         let tool_events = Arc::new(Mutex::new(Vec::new()));
         let emit_tool = |event: Value| {
@@ -857,7 +858,7 @@ impl VendorHost {
             gate = gate.with_mcp(mcp_bindings, mcp_definitions, service.clone(), mcp_cancel);
         }
         let mut definitions=self.agent_tools.as_ref().map(|tools|tools.vendor_definitions()).unwrap_or_default();
-        let agent=self.agent_tools.as_ref().map(|tools|tools.vendor_handler());let session=self.session_tools.lock().unwrap().clone();
+        let agent=self.agent_tools.as_ref().map(|tools|tools.vendor_handler());
         if session.is_some(){definitions.extend(doxa_engines::session_tools::definitions().into_iter().map(|row|json!({"type":"function","function":{"name":"spawn_session","description":row["description"],"parameters":row["inputSchema"]}})));}
         if !definitions.is_empty(){gate=gate.with_agent(definitions,Arc::new(move|name,args|if name=="spawn_session"{session.as_ref().ok_or("Session tools unavailable".to_owned())?(name,args)}else{agent.as_ref().ok_or("LORE tools unavailable".to_owned())?(name,args)}));}
 

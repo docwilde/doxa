@@ -279,13 +279,42 @@ fn saved_budget(session_id: &str) -> io::Result<Option<f64>> {
     Ok(Some(ceiling))
 }
 
+fn saved_router_journal(session_id: &str) -> io::Result<serde_json::Value> {
+    if !doxa_state::valid_session_id(session_id) { return Err(invalid("invalid Router resume identity")); }
+    let home = doxa_isolation::home()?;
+    let raw = doxa_router::read_private(&home.join("router").join(format!("{session_id}.router.json")), 256 * 1024)
+        .map_err(|_| invalid("unsafe Router resume allowance journal"))?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| invalid("invalid Router resume allowance"))?;
+    if value["version"] != 1 || value["identity"]["engine"] != "router" || value["identity"]["session_id"] != session_id {
+        return Err(invalid("Router resume allowance identity changed"));
+    }
+    Ok(value)
+}
+fn saved_router_budget(session_id: &str) -> io::Result<Option<u64>> {
+    let value=saved_router_journal(session_id)?;
+    match &value["identity"]["ceiling_usd_micros"] {
+        serde_json::Value::Null => Ok(None),
+        number => number.as_u64().filter(|micros| *micros > 0).map(Some).ok_or_else(||invalid("invalid Router resume ceiling")),
+    }
+}
+pub(crate) fn router_resume_config(session_id:&str)->io::Result<(PathBuf,doxa_router::Config,PathBuf)> {
+    let journal=saved_router_journal(session_id)?;
+    let home=doxa_isolation::home()?;
+    let explicit=journal["config_path"].as_str().map(PathBuf::from);
+    let path=router_config_path(explicit.as_deref())?;
+    let config=doxa_router::Config::load_with_model(&path,journal["config_model"].as_str())
+        .map_err(|_|invalid("original private Router config is unavailable or changed"))?;
+    if journal["identity"]["config_sha256"].as_str()!=config.hash().ok().as_deref() {return Err(invalid("original private Router config changed"));}
+    Ok((path,config,home))
+}
+
 pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     spawn_inner(options, None, &[],None)
 }
 
 /// Fleet-scoped child environment without changing the frontend process.
 pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>, inbound: bool, lore: bool) -> io::Result<Session> {
-    if options.engine==Engine::Router {return Err(invalid("router fleet config inheritance is unavailable; start an explicit router session"));}
+    if options.engine==Engine::Router && options.router_config.is_none() {return Err(invalid("Router fleets require their reviewed private per-slot configuration"));}
     let mut environment = vec![("DOXA_RUNTIME_DIR", runtime.to_string_lossy().into_owned()),
         ("DOXA_AGENT_PEER_SEND", "1".into()),
         ("DOXA_PEER_INBOUND_TURNS", if inbound { "1" } else { "0" }.into())];
@@ -306,7 +335,6 @@ pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>,
 
 /// Reattach the same stopped conversation with its original admission policy.
 pub(crate) fn spawn_migrated(options:&LaunchOptions,record:&serde_json::Value)->io::Result<Session>{
-    if options.engine==Engine::Router {return Err(invalid("router isolation migration is unavailable"));}
     let runtime=Path::new(record["runtime"].as_str().ok_or_else(||invalid("migration runtime missing"))?);
     let mut environment=vec![("DOXA_PEER_INBOUND_TURNS",if record["inbound"]==true{"1"}else{"0"}.into()),
         ("DOXA_LORE",if record["lore"]==true{"1"}else{"0"}.into()),
@@ -444,6 +472,14 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             command.env("DOXA_SESSION_BUDGET_USD", ceiling.to_string());
         }
     }
+    if options.engine == Engine::Router {
+        if let Some(id) = &options.resume {
+            // Configuration defaults and environment edits cannot replace a
+            // historical Router allowance or turn an unbudgeted one into a
+            // newly budgeted conversation. The daemon verifies the full hash.
+            command.env("DOXA_SESSION_BUDGET_USD", saved_router_budget(id)?.map(|micros|format!("{}.{:06}",micros/1_000_000,micros%1_000_000)).unwrap_or_default());
+        }
+    }
     command.args([
         "--runtime-dir",
         runtime
@@ -540,9 +576,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             if options.sandbox.is_some() || options.effort.is_some() {
                 return Err(invalid("router targets define their effort; sandbox overrides are unsupported"));
             }
-            let profile=options.isolation.unwrap_or(doxa_isolation::configured_profile(&doxa_isolation::home()?)?);
-            if profile!=doxa_isolation::Profile::Native {return Err(invalid("router currently requires native isolation"));}
-            let (path,config)=router_config(options.router_config.as_deref())?;
+            let (path,config)=if let Some(id)=&options.resume {let(path,config,_)=router_resume_config(id)?;(path,config)}else{router_config(options.router_config.as_deref())?};
             if model.as_deref().is_some_and(|id| id!="auto" && config.candidate(id).is_none()) {
                 return Err(invalid("router model must be auto or an exact configured target ID"));
             }
@@ -705,8 +739,35 @@ mod tests {
     #[test]
     fn router_refuses_unpropagated_fleet_and_migration_before_host_actions() {
         let options=LaunchOptions{engine:Engine::Router,..Default::default()};
-        assert!(spawn_fleet(&options,Path::new("/missing"),Some(1.0),false,false).unwrap_err().to_string().contains("config inheritance"));
-        assert!(spawn_migrated(&options,&serde_json::json!({})).unwrap_err().to_string().contains("migration is unavailable"));
+        assert!(spawn_fleet(&options,Path::new("/missing"),Some(1.0),false,false).unwrap_err().to_string().contains("reviewed private per-slot"));
+        assert!(spawn_migrated(&options,&serde_json::json!({})).unwrap_err().to_string().contains("migration runtime missing"));
+    }
+    #[test]
+    fn router_history_restores_the_original_ceiling_instead_of_new_defaults() {
+        if std::env::var("DOXA_ROUTER_BUDGET_TEST").as_deref()!=Ok("1") {
+            let root=tempfile::tempdir().unwrap();
+            fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();
+            let result=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","launch::tests::router_history_restores_the_original_ceiling_instead_of_new_defaults"])
+                .env_clear().env("PATH","/usr/bin:/bin").env("HOME",root.path().join("home")).env("TMPDIR",std::env::var_os("TMPDIR").unwrap())
+                .env("DOXA_ROUTER_BUDGET_TEST","1").env("DOXA_HOME",root.path()).status().unwrap();
+            assert!(result.success());return;
+        }
+        let home=doxa_isolation::home().unwrap();fs::create_dir(home.join("router")).unwrap();
+        let path=home.join("router/saved-router.router.json");
+        let mut journal=serde_json::json!({"version":1,"identity":{"engine":"router","session_id":"saved-router","ceiling_usd_micros":1234567}});
+        fs::write(&path,journal.to_string()).unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(saved_router_budget("saved-router").unwrap(),Some(1234567));
+        let config_path=home.join("original-router.json");fs::write(&config_path,router_fixture().to_string()).unwrap();fs::set_permissions(&config_path,fs::Permissions::from_mode(0o600)).unwrap();
+        let original=doxa_router::Config::load_with_model(&config_path,Some("subq-snap-preview")).unwrap();
+        journal["config_path"]=serde_json::json!(config_path);journal["config_model"]=serde_json::json!("subq-snap-preview");journal["identity"]["config_sha256"]=serde_json::json!(original.hash().unwrap());
+        fs::write(&path,journal.to_string()).unwrap();
+        let (restored_path,restored,restored_home)=router_resume_config("saved-router").unwrap();assert_eq!(restored_path,config_path);assert_eq!(restored,original);assert_eq!(restored_home,home);
+        journal["identity"]["ceiling_usd_micros"]=serde_json::Value::Null;fs::write(&path,journal.to_string()).unwrap();
+        assert_eq!(saved_router_budget("saved-router").unwrap(),None);
+        journal["identity"]["ceiling_usd_micros"]=serde_json::json!(-1);fs::write(&path,journal.to_string()).unwrap();assert!(saved_router_budget("saved-router").is_err());
+        journal["identity"]["session_id"]=serde_json::json!("other");fs::write(&path,journal.to_string()).unwrap();assert!(saved_router_budget("saved-router").is_err());
+        assert!(saved_router_budget("../escape").is_err());
     }
     #[test]
     fn launcher_config_rejects_fifo_and_oversized_files() {

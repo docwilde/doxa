@@ -47,12 +47,15 @@ impl Env {
     fn capture(&self)->Vec<Value>{fs::read_to_string(self.path().join("calls.jsonl")).unwrap_or_default().lines().map(|line|serde_json::from_str(line).unwrap()).collect()}
     fn mode(&self,mode:&str){fs::write(self.path().join("mode"),mode).unwrap();}
     fn daemon(&self,server:&Server,resume:bool,bins:bool)->Daemon {
+        self.daemon_lore(server,resume,bins,false)
+    }
+    fn daemon_lore(&self,server:&Server,resume:bool,bins:bool,lore:bool)->Daemon {
         let run=self.path().join(if resume{"resume-run"}else{"run"});let mut cmd=Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
         cmd.env_clear().args(["--engine","router","--router-config",self.path().join("router.json").to_str().unwrap(),"--runtime-dir",run.to_str().unwrap(),"--cwd",self.cwd().to_str().unwrap(),"--session-id","routed","--vendor-endpoint",&server.endpoint,"--resume",if resume{"true"}else{"false"},"--linger","20"]);
         if bins {cmd.arg("--claude-bin").arg(self.path().join("claude")).arg("--codex-bin").arg(self.path().join("codex"));}
         cmd.env("PATH","/usr/bin:/bin").env("HOME",self.path().join("home")).env("DOXA_HOME",self.path().join("doxa")).env("CODEX_HOME",self.path().join("codex-home"))
             .env("LORE_ROOT",self.path().join("lore")).env("LORE_PROJECTS_DIR",self.path().join("projects")).env("LORE_SKILLS_DIR",self.path().join("skills"))
-            .env("DOXA_LORE_RS",std::env::var_os("DOXA_LORE_RS").unwrap()).env("LORE_DISABLE_SYNC","1").env("LORE_DISABLE_REVIEW","1").env("DOXA_LORE","0").env("DOXA_WORKTREE","0").env("DOXA_AGENT_PEER_SEND","1")
+            .env("DOXA_LORE_RS",std::env::var_os("DOXA_LORE_RS").unwrap()).env("LORE_DISABLE_SYNC","1").env("LORE_DISABLE_REVIEW",if lore{"0"}else{"1"}).env("DOXA_LORE",if lore{"1"}else{"0"}).env("DOXA_WORKTREE","0").env("DOXA_AGENT_PEER_SEND","1")
             .env("DEEPSEEK_API_KEY","local-worker-fixture-key").env("ZAI_API_KEY","local-worker-fixture-key").env("TYPESAFE_API_KEY","local-jev-fixture-key").env("DOXA_SESSION_BUDGET_USD","2")
             .env("FIXTURE_MODE_FILE",self.path().join("mode")).env("FIXTURE_LOG",self.path().join("calls.jsonl"))
             .env("FIXTURE_CANONICAL_MESSAGES",self.project().join("routed.messages.json"))
@@ -76,6 +79,49 @@ impl Daemon {
     fn stop(mut self){self.call("stop",json!({}));wait(||self.child.try_wait().unwrap().is_some());}
 }
 impl Drop for Daemon{fn drop(&mut self){let _=self.child.kill();let _=self.child.wait();}}
+
+#[test]
+fn changed_router_config_or_native_permission_during_spawn_review_cannot_launch_a_child() {
+    for change in ["config","permission"] {
+        let env=Env::new();fs::create_dir_all(env.path().join("doxa")).unwrap();fs::set_permissions(env.path().join("doxa"),fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(env.path().join("doxa/config.toml"),"spawn_sessions=true\nworktree_per_session=false\n").unwrap();
+        fs::set_permissions(env.path().join("doxa/config.toml"),fs::Permissions::from_mode(0o600)).unwrap();
+        let server=Server::new(||"ds".into());let mut daemon=env.daemon(&server,false,true);
+        // A waiting operator RPC owns its connection until it returns. Human
+        // answers use the already attached control connection independently.
+        let registry:Value=serde_json::from_slice(&fs::read(daemon.run.join("registry/routed.json")).unwrap()).unwrap();
+        let mut request_socket=UnixStream::connect(registry["daemon_socket"].as_str().unwrap()).unwrap();request_socket.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        let mut request_reader=BufReader::new(request_socket.try_clone().unwrap());receive(&mut request_reader);let request=501;
+        send(&mut request_socket,json!({"type":"attach","cursor":null}));
+        send(&mut request_socket,json!({"type":"call","id":request,"method":"spawn_session","params":{"task":"reviewed dummy task","model":"ds"}}));
+        let approval=loop {let frame=receive(&mut daemon.reader);if frame["event"]["type"]=="needs_input" && frame["event"]["data"]["kind"]=="spawn"{break frame;}};
+        assert!(approval["event"]["data"]["body"].as_str().unwrap().contains("Native permission: default"));
+        if change=="permission" {assert_eq!(daemon.call("set_permission_mode",json!({"mode":"auto"}))["ok"],true);}
+        else {let path=env.path().join("router.json");let mut config:Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();config["criteria_version"]=json!("changed-during-human-review");fs::write(path,config.to_string()).unwrap();}
+        daemon.id+=1;send(&mut daemon.socket,json!({"type":"call","id":daemon.id,"method":"answer_needs_input","params":{"id":approval["event"]["data"]["id"],"answer":{"decision":"allow"}}}));
+        let reply=loop {let frame=receive(&mut request_reader);if frame["id"]==request{break frame;}};
+        assert_eq!(reply["ok"],false,"{reply}");assert!(env.state()["allocations"].as_array().unwrap().is_empty());
+        assert!(server.posts().is_empty());assert!(env.capture().is_empty());
+        let peers=fs::read_dir(daemon.run.join("registry")).unwrap().filter_map(Result::ok).filter(|row|row.path().extension().is_some_and(|extension|extension=="json")).count();assert_eq!(peers,1);
+        daemon.stop();
+    }
+}
+
+#[test]
+fn automatic_compaction_of_a_cli_pin_or_last_worker_refuses_without_an_implicit_api_switch() {
+    for pin in [true,false] {
+        let env=Env::new();let path=env.path().join("router.json");let mut config:Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        config["auto_compact_percent"]=json!(50);
+        fs::write(&path,config.to_string()).unwrap();let server=Server::new(||"claude".into());let mut daemon=env.daemon_lore(&server,false,true,true);
+        if pin {daemon.call("set_model",json!({"model":"claude"}));}
+        let first=daemon.prompt("first CLI request");assert_eq!(first["data"]["is_error"],false,"{first}");
+        let calls=server.posts().len();let capture=env.capture();let state=env.state();
+        let refused=daemon.prompt("must review an API summary target");assert_eq!(refused["type"],"turn_refused","{refused}");
+        assert!(refused["data"]["message"].as_str().unwrap().contains("API target"),"{refused}");assert_eq!(server.posts().len(),calls);
+        assert_eq!(env.capture(),capture);assert_eq!(env.state()["selection"],state["selection"]);assert_eq!(env.state()["pinned"],state["pinned"]);
+        daemon.stop();
+    }
+}
 
 #[test]
 fn authenticated_native_workers_review_tools_keep_canonical_history_and_resume_across_api_switch() {

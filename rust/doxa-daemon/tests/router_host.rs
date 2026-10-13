@@ -55,12 +55,69 @@ mod tests {
             id:id.into(),provider,billing:doxa_router::Billing::Api,model:model.into(),effort:effort.into(),description:format!("Reviewed {id} test target"),
             context_tokens:131072,max_output_tokens:512,supports_tools:true,
             input_usd_micros_per_million:input,output_usd_micros_per_million:output };
-        Config {version:1,jev_model:doxa_router::JEV_MODEL.into(),criteria_version:"fixture-v1".into(),
+        Config {version:1,jev_model:doxa_router::JEV_MODEL.into(),criteria_version:"fixture-v1".into(),auto_compact_percent:None,
             candidates:vec![candidate("ds",Provider::Deepseek,"deepseek-flash","none",300000,1200000),
                 candidate("glm",Provider::Glm,"glm-5.3-flash","high",150000,500000),
                 candidate("thinking",Provider::Deepseek,"deepseek-flash","high",300000,1200000)],
             fallback_id:"ds".into(),confidence_threshold:0.8,max_calls:8,max_spend_usd_micros:10000,
             max_input_bytes:8192,deadline_ms:1000 }
+    }
+
+    #[test]
+    fn child_allowances_are_disjoint_review_bound_and_retained_across_failed_startup_and_resume() {
+        let env=Env::new();let cfg=config();
+        let server=Server::new(|method,body|if method=="GET" {("application/json".into(),json!({"data":[{"id":"deepseek-flash"},{"id":"glm-5.3-flash"}]}).to_string(),Duration::ZERO)}else{worker(body,false)});
+        let parent=make_host(&env,cfg.clone(),&server,false,Some(4.0));
+        let review=parent.call("router_child_plan",&json!({"model":"ds"})).unwrap();
+        assert_eq!(review["ceiling_usd_micros"],2_000_000);assert_eq!(review["routing_calls"],4);
+        let mut changed=review.clone();changed["ceiling_usd_micros"]=json!(3_000_000);
+        assert!(parent.call("router_child_admit",&json!({"child_session_id":"child-one","review":changed})).is_err());
+        parent.call("router_child_admit",&json!({"child_session_id":"child-one","review":review})).unwrap();
+        assert!(parent.call("router_child_admit",&json!({"child_session_id":"child-one","review":review})).is_err());
+        let second=parent.call("router_child_plan",&json!({})).unwrap();assert_eq!(second["ceiling_usd_micros"],1_000_000);assert_eq!(second["routing_calls"],2);
+        parent.call("router_child_admit",&json!({"child_session_id":"never-started","review":second})).unwrap();
+        assert_eq!(parent.billing_snapshot().unwrap()["budget"]["aggregate_held_usd"],3.0);
+        let child=RouterHost::new_with_cli(cfg.clone(),&env.cwd(),"child-one",false,Some(2_000_000),super::router_cli::CliOptions::default(),Some("routed"),Some(server.endpoint.clone())).unwrap();
+        assert_eq!(child.initial_model().as_deref(),Some("ds"));
+        let third=child.call("router_child_plan",&json!({})).unwrap();assert_eq!(third["ceiling_usd_micros"],1_000_000);assert_eq!(third["routing_calls"],2);
+        child.call("router_child_admit",&json!({"child_session_id":"grandchild","review":third})).unwrap();
+        assert_eq!(child.billing_snapshot().unwrap()["budget"]["aggregate_held_usd"],1.0);
+        assert!(RouterHost::new_with_cli(cfg.clone(),&env.cwd(),"grandchild",false,Some(2_000_000),super::router_cli::CliOptions::default(),Some("child-one"),Some(server.endpoint.clone())).is_err());
+        assert!(RouterHost::new_with_cli(cfg.clone(),&env.cwd(),"forged-child",false,Some(2_000_000),super::router_cli::CliOptions::default(),Some("routed"),Some(server.endpoint.clone())).is_err());
+        parent.shutdown();drop(parent);let resumed=make_host(&env,cfg.clone(),&server,true,Some(4.0));
+        assert_eq!(resumed.billing_snapshot().unwrap()["budget"]["aggregate_held_usd"],3.0);
+        assert_eq!(env.state()["allocations"].as_array().unwrap().len(),2);assert!(server.bodies().is_empty());
+        resumed.shutdown();child.shutdown();
+    }
+
+    #[test]
+    fn competing_child_reviews_cannot_double_allocate_and_failed_save_blocks_retry() {
+        let env=Env::new();let cfg=config();let server=Server::new(|_,_|panic!("allocation must perform no provider request"));
+        let parent=Arc::new(make_host(&env,cfg,&server,false,Some(4.0)));
+        let review=parent.call("router_child_plan",&json!({})).unwrap();let barrier=Arc::new(std::sync::Barrier::new(2));
+        let threads=["first","second"].map(|id|{let parent=parent.clone();let review=review.clone();let barrier=barrier.clone();std::thread::spawn(move||{barrier.wait();parent.call("router_child_admit",&json!({"child_session_id":id,"review":review})).is_ok()})});
+        assert_eq!(threads.into_iter().map(|thread|usize::from(thread.join().unwrap())).sum::<usize>(),1);
+        assert_eq!(env.state()["allocations"].as_array().unwrap().len(),1);
+        let next=parent.call("router_child_plan",&json!({})).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let directory=env.journal().parent().unwrap().to_owned();fs::set_permissions(&directory,fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(parent.call("router_child_admit",&json!({"child_session_id":"save-failed","review":next})).is_err());
+        fs::set_permissions(&directory,fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(parent.billing_snapshot().unwrap()["budget"]["accounting_unknown"],true);
+        assert_eq!(parent.billing_snapshot().unwrap()["budget"]["aggregate_held_usd"],3.0);
+        assert!(parent.call("router_child_plan",&json!({})).is_err());assert!(server.bodies().is_empty());parent.shutdown();
+    }
+
+    #[test]
+    fn router_migration_checkpoint_binds_exact_known_journal_and_refuses_external_accounting_change() {
+        let env=Env::new();let server=Server::new(|_,_|panic!("checkpoint must not call a provider"));
+        let host=make_host(&env,config(),&server,false,Some(4.0));
+        let checkpoint=host.call("router_migration_checkpoint",&json!({})).unwrap();assert_eq!(checkpoint["session_id"],"routed");
+        assert_eq!(checkpoint["ceiling_usd_micros"],4_000_000);assert_eq!(checkpoint["path"],json!(env.journal()));
+        assert_eq!(checkpoint["bytes"],fs::metadata(env.journal()).unwrap().len());
+        assert_eq!(checkpoint["sha256"],doxa_isolation::migration::fingerprint(&env.journal(),checkpoint["bytes"].as_u64().unwrap()).unwrap());
+        let mut state=env.state();state["worker"]["estimated_actual_usd_micros"]=json!(99);fs::write(env.journal(),state.to_string()).unwrap();
+        assert!(host.call("router_migration_checkpoint",&json!({})).is_err());assert!(server.bodies().is_empty());host.shutdown();
     }
 
     struct Server { endpoint:String, requests:Arc<Mutex<Vec<Value>>>, stop:Arc<AtomicBool>, thread:Option<std::thread::JoinHandle<()>> }

@@ -454,7 +454,7 @@ impl App {
             }
             lines.push(Line::styled(
                 format!(" {} Isolation: [{} ▾]{}",if form.field==prompt_field-1{'›'}else{' '},form.isolation.label(),
-                    if form.engine==launch::Engine::Router {" · native · worker command permissions reviewed separately"} else {" · Click/Enter choose"}),
+                    if form.engine==launch::Engine::Router {" · worker command permissions reviewed separately"} else {" · Click/Enter choose"}),
                 chooser_row_style(form.field==prompt_field-1),
             ));
             lines.push(Line::styled(

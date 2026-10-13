@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Acting coordinator; task may be interactive\n  --alignment-supervisor PROVIDER:MODEL Independent read-only alignment model (jev:jev-1.13.0 or subq:subq-snap-preview)\n  --supervision-mode shadow|enforce     Independent review action (default enforce)\n  --message-review off|shadow|enforce   Fast semantic admission mode\n  --message-judge llm:PROVIDER:MODEL | jev:MODEL | subq:MODEL\n  --review-budget USD                  Reserved from the total run budget\n  --review-max-calls N --review-interval SECONDS\n  --review-input-price USD_PER_MTOK --review-output-price USD_PER_MTOK\n  --review-threshold PROBABILITY        Message risk / decision Choice confidence guard\n  --strict-unreviewed                  Hold every message if its judge is unavailable\n  --allowed-path RELATIVE_PREFIX       Approved scope (repeatable; default repository)\n  --worker-task INDEX:TEXT             Frozen task for each worker (1-based; specify all)\n  --worker-path INDEX:RELATIVE_PREFIX  Narrow one worker's approved paths (repeatable)\n  --worker-after INDEX:PREDECESSOR    Wait for an earlier worker (repeatable)\n  --test-recipe ABSOLUTE_JSON_PATH    Frozen offline Docker test command\n  --auto-test                         Collect host receipts after worker turns\n  --isolation native|docker-open|docker-offline\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, debrief RUN, test RUN SLOT, resume, continue RUN CHARTER_HASH, dependency-evidence, dependency-review, dependency-release, review, answer, attach, stop\n  calibrate LABELED_JSONL               Offline threshold metrics; no model calls\n  evaluate-development PRIVATE_JSONL --message-judge PROVIDER:MODEL\n                                       Development-only metrics and identity before holdout\n  evaluate-messages PRIVATE_JSONL --message-judge PROVIDER:MODEL [--gate PRIVATE_JSON]\n                                       Offline holdout metrics or fixed gate; no model calls\n";
+pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --router-config ABSOLUTE_PATH        Reviewed Router pool config; call/spend limits split across slots\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Acting coordinator; task may be interactive\n  --alignment-supervisor PROVIDER:MODEL Independent read-only alignment model (jev:jev-1.13.0 or subq:subq-snap-preview)\n  --supervision-mode shadow|enforce     Independent review action (default enforce)\n  --message-review off|shadow|enforce   Fast semantic admission mode\n  --message-judge llm:PROVIDER:MODEL | jev:MODEL | subq:MODEL\n  --review-budget USD                  Reserved from the total run budget\n  --review-max-calls N --review-interval SECONDS\n  --review-input-price USD_PER_MTOK --review-output-price USD_PER_MTOK\n  --review-threshold PROBABILITY        Message risk / decision Choice confidence guard\n  --strict-unreviewed                  Hold every message if its judge is unavailable\n  --allowed-path RELATIVE_PREFIX       Approved scope (repeatable; default repository)\n  --worker-task INDEX:TEXT             Frozen task for each worker (1-based; specify all)\n  --worker-path INDEX:RELATIVE_PREFIX  Narrow one worker's approved paths (repeatable)\n  --worker-after INDEX:PREDECESSOR    Wait for an earlier worker (repeatable)\n  --test-recipe ABSOLUTE_JSON_PATH    Frozen offline Docker test command\n  --auto-test                         Collect host receipts after worker turns\n  --isolation native|docker-open|docker-offline\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, debrief RUN, test RUN SLOT, resume, continue RUN CHARTER_HASH, dependency-evidence, dependency-review, dependency-release, review, answer, attach, stop\n  calibrate LABELED_JSONL               Offline threshold metrics; no model calls\n  evaluate-development PRIVATE_JSONL --message-judge PROVIDER:MODEL\n                                       Development-only metrics and identity before holdout\n  evaluate-messages PRIVATE_JSONL --message-judge PROVIDER:MODEL [--gate PRIVATE_JSON]\n                                       Offline holdout metrics or fixed gate; no model calls\n";
 
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message.into()) }
 fn now() -> String { OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default() }
@@ -62,7 +62,7 @@ fn choice(value: &str) -> io::Result<Choice> {
     let (engine, model) = body.split_once(':').map_or((body, None), |(engine, model)| (engine, Some(model.to_owned())));
     let engine = match engine { "claude" => launch::Engine::Claude, "codex" => launch::Engine::Codex,
         "deepseek" => launch::Engine::DeepSeek, "glm" => launch::Engine::Glm, "fixture" => launch::Engine::Fixture,
-        "router" => return Err(invalid("router fleet config inheritance is unavailable; start an explicit router session")),
+        "router" => launch::Engine::Router,
         _ => return Err(invalid("unsupported native fleet engine")) };
     let weight: f64 = weight.parse().map_err(|_| invalid("invalid pool weight"))?;
     if !weight.is_finite() || weight <= 0.0 || model.as_deref().is_some_and(|model| model.is_empty() || model.len() > 128 || model.chars().any(char::is_control)) {
@@ -75,6 +75,7 @@ fn engine_name(engine: launch::Engine) -> &'static str { match engine { launch::
 pub struct Spec {
     preflight: fleet_plan::Preflight, isolation:doxa_isolation::Profile, pool: Vec<Choice>, prompt: String, cwd: PathBuf,
     review: doxa_fleet::ReviewConfig, allowed_paths:Vec<String>, worker_tasks:Vec<String>, worker_paths:Vec<Vec<String>>, worker_after:Vec<Vec<usize>>, test_recipe:Option<doxa_fleet::evidence::TestRecipe>, auto_test:bool, seed: u64, timeout: Option<Duration>, quiet: Duration, dry_run: bool, memory_off: u64, lore_enabled: bool,
+    router_config: Option<doxa_router::Config>,
 }
 impl Spec {
     pub fn parse(args: &[String]) -> io::Result<Self> {
@@ -96,7 +97,7 @@ impl Spec {
         let mut isolation=doxa_isolation::configured_profile(&doxa_isolation::home()?)?;
         let mut allowed_paths=Vec::new();
         let mut task_options=Vec::new(); let mut path_options=Vec::new(); let mut after_options=Vec::new();
-        let mut base = Vec::new(); let mut pool = None; let mut prompt = String::new(); let mut prompt_file = None; let mut test_recipe = None;
+        let mut base = Vec::new(); let mut pool = None; let mut prompt = String::new(); let mut prompt_file = None; let mut test_recipe = None; let mut router_path = None;
         let mut cwd = std::env::current_dir()?; let mut seed = 0; let mut timeout = None;
         let mut quiet = Duration::from_secs(20); let mut dry_run = false; let mut auto_test=false; let mut memory_off = 0; let mut index = 0;
         while index < args.len() {
@@ -136,6 +137,7 @@ impl Spec {
                         recipe.validate()?;test_recipe=Some(recipe);
                     },
                     "--pool" => pool = Some(value.split(',').map(choice).collect::<io::Result<Vec<_>>>()?),
+                    "--router-config" => router_path=Some(PathBuf::from(value)),
                     "--prompt" => prompt = value.clone(), "--prompt-file" => prompt_file = Some(PathBuf::from(value)),
                     "--cwd" => cwd = PathBuf::from(value),
                     "--seed" => seed = value.parse::<u64>().or_else(|_| value.parse::<i64>().map(|seed| seed as u64)).map_err(|_| invalid("fleet seed must be a signed or unsigned 64-bit integer"))?,
@@ -173,6 +175,22 @@ impl Spec {
                 return Err(invalid("supervisor fleets require provider peer tools; fixture engine has none"));
             }
         }
+        let router_count=pool.iter().any(|row|row.engine==launch::Engine::Router)
+            || preflight.supervisor.as_deref().map(choice).transpose()?.is_some_and(|row|row.engine==launch::Engine::Router);
+        let router_config=if router_count {
+            let (_,config)=launch::router_config(router_path.as_deref())?;
+            if preflight.run_budget_usd.is_none(){return Err(invalid("Router fleets require a finite reviewed --run-budget"));}
+            for row in pool.iter().filter(|row|row.engine==launch::Engine::Router).cloned()
+                .chain(preflight.supervisor.as_deref().map(choice).transpose()?.filter(|row|row.engine==launch::Engine::Router)) {
+                if row.model.as_deref().is_some_and(|model|model!="auto" && config.candidate(model).is_none()) {
+                    return Err(invalid("Router fleet targets must be auto or exact reviewed target IDs"));
+                }
+            }
+            Some(config)
+        } else {
+            if router_path.is_some(){return Err(invalid("--router-config requires a Router fleet slot"));}
+            None
+        };
         let cwd = fs::canonicalize(cwd)?;
         if !cwd.is_dir() { return Err(invalid("fleet cwd must be a directory")); }
         if test_recipe.is_some() && (isolation!=doxa_isolation::Profile::DockerOffline || !review.enabled()) {return Err(invalid("host test evidence requires a supervised docker-offline fleet"));}
@@ -213,7 +231,9 @@ impl Spec {
             return Err(invalid("worker dependencies require Docker-isolated fleet sessions; native workers can invoke owner-local release commands"));
         }
         memory_off = memory_off.min(preflight.sessions);
-        Ok(Self { review, allowed_paths, worker_tasks, worker_paths, worker_after, test_recipe, auto_test, preflight, isolation, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default() })
+        let spec=Self { review, allowed_paths, worker_tasks, worker_paths, worker_after, test_recipe, auto_test, preflight, isolation, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default(),router_config };
+        spec.router_slot_configs(&spec.assignments()?)?;
+        Ok(spec)
     }
     /// Complete validation and a readable launch review without provider
     /// discovery, session creation, prompt text or filesystem mutations.
@@ -224,6 +244,8 @@ impl Spec {
             "mode":if self.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
             "interactive":self.preflight.supervisor.is_some() && self.prompt.trim().is_empty(),
             "workers":self.preflight.sessions,"sessions":assignments.len(),"run_budget_usd":self.preflight.run_budget_usd,
+            "router_config_sha256":self.router_config.as_ref().map(doxa_router::Config::hash).transpose()?,
+            "router_allocations":self.router_slot_configs(&assignments)?.iter().map(|(index,config)|json!({"slot":index,"config_sha256":config.hash().ok(),"routing_calls":config.max_calls,"routing_spend_usd_micros":config.max_spend_usd_micros})).collect::<Vec<_>>(),
             "allow_unbudgeted":self.preflight.allow_unbudgeted,"approval_policy":self.preflight.approve,
             "memory_off":self.memory_off,"lore_enabled":self.lore_enabled,"approval_grace_s":self.preflight.approval_grace_s,"dry_run":self.dry_run,"seed":self.seed,"quiescence_timeout_s":self.timeout.map(|duration| duration.as_secs_f64()),"quiescence_grace_s":self.quiet.as_secs_f64(),
             "preflight":preflight,"slots":assignments.iter().enumerate().map(|(index, choice)| json!({
@@ -235,10 +257,27 @@ impl Spec {
             })).collect::<Vec<_>>()}))
     }
     fn assignment_plan_hash(&self)->io::Result<String>{
+        if let Some(config)=&self.router_config {return doxa_fleet::hash(&(&self.worker_tasks,&self.worker_paths,&self.worker_after,config));}
         if self.worker_after.iter().all(Vec::is_empty){doxa_fleet::hash(&(&self.worker_tasks,&self.worker_paths))}
         else{doxa_fleet::hash(&(&self.worker_tasks,&self.worker_paths,&self.worker_after))}
     }
     fn test_recipe_review_hash(&self)->io::Result<String>{doxa_fleet::hash(&(&self.test_recipe,self.auto_test))}
+    fn router_slot_configs(&self,assignments:&[Choice])->io::Result<Vec<(usize,doxa_router::Config)>> {
+        let Some(config)=&self.router_config else {return Ok(Vec::new());};
+        let indices=assignments.iter().enumerate().filter_map(|(index,row)|(row.engine==launch::Engine::Router).then_some(index)).collect::<Vec<_>>();
+        if indices.is_empty(){return Ok(Vec::new());}
+        let count=indices.len() as u64;
+        if config.max_calls<count || config.max_spend_usd_micros<count {
+            return Err(invalid("Reviewed Router routing allowance must cover every assigned Router slot"));
+        }
+        indices.into_iter().enumerate().map(|(ordinal,index)| {
+            let mut slot=config.clone();
+            slot.max_calls=config.max_calls/count + u64::from((ordinal as u64)<config.max_calls%count);
+            slot.max_spend_usd_micros=config.max_spend_usd_micros/count + u64::from((ordinal as u64)<config.max_spend_usd_micros%count);
+            slot.validate()?;
+            Ok((index,slot))
+        }).collect()
+    }
     fn assignments(&self) -> io::Result<Vec<Choice>> {
         let total: f64 = self.pool.iter().map(|entry| entry.weight).sum();
         if !total.is_finite() { return Err(invalid("fleet weight total overflow")); }
@@ -435,7 +474,7 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
         let mut assigned = choice(engine)?;
         assigned.lore = row["lore"].as_bool();
         let session = discovery::Session { id:session_id, title:String::new(), socket, scope_key:String::new(), clients:None, started_at:String::new() };
-        let mut slot = connect(session, &assigned, budget, value["spec"]["isolation"].as_str().map(doxa_isolation::Profile::parse).transpose()?)?;
+        let mut slot = connect(session, &assigned, budget, value["spec"]["isolation"].as_str().map(doxa_isolation::Profile::parse).transpose()?,row["router_config_sha256"].as_str())?;
         resumable_slot_phase(row,slot.busy)?;
         if has_dependencies{verify_dependency_container(&root.join(value["run_id"].as_str().ok_or_else(||invalid("fleet run identity unavailable"))?),&slot.session.id)?;}
         if value["ledger_path"].is_string() {
@@ -553,9 +592,12 @@ fn verify_dependency_container(run:&Path,session_id:&str)->io::Result<()> {
     let run=fs::canonicalize(run)?;
     evidence_store_outside_mounts(&run,&[&manifest.checkout,&manifest.private_home,&manifest.cache,&manifest.broker])
 }
-fn connect(session: discovery::Session, expected: &Choice, budget: Option<f64>, isolation:Option<doxa_isolation::Profile>) -> io::Result<Slot> {
+fn connect(session: discovery::Session, expected: &Choice, budget: Option<f64>, isolation:Option<doxa_isolation::Profile>,router_hash:Option<&str>) -> io::Result<Slot> {
     let mut client = DaemonClient::connect(&session.socket, None).map_err(io::Error::other)?;
     if client.hello["session_id"] != session.id || client.hello["engine"] != engine_name(expected.engine) { return Err(invalid("fleet daemon identity changed")); }
+    if expected.engine==launch::Engine::Router && (router_hash.is_none() || client.hello["billing"]["config_sha256"].as_str()!=router_hash) {
+        return Err(invalid("fleet Router configuration or routing allocation changed"));
+    }
     if let Some(expected_profile)=isolation.filter(|_|expected.engine!=launch::Engine::Fixture) {
         let actual=doxa_isolation::Profile::parse(client.hello["isolation"]["profile"].as_str().ok_or_else(||invalid("fleet isolation status unavailable"))?)?;
         if actual.docker()!=expected_profile.docker()||client.hello["isolation"]["state"]!="ready" {
@@ -566,7 +608,8 @@ fn connect(session: discovery::Session, expected: &Choice, budget: Option<f64>, 
         return Err(invalid("fleet daemon memory policy could not be verified"));
     }
     if let Some(budget) = budget {
-        if client.hello["billing"]["budget"]["ceiling_usd"].as_f64() != Some(budget) { return Err(invalid("fleet daemon budget could not be verified")); }
+        let expected_budget=if expected.engine==launch::Engine::Router {doxa_router::usd_micros(&budget.to_string())? as f64/1_000_000.0}else{budget};
+        if client.hello["billing"]["budget"]["ceiling_usd"].as_f64() != Some(expected_budget) { return Err(invalid("fleet daemon budget could not be verified")); }
     }
     let state = rpc(&mut client, "get_state", json!({}))?;
     Ok(Slot { session, client, pending: Vec::new(), busy: state["running"] == true || state["queued"].as_u64().unwrap_or(0) > 0 })
@@ -598,6 +641,17 @@ pub fn start(args: &[String]) -> io::Result<()> {
     let runtime = store.run.join("rt"); fs::DirBuilder::new().mode(0o700).create(&runtime)?;
     let ledger_home = store.run.join("home"); fs::DirBuilder::new().mode(0o700).create(&ledger_home)?;
     fs::DirBuilder::new().mode(0o700).create(ledger_home.join("peers"))?;
+    let mut router_paths=BTreeMap::new();
+    let configs=spec.router_slot_configs(&assigned)?;
+    if !configs.is_empty() {
+        let directory=store.run.join("router-configs");fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        for (index,config) in &configs {
+            let path=directory.join(format!("slot-{index}.json"));
+            let mut file=fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+            file.write_all(&serde_json::to_vec(config)?)?;file.sync_all()?;router_paths.insert(*index,path);
+        }
+        trusted_dir(&directory)?.sync_all()?;
+    }
     let review_budget=if spec.review.enabled(){spec.review.budget_usd}else{0.0};
     let budget = spec.preflight.run_budget_usd.map(|total| (total-review_budget) / assigned.len() as f64);
     let mut value = json!({"native_version":1,"run_id":spec.preflight.run_id,"ledger_path":ledger_home.join("peers/messages.jsonl"),"started_at":now(),"heartbeat_at":now(),
@@ -611,18 +665,19 @@ pub fn start(args: &[String]) -> io::Result<()> {
     let result = (|| -> io::Result<()> {
         for (index, assigned) in assigned.iter().enumerate() {
             ensure_active(&store)?;
-            let options = launch::LaunchOptions { isolation:Some(spec.isolation), engine: assigned.engine, model: assigned.model.clone(), cwd: Some(spec.cwd.clone()),
+            let options = launch::LaunchOptions { isolation:Some(spec.isolation), engine: assigned.engine, model: assigned.model.clone(), cwd: Some(spec.cwd.clone()),router_config:router_paths.get(&index).cloned(),
                 linger: Some(60.0), ..Default::default() };
             let session = launch::spawn_fleet(&options, &runtime, budget, assigned.engine != launch::Engine::Fixture, assigned.lore.unwrap_or(spec.lore_enabled))?;
             // Publish the started identity before attachment can fail.
             value["slots"].as_array_mut().unwrap().push(json!({"index":index,"role":if spec.preflight.supervisor.is_some() && index == 0 { "supervisor" } else { "worker" },
-                "engine":engine_name(assigned.engine),"model":assigned.model,"lore":assigned.lore,"phase":"started","session_id":session.id,"socket_path":session.socket,"pending_asks":[],"approvals":[],
+                "engine":engine_name(assigned.engine),"model":assigned.model,"router_config":router_paths.get(&index),"router_config_sha256":configs.iter().find(|(slot,_)|*slot==index).and_then(|(_,config)|config.hash().ok()),"lore":assigned.lore,"phase":"started","session_id":session.id,"socket_path":session.socket,"pending_asks":[],"approvals":[],
                 "task":index.checked_sub(usize::from(spec.preflight.supervisor.is_some())).and_then(|worker|spec.worker_tasks.get(worker)),
                 "allowed_paths":index.checked_sub(usize::from(spec.preflight.supervisor.is_some())).and_then(|worker|spec.worker_paths.get(worker)).filter(|paths|!paths.is_empty()).unwrap_or(&spec.allowed_paths),
                 "depends_on":index.checked_sub(usize::from(spec.preflight.supervisor.is_some())).and_then(|worker|spec.worker_after.get(worker)).cloned().unwrap_or_default()}));
             store.save(&value)?;
             ensure_active(&store)?;
-            let mut slot = connect(session, assigned, budget, Some(spec.isolation))?;
+            let router_hash=configs.iter().find(|(slot,_)|*slot==index).map(|(_,config)|config.hash()).transpose()?;
+            let mut slot = connect(session, assigned, budget, Some(spec.isolation),router_hash.as_deref())?;
             if spec.worker_after.iter().any(|row|!row.is_empty()){verify_dependency_container(&store.run,&slot.session.id)?;}
             if spec.preflight.supervisor.is_some() {
                 let capability = rpc(&mut slot.client, "peer_tools_status", json!({}))?;
@@ -1650,10 +1705,26 @@ mod tests {
         assert!(!message.contains("python"));
     }
     #[test]
-    fn router_pool_refuses_missing_config_inheritance() {
-        let args=["--pool=router:auto","--prompt=task","-n2","--allow-unbudgeted"]
+    fn router_pool_refuses_unreviewed_config_paths() {
+        let args=["--pool=router:auto","--router-config=relative.json","--prompt=task","-n2","--allow-unbudgeted"]
             .into_iter().map(str::to_owned).collect::<Vec<_>>();
-        assert!(Spec::parse(&args).err().unwrap().to_string().contains("router fleet config inheritance is unavailable"));
+        assert!(Spec::parse(&args).err().unwrap().to_string().contains("absolute"));
+    }
+    #[test]
+    fn router_fleet_review_splits_call_and_spend_allowances_and_binds_config_changes() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("router.json");let mut config=crate::router_setup::tests::config();
+        config.max_calls=7;config.max_spend_usd_micros=1001;
+        fs::write(&path,serde_json::to_vec(&config).unwrap()).unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
+        let args=["--pool".into(),"router:auto".into(),"--router-config".into(),path.to_str().unwrap().into(),"--prompt".into(),"bounded task".into(),
+            "--sessions".into(),"3".into(),"--run-budget".into(),"12".into(),"--isolation".into(),"native".into(),"--force".into()];
+        let spec=Spec::parse(&args).unwrap();let assignments=spec.assignments().unwrap();let split=spec.router_slot_configs(&assignments).unwrap();
+        assert_eq!(split.iter().map(|(_,config)|config.max_calls).sum::<u64>(),7);
+        assert_eq!(split.iter().map(|(_,config)|config.max_spend_usd_micros).sum::<u64>(),1001);
+        assert_eq!(split.iter().map(|(_,config)|config.max_calls).collect::<Vec<_>>(),[3,2,2]);
+        let review=spec.review().unwrap();assert_eq!(review["router_config_sha256"],config.hash().unwrap());assert_eq!(review["router_allocations"].as_array().unwrap().len(),3);
+        let before=spec.assignment_plan_hash().unwrap();config.auto_compact_percent=Some(80);fs::write(&path,serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_ne!(Spec::parse(&args).unwrap().assignment_plan_hash().unwrap(),before);
+        config.max_calls=2;fs::write(&path,serde_json::to_vec(&config).unwrap()).unwrap();assert!(Spec::parse(&args).is_err());
     }
     fn memory_spec(supervisor: bool, off: &str) -> Spec {
         let mut args = vec!["--pool".into(), "codex:model-a@3,claude:model-b@1".into(),

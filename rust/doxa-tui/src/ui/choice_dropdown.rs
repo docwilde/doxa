@@ -64,8 +64,7 @@ impl App {
                 let vendor = !vendor_models(form.engine).is_empty();
                 let isolation_field = if vendor { 2 } else { 1 };
                 if *field == isolation_field {
-                    let values = if *engine == launch::Engine::Router { vec!["native".into()] }
-                        else { vec!["native".into(), "docker-open".into(), "docker-offline".into()] };
+                    let values = vec!["native".into(), "docker-open".into(), "docker-offline".into()];
                     Some(("Isolation".into(), values, form.isolation.key().into()))
                 } else if *field == 0 {
                     Some((if *engine == launch::Engine::Router { "Target" } else { "Model" }.into(), form.models.clone(), form.model.clone()))

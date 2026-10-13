@@ -104,7 +104,7 @@ impl SpawnManager {
             || config.depth > 2
             || !matches!(
                 config.engine.as_str(),
-                "fixture" | "claude" | "codex" | "deepseek" | "glm"
+                "fixture" | "claude" | "codex" | "deepseek" | "glm" | "router"
             )
         {
             return Err(io::Error::other("Invalid immutable spawn identity"));
@@ -265,6 +265,9 @@ impl SpawnManager {
             .map(str::to_owned)
             .or_else(|| host.initial_model());
         let effort = host.initial_effort();
+        let router_review = if self.config.engine == "router" {
+            Some(host.call("router_child_plan", &json!({"model":model}))?)
+        } else { None };
         let base = args["base_branch"].as_str();
         let worktrees = std::env::var_os("DOXA_HOME")
             .map(PathBuf::from)
@@ -304,7 +307,11 @@ impl SpawnManager {
                 answer: tx,
             });
         }
-        let body=format!("Engine: {}\nModel: {}\nEffort: {}\nRepository: {}\nBase: {}\nLive sessions: {live}/3\nChild depth: {}/2\nThis starts a separate billed provider session.",self.config.engine,model.as_deref().unwrap_or("provider default"),effort.as_deref().unwrap_or("provider default"),self.scope,base.unwrap_or("current checkout"),self.config.depth+1);
+        let mut body=format!("Engine: {}\nModel: {}\nEffort: {}\nRepository: {}\nBase: {}\nLive sessions: {live}/3\nChild depth: {}/2\nThis starts a separate billed provider session.",self.config.engine,model.as_deref().unwrap_or("provider default"),effort.as_deref().unwrap_or("provider default"),self.scope,base.unwrap_or("current checkout"),self.config.depth+1);
+        if let Some(review)=&router_review {
+            body.push_str(&format!("\nReviewed Router config: {}\nChild tracked ceiling: {} USD micros\nAllocated routing calls: {}\nAllocated routing spend: {} USD micros\nNative permission: {}\nThis allocation is reserved from the parent's existing allowance before launch and remains held after failed startup. CLI provider charges remain unknown.",
+                review["config_sha256"].as_str().unwrap_or("unavailable"),review["ceiling_usd_micros"],review["routing_calls"],review["routing_spend_usd_micros"],review["permission"].as_str().unwrap_or("default")));
+        }
         if self.events.try_send(json!({"type":"needs_input","data":{"id":id,"kind":"spawn","title":"Start this delegated session?","task":task,"body":body,"require_full_review":true}})).is_err(){self.cancel(false);return Err("Spawn approval channel unavailable".into());}
         let allowed = loop {
             if self.closed.load(Ordering::Acquire)
@@ -334,6 +341,7 @@ impl SpawnManager {
             return Err("Parent selection changed after review; request a new spawn".into());
         }
         let child_id = uuid().map_err(|_| "Child identity unavailable")?;
+        let allocation=router_review.as_ref().map(|review|host.call("router_child_admit",&json!({"child_session_id":child_id,"review":review}))).transpose()?;
         let mut command = Command::new(&self.config.executable);
         command.args([
             "--runtime-dir",
@@ -362,6 +370,10 @@ impl SpawnManager {
             } else { provider_args.extend(["--isolation".into(),manifest.profile.key().into()]); }
         }
         command.args(&provider_args);
+        if let Some(allocation)=&allocation {
+            let micros=allocation["allocation"]["ceiling_usd_micros"].as_u64().ok_or("Router child allowance is unavailable")?;
+            command.env("DOXA_SESSION_BUDGET_USD",format!("{}.{:06}",micros/1_000_000,micros%1_000_000));
+        }
         if let Some(model) = &model {
             command.args(["--model", model]);
         }

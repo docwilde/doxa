@@ -7,6 +7,26 @@ fn input()->RoutingInput {RoutingInput {summary:"Format a synthetic mapping as J
 fn response()->Value {json!({"model":JEV_MODEL,"answers":{"target":{"type":"choice","choice":"fast","probabilities":{"fast":0.9,"deliberate":0.1},"confidence":0.8}},"usage":{"input_tokens":100,"output_tokens":20}})}
 
 #[test]
+fn reviewed_micro_dollar_ceilings_round_trip_exactly_and_never_round_up() {
+    for micros in [1,29000,251455,508081,1234567,u64::MAX] {
+        let usd=format!("{}.{:06}",micros/1_000_000,micros%1_000_000);assert_eq!(usd_micros(&usd).unwrap(),micros);
+    }
+    assert_eq!(usd_micros("1.23456789").unwrap(),1234567);assert_eq!(usd_micros("+1.23456789e+0").unwrap(),1234567);
+    assert_eq!(usd_micros("2.9e-2").unwrap(),29000);assert_eq!(usd_micros(".0000019").unwrap(),1);
+    assert_eq!(usd_micros("1.1234567890123456789012345678901234567890123456789").unwrap(),1123456);
+    for bad in ["0","-1","NaN","inf","1e999999","1.2.3","1e1e1","0.0000009","18446744073709.551616"] {assert!(usd_micros(bad).is_err(),"{bad}");}
+}
+
+#[test]
+fn automatic_compaction_opt_in_is_bounded_and_part_of_the_reviewed_config_hash() {
+    let mut cfg=config();let original=cfg.hash().unwrap();
+    assert!(serde_json::to_value(&cfg).unwrap().get("auto_compact_percent").is_none());
+    cfg.auto_compact_percent=Some(80);cfg.validate().unwrap();assert_ne!(cfg.hash().unwrap(),original);
+    for percent in [0,49,96,100] {cfg.auto_compact_percent=Some(percent);assert!(cfg.validate().is_err());}
+    cfg.auto_compact_percent=None;assert_eq!(cfg.hash().unwrap(),original);
+}
+
+#[test]
 fn cli_account_targets_require_explicit_unknown_charge_policy_not_zero_price() {
     let mut cfg=config();let old_hash=cfg.hash().unwrap();
     let mut explicit=serde_json::to_value(&cfg).unwrap();

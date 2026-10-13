@@ -39,12 +39,13 @@ fn stopped_claim(runtime:&Path,id:&str)->io::Result<File>{
 fn options(plan:&Value,manifest:&Manifest)->io::Result<LaunchOptions>{
     let record=&plan["launch"];
     let engine=match record["engine"].as_str(){Some("codex")=>Engine::Codex,Some("claude")=>Engine::Claude,
-        Some("deepseek")=>Engine::DeepSeek,Some("glm")=>Engine::Glm,Some("router")=>return Err(invalid("router isolation migration is unavailable")),_=>return Err(invalid("unsupported migration engine"))};
+        Some("deepseek")=>Engine::DeepSeek,Some("glm")=>Engine::Glm,Some("router")=>Engine::Router,_=>return Err(invalid("unsupported migration engine"))};
     Ok(LaunchOptions{isolation:Some(manifest.profile),engine,cwd:Some(manifest.checkout.clone()),resume:Some(manifest.session_id.clone()),
         model:plan["model"].as_str().map(str::to_owned),effort:plan["effort"].as_str().map(str::to_owned),
         linger:record["linger"].as_f64(),sandbox:record["sandbox"].as_str().map(str::to_owned),
-        codex_bin:if engine==Engine::Codex{record["codex_bin"].as_str().map(PathBuf::from)}else{None},
-        claude_bin:if engine==Engine::Claude{record["claude_bin"].as_str().map(PathBuf::from)}else{None},..LaunchOptions::default()})
+        codex_bin:if matches!(engine,Engine::Codex|Engine::Router){record["codex_bin"].as_str().map(PathBuf::from)}else{None},
+        claude_bin:if matches!(engine,Engine::Claude|Engine::Router){record["claude_bin"].as_str().map(PathBuf::from)}else{None},
+        router_config:if engine==Engine::Router{Some(PathBuf::from(record["router_config"].as_str().filter(|path|Path::new(path).is_absolute()).ok_or_else(||invalid("Router migration requires its reviewed config path"))?))}else{None},..LaunchOptions::default()})
 }
 
 fn resume(plan:&Value,manifest:&Manifest)->io::Result<DaemonClient>{
@@ -54,7 +55,7 @@ fn resume(plan:&Value,manifest:&Manifest)->io::Result<DaemonClient>{
         if client.hello["session_id"]!=manifest.session_id||client.hello["isolation"]["profile"]!=manifest.profile.key()
             ||client.hello["isolation"]["state"]!="ready"{return Err(invalid("resumed daemon did not verify its session and isolation identity"));}
         let resumed=call(&mut client,"isolation_migration_plan",json!({}))?;
-        for key in ["transcript_path","transcript_bytes","transcript_sha256","model","effort","permission_mode"]{
+        for key in ["transcript_path","transcript_bytes","transcript_sha256","model","effort","permission_mode","router_checkpoint"]{
             if resumed[key]!=plan[key]{return Err(invalid(format!("resumed conversation changed {key}")));}
         }
         if plan["launch"]["engine"]=="codex"{
@@ -152,10 +153,16 @@ mod tests{
         let wrapper=root.join("reject-docker-daemon");
         fs::write(&wrapper,format!("#!/bin/sh\nfor arg do\n case \"$arg\" in docker-open|docker-offline) echo 'injected target startup failure' >&2; exit 91;; esac\ndone\nexec {} \"$@\"\n",format!("'{}'",daemon.to_string_lossy().replace('\'',"'\\''")))).unwrap();
         fs::set_permissions(&wrapper,fs::Permissions::from_mode(0o700)).unwrap();
+        let router_path=root.join("router.json");
+        let mut router_config=crate::router_setup::tests::config();router_config.max_calls=8;router_config.max_spend_usd_micros=10000;
+        fs::write(&router_path,serde_json::to_vec(&router_config).unwrap()).unwrap();fs::set_permissions(&router_path,fs::Permissions::from_mode(0o600)).unwrap();
         let mut cleanup=Cleanup{runtime:runtime.clone(),host:host.clone(),ids:Vec::new()};
-        for dirty in [false,true]{
+        for (engine,dirty) in [Engine::Glm,Engine::Router].into_iter().flat_map(|engine|[false,true].map(|dirty|(engine,dirty))){
             environment.set("DOXA_DAEMON_BIN",&daemon);
-            let session=launch::spawn(&LaunchOptions{engine:Engine::Glm,cwd:Some(source.clone()),isolation:Some(Profile::Native),model:Some("glm-5.3-flash".into()),effort:Some("high".into()),linger:Some(120.0),..LaunchOptions::default()}).unwrap();
+            environment.set("DOXA_SESSION_BUDGET_USD",if engine==Engine::Router{"4"}else{""});
+            let session=launch::spawn(&LaunchOptions{engine,cwd:Some(source.clone()),isolation:Some(Profile::Native),
+                model:Some(if engine==Engine::Router{"auto"}else{"glm-5.3-flash"}.into()),effort:if engine==Engine::Router{None}else{Some("high".into())},
+                router_config:(engine==Engine::Router).then(||router_path.clone()),linger:Some(120.0),..LaunchOptions::default()}).unwrap();
             cleanup.ids.push(session.id.clone());let mut client=DaemonClient::connect(&session.socket,None).unwrap();
             assert_eq!(client.hello["isolation"]["can_set_isolation"],true);
             let original=PathBuf::from(client.hello["cwd"].as_str().unwrap());assert_ne!(original,source,"fixture must use a managed native worktree");
@@ -164,12 +171,13 @@ mod tests{
                 fs::remove_file(original.join("removed")).unwrap();fs::write(original.join("untracked"),"private work").unwrap();fs::write(original.join("ignored"),"retained").unwrap();
             }
             let before=call(&mut client,"isolation_migration_plan",json!({})).unwrap();
+            let original_router_journal=(engine==Engine::Router).then(||fs::read(home.join("router").join(format!("{}.router.json",session.id))).unwrap());
             let (docker,status)=change(&mut client,Profile::DockerOffline).unwrap();client=docker;
             assert_eq!(crate::discovery::sessions_in(&runtime).unwrap().into_iter().find(|s|s.id==session.id).unwrap().scope_key,session.scope_key);
             assert_eq!(status["profile"],"docker-offline");assert!(original.is_dir(),"admitted migration must preserve even a clean managed native worktree");
             let clone=PathBuf::from(client.hello["cwd"].as_str().unwrap());assert_ne!(clone,original);
             let after=call(&mut client,"isolation_migration_plan",json!({})).unwrap();assert_eq!(after["manifest"]["context_cwd"],json!(original));
-            for key in ["transcript_path","transcript_bytes","model","effort","permission_mode"]{assert_eq!(before[key],after[key],"changed {key}");}
+            for key in ["transcript_path","transcript_bytes","model","effort","permission_mode","router_checkpoint"]{assert_eq!(before[key],after[key],"changed {key}");}
             if dirty{assert_eq!(git(&clone,&["show",":tracked"]),"staged");assert_eq!(fs::read_to_string(clone.join("tracked")).unwrap(),"working");assert!(!clone.join("removed").exists());assert!(clone.join("untracked").exists()&&clone.join("ignored").exists());}
             let (native,status)=change(&mut client,Profile::Native).unwrap();client=native;assert_eq!(status["profile"],"native");assert_eq!(client.hello["cwd"],json!(clone));
             assert_eq!(crate::discovery::sessions_in(&runtime).unwrap().into_iter().find(|s|s.id==session.id).unwrap().scope_key,session.scope_key);
@@ -180,6 +188,7 @@ mod tests{
             assert_eq!(client.hello["isolation"]["profile"],"native");assert_eq!(client.hello["cwd"],json!(clone));
             assert_eq!(restored.scope_key,session.scope_key);
             if dirty{assert_eq!(git(&clone,&["show",":tracked"]),"staged");assert_eq!(fs::read_to_string(clone.join("untracked")).unwrap(),"private work");}
+            if let Some(original)=original_router_journal {assert_eq!(fs::read(home.join("router").join(format!("{}.router.json",session.id))).unwrap(),original);}
             call(&mut client,"stop_if_idle",json!({})).unwrap();drop(stopped_claim(&runtime,&session.id).unwrap());
         }
     }
@@ -192,5 +201,10 @@ mod tests{
         assert_eq!(restored.resume.as_deref(),Some("session"));assert_eq!(restored.cwd.as_deref(),Some(cwd.as_path()));
         assert_eq!(restored.codex_bin.as_deref(),Some(Path::new("/selected/provider")));assert_eq!(restored.sandbox.as_deref(),Some("read-only"));
         assert_eq!(restored.model.as_deref(),Some("gpt-5.4"));assert_eq!(restored.effort.as_deref(),Some("high"));
+        let router=json!({"launch":{"engine":"router","router_config":"/private/reviewed-router.json","codex_bin":"/selected/codex","claude_bin":"/selected/claude","linger":120},"model":"auto","effort":null});
+        let restored=options(&router,runtime.manifest()).unwrap();assert_eq!(restored.engine,Engine::Router);
+        assert_eq!(restored.router_config.as_deref(),Some(Path::new("/private/reviewed-router.json")));
+        assert_eq!(restored.codex_bin.as_deref(),Some(Path::new("/selected/codex")));assert_eq!(restored.claude_bin.as_deref(),Some(Path::new("/selected/claude")));
+        assert_eq!(restored.model.as_deref(),Some("auto"));assert!(restored.effort.is_none());
     }
 }
