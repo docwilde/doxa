@@ -9,6 +9,7 @@
 #[path = "../src/codex_host.rs"] mod codex_host;
 #[path = "../src/router_cli.rs"] mod router_cli;
 #[path = "../src/router_host.rs"] mod router_host;
+#[path = "../src/isolation_host.rs"] mod isolation_host;
 mod peer_host { pub const PEER_TURN_MARKER: &str = "[PEER-STARTED TURN]"; }
 fn iso_now() -> String { "2026-10-10T23:00:00Z".into() }
 
@@ -118,6 +119,50 @@ mod tests {
         assert_eq!(checkpoint["sha256"],doxa_isolation::migration::fingerprint(&env.journal(),checkpoint["bytes"].as_u64().unwrap()).unwrap());
         let mut state=env.state();state["worker"]["estimated_actual_usd_micros"]=json!(99);fs::write(env.journal(),state.to_string()).unwrap();
         assert!(host.call("router_migration_checkpoint",&json!({})).is_err());assert!(server.bodies().is_empty());host.shutdown();
+    }
+
+    #[test]
+    fn inherited_router_migration_refuses_unknown_missing_changed_or_overallocated_parent_before_source_stop() {
+        let env=Env::new();let cfg=config();let server=Server::new(|_,_|panic!("migration review must not call a provider"));
+        let parent=make_host(&env,cfg.clone(),&server,false,Some(4.0));
+        let review=parent.call("router_child_plan",&json!({"model":"ds"})).unwrap();
+        parent.call("router_child_admit",&json!({"child_session_id":"migration-child","review":review})).unwrap();
+        let child=Arc::new(RouterHost::new_with_cli(cfg,&env.cwd(),"migration-child",false,Some(2_000_000),super::router_cli::CliOptions::default(),Some("routed"),Some(server.endpoint.clone())).unwrap());
+        let runtime=Arc::new(Mutex::new(doxa_isolation::Runtime::prepare(&env.root.path().join("home"),"migration-child",&env.cwd(),Some(doxa_isolation::Profile::Native),false,None).unwrap()));
+        let wrapper=super::isolation_host::IsolationHost::new(child.clone(),runtime.clone(),json!({"engine":"router"}));
+        let original_parent=fs::read(env.journal()).unwrap();
+        let child_journal=env.root.path().join("home/router/migration-child.router.json");
+        let original_child=fs::read(&child_journal).unwrap();
+        let original_source=fs::read(env.cwd().join("visible.txt")).unwrap();
+        let reviewed=wrapper.call("isolation_migration_plan",&json!({})).unwrap();
+        for (pointer,value) in [
+            ("/worker/accounting_unknown",json!(true)),("/router/accounting_unknown",json!(true)),
+            ("/allocations",json!([])),("/allocations/0/routing_calls",json!(3)),
+            ("/allocations/0/model",json!("glm")),("/allocations/0/permission",json!("auto")),
+            ("/allocations/0/ceiling_usd_micros",json!(1_999_999)),
+            ("/router/calls",json!(5)),
+        ] {
+            let mut changed:Value=serde_json::from_slice(&original_parent).unwrap();
+            *changed.pointer_mut(pointer).unwrap()=value;fs::write(env.journal(),changed.to_string()).unwrap();
+            assert!(child.call("router_migration_checkpoint",&json!({})).is_err(),"{pointer}");
+            assert!(wrapper.call("isolation_migration_plan",&json!({})).is_err(),"{pointer}");
+            assert!(wrapper.call("isolation_migration_stop",&json!({"confirmed":true,"expected":reviewed})).is_err(),"{pointer}");
+            assert!(!runtime.lock().unwrap().preserves_native_checkout(),"source stop was admitted for {pointer}");
+            assert_eq!(fs::read(&child_journal).unwrap(),original_child);
+            assert_eq!(fs::read(env.cwd().join("visible.txt")).unwrap(),original_source);
+            fs::write(env.journal(),&original_parent).unwrap();
+            assert_eq!(wrapper.call("isolation_migration_plan",&json!({})).unwrap(),reviewed,"healthy source remained open for {pointer}");
+        }
+        fs::remove_file(env.journal()).unwrap();
+        assert!(child.call("router_migration_checkpoint",&json!({})).is_err());
+        assert!(wrapper.call("isolation_migration_stop",&json!({"confirmed":true,"expected":reviewed})).is_err());
+        assert!(!runtime.lock().unwrap().preserves_native_checkout());
+        assert_eq!(fs::read(&child_journal).unwrap(),original_child);
+        fs::write(env.journal(),original_parent).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(env.journal(),fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(wrapper.call("isolation_migration_plan",&json!({})).unwrap(),reviewed);
+        assert!(server.bodies().is_empty());parent.shutdown();child.shutdown();
     }
 
     struct Server { endpoint:String, requests:Arc<Mutex<Vec<Value>>>, stop:Arc<AtomicBool>, thread:Option<std::thread::JoinHandle<()>> }

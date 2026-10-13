@@ -269,6 +269,13 @@ impl RouterHost {
         let Ok(_turn)=self.turn_lock.try_lock() else {return Err("Router migration requires an idle turn boundary".into());};
         let state=self.state.lock().unwrap();
         if state.unknown() || self.active.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {return Err("Router migration requires complete verified accounting".into());}
+        Self::validate_allocations(&state,&self.config,self.ceiling_micros)?;
+        if let Some(inherited)=&state.inherited {
+            let id=state.identity["session_id"].as_str().ok_or("Router migration session identity unavailable")?;
+            if Self::inheritance(&self.cwd,id,&inherited.parent_session_id,&self.config,self.ceiling_micros)?!=*inherited {
+                return Err("Router migration inherited allowance or parent review changed".into());
+            }
+        }
         self.inner.routing_view("",self.config.max_input_bytes/2)?;
         let (bytes,proof)=doxa_engines::compact_hook::safe_read(&self.journal.path,JOURNAL_MAX as usize).map_err(|_|"Router migration journal is unsafe")?;
         let saved:Value=serde_json::from_slice(&bytes).map_err(|_|"Router migration journal is invalid")?;
