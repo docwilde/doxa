@@ -17,9 +17,8 @@ spec = importlib.util.spec_from_file_location("root_broker",Path(__file__).with_
 b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)
 
 
-def main():
+def run_proof(sid):
     b.require(os.geteuid()==0,"guest client proof requires ROOT")
-    sid="root-client-proof-"+str(os.getpid())
     script=Path(__file__).with_name("root_broker.py").resolve()
     runtime=Path("/run/doxa/hardened")/sid
     runtime.mkdir(mode=0o755)
@@ -81,8 +80,16 @@ def main():
         try:server.wait(timeout=5)
         except subprocess.TimeoutExpired:server.kill();server.wait(timeout=2)
         if server.stderr:server.stderr.close()
-        shutil.rmtree(runtime)
-        source.unlink();installed.unlink()
+
+
+def main():
+    sid="root-client-proof-"+str(os.getpid())
+    try:run_proof(sid)
+    finally:
+        runtime=Path("/run/doxa/hardened")/sid
+        if runtime.exists():shutil.rmtree(runtime)
+        for suffix in (".source.json",".json"):
+            (Path("/etc/doxa/root-client-proof")/(sid+suffix)).unlink(missing_ok=True)
 
 
 if __name__=="__main__":main()
