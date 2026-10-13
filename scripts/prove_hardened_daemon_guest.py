@@ -430,6 +430,10 @@ def main(args):
         provision = command("quota-provision", [str(args.quota_provision), "create", SID, str(quota_root), "1000", "1001", "1001",
                              str(PROJECT), str(policy["limits"]["disk_bytes"]), policy["image"], WORKER_SHA])
         report["quota_provision"] = provision.stdout.decode()
+        module.controlled(state.parent)
+        state.mkdir(mode=0o755)
+        os.chown(state, 0, 0); state.chmod(0o755)
+        module.controlled(state)
         source = args.output / "source-policy.json"
         private_new(source, json.dumps(policy, sort_keys=True).encode() + b"\n")
         python = str(Path(sys.executable).resolve())
