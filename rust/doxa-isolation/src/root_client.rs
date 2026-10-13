@@ -1116,7 +1116,8 @@ pub fn snapshot(
         installed.policy.limits.operation_seconds,
     )?)?;
     reply_scope(&installed, &proof)?;
-    if proof["offset"].as_u64() != Some(offset) || proof["boot_id"] != installed.receipt.boot_id {
+    if proof["offset"].as_u64() != Some(offset) || proof["boot_id"] != installed.receipt.boot_id
+        ||proof["cid"].as_str()!=manifest.container_id.as_deref() {
         return Err(error("ROOT snapshot destination or request scope changed"));
     }
     let bytes = read_snapshot_file(&destination, limit)?;
@@ -1209,7 +1210,7 @@ pub fn register_hook(
             "unregistered"
         }
         || value["hook_ready"] != register
-        || !value["cid"].as_str().is_some_and(digest)
+        || value["cid"].as_str()!=manifest.container_id.as_deref()
     {
         return Err(error("ROOT callback acknowledgement is incomplete"));
     }
