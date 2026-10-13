@@ -121,3 +121,11 @@ Root600 lock validated, eight actual UID1001 Git operations no markers/index
 unchanged. Updated UID1000 client proof also passes RootPID55863/start1159695,
 exeEACCES13. No Engine/provider/quota writes or admission claim. Both private
 data/runtime scopes cleaned; versioned ROOT proof packages/evidence retained.
+
+Parent source review found nonempty lock acceptance and global state-lock guard
+starvation during private copy. Narrow source fix requires zero-byte lock plus
+full held/fresh identity across acquisition/operation. Workspace reserves exact
+CID/Engine and active count before releasing state lock for copy; scoped/native
+revalidation precedes short publication and exec, with state->shared->EX lock
+order. Meaningful held-copy guard responsiveness and changed-scope refusal
+regressions added. Frozen running guest broker/policy bytes were not changed.

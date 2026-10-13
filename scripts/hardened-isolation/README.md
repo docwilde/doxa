@@ -157,6 +157,13 @@ quota checks must take the shared lock around their whole quota audit. No partia
 0700/0600 tree or recursive deletion is visible to a concurrent shared auditor.
 The lock path/inode/owner/mode are validated, wait uses the operation's absolute
 deadline, and the fixed lock is never unlinked. Lock ownership grants no readiness.
+The lock is empty and its full held/fresh stat identity stays unchanged through
+the bounded wait and operation. A workspace build reserves its active count and
+exact CID/Engine before copying, then releases the global state lock. Guards can
+continue during a slow private copy; lifecycle/staging remains blocked by the
+reservation. Before publication and exec, the broker rechecks the exact scope
+and live native authority. Native shared audits precede the short exclusive
+publication lock, preserving a consistent lock order.
 
 `guard` has no caller fields beyond v/session/op. It runs a fresh native
 `provider_exec`/family`none` authority check while persistent provider stdio is

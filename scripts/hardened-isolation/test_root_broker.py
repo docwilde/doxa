@@ -658,9 +658,9 @@ class GitMetadataTests(unittest.TestCase):
                 self.assertLess(time.monotonic()-start,.3)
 
     def test_root_lock_rejects_wrong_owner_mode_links_and_inode(self):
-        meta=Mock(st_mode=0o100600,st_uid=0,st_gid=0,st_nlink=1,st_dev=1,st_ino=2)
+        meta=Mock(st_mode=0o100600,st_uid=0,st_gid=0,st_nlink=1,st_dev=1,st_ino=2,st_size=0,st_mtime_ns=1,st_ctime_ns=1)
         path=Mock();path.lstat.return_value=meta
-        changes=[{"st_uid":1000},{"st_gid":1001},{"st_mode":0o100640},{"st_nlink":2},{"st_mode":0o040600}]
+        changes=[{"st_uid":1000},{"st_gid":1001},{"st_mode":0o100640},{"st_nlink":2},{"st_mode":0o040600},{"st_size":1}]
         with patch.object(b,"controlled"):
             for change in changes:
                 bad=copy.copy(meta)
@@ -668,8 +668,58 @@ class GitMetadataTests(unittest.TestCase):
                 with patch.object(b.os,"fstat",return_value=bad):
                     with self.assertRaises(b.Refused):b.check_git_lock(1,path)
             with patch.object(b.os,"fstat",return_value=meta):
-                path.lstat.return_value=Mock(st_dev=1,st_ino=3)
+                fresh=copy.copy(meta);fresh.st_ino=3;path.lstat.return_value=fresh
                 with self.assertRaises(b.Refused):b.check_git_lock(1,path)
+                fresh=copy.copy(meta);fresh.st_size=1;path.lstat.return_value=fresh
+                with self.assertRaises(b.Refused):b.check_git_lock(1,path)
+
+
+class WorkspaceControlTests(unittest.TestCase):
+    def fixture(self):
+        broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy_sha256="3"*64
+        broker.state_lock=threading.RLock();broker.git_lock=threading.Lock();broker.closing=threading.Event()
+        broker.manifest={"cid":"2"*64,"status":"ready"};broker.active_provider=True;broker.active_workspace=0
+        broker.identity=Mock(side_effect=lambda:broker.manifest["cid"]);broker.preflight=Mock();broker.stage_check=Mock()
+        broker.native_check=Mock();broker.engine=Mock();broker.cleanup=Mock();broker.exec_exit=Mock(return_value=0)
+        broker.exec_start=Mock(return_value=("2"*64,"exec-scope",Mock()))
+        return broker
+
+    def test_slow_workspace_copy_keeps_active_provider_guard_responsive(self):
+        broker=self.fixture();copying=threading.Event();release=threading.Event();errors=[];published=[]
+        request={"v":1,"session_id":"unit-scope","op":"workspace_exec","argv":["status","--porcelain"]}
+        def slow(policy,deadline,publication_scope):
+            copying.set();self.assertTrue(release.wait(2))
+            with publication_scope():published.append(True)
+            return Path("/unused-scoped-view"),"/run/doxa/session/git-safe/"+"1"*32
+        def execute():
+            try:broker.execute(request,Mock())
+            except BaseException as error:errors.append(error)
+        with patch.object(b,"build_git_view",side_effect=slow),patch.object(b,"retire_git_view"),patch.object(b,"stream_stdio"):
+            worker=threading.Thread(target=execute);worker.start()
+            try:
+                self.assertTrue(copying.wait(1));self.assertEqual(broker.active_workspace,1)
+                self.assertTrue(broker.state_lock.acquire(timeout=.2),"private copy held global control lock")
+                try:
+                    start=time.monotonic();proof=broker.guard(b.Deadline(.2))
+                    self.assertTrue(proof["guard_ready"]);self.assertLess(time.monotonic()-start,.1)
+                    with self.assertRaisesRegex(b.Refused,"transport is active"):broker.idle()
+                finally:broker.state_lock.release()
+                release.set();worker.join(2);self.assertFalse(worker.is_alive());self.assertFalse(errors)
+                self.assertEqual(published,[True]);self.assertEqual(broker.active_workspace,0);self.assertTrue(broker.active_provider)
+                broker.cleanup.assert_not_called();broker.exec_start.assert_called_once()
+            finally:release.set();worker.join(2)
+
+    def test_changed_scope_during_private_copy_never_publishes_or_executes(self):
+        broker=self.fixture();published=[]
+        request={"v":1,"session_id":"unit-scope","op":"workspace_exec","argv":["status"]}
+        def changed(policy,deadline,publication_scope):
+            broker.engine=Mock()
+            with publication_scope():published.append(True)
+            self.fail("scope change was admitted")
+        with patch.object(b,"build_git_view",side_effect=changed):
+            with self.assertRaisesRegex(b.Refused,"scope changed"):broker.execute(request,Mock())
+        self.assertFalse(published);broker.exec_start.assert_not_called();self.assertEqual(broker.active_workspace,0)
+        broker.cleanup.assert_called_once_with("2"*64)
 
 
 class ConcurrentControlTests(unittest.TestCase):

@@ -8,7 +8,7 @@ alone, or a fake Engine fixture, does not authorize hardened isolation.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import fcntl
 import hashlib
 import io
@@ -1263,10 +1263,6 @@ class Broker:
                     if request.get("staging") is True: self.idle()
                 self.preflight()
                 self.engine.connect(deadline).sock.close()
-                if op == "workspace_exec":
-                    self.stage_check(deadline,"before","none")
-                    git_view,worker_git_view=build_git_view(p,deadline)
-                    self.stage_check(deadline,"after","none")
                 cid = self.identity()
                 require(self.manifest["status"] == "ready", "session admission is not ready")
                 require(family == "none" if op == "workspace_exec" else family in p["providers"], "unreviewed provider family")
@@ -1276,8 +1272,8 @@ class Broker:
                         self.idle()
                         client.deadline = deadline
                         self.stage(client, family)
-                self.native_check(deadline, op, family)
                 if op == "provider_exec":
+                    self.native_check(deadline, op, family)
                     provider = p["providers"][family]
                     require(set(environment) <= set(provider["environment_keys"]), "provider environment key refused")
                     port = provider["proxy_port"]
@@ -1285,16 +1281,37 @@ class Broker:
                     env = [f"{k}={v}" for k, v in environment.items()]
                     env += [f"{key}=http://127.0.0.1:{port}" for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")]
                     env += ["NO_PROXY=", "no_proxy=", "CLAUDE_CONFIG_DIR=/home/doxa/claude" if family == "claude" else "CODEX_HOME=/home/doxa/codex"]
+                    env += ["HOME=/home/doxa", "TMPDIR=/work-cache/tmp", "PATH=/usr/local/bin:/usr/bin:/bin"]
+                    _, eid, stream = self.exec_start(deadline, cmd, env, "/workspace" + ("" if cwd == "." else "/" + cwd))
+                    self.active_provider = True
                 else:
-                    require(set(environment) <= {"TERM", "LANG", "LC_ALL"}, "workspace command environment refused")
-                    cmd = [WORKER, "workspace-hardened", *safe_git]
-                    env = [f"{k}={v}" for k, v in environment.items()]
-                    env += [f"{k}={v}" for k,v in git_environment(worker_git_view).items()]
-                env += ["HOME=/home/doxa", "TMPDIR=/work-cache/tmp", "PATH=/usr/local/bin:/usr/bin:/bin"]
-                _, eid, stream = self.exec_start(deadline, cmd, env, "/workspace" + ("" if cwd == "." else "/" + cwd))
-                if op == "provider_exec": self.active_provider = True
-                else: self.active_workspace += 1
+                    self.stage_check(deadline,"before","none")
+                    scope_engine=self.engine
+                    self.active_workspace += 1
                 active = True
+            if op == "workspace_exec":
+                deadline.cancelled=lambda:self.closing.is_set() or self.manifest is None or self.manifest.get("cid")!=cid or self.manifest.get("status")!="ready"
+                def same_scope():
+                    require(self.engine is scope_engine and self.identity()==cid and self.manifest["status"]=="ready",
+                            "workspace scope changed during private build")
+                @contextmanager
+                def publication_scope():
+                    with self.state_lock:
+                        same_scope()
+                        # Native shared quota audit precedes publication EX lock:
+                        # state -> native/shared -> EX, never EX -> state.
+                        self.native_check(deadline,op,family)
+                        yield
+                git_view,worker_git_view=build_git_view(p,deadline,publication_scope)
+                with self.state_lock:
+                    same_scope()
+                    self.stage_check(deadline,"after","none")
+                    self.native_check(deadline,op,family)
+                    cmd=[WORKER,"workspace-hardened",*safe_git]
+                    env=[f"{k}={v}" for k,v in environment.items()]
+                    env += [f"{k}={v}" for k,v in git_environment(worker_git_view).items()]
+                    env += ["HOME=/home/doxa","TMPDIR=/work-cache/tmp","PATH=/usr/local/bin:/usr/bin:/bin"]
+                    _,eid,stream=self.exec_start(deadline,cmd,env,"/workspace"+("" if cwd=="." else "/"+cwd))
             client.deadline = deadline
             client.json_frame(TAG_JSON, {"protocol": PROTOCOL, "status": "exec-ready", "cid": cid, "exec_id": eid})
             stream_stdio(self.engine, stream, client, resource_limits(p), self.transport_live)
@@ -1322,9 +1339,11 @@ class Broker:
 def check_git_lock(fd,path):
     controlled(path,private=True)
     info=os.fstat(fd);current=path.lstat()
-    require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_gid==0 and info.st_nlink==1
-            and stat.S_IMODE(info.st_mode)==0o600 and (info.st_dev,info.st_ino)==(current.st_dev,current.st_ino),
+    identity=lambda m:(m.st_dev,m.st_ino,m.st_uid,m.st_gid,m.st_mode,m.st_nlink,m.st_size,m.st_mtime_ns,m.st_ctime_ns)
+    require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_gid==0 and info.st_nlink==1 and info.st_size==0
+            and stat.S_IMODE(info.st_mode)==0o600 and identity(info)==identity(current),
             "Git metadata lock is outside ROOT control")
+    return identity(info)
 
 
 def open_git_metadata_lock(policy):
@@ -1344,13 +1363,16 @@ def open_git_metadata_lock(policy):
 @contextmanager
 def git_metadata_lock(policy,deadline,exclusive=True):
     fd=open_git_metadata_lock(policy)
+    path=Path(policy_paths(policy)["state_dir"])/"git-metadata.lock"
     try:
+        held=check_git_lock(fd,path)
         while True:
             deadline.check()
             try:fcntl.flock(fd,(fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)|fcntl.LOCK_NB);break
             except BlockingIOError:select.select([],[],[],min(.02,max(0,deadline.end-time.monotonic())))
-        check_git_lock(fd,Path(policy_paths(policy)["state_dir"])/"git-metadata.lock")
-        yield
+        require(check_git_lock(fd,path)==held,"Git metadata lock changed during bounded wait")
+        try:yield
+        finally:require(check_git_lock(fd,path)==held,"Git metadata lock changed during operation")
     finally:os.close(fd)
 
 
@@ -1393,7 +1415,7 @@ def retire_git_view(policy,view,deadline):
     shutil.rmtree(retired)
 
 
-def build_git_view(policy, deadline):
+def build_git_view(policy, deadline, publication_scope=None):
     """Build privately; atomically publish immutable metadata under audit lock."""
     require(os.geteuid() == 0, "Git metadata view requires ROOT")
     paths = policy_paths(policy)
@@ -1563,7 +1585,8 @@ def build_git_view(policy, deadline):
         finally:os.fchmod(infofd,0o550);os.fsync(infofd);os.close(infofd)
         os.fchmod(dstfd,0o550);os.fsync(dstfd)
         published=safe/generation
-        with git_metadata_lock(policy,deadline):os.rename(destination,published)
+        with publication_scope() if publication_scope is not None else nullcontext():
+            with git_metadata_lock(policy,deadline):os.rename(destination,published)
         return published,"/run/doxa/session/git-safe/"+generation
     except BaseException:
         shutil.rmtree(destination,ignore_errors=True)
