@@ -1,5 +1,5 @@
 {
-  "RUN.md": "671fb15f08fb48cb3b2c33ed98a82267762b4c3ce3d6192997a181d4eaba4cf6",
+  "RUN.md": "2936d144dc81a5c2d78721630cdfb1ef8f9f4fa6ed09eb002e4a93939c6087b6",
   "run1-report.json": "afd2f4a6d5ac0c22c0c1b6444e600038342c97e43c063580dd7a8422c179c9b2",
   "run2-report.json": "53a166d29b6f2be81f801595d2a6a8c12e9ecc617e4e4c03137fdafb0b0c3c3b",
   "run2-terminal.raw": "84f2d50925dac0b5a6c7f6718cff18afeee525289e3cc4c75a8503ae71529021",
@@ -33,5 +33,19 @@
   "run5-scoped-diagnostics/quota-enforcement-policy.json": "1600d0aa2f4318e9717d9e62b97271d2e9c009c2ce59a752e842f288f2258cd1",
   "run5-terminal.raw": "76611f59ac948494eb0265335fcc7e52558316d90cb1497cc321a819057f77ab",
   "run5-terminal.screen.txt": "62fdb20722321a6d2a9c5220dc555e75d7b4109b55ae9510f4ad0cda2d41dbb1",
+  "run6-frontend-prompt.screen.txt": "5f4e9740366dabfb907103e89e7225a2a79601b02aa9a9d4aac7c77346ea057a",
+  "run6-frontend-ready.screen.txt": "018c54618508d4fa39c516744fba848f9e95349e34728667353dcb4a41310474",
+  "run6-frontend-response.screen.txt": "32b2deee8c1a660dc10f6bbeeb1f42b460ec2a41eb4ec8e45b64d2aecd37b1d7",
+  "run6-report.json": "155baaa8744f6ae9a316fab0a191b95778ce5913028f50cedc09a2595561ed9e",
+  "run6-scoped-diagnostics/gateway-instance.json": "3243c43ef4b7d650f539863373a8202a921981820f31e968cd65a62338350b39",
+  "run6-scoped-diagnostics/identities.json": "9343f553bf62821dbcc54c8dba1295d7085ced053f55de2e5f12fa2bccc81af1",
+  "run6-scoped-diagnostics/installed-root-policy.json": "2a8b12caff244cd2b506e7ed7b3e6767c61aeee58eb9f12e79aa1764c89ac9e6",
+  "run6-scoped-diagnostics/manifest.json": "49152b25ec2a08da55b938f63881db55df6bc1a311b123ba79b28ffb6dd6ef14",
+  "run6-scoped-diagnostics/native-broker-check.json": "2a8dfb5407c6f7ede741f98c139a293119d92a85167796caf3b5c174ad150af3",
+  "run6-scoped-diagnostics/native-serve.json": "df5adcfd1ec44a8e136d4e56ff8653e4b20866df771b7836f25a12c4ca850da6",
+  "run6-scoped-diagnostics/native-stage-check.json": "c28e563f699f3b8436b6a1922f4def7bb7265435c703e84c843c685fa4e0ebc4",
+  "run6-scoped-diagnostics/quota-enforcement-policy.json": "f7659109cf23edde195b5a3eba22f25f788f39ae594a970a8566535bc9fdb0e2",
+  "run6-terminal.raw": "2c07b798e20c2c6bd5e6639988ec44cdcc93c7b8aa999df28f955c47c8ac867d",
+  "run6-terminal.screen.txt": "62fdb20722321a6d2a9c5220dc555e75d7b4109b55ae9510f4ad0cda2d41dbb1",
   "screen-regressions.json": "7703dce88014093caa1171719f4d7d460ce09fe11f9cbb50825c8a109830b6c4"
 }

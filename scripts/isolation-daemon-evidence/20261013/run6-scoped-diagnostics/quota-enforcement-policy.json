@@ -1,0 +1,41 @@
+{
+  "version": 2,
+  "session_id": "root-daemon-r6-20261013",
+  "root": "/srv/doxa-quota-proof/root-daemon-r6-20261013",
+  "caller_uid": 1000,
+  "engine_uid": 1001,
+  "engine_gid": 1001,
+  "project_id": 5019,
+  "hard_limit_bytes": 67108864,
+  "boot_id": "d606e7c5-c113-477e-b804-8449e367d706",
+  "bindings": {
+    "root": {
+      "device": 1792,
+      "inode": 326,
+      "mount_id": 2147500504
+    },
+    "checkout": {
+      "device": 1792,
+      "inode": 328,
+      "mount_id": 2147500504
+    },
+    "home": {
+      "device": 1792,
+      "inode": 329,
+      "mount_id": 2147500504
+    },
+    "cache": {
+      "device": 1792,
+      "inode": 332,
+      "mount_id": 2147500504
+    },
+    "broker": {
+      "device": 1792,
+      "inode": 333,
+      "mount_id": 2147500504
+    }
+  },
+  "worker_image": "sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23",
+  "worker_binary_sha256": "cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f",
+  "security_contract_version": 1
+}

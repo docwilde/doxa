@@ -1,14 +1,16 @@
 # Actual UID1000 daemon and frontend fixture proof
 
+The sixth attempt, `root-daemon-r6-20261013` / project 5019, PASSED. It completed one actual frontend turn, rendered the exact response, verified idle, accepted the owner stop request, exited the frontend and daemon cleanly, and passed every resource cleanup check. Five earlier failed receipts remain preserved below.
+
 All attempts use the disposable `doxa-proof` guest. The caller is UID1000, the independent Engine is UID1001, and the policy and broker are controlled by ROOT. The image and provider files are credential-free fixtures. These receipts do not verify vendor sessions, paid calls, TLS provider traffic, Core, LORE human review, or provider authentication.
 
-## Frozen artifacts
+## Pinned artifacts
 
 The daemon and frontend were built from source `934661cd`.
 
 - Daemon SHA256: `bdab19e567fe3e7b337414933f64d90be5cd361c55434b482d1d1cd7e378b1aa`.
 - Frontend SHA256: `5b4d8ef78eb7c42d84fe9c80f4220cdefdad6d2cad5987399dedc5497aa965c2`.
-- ROOT broker SHA256: `6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5`.
+- Final ROOT broker source: `5e536002`, SHA256 `3305ba7bca32430837331e8613852b48ed486bacd2c35393ab0e27a48c616b7b`. Attempts 1–4 used SHA256 `6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5`; attempt 5 used the separately recorded broker below.
 - Native gateway SHA256: `18d1d633a67aee1dd1bfd67eaf5de82ebcc42dfb0ef112198c6691439de98fe9`.
 - Image worker SHA256: `cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f`.
 - Immutable image: `sha256:2a26a7b39d5c878e4780447d8559f8b08903d313e76b9397d3d2ea51653b2f23`.
@@ -58,14 +60,26 @@ The overall receipt is FAILED. The daemon exited with code1 and stderr `doxa-dae
 
 All cleanup checks passed with an empty error list: ROOT stopped, exact CID404, captured cgroup absent, every directly owned pidfd exited, zero scope processes, sockets and registry entries, complete terminal EOF, and unchanged Engine PID 27821/socket device 56, inode 688/configuration. The faithful opening, prompt and response screen artifacts and full raw trace are retained. No further input, forced cleanup or rerun occurred. The daemon Runtime.stop / ROOT client shutdown path requires production investigation before a fresh reviewed proof can pass.
 
+## Attempt 6: complete pass
+
+Fresh session `root-daemon-r6-20261013`, project 5019, used harness `02717f81`, SHA256 `16b7a4921d020e36638a5ae88c23b4fcfa396d2fe35932cde2b2776e23a0f6df`. The final broker source `5e536002`, SHA256 `3305ba7bca32430837331e8613852b48ed486bacd2c35393ab0e27a48c616b7b`, was staged at the unique ROOT-owned `/usr/libexec/doxa/daemon-r6-20261013-broker.py`. The unique template `/etc/doxa/hardened/daemon-r6-template-20261013.json` and installed ROOT policy have SHA256 `2a8b12caff244cd2b506e7ed7b3e6767c61aeee58eb9f12e79aa1764c89ac9e6`. Original templates and all failed scopes remain unchanged.
+
+One prompt passed current-screen readiness, typing, rendered-input and Enter predicates. The retained UID1000 observer received exactly one turn_started, one text_delta containing `Deterministic native fixture response.`, and one turn_done. The actual frontend rendered the response. Status 102 showed running=false and queued=0. CtrlQ exited the captured frontend with code 0 and complete PTY EOF. Owner stop_if_idle request 103 returned ok=true. The captured daemon, observer and ROOT broker each exited with code 0. Fixture resume=true was separately rejected before session startup, as required.
+
+Overall status is PASSED. Exact CID `a659fc0b7339f240f9a045dc975325ad1d7f195f2211b58b520b4f8e26541607` returned 404. Its actual captured cgroup disappeared. ROOT manifest status is stopped. Every directly owned pidfd exited; scope process, socket and registry counts are zero. Terminal EOF finalized completely. Cleanup errors are empty. Engine PID 27821, socket device 56/inode 688, UID/GID 1001, mode0600 and configuration hash remained unchanged. No forced CID cleanup, extra prompt, deadline extension or shared Engine change occurred.
+
+The last native after-stage check succeeded with exit 0 and no diagnostic error. `control-stop-failure.json` and `broker-instance.json` are absent. Other ROOT scope diagnostics and file identities are retained. Private session source/quota data and immutable evidence files remain preserved; there are no running scope services.
+
+The public report SHA256 is `155baaa8744f6ae9a316fab0a191b95778ce5913028f50cedc09a2595561ed9e`. The raw terminal trace is 19129 bytes, SHA256 `2c07b798e20c2c6bd5e6639988ec44cdcc93c7b8aa999df28f955c47c8ac867d`. Reached opening, prompt and response screens are separate artifacts. This pass establishes the credential-free fixture daemon/IsolationHost/ROOT guard/control-plane/frontend join and cleanup. It does not establish vendor inference, TLS provider traffic, authentication, canonical human review, Core or LORE human paths. Fixture checkpoint resume remains refused; composed Runtime cold-resume is a separate proof.
+
 ## Reproduction
 
-Only run in the authorized disposable guest with freshly reserved scope paths and the exact protected template and artifacts above. The Root-private script and UID1000-readable observer source must contain identical reviewed bytes. The actual fourth attempt used:
+Only run in the authorized disposable guest with freshly reserved scope paths and the exact protected template and artifacts above. The Root-private script and UID1000-readable observer source must contain identical reviewed bytes. The final sixth attempt used:
 
 ```text
-python3 -I /root/isolation-proof/daemon-proof-5017.py --ack-disposable \
-  --template-policy /etc/doxa/hardened/composed-runtime-r6-20261013.json \
-  --seconds 240 --output /root/isolation-proof/daemon-run4
+python3 -I /root/isolation-proof/daemon-proof-5019.py --ack-disposable \
+  --template-policy /etc/doxa/hardened/daemon-r6-template-20261013.json \
+  --seconds 240 --output /root/isolation-proof/daemon-run6
 ```
 
 The harness uses direct typed Engine API calls and retained pidfds for its own children. It never signals processes discovered only by argv or a /proc snapshot. Final status can be passed only after the body and every required cleanup check succeed. Preserve failed scope data; a retry requires a fresh coordinated scope.
