@@ -69,3 +69,7 @@ python3 -I /root/isolation-proof/daemon-proof-5017.py --ack-disposable \
 ```
 
 The harness uses direct typed Engine API calls and retained pidfds for its own children. It never signals processes discovered only by argv or a /proc snapshot. Final status can be passed only after the body and every required cleanup check succeed. Preserve failed scope data; a retry requires a fresh coordinated scope.
+
+## Attempt 4 scoped shutdown diagnostics
+
+Read-only copies of the actual stopped scope are under `run4-scoped-diagnostics`, including ROOT file identities. The manifest remains status=stopped. The last native broker-check succeeded with exit0, phase `workspace_exec`, family `none`, PID90824. The last native stage-check recorded `client cancelled`, exit-9, phase `after`, family `none`, PID90919. Native serve closed with exit-15 and no diagnostic error, PID90294. The gateway instance remains a historical identity file; broker-instance.json is absent. The enforced quota policy remains ROOT0:0/0600, project5017, SHA256 `144a0ffa6a02caebe885d4b1d03f93d6270856ac7883fd477fedf41eab9db93e`. No additional control, admission or stop request was sent while collecting these files. Production shutdown investigation remains open.

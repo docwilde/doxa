@@ -1,0 +1,65 @@
+{
+  "/etc/doxa/quota-enforced/root-daemon-r4-20261013.json": {
+    "dev": 64769,
+    "gid": 0,
+    "ino": 530235,
+    "mode": "0o600",
+    "mtime_ns": 1791876581909859760,
+    "nlink": 1,
+    "sha256": "144a0ffa6a02caebe885d4b1d03f93d6270856ac7883fd477fedf41eab9db93e",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r4-20261013/broker-instance.json": {
+    "absent": true
+  },
+  "/run/doxa/hardened/root-daemon-r4-20261013/gateway-instance.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 12967,
+    "mode": "0o444",
+    "mtime_ns": 1791876586366910211,
+    "nlink": 1,
+    "sha256": "c41cccd3d5d6b4ba9d6e42aa14e3ec58558c51e72b756bf7b3cbb3cabd0e2966",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r4-20261013/manifest.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 12986,
+    "mode": "0o600",
+    "mtime_ns": 1791876594259603600,
+    "nlink": 1,
+    "sha256": "941c87fcf97a8f3a1d0683b27819f257b413dafd04e55314c20fd33d8770db44",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r4-20261013/native-broker-check.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 12982,
+    "mode": "0o600",
+    "mtime_ns": 1791876593750567881,
+    "nlink": 1,
+    "sha256": "9fadb9f6112c4e21ab77ecf3db0a490de53aa7fd167a2e6f19c23d47f7cb5cfc",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r4-20261013/native-serve.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 12984,
+    "mode": "0o600",
+    "mtime_ns": 1791876593828264374,
+    "nlink": 1,
+    "sha256": "0265a152041ac48aa13746b86171f600a3b433f825f8ad286174130157f3ca06",
+    "uid": 0
+  },
+  "/run/doxa/hardened/root-daemon-r4-20261013/native-stage-check.json": {
+    "dev": 28,
+    "gid": 0,
+    "ino": 12983,
+    "mode": "0o600",
+    "mtime_ns": 1791876593826745616,
+    "nlink": 1,
+    "sha256": "588a36a422b69ca93b7815aa71f8df46c35b6126f21a35b2b7d3a8145ba97b86",
+    "uid": 0
+  }
+}

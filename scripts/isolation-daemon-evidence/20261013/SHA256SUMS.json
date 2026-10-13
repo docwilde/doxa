@@ -1,5 +1,5 @@
 {
-  "RUN.md": "1c340c088827136459c6023d34e06004d5d0582b36bbfac34025ac4d717505ba",
+  "RUN.md": "2c2c874d7474023af6cf1a4c352599032672ee77542b4e2a77b462d112335b46",
   "run1-report.json": "afd2f4a6d5ac0c22c0c1b6444e600038342c97e43c063580dd7a8422c179c9b2",
   "run2-report.json": "53a166d29b6f2be81f801595d2a6a8c12e9ecc617e4e4c03137fdafb0b0c3c3b",
   "run2-terminal.raw": "84f2d50925dac0b5a6c7f6718cff18afeee525289e3cc4c75a8503ae71529021",
@@ -10,6 +10,13 @@
   "run4-frontend-ready.screen.txt": "2320cac94c40cc4b5c539bcf9699e80f93a9fe71252e0055d1bf3322697f61fa",
   "run4-frontend-response.screen.txt": "1b8cbfe03fc0321c38aa3274a076105f9a7a555622b8e5ee7da0969de05350f3",
   "run4-report.json": "64c0536fc9c128ed8b1dbb69810896d4bb595a47cceab4e24bc74b36cddae378",
+  "run4-scoped-diagnostics/gateway-instance.json": "c41cccd3d5d6b4ba9d6e42aa14e3ec58558c51e72b756bf7b3cbb3cabd0e2966",
+  "run4-scoped-diagnostics/identities.json": "2e003cc7c7bbde5543b422225731573e811d68f6c2c21242c44d4094dfd5c80e",
+  "run4-scoped-diagnostics/manifest.json": "941c87fcf97a8f3a1d0683b27819f257b413dafd04e55314c20fd33d8770db44",
+  "run4-scoped-diagnostics/native-broker-check.json": "9fadb9f6112c4e21ab77ecf3db0a490de53aa7fd167a2e6f19c23d47f7cb5cfc",
+  "run4-scoped-diagnostics/native-serve.json": "0265a152041ac48aa13746b86171f600a3b433f825f8ad286174130157f3ca06",
+  "run4-scoped-diagnostics/native-stage-check.json": "588a36a422b69ca93b7815aa71f8df46c35b6126f21a35b2b7d3a8145ba97b86",
+  "run4-scoped-diagnostics/quota-enforcement-policy.json": "144a0ffa6a02caebe885d4b1d03f93d6270856ac7883fd477fedf41eab9db93e",
   "run4-terminal.raw": "3e133224e312e25c557e12344f23b2a4589896644a244e4ca70aada37abf1ed1",
   "run4-terminal.screen.txt": "62fdb20722321a6d2a9c5220dc555e75d7b4109b55ae9510f4ad0cda2d41dbb1",
   "screen-regressions.json": "7703dce88014093caa1171719f4d7d460ce09fe11f9cbb50825c8a109830b6c4"
