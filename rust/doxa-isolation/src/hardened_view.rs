@@ -32,6 +32,11 @@ pub(super) enum Operation {
     RootMetadata {pid:i32,path:PathBuf,nofollow:bool},
     DescriptorMetadata {pid:i32,fd:i32},
 }
+enum Prepared {
+    Executable {init:i32},
+    Artifact {root:File,path:PathBuf},
+    Metadata(File),
+}
 #[derive(Deserialize,Serialize)]
 #[serde(deny_unknown_fields)]
 struct Reply {fact:Option<Fact>,error:Option<String>}
@@ -75,10 +80,15 @@ impl<'a> Context<'a> {
             if !success{unsafe{libc::_exit(2);}}
             // Credential transitions clear PDEATHSIG. Re-arm and confirm the
             // kernel still names the original parent before reading any file.
-            if drop_authority().is_err()||!arm_parent_death(parent_pid,None)
-                ||readonly_landlock(self.pid,&operation).is_err()
-                ||readonly_filter().is_err(){unsafe{libc::_exit(3);}}
-            let reply=match perform(self.pid,operation,deadline) {
+            if drop_authority().is_err()||!arm_parent_death(parent_pid,None){unsafe{libc::_exit(3);}}
+            let prepared=match prepare(self.pid,operation){Ok(prepared)=>prepared,Err(_)=>unsafe{libc::_exit(3)}};
+            // Landlock restricts ptrace-style /proc/exe access even when file
+            // bytes are granted. EXEC instead denies openat2 completely and
+            // permits only read-only scalar-flag opens under default-deny BPF.
+            let root_opens=matches!(&prepared,Prepared::Artifact{..});
+            if !matches!(&prepared,Prepared::Executable{..})&&readonly_landlock(&prepared).is_err()
+                ||readonly_filter(root_opens).is_err(){unsafe{libc::_exit(3);}}
+            let reply=match perform(prepared,deadline) {
                 Ok(fact)=>Reply{fact:Some(fact),error:None},
                 Err(err)=>Reply{fact:None,error:Some(err.to_string().chars().take(512).collect())},
             };
@@ -185,36 +195,43 @@ fn in_root(root:&File,path:&Path,flags:i32)->io::Result<File> {
     let fd=unsafe{libc::syscall(libc::SYS_openat2,root.as_raw_fd(),path.as_ptr(),&how as *const How,mem::size_of::<How>())};
     if fd<0{return Err(io::Error::last_os_error());}Ok(unsafe{File::from_raw_fd(fd as i32)})
 }
-fn perform(init:i32,operation:Operation,deadline:Instant)->io::Result<Fact> {
-    remaining(deadline)?;
+fn prepare(init:i32,operation:Operation)->io::Result<Prepared> {
     match operation {
-        Operation::Executable=>{
-            let path=format!("/proc/{init}/exe");let file=File::open(&path)?;let first=Identity::of(&file)?;
-            let hash=hash_file(&file,MAX_ARTIFACT,deadline)?;let fresh=File::open(path)?;
-            if Identity::of(&fresh)?!=first{return Err(error("actual init executable changed during view read"));}
-            Fact::from_file(&fresh,Some(hash))
-        },
-        Operation::Artifact(path)=>{
-            let root=open_root(init)?;let file=in_root(&root,&path,libc::O_RDONLY)?;let first=Identity::of(&file)?;
-            if !file.metadata()?.is_file(){return Err(error("protected image artifact is not regular"));}
-            let hash=hash_file(&file,MAX_ARTIFACT,deadline)?;let fresh=in_root(&root,&path,libc::O_RDONLY)?;
-            if Identity::of(&fresh)?!=first{return Err(error("protected image artifact changed during view read"));}
-            Fact::from_file(&fresh,Some(hash))
-        },
+        Operation::Executable=>Ok(Prepared::Executable{init}),
+        Operation::Artifact(path)=>Ok(Prepared::Artifact{root:open_root(init)?,path}),
         Operation::RootMetadata{pid,path,nofollow}=>{
             let root=open_root(pid)?;let file=in_root(&root,&path,libc::O_PATH|if nofollow{libc::O_NOFOLLOW}else{0})?;
-            Fact::from_file(&file,None)
+            Ok(Prepared::Metadata(file))
         },
         Operation::DescriptorMetadata{pid,fd}=>{
             if pid<=0||fd<0{return Err(error("view descriptor identity is invalid"));}
             let path=CString::new(format!("/proc/{pid}/fd/{fd}")).unwrap();
             let copied=unsafe{libc::open(path.as_ptr(),libc::O_PATH|libc::O_CLOEXEC)};
-            if copied<0{return Err(io::Error::last_os_error());}Fact::from_file(&unsafe{File::from_raw_fd(copied)},None)
+            if copied<0{return Err(io::Error::last_os_error());}Ok(Prepared::Metadata(unsafe{File::from_raw_fd(copied)}))
         },
     }
 }
+fn perform(prepared:Prepared,deadline:Instant)->io::Result<Fact> {
+    remaining(deadline)?;
+    match prepared {
+        Prepared::Executable{init}=>{
+            let path=format!("/proc/{init}/exe");let file=File::open(&path)?;let first=Identity::of(&file)?;
+            let hash=hash_file(&file,MAX_ARTIFACT,deadline)?;let fresh=File::open(path)?;
+            if Identity::of(&fresh)?!=first{return Err(error("actual init executable changed during view read"));}
+            Fact::from_file(&fresh,Some(hash))
+        },
+        Prepared::Artifact{root,path}=>{
+            let file=in_root(&root,&path,libc::O_RDONLY)?;let first=Identity::of(&file)?;
+            if !file.metadata()?.is_file(){return Err(error("protected image artifact is not regular"));}
+            let hash=hash_file(&file,MAX_ARTIFACT,deadline)?;let fresh=in_root(&root,&path,libc::O_RDONLY)?;
+            if Identity::of(&fresh)?!=first{return Err(error("protected image artifact changed during view read"));}
+            Fact::from_file(&fresh,Some(hash))
+        },
+        Prepared::Metadata(file)=>Fact::from_file(&file,None),
+    }
+}
 
-fn readonly_landlock(init:i32,operation:&Operation)->io::Result<()> {
+fn readonly_landlock(prepared:&Prepared)->io::Result<()> {
     // openat2 keeps root-relative symlinks confined, but seccomp cannot inspect
     // its pointer flags. Landlock denies every filesystem write independently.
     // The only file-content grant is the fixed immutable file being measured;
@@ -232,10 +249,10 @@ fn readonly_landlock(init:i32,operation:&Operation)->io::Result<()> {
             return Err(io::Error::last_os_error());
         }Ok(())
     };
-    let content=match operation {
-        Operation::Executable=>Some(File::open(format!("/proc/{init}/exe"))?),
-        Operation::Artifact(path)=>Some(in_root(&open_root(init)?,path,libc::O_PATH)?),
-        Operation::RootMetadata{..}|Operation::DescriptorMetadata{..}=>None,
+    let content=match prepared {
+        Prepared::Artifact{root,path}=>Some(in_root(root,path,libc::O_PATH)?),
+        Prepared::Metadata(_)=>None,
+        Prepared::Executable{..}=>return Err(error("EXEC view cannot install a ptrace-restricting Landlock domain")),
     };
     if let Some(file)=content {if !file.metadata()?.is_file(){return Err(error("view content grant is not regular"));}add(&file,1<<2)?;}
     let raw=unsafe{libc::open(c"/proc/self/fdinfo".as_ptr(),libc::O_PATH|libc::O_DIRECTORY|libc::O_CLOEXEC)};
@@ -245,7 +262,7 @@ fn readonly_landlock(init:i32,operation:&Operation)->io::Result<()> {
     Ok(())
 }
 
-fn readonly_filter()->io::Result<()> {
+fn readonly_filter(root_opens:bool)->io::Result<()> {
     #[cfg(target_arch="x86_64")]const ARCH:u32=0xc000003e;
     #[cfg(target_arch="aarch64")]const ARCH:u32=0xc00000b7;
     #[cfg(not(any(target_arch="x86_64",target_arch="aarch64")))]return Err(error("read-only view helper ABI is unsupported"));
@@ -262,9 +279,10 @@ fn readonly_filter()->io::Result<()> {
             libc::SYS_newfstatat,libc::SYS_statx,libc::SYS_brk,libc::SYS_munmap,
             libc::SYS_mremap,libc::SYS_madvise,libc::SYS_futex,libc::SYS_clock_gettime,
             libc::SYS_getpid,libc::SYS_gettid,libc::SYS_rt_sigaction,libc::SYS_rt_sigprocmask,
-            libc::SYS_rt_sigreturn,libc::SYS_exit,libc::SYS_exit_group,libc::SYS_openat2] {
+            libc::SYS_rt_sigreturn,libc::SYS_exit,libc::SYS_exit_group] {
             program.extend([instruction(0x15,0,1,call as u32),instruction(0x06,0,0,ALLOW)]);
         }
+        if root_opens {program.extend([instruction(0x15,0,1,libc::SYS_openat2 as u32),instruction(0x06,0,0,ALLOW)]);}
         for call in [libc::SYS_write,libc::SYS_writev] {
             program.extend([instruction(0x15,0,4,call as u32),instruction(0x20,0,0,16),instruction(0x15,1,0,3),
                 instruction(0x06,0,0,DENY),instruction(0x06,0,0,ALLOW),instruction(0x20,0,0,0)]);
@@ -308,12 +326,17 @@ mod tests {
         let child=unsafe{libc::fork()};assert!(child>=0);
         if child==0 {
             if unsafe{libc::dup2(output.as_raw_fd(),3)}<0||unsafe{libc::prctl(libc::PR_SET_NO_NEW_PRIVS,1,0,0,0)}!=0
-                ||readonly_filter().is_err(){unsafe{libc::_exit(2);}}
+                ||readonly_filter(false).is_err(){unsafe{libc::_exit(2);}}
             let mut ok=true;
             let fd=unsafe{libc::openat(libc::AT_FDCWD,c"/dev/null".as_ptr(),libc::O_WRONLY)};
             ok&=fd<0&&io::Error::last_os_error().raw_os_error()==Some(libc::EPERM);
             let fd=unsafe{libc::socket(libc::AF_UNIX,libc::SOCK_STREAM,0)};
             ok&=fd<0&&io::Error::last_os_error().raw_os_error()==Some(libc::EPERM);
+            #[repr(C)]struct How{flags:u64,mode:u64,resolve:u64}
+            let how=How{flags:libc::O_RDONLY as u64,mode:0,resolve:0};
+            let rc=unsafe{libc::syscall(libc::SYS_openat2,libc::AT_FDCWD,c"/proc/self/exe".as_ptr(),
+                &how as *const How,mem::size_of::<How>())};
+            ok&=rc<0&&io::Error::last_os_error().raw_os_error()==Some(libc::EPERM);
             let rc=unsafe{libc::syscall(libc::SYS_setns,-1,0)};
             ok&=rc<0&&io::Error::last_os_error().raw_os_error()==Some(libc::EPERM);
             let rc=unsafe{libc::syscall(libc::SYS_ioctl,-1,0x401c5820u32,0)};
@@ -380,15 +403,50 @@ mod tests {
         let fixed_path=fixed.path().to_owned();let unrelated_path=unrelated.path().to_owned();
         let child=unsafe{libc::fork()};assert!(child>=0);
         if child==0 {
-            if unsafe{libc::prctl(libc::PR_SET_NO_NEW_PRIVS,1,0,0,0)}!=0
-                ||readonly_landlock(unsafe{libc::getpid()},&Operation::Artifact(fixed_path.clone())).is_err()
-                ||readonly_filter().is_err(){unsafe{libc::_exit(2);}}
+            let prepared=prepare(unsafe{libc::getpid()},Operation::Artifact(fixed_path.clone())).unwrap();
             let root=open_root(unsafe{libc::getpid()}).unwrap();
+            if unsafe{libc::prctl(libc::PR_SET_NO_NEW_PRIVS,1,0,0,0)}!=0
+                ||readonly_landlock(&prepared).is_err()
+                ||readonly_filter(true).is_err(){unsafe{libc::_exit(2);}}
             let mut ok=in_root(&root,&fixed_path,libc::O_RDONLY).is_ok();
-            ok&=perform(unsafe{libc::getpid()},Operation::Artifact(fixed_path.clone()),
-                Instant::now()+std::time::Duration::from_secs(1)).is_ok();
+            ok&=perform(prepared,Instant::now()+std::time::Duration::from_secs(1)).is_ok();
             ok&=in_root(&root,&fixed_path,libc::O_WRONLY).is_err();
             ok&=in_root(&root,&unrelated_path,libc::O_RDONLY).is_err();
+            unsafe{libc::_exit(if ok{0}else{3});}
+        }
+        let mut status=0;assert_eq!(unsafe{libc::waitpid(child,&mut status,0)},child);assert_eq!(status,0);
+    }
+    #[test]
+    fn executable_view_reads_fresh_proc_exe_with_openat2_denied() {
+        let expected=hash_file(&File::open("/proc/self/exe").unwrap(),MAX_ARTIFACT,
+            Instant::now()+std::time::Duration::from_secs(3)).unwrap();
+        let directory=tempfile::tempdir().unwrap();let new_file=directory.path().join("must-not-exist");
+        let name=CString::new(new_file.as_os_str().as_bytes()).unwrap();
+        let child=unsafe{libc::fork()};assert!(child>=0);
+        if child==0 {
+            if unsafe{libc::prctl(libc::PR_SET_NO_NEW_PRIVS,1,0,0,0)}!=0
+                ||readonly_filter(false).is_err(){unsafe{libc::_exit(2);}}
+            let fd=unsafe{libc::openat(libc::AT_FDCWD,name.as_ptr(),libc::O_RDONLY|libc::O_CREAT,0o600)};
+            let mut ok=fd<0&&io::Error::last_os_error().raw_os_error()==Some(libc::EPERM);
+            let fact=perform(Prepared::Executable{init:unsafe{libc::getpid()}},Instant::now()+std::time::Duration::from_secs(3));
+            ok&=fact.is_ok_and(|fact|fact.regular()&&fact.sha256.as_ref()==Some(&expected));
+            unsafe{libc::_exit(if ok{0}else{3});}
+        }
+        let mut status=0;assert_eq!(unsafe{libc::waitpid(child,&mut status,0)},child);assert_eq!(status,0);
+        assert!(!new_file.exists());
+    }
+    #[test]
+    fn metadata_view_preopens_only_opath_and_cannot_read_object_bytes() {
+        let fixed=tempfile::NamedTempFile::new().unwrap();std::fs::write(fixed.path(),b"private bytes").unwrap();
+        let child=unsafe{libc::fork()};assert!(child>=0);
+        if child==0 {
+            let prepared=prepare(unsafe{libc::getpid()},Operation::RootMetadata{pid:unsafe{libc::getpid()},
+                path:fixed.path().to_owned(),nofollow:true}).unwrap();
+            if unsafe{libc::prctl(libc::PR_SET_NO_NEW_PRIVS,1,0,0,0)}!=0
+                ||readonly_landlock(&prepared).is_err()||readonly_filter(false).is_err(){unsafe{libc::_exit(2);}}
+            let mut ok=File::open(fixed.path()).is_err();
+            if let Prepared::Metadata(ref file)=prepared {let mut byte=[0];ok&=(&*file).read(&mut byte).is_err();}
+            ok&=perform(prepared,Instant::now()+std::time::Duration::from_secs(1)).is_ok();
             unsafe{libc::_exit(if ok{0}else{3});}
         }
         let mut status=0;assert_eq!(unsafe{libc::waitpid(child,&mut status,0)},child);assert_eq!(status,0);
