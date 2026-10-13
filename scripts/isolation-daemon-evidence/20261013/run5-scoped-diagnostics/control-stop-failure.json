@@ -1,0 +1,1 @@
+{"cause_errno":null,"cause_exception":null,"contract":"doxa-root-control-failure-v1","errno":null,"exception":"Refused","op":"stop","phase":"dispatch-idle","policy_sha256":"8885ee698c378ca33bf3cd7544c994b53af823f55ba451349955734935f1784f","reason":"busy-transport","session_id":"root-daemon-r5-20261013"}
