@@ -5,6 +5,32 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.51 — 2026-10-13
+
+**Routing and fleets**
+
+- Add reviewed child and fleet configuration inheritance with disjoint durable money, routing-call and routing-spend allowances. Restore the original ceiling and decision service; retain uncertain attempts.
+- Add opt-in automatic canonical-source compaction. Bind Docker migration to the current journal and inherited allowance; preserve pinned CLI summary refusals and worker recovery without replay.
+
+**Code graph**
+
+- Prepare bounded Rust/Python syntax indexes in the background, rechecking complete inventories, source hashes and modes for every answer. Preserve explicit parser failures and incomplete coverage.
+- Add an optional externally provisioned Linux semantic broker with an operator-pinned signer, immutable source and verified Engine/analyzer lifecycle. Its plain-Rust definition claim excludes compiler execution.
+
+**Native plugins**
+
+- Enable Linux TUI execution through a separate signed operator permit bound to the exact instance and installed artifacts. Enforce boot-time expiry, revocation and panel/window cleanup; review receipts grant no authority.
+
+**Hardened isolation**
+
+- Add administrator-provisioned Linux sessions with ROOT policy, a separate Engine identity, enforcing project quota, per-turn guards and typed workspace/provider transport.
+- Verify Runtime transport, source review and Git fixtures plus an actual daemon/frontend guarded turn with clean shutdown and complete cleanup. Wait for admitted workspace operations before stop; retain uncertain ownership.
+
+**Platform and validation**
+
+- Make MCP timeout and full-backlog fixtures portable and require a dispatched fleet turn with terminal settlement. Add automated platform prerequisite checks and offline Android recovery/relaunch coverage.
+- Pin released native LORE **0.62.22**. Physical Android/FCM, authenticated macOS and two-host tailnet acceptance remain deferred; installed routing/fleet pilots follow the merged release.
+
 ## 2.0.0-beta.50 — 2026-10-12
 
 **Routing and supervision**
