@@ -36,6 +36,7 @@ EXPECTED_TEXT = "Deterministic native fixture response."
 PUBLIC = Path("/usr/libexec/doxa/daemon-proof-20261013")
 MAX_FRAME = 65536
 MAX_OUTPUT = 2 * 1024 * 1024
+FAILED_SPAWNS = []
 
 
 def require(condition, reason):
@@ -126,6 +127,41 @@ def child_setup(parent, tty=False):
         fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
 
+def pin_spawned(process, uid, snapshot=proc, opener=os.pidfd_open):
+    """Pin only a direct, still-unreaped Popen child; never a /proc selection."""
+    descriptor = None
+    try:
+        descriptor = opener(process.pid)
+        identity = snapshot(process.pid)
+        require(identity["uids"] == [uid] * 4, "actual child UID differs")
+        return descriptor, identity
+    except BaseException as original:
+        failure = {"pid": process.pid, "error": str(original), "teardown_error": None}
+        try:
+            if descriptor is not None:
+                if alive(descriptor): signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+            elif process.returncode is None:
+                # This direct child has never been waited/polled by another
+                # thread. Its PID remains reserved even if it has just exited.
+                process.kill()
+            process.wait(timeout=2)
+        except BaseException as cause:
+            failure["teardown_error"] = str(cause)
+        finally:
+            for file in (process.stdin, process.stdout, process.stderr):
+                if file is not None: file.close()
+        failure["returncode"] = process.returncode
+        if process.returncode is None:
+            # Preserve ownership for the orchestrator's cleanup retry. A
+            # constructor failure cannot leave an unrecorded background task.
+            failure.update(process=process, pidfd=descriptor)
+            FAILED_SPAWNS.append(failure)
+        else:
+            if descriptor is not None: os.close(descriptor)
+            FAILED_SPAWNS.append(failure)
+        raise
+
+
 class Child:
     def __init__(self, name, argv, env, uid=0, tty=None):
         self.name = name
@@ -139,9 +175,7 @@ class Child:
             stderr=tty if tty is not None else subprocess.PIPE,
             user=uid, group=uid, extra_groups=[], close_fds=True, start_new_session=True,
             preexec_fn=lambda: child_setup(parent, tty is not None))
-        self.pidfd = os.pidfd_open(self.process.pid)
-        self.identity = proc(self.process.pid)
-        require(self.identity["uids"] == [uid] * 4, "actual child UID differs")
+        self.pidfd, self.identity = pin_spawned(self.process, uid)
         self.channels = []
         for label in ("stdout", "stderr"):
             file = getattr(self.process, label)
@@ -415,7 +449,7 @@ def main(args):
                 and stat.S_ISSOCK(daemon_socket.lstat().st_mode), "daemon socket escaped own runtime")
         root_manifest = json.loads((state / "manifest.json").read_bytes())
         cid = root_manifest["cid"]; require(re.fullmatch(r"[0-9a-f]{64}", cid), "ROOT exact CID unavailable")
-        info_status, info = engine.request(module.Deadline(10), "GET", f"/containers/{cid}/json")
+        info_status, info = engine.request(module.Deadline(budget.left(10)), "GET", f"/containers/{cid}/json")
         require(info_status == 200, "actual session CID not live")
         init = module.host_init_pid(engine.pid, info["State"]["Pid"])
         cgroup = Path(f"/proc/{init}/cgroup").read_text().strip().removeprefix("0::")
@@ -462,6 +496,20 @@ def main(args):
         body_error = str(cause)
     finally:
         cleanup = Budget(45)
+        for failed in FAILED_SPAWNS:
+            process = failed.get("process")
+            descriptor = failed.get("pidfd")
+            if process is not None:
+                try:
+                    if descriptor is not None:
+                        if alive(descriptor): signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                    elif process.returncode is None: process.kill()
+                    process.wait(timeout=cleanup.left(2))
+                except BaseException as cause: cleanup_errors.append("failed spawn teardown: " + str(cause))
+                finally:
+                    if descriptor is not None: os.close(descriptor)
+            if failed.get("teardown_error"): cleanup_errors.append("initial spawn teardown: " + failed["teardown_error"])
+        report["failed_spawns"] = [{k:v for k,v in row.items() if k not in ("process", "pidfd")} for row in FAILED_SPAWNS]
         # Signal only retained exact own pidfds, never process groups or argv hints.
         first = [child for child in (frontend, obs, daemon) if child is not None]
         owned = first + [child for child in pump.children if child is not broker and child not in first]
@@ -535,9 +583,34 @@ def main(args):
     if report["status"] != "passed": raise SystemExit(1)
 
 
+def self_test():
+    """Actual known-child startup-failure teardown, without any guest setup."""
+    for failed_open in (False, True):
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+        def bad_snapshot(pid):
+            row = proc(pid); row["uids"] = [-1]*4; return row
+        def bad_open(_pid):
+            raise PermissionError("injected pidfd-open failure")
+        try:
+            pin_spawned(process, os.geteuid(), snapshot=bad_snapshot,
+                        opener=bad_open if failed_open else os.pidfd_open)
+        except (RuntimeError, PermissionError):
+            pass
+        else:
+            raise AssertionError("startup failure accepted")
+        require(process.returncode is not None, "failed constructor left its actual child alive")
+        require(all(file.closed for file in (process.stdin, process.stdout, process.stderr)), "failed constructor left pipe descriptors open")
+        try: os.kill(process.pid, 0)
+        except ProcessLookupError: pass
+        else: raise AssertionError("failed constructor child was not reaped")
+    print("known-child UID-validation and pidfd-open failures killed/reaped; all pipes closed")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--observer", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--socket", type=Path)
     parser.add_argument("--daemon-pid", type=int)
     parser.add_argument("--daemon-starttime", type=int)
@@ -550,5 +623,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path)
     options = parser.parse_args()
     require(10 <= options.seconds <= 300, "finite proof deadline outside bound")
-    if options.observer: observer(options)
+    if options.self_test: self_test()
+    elif options.observer: observer(options)
     else: main(options)
