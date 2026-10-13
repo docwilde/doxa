@@ -873,6 +873,15 @@ class GitMetadataTests(unittest.TestCase):
     def test_actual_git_preserves_normal_heads_tags_and_peeled_packed_refs(self):
         self.actual_packed_refs_view(None)
 
+    def test_packed_refs_rejects_malformed_peeled_oid(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))) as directory:
+            p=policy();p["root"]=str(Path(directory).resolve());p["engine"]["gid"]=os.getgid()
+            root=Path(p["root"]);(root/"broker").mkdir();source=root/"checkout/.git";source.mkdir(parents=True)
+            (source/"HEAD").write_bytes(b"1"*40+b"\n")
+            (source/"packed-refs").write_bytes(b"1"*40+b" refs/tags/v1\n^"+b"2"*39+b"z\n")
+            with self.fixture_root(p):
+                with self.assertRaisesRegex(b.Refused,"peeled ref syntax"):b.build_git_view(p,b.Deadline(1))
+
     def actual_packed_refs_view(self,inventory):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))) as directory:
             root=Path(directory).resolve();checkout=root/"checkout";checkout.mkdir();(root/"broker").mkdir()

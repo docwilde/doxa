@@ -1787,7 +1787,7 @@ def build_git_view(policy, deadline, publication_scope=None):
                     require(b".." not in row.split(b" ",1)[1].split(b"/"),"packed ref component escapes")
                     rows.append(row);accept_peeled=True
                 elif row.startswith(b"^") and accept_peeled:
-                    require(re.fullmatch(b"[\x5e](?:[0-9a-f]{40}|[0-9a-f]{64})",row),"peeled ref syntax")
+                    require(re.fullmatch(b"(?:[0-9a-f]{40}|[0-9a-f]{64})",row[1:]),"peeled ref syntax")
                     rows.append(row);accept_peeled=False
                 else:accept_peeled=False
             # A header-only clone or fully filtered inventory is a valid empty

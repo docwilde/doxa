@@ -204,3 +204,8 @@ exact R5 header-only, fully filtered remote/peeled inventories, and normal packe
 heads/tags/annotated peeled refs; fixtures substitute ROOT/quota metadata only,
 and do not authorize live isolation. Frozen R5 broker/policy/artifacts untouched;
 no guest edits. Committing before focused verification.
+
+The new actual normal annotated-tag case exposed existing peeled-row regex
+`[\x5e]`: bytes escaping made an invalid negated character class, raising a
+PatternError for valid peeled refs. Validate the OID suffix after the already
+checked literal caret instead. Added malformed peeled-OID refusal fixture.
