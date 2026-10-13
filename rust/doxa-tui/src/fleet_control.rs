@@ -436,6 +436,32 @@ fn resumable_slot_phase(row:&Value,busy:bool)->io::Result<()> {
     Ok(())
 }
 
+fn resumable_slot_accounting(row:&Value,hello:&Value,state:&Value)->io::Result<()> {
+    let billing=&hello["billing"];
+    if hello["engine"]=="router" {
+        // Router's aggregate flag also covers a normally unfinished API turn
+        // or pending CLI worker. Observation may rejoin that same running
+        // dispatch, but definitive or missing accounting is never authority.
+        if billing["router_usage"]["accounting_unknown"].as_bool()!=Some(false)
+            ||billing["worker_usage"]["accounting_unknown"].as_bool()!=Some(false) {
+            return Err(invalid("fleet slot spend is unknown; resume withheld"));
+        }
+        match billing["budget"]["accounting_unknown"].as_bool() {
+            Some(false)=>Ok(()),
+            Some(true) if row["phase"]=="dispatched"&&state["running"].as_bool()==Some(true)=>Ok(()),
+            _=>Err(invalid("fleet slot spend is unknown; resume withheld")),
+        }
+    } else if billing["budget"]["accounting_unknown"]==true {
+        Err(invalid("fleet slot spend is unknown; resume withheld"))
+    } else {Ok(())}
+}
+
+fn resumable_slot_state(row:&Value,client:&mut DaemonClient)->io::Result<Value> {
+    let state=rpc(client,"get_state",json!({}))?;
+    resumable_slot_accounting(row,&client.hello,&state)?;
+    Ok(state)
+}
+
 fn validate_dependency_resume(context:&doxa_fleet::Context,state:&doxa_fleet::State,rows:&[Value])->io::Result<()> {
     if rows.len()!=context.assignments.len(){return Err(invalid("fleet assignment count changed; resume withheld"));}
     for (index,assignment) in context.assignments.iter().enumerate().filter(|(_,row)|!row.depends_on.is_empty()) {
@@ -488,8 +514,7 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
         if slot.client.hello["cwd"] != row["cwd"] || slot.client.hello["model"] != row["effective_model"] {
             return Err(invalid("fleet slot identity or effective model changed; resume withheld"));
         }
-        if slot.client.hello["billing"]["budget"]["accounting_unknown"] == true { return Err(invalid("fleet slot spend is unknown; resume withheld")); }
-        let state = rpc(&mut slot.client, "get_state", json!({}))?;
+        let state = resumable_slot_state(row,&mut slot.client)?;
         if state["pending_inputs_complete"] != true { return Err(invalid("fleet approval state is incomplete; resume withheld")); }
         if let Some(pending) = state["pending_inputs"].as_array() {
             for ask in pending.iter().take(64) {
@@ -1418,6 +1443,104 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn router_resume_hello(mode:&str)->Value {
+        json!({"type":"hello","proto":1,"engine":"router","session_id":"pending-router","next_seq":0,
+            "billing":{"mode":mode,"router_usage":{"accounting_unknown":false,"reserved_usd_micros":1250},
+                "worker_usage":{"accounting_unknown":false,"retained_reservation_usd_micros":50000},
+                "budget":{"accounting_unknown":true,"ceiling_usd":0.1,"aggregate_held_usd":0.05125}}})
+    }
+
+    #[test]
+    fn router_resume_observes_pending_api_and_cli_with_known_ledgers_without_changing_holds() {
+        for mode in ["api","mixed"] {
+            let hello=router_resume_hello(mode);let before=hello.clone();
+            let row=json!({"phase":"dispatched"});let state=json!({"running":true,"queued":0});
+            assert!(resumable_slot_accounting(&row,&hello,&state).is_ok());
+            assert_eq!(hello,before,"observation must not settle or release pending reservations");
+            let mut settled=hello.clone();settled["billing"]["budget"]["accounting_unknown"]=json!(false);
+            assert!(resumable_slot_accounting(&row,&settled,&json!({"running":false,"queued":0})).is_ok());
+        }
+    }
+
+    #[test]
+    fn router_resume_refuses_definitive_unknown_even_when_running_or_aggregate_says_known() {
+        for ledger in ["router_usage","worker_usage"] {
+            for aggregate in [false,true] {
+                let mut hello=router_resume_hello("api");
+                hello["billing"][ledger]["accounting_unknown"]=json!(true);
+                hello["billing"]["budget"]["accounting_unknown"]=json!(aggregate);
+                assert!(resumable_slot_accounting(&json!({"phase":"dispatched"}),&hello,&json!({"running":true})).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn router_resume_requires_explicit_boolean_accounting_fields() {
+        for ledger in ["router_usage","worker_usage","budget"] {
+            for malformed in [Value::Null,json!("false"),json!(0),json!({})] {
+                let mut hello=router_resume_hello("mixed");
+                hello["billing"]["budget"]["accounting_unknown"]=json!(false);
+                hello["billing"][ledger]["accounting_unknown"]=malformed;
+                assert!(resumable_slot_accounting(&json!({"phase":"dispatched"}),&hello,&json!({"running":true})).is_err());
+            }
+            let mut hello=router_resume_hello("api");
+            hello["billing"][ledger].as_object_mut().unwrap().remove("accounting_unknown");
+            assert!(resumable_slot_accounting(&json!({"phase":"dispatched"}),&hello,&json!({"running":true})).is_err());
+        }
+    }
+
+    #[test]
+    fn router_resume_refuses_inactive_queued_only_and_ambiguous_unfinished_slots() {
+        let hello=router_resume_hello("api");
+        for running in [json!(false),Value::Null,json!("true"),json!(1)] {
+            assert!(resumable_slot_accounting(&json!({"phase":"dispatched"}),&hello,&json!({"running":running,"queued":3})).is_err());
+        }
+        for phase in ["dispatch_pending","dispatching","started","dependency_waiting",""] {
+            assert!(resumable_slot_accounting(&json!({"phase":phase}),&hello,&json!({"running":true})).is_err());
+        }
+        assert!(resumable_slot_phase(&json!({"phase":"dispatch_pending"}),true).is_err());
+    }
+
+    #[test]
+    fn router_resume_does_not_widen_non_router_accounting_policy() {
+        let row=json!({"phase":"dispatched"});let state=json!({"running":true});
+        let mut hello=router_resume_hello("api");hello["engine"]=json!("codex");
+        assert!(resumable_slot_accounting(&row,&hello,&state).is_err());
+        hello["billing"]["budget"]["accounting_unknown"]=json!(false);
+        assert!(resumable_slot_accounting(&row,&hello,&state).is_ok());
+        assert!(resumable_slot_accounting(&row,&json!({"engine":"fixture"}),&state).is_ok());
+    }
+
+    #[test]
+    fn router_resume_reads_authenticated_running_state_without_redelivery() {
+        use std::io::{BufRead,BufReader};
+        use std::os::unix::net::UnixListener;
+        for mode in ["api","mixed"] {
+            let root=tempfile::Builder::new().prefix("rr").rand_bytes(4).tempdir().unwrap();
+            fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();
+            let path=root.path().join("s");let listener=UnixListener::bind(&path).unwrap();
+            fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
+            let hello=router_resume_hello(mode);let expected=hello.clone();
+            let server=std::thread::spawn(move||{
+                let (mut stream,_)=listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                writeln!(stream,"{hello}").unwrap();
+                let mut reader=BufReader::new(stream.try_clone().unwrap());let mut line=String::new();
+                reader.read_line(&mut line).unwrap();
+                let attach:Value=serde_json::from_str(&line).unwrap();assert_eq!(attach["type"],"attach");
+                line.clear();reader.read_line(&mut line).unwrap();
+                let command:Value=serde_json::from_str(&line).unwrap();assert_eq!(command["method"],"get_state");
+                assert_ne!(command["type"],"prompt");
+                writeln!(stream,"{}",json!({"type":"reply","id":command["id"],"ok":true,"running":true,"queued":0,"pending_inputs_complete":true,"pending_inputs":[]})).unwrap();
+                line.clear();assert_eq!(reader.read_line(&mut line).unwrap(),0,"resume must not send another admission");
+            });
+            let mut client=DaemonClient::connect(&path,None).unwrap();
+            let state=resumable_slot_state(&json!({"phase":"dispatched"}),&mut client).unwrap();
+            assert_eq!(state["running"],true);assert_eq!(client.hello,expected);
+            drop(client);server.join().unwrap();
+        }
+    }
 
     // Launch-review fixtures exercise the real AF_UNIX admission bound. Keep
     // their explicit root short and private under the caller's real-disk TMPDIR
