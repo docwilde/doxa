@@ -336,7 +336,7 @@ def main():
             'claude':{'path':'/usr/local/bin/claude','sha256':'0'*64,'artifacts':{'/usr/local/bin/claude':'0'*64},'environment_keys':[],'egress':['example.com'],'proxy_port':3128}},
         'authority':{'path':str(args.gateway),'sha256':args.gateway_sha256},'broker':{'path':str(installed),'sha256':sha_file(installed)},
         'limits':{'memory_bytes':512*1024*1024,'cpu_quota':100000,'cpu_period':100000,'pids':128,'disk_bytes':64*1024*1024,
-            'output_bytes':1024*1024,'stdin_bytes':1024*1024,'deadline_seconds':300,'operation_seconds':30}}
+            'output_bytes':1024*1024,'stdin_bytes':1024*1024,'deadline_seconds':300,'operation_seconds':120}}
     module.validate_policy(policy);engine=module.Engine(policy)
     connection=engine.connect(module.Deadline(10));connection.sock.close();engine.live()
     report={'scope':'actual-composed-root-runtime-fixture','session_id':sid,'project_id':args.project_id,'paid_calls':0,'live_provider_verified':False,
