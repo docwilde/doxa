@@ -1891,10 +1891,14 @@ fn billing_from_account(account: &Value) -> Option<Value> {
 }
 
 fn finish_terminal(events: &mut Option<SyncSender<Value>>, shared: &Shared, data: Value) {
-    if let Some(sink) = events.take() {
+    let sink = events.take();
+    // Durable, context and input cleanup precedes this detached old sink.
+    // Publish idle before completion wakes a caller; never clear active again
+    // after that caller can admit another turn or change verified settings.
+    shared.active.store(false, Ordering::Release);
+    if let Some(sink) = sink {
         let _ = sink.send(json!({"type":"turn_done","data":data}));
     }
-    shared.active.store(false, Ordering::Release);
 }
 fn context_detail(value: &Value, shared: &Shared) -> Result<Value, String> {
     let mut result = json!({"source":"Claude CLI get_context_usage"});
@@ -2473,6 +2477,67 @@ for line in sys.stdin:
             .unwrap();
         assert_eq!(next["data"]["approx_tokens"], 17);
     }
+    #[test]
+    fn terminal_publication_releases_active_before_a_blocked_receiver_and_preserves_new_admission() {
+        let (_dir, host) = fixture("pass");
+        for data in [json!({"is_error":false}),json!({"is_error":true,"error":"provider failed"}),json!({"is_error":true,"error":"interrupted"})] {
+            host.shared.active.store(true,Ordering::Release);
+            let shared=host.shared.clone();let (sink,receiver)=mpsc::sync_channel(0);
+            let (started,ready)=mpsc::channel();let expected=data.clone();
+            let worker=std::thread::spawn(move||{
+                let mut events=Some(sink);started.send(()).unwrap();
+                finish_terminal(&mut events,&shared,data);
+                assert!(events.is_none(),"completed turn must detach its sink");
+            });
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+            let deadline=Instant::now()+Duration::from_secs(2);
+            while host.has_active_work()&&Instant::now()<deadline {std::thread::yield_now();}
+            let idle_before_receive=!host.has_active_work();
+            // Drain even on failure so the rendezvous sender cannot be orphaned.
+            let terminal=receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            host.shared.active.store(true,Ordering::Release);
+            worker.join().unwrap();
+            assert!(idle_before_receive,"turn_done publication must already observe an idle host");
+            assert!(host.has_active_work(),"old completion must not clear a newly admitted turn");
+            assert_eq!(terminal,json!({"type":"turn_done","data":expected}));
+            host.shared.active.store(false,Ordering::Release);
+        }
+        assert!(host.shutdown());
+    }
+
+    #[test]
+    fn terminal_callback_observes_cleanup_and_immediately_changes_effort_after_success_error_and_interrupt() {
+        let (_dir,host)=fixture(&format!(r#"if row['type']=='user':
+  text=row['message']['content']
+  emit({{'type':'stream_event','session_id':'{SESSION}','event':{{'type':'content_block_delta','delta':{{'type':'text_delta','text':str(os.getpid())}}}}}})
+  if text!='interrupt':
+   emit({{'type':'assistant','session_id':'{SESSION}','message':{{'role':'assistant','content':[{{'type':'text','text':'completed'}}]}}}})
+   emit({{'type':'result','session_id':'{SESSION}','is_error':text=='error','usage':{{'input_tokens':5,'output_tokens':2}}}})
+"#));
+        let mut pids=Vec::new();
+        for text in ["success","error","interrupt"] {
+            let mut terminal_seen=false;let mut interrupted=false;let mut pid=String::new();
+            host.prompt(text,&mut|event|{
+                if event["type"]=="text_delta" {
+                    pid.push_str(event["data"]["text"].as_str().unwrap());
+                    if text=="interrupt"&&!interrupted {
+                        interrupted=true;host.call("interrupt",&json!({})).unwrap();
+                    }
+                }
+                if event["type"]=="turn_done" {
+                    assert!(!host.has_active_work(),"terminal callback must observe idle after cleanup");
+                    assert_eq!(event["data"]["is_error"],text!="success");
+                    assert_eq!(host.call("set_effort",&json!({"effort":"low"})).unwrap()["verification_pending"],false);
+                    terminal_seen=true;
+                }
+            });
+            assert!(terminal_seen);assert_eq!(interrupted,text=="interrupt");
+            assert!(!pid.is_empty());pids.push(pid);
+        }
+        assert!(pids.windows(2).all(|pair|pair[0]==pair[1]),"completion settings changes must retain the same CLI process");
+        assert!(host.shutdown());
+    }
+
     #[test]
     fn same_cli_turn_observes_verified_model_effort_and_immediate_reasoning() {
         let (_dir, host) = fixture(&format!(
