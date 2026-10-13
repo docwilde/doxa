@@ -395,10 +395,8 @@ class GatewaySocketCleanupTests(unittest.TestCase):
             root=Path(directory);runtime=root/"r";runtime.mkdir();mount=root/"b";mount.mkdir()
             broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy["engine"]["gid"]=os.getgid()
             broker.policy["providers"]["codex"]={};broker.state_dir=runtime;broker.gateway_sockets={};broker.gateway_parents={}
-            shapes=broker.gateway_socket_paths
-            sockets=[];child=subprocess.Popen([sys.executable,"-I","-c","import time;time.sleep(5)" if alive else "pass"])
+            sockets=[];child=subprocess.Popen([sys.executable,"-I","-c","import time;time.sleep(5)"])
             broker.gateway_pidfd=os.pidfd_open(child.pid)
-            if not alive:child.wait(timeout=2)
             original_stat=os.stat;original_lstat=os.lstat
             def root_socket(meta):
                 if stat.S_ISSOCK(meta.st_mode):
@@ -413,6 +411,7 @@ class GatewaySocketCleanupTests(unittest.TestCase):
                     sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.bind(str(path));path.chmod(mode);sockets.append(sock)
                     parent=original_stat(path.parent);broker.gateway_parents[path.parent]=(parent.st_dev,parent.st_ino,parent.st_uid,parent.st_gid,parent.st_mode)
                 broker.capture_gateway_sockets()
+                if not alive:child.kill();child.wait(timeout=2)
                 try:yield broker,mount,sockets
                 finally:
                     for sock in sockets:sock.close()

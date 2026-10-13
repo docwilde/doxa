@@ -933,6 +933,8 @@ class Broker:
                     "untracked gateway socket in fixed broker scope")
 
     def capture_gateway_sockets(self):
+        require(self.gateway_pidfd is not None and not select.select([self.gateway_pidfd],[],[],0)[0],
+                "gateway socket capture requires live owned PIDFD")
         self.check_unknown_gateway_sockets()
         for path,gid,mode in self.gateway_socket_paths():
             parent=controlled(path.parent)
