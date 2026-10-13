@@ -95,3 +95,8 @@ unique guest package toROOT0:0/0644 and ensured setup failure fixture cleanup.
 P2 additional fix: absent-CID resume also retires old gateway/adapter handles via
 independent cleanup before handing ownership to fresh prepare; uncertain helper
 retirement prevents fresh scope creation even when the old container is absent.
+
+Final code baselinef26a69b7:50 focused tests passed0.577s, clean status and
+diff-check. Evidence and exact commands are committed in evidence/RUN.md.
+Native composed admission proof, Runtime wiring and production provisioning
+remain parent/authority-owned; these Git/client fixtures make no readiness claim.
