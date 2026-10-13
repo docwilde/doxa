@@ -58,4 +58,5 @@ tempfile = "3"
 wat = "=1.261.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ring = "=0.17.14"
 signal-hook = "=0.3.18"

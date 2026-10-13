@@ -1,6 +1,6 @@
 # Native DOXA plugin API
 
-Status: **data-only TUI v1 plus package review and a closed run-request lifecycle; explicit Linux grantless CLI prototype; disposable delegated-host proof passed; installed-host activation open**.
+Status: **data-only TUI v1 plus explicit isolated zero-grant execution; signed installed-host permits bind each TUI instance; nine-case installed-host and eight-case actual TUI acceptance passed on a private installation**.
 This plan supersedes the Python/Textual `Plugin` and `PANE_COMMANDS` draft. The
 Rust frontend uses its own command registry, palette and help panel. Claude Code
 plugin adoption through `/plugins` is a separate provider feature.
@@ -76,8 +76,8 @@ startup, and neither preflight nor a matching config entry executes code. The
 TUI validates in a background worker and displays a read-only snapshot with
 an explicit CLI run command only for an exactly approved zero-grant package.
 `/native-plugin run NAME` starts a cancellable local admission request that
-rechecks exact approval and identity, then stops at a closed installed-host
-gate. No native slash command can execute a package or reach a provider.
+rechecks exact approval and identity, then checks the enrolled operator’s signed installed-host permit before dispatch.
+The worker remains isolated and cannot reach a provider.
 The CLI repeats the approval, byte and inode check at execution. The
 only reserved grant name is `render-local-panel-v1`; no runtime capability is
 implemented. See [Native text plugins](../native-plugins.md#executable-package-identity-review)
@@ -96,8 +96,8 @@ make the module safe to run.
 The explicit `doxa native-plugin run NAME --grantless-prototype` command now
 routes an approved zero-grant package through the cgroup-gated child boundary.
 It refuses execution when the delegated cgroup controls are unavailable.
-Aggregate containment passed on a disposable delegated guest. TUI activation
-and broader plugin capabilities still need a reviewed operator path. Native shared libraries and
+Aggregate containment passed on a disposable delegated guest. TUI activation requires a separately signed, current operator permit.
+Broader plugin capabilities remain unavailable. Native shared libraries and
 in-process callbacks remain out of scope.
 
 ### Runner design and test seam
@@ -143,7 +143,9 @@ fixtures show host files, mounts, a host TCP listener and inherited test
 environment are unavailable; resource fixtures show memory and CPU exhaustion
 stopped by kernel limits. Without a user-delegated cgroup subtree, admission
 refuses to spawn. A disposable delegated guest recorded aggregate limits and
-cgroup cleanup; installed-host acceptance remains open.
+cgroup cleanup. The installed-host nine-case exercise and actual TUI lifecycle
+proof also passed on a private installation on 2026-10-13; each different host,
+artifact and running instance still needs its own fresh proof.
 An [ignored delegated-host acceptance fixture](../native-plugins.md#delegated-host-acceptance-fixture)
 now measures the actual aggregate limits, namespace boundary and cgroup
 cleanup in one bounded run. The opt-in `scripts/plugin-delegated-host-proof.py`
@@ -159,7 +161,7 @@ spawn. Its boundary case
 compares worker network, mount, user and PID namespace identities with the
 host and rejects any non-loopback network interface or route. All seven cases,
 including cgroup writes, passed on a disposable delegated Ubuntu guest. This
-does not authorize TUI execution or nonempty grants.
+receipt does not authorize TUI execution or nonempty grants.
 
 The sandbox opens the trusted worker executable with `O_NOFOLLOW` and
 binds that descriptor into the private mount. It also executes Bubblewrap
@@ -181,10 +183,13 @@ setup failure and a worker failure before its entry marker remain one
 conservative class. The explicit CLI command now calls this seam with a
 five-second deadline and signal-driven cancellation. The TUI run request has
 background ownership, bounded result classes and cancellation on panel, tab,
-owner and window exit. The TUI worker entry requires a private installed-host
-authority value; its production issuer remains closed until delegation and
-descendant cleanup are verified for the installed host. There is still no
-authenticated installed-host admission, so TUI execution stays disabled. Do
+owner and window exit. The TUI worker entry requires a signed installed-host authority value, verified
+against an explicitly enrolled Ed25519 operator public key and policy epoch.
+The issuer reruns all nine installed-host acceptance cases and binds the
+running frontend UID/PID/start/boot/home, exact binaries and delegated cgroups.
+Signed absolute `CLOCK_BOOTTIME` expiry is limited to 15 minutes; every load
+and running-worker check enforces it. Unlink and policy changes revoke permits.
+Review receipts stay non-authorizing. Do
 not treat owner approval,
 the request frame, fuel or store limits as an execution switch. The handoff is
 `recheck_approved(home, review) -> RecheckedPackage`: it returns the exact,
@@ -197,7 +202,7 @@ read-only observation of the running CLI's delegated cgroup parent and
 supervisor membership and the exact opened frontend, worker and Bubblewrap
 binary hashes/inodes. It refuses stale worker cgroups and ambiguous or
 changing identities. This is a prerequisite report, not a cleanup exercise or
-authority token; the production `InstalledHostAuthority` issuer remains closed.
+authority token; only the separate signed activation workflow can issue a permit.
 
 The runnable prototype is an explicit, grantless developer-only CLI command,
 never TUI startup or a native slash command. It requires an
@@ -215,13 +220,13 @@ The seven-case fixture passed on a disposable host with delegated
 controllers. It covered aggregate memory/CPU/PID enforcement, cancellation,
 network and host-file denial, stale approval, and cgroup cleanup. A separate
 review-only receipt workflow now binds an exact test executable and clean
-source tree. Installed-host acceptance and an operator activation policy
-remain open. The current TUI request can abandon a stalled private-file read
+source tree. Installed-host activation uses the separate signed operator policy; fresh
+acceptance is required for each instance. The current TUI request can abandon a stalled private-file read
 after setting cancellation, but an atomic fence prevents that read from later
 dispatching a worker. Once admitted, panel or window close waits for the
 supervisor's cleanup attempt to return. Local tests cover that ordering and a
-real process-group cancellation. Successful cgroup cleanup on window exit,
-including error paths, still needs installed-host acceptance. Parent deadlines
+real process-group cancellation. Successful cgroup cleanup on window exit, including error paths, is covered
+by the installed-host lifecycle proof before a permit is signed. Parent deadlines
 and module maxima are not hard resource guarantees; other platforms need
 equivalent isolation proof.
 
@@ -231,9 +236,19 @@ executable. Its read-only check precedes any cgroup write. The run requires
 operator-supplied expected digests and exercises the seven namespace and
 resource cases plus trapped-module and post-allocation launch-error cleanup.
 Its private receipt stays review-only; no code consumes it as TUI authority.
-The nine-case installed-host run has not been performed.
-An operator policy must still authenticate the result, bind the running TUI
-instance and define expiry and revocation before the issuer can open.
+The optional `--activate` workflow signs a separate instance-bound permit only
+after all nine cases pass; it never imports a prior receipt. See the documented
+operator enrollment, expiry and revocation policy in [Native plugins](../native-plugins.md#installed-host-proof-and-operator-activation).
+
+The installed private Ubuntu guest passed three fresh nine-case runs before
+the actual TUI lifecycle driver completed all eight cases: no-permit refusal,
+signed return 17, unlink revocation of a populated worker cgroup, refusal after
+revocation, panel and window close cleanup, different-instance replay refusal,
+and expiry refusal. The receipt retained populated/PID observations for each
+active worker and zero remaining worker cgroups. Memory peak reached exactly
+256 MiB with kernel OOM kills, PID peak reached 16 with a denial, and aggregate
+CPU throttling was observed. Private activation keys and owner homes were
+removed after the proof. The workstation owner installation was not changed.
 
 ### Other extensions
 

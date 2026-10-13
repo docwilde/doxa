@@ -1,7 +1,7 @@
 //! Linux sandbox admission for the explicit grantless plugin CLI prototype.
 //! A command is constructed only after a private cgroup v2 budget is installed.
-//! The TUI does not call this module. Disposable delegated-host proof passed;
-//! installed-host acceptance remains required before broader activation.
+//! TUI admission additionally requires a signed, instance-bound operator permit.
+//! Each installed host and artifact still needs its own fresh acceptance.
 #![cfg(target_os = "linux")]
 
 use std::collections::HashSet;
@@ -17,6 +17,7 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::{Duration, Instant};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -96,8 +97,9 @@ fn delegated_cgroup_parent() -> io::Result<PathBuf> {
         unsafe { libc::geteuid() }, std::process::id())
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct ExecutableIdentity {
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ExecutableIdentity {
     device: u64,
     inode: u64,
     bytes: u64,
@@ -121,6 +123,10 @@ fn executable_identity(path: &Path) -> io::Result<ExecutableIdentity> {
 
 fn executable_identity_with(path: &Path, after_open: impl FnOnce()) -> io::Result<ExecutableIdentity> {
     let mut file = open_trusted_executable(path)?;
+    executable_identity_opened(path, &mut file, after_open)
+}
+
+fn executable_identity_opened(path: &Path, file: &mut File, after_open: impl FnOnce()) -> io::Result<ExecutableIdentity> {
     let before = file.metadata()?;
     if before.len() > MAX_TRUSTED_EXE_BYTES {
         return Err(unavailable("trusted plugin executable exceeds identity read limit"));
@@ -152,9 +158,10 @@ fn executable_identity_with(path: &Path, after_open: impl FnOnce()) -> io::Resul
         bytes, sha256: format!("{:x}", hash.finalize()) })
 }
 
-#[derive(Debug)]
-struct HostObservation {
-    parent: PathBuf,
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct HostObservation {
+    pub(super) parent: PathBuf,
     parent_device: u64,
     parent_inode: u64,
     supervisor_device: u64,
@@ -230,7 +237,7 @@ fn host_observation_at(root: &Path, membership: &str, uid: u32, pid: u32,
 /// Read-only operator inventory for the current process and exact binaries.
 /// It proves prerequisites only: namespace isolation, aggregate limits and
 /// descendant cleanup require an accepted installed-host exercise.
-pub(crate) fn host_preflight_report(frontend: &Path, worker: &Path) -> io::Result<String> {
+pub(super) fn host_observation(frontend: &Path, worker: &Path) -> io::Result<HostObservation> {
     let expected_parent = delegated_cgroup_parent()?; // checks cgroup2 mount
     let membership = fs::read_to_string("/proc/self/cgroup")?;
     let observation = host_observation_at(Path::new(CGROUP_ROOT), &membership,
@@ -240,7 +247,11 @@ pub(crate) fn host_preflight_report(frontend: &Path, worker: &Path) -> io::Resul
         || delegated_cgroup_parent()? != expected_parent {
         return Err(unavailable("installed host cgroup membership changed during observation"));
     }
-    Ok(observation.report())
+    Ok(observation)
+}
+
+pub(crate) fn host_preflight_report(frontend: &Path, worker: &Path) -> io::Result<String> {
+    Ok(host_observation(frontend, worker)?.report())
 }
 
 fn write_and_check(path: &Path, value: &str) -> io::Result<()> {
@@ -421,9 +432,21 @@ struct WorkerCommand { command: Command, status: File }
 /// Replacing its pathname after this call cannot change the bytes executed.
 /// The separate status descriptor belongs to Bubblewrap and is not mounted
 /// into the child; it distinguishes setup failure from a started child.
+#[cfg(test)]
 fn command_impl_with_bwrap(bwrap: &Path, worker: &Path, args: &[&str], cgroup: Option<&CgroupBudget>) -> io::Result<WorkerCommand> {
-    let bwrap_file = open_trusted_executable(bwrap)?;
-    let worker_file = open_trusted_executable(worker)?;
+    command_attested(bwrap, worker, args, cgroup, None)
+}
+
+fn command_attested(bwrap: &Path, worker: &Path, args: &[&str], cgroup: Option<&CgroupBudget>,
+    expected: Option<&HostObservation>) -> io::Result<WorkerCommand> {
+    let mut bwrap_file = open_trusted_executable(bwrap)?;
+    let mut worker_file = open_trusted_executable(worker)?;
+    if let Some(expected) = expected {
+        if executable_identity_opened(bwrap, &mut bwrap_file, || {})? != expected.bwrap
+            || executable_identity_opened(worker, &mut worker_file, || {})? != expected.worker {
+            return Err(unavailable("plugin launch artifacts differ from signed installed-host authority"));
+        }
+    }
     let status = status_memfd()?;
     let status_child = status.try_clone()?;
     let bwrap_fd = bwrap_file.as_raw_fd();
@@ -477,12 +500,9 @@ fn command_impl_with_bwrap(bwrap: &Path, worker: &Path, args: &[&str], cgroup: O
     Ok(WorkerCommand { command, status })
 }
 
+#[cfg(test)]
 fn command_impl(worker: &Path, args: &[&str], cgroup: Option<&CgroupBudget>) -> io::Result<WorkerCommand> {
     command_impl_with_bwrap(Path::new(BWRAP), worker, args, cgroup)
-}
-
-fn command(worker: &Path, cgroup: &CgroupBudget) -> io::Result<WorkerCommand> {
-    command_impl(worker, &[], Some(cgroup))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -569,10 +589,36 @@ pub(crate) fn supervise_reviewed(
     cancel: &AtomicBool,
     deadline: Instant,
 ) -> io::Result<IsolatedOutcome> {
+    supervise_reviewed_impl(home, review, worker, cancel, deadline, None)
+}
+
+pub(super) fn supervise_authorized(home: &Path, review: &super::packages::Review,
+    worker: &Path, cancel: &AtomicBool, deadline: Instant,
+    authority: &super::InstalledHostAuthority) -> io::Result<IsolatedOutcome> {
+    authority.check(home)?;
+    if host_observation(&std::env::current_exe()?, worker)? != authority.host {
+        return Err(unavailable("installed plugin host changed after authorization"));
+    }
+    supervise_reviewed_impl(home, review, worker, cancel, deadline, Some(authority))
+}
+
+fn supervise_reviewed_impl(home: &Path, review: &super::packages::Review,
+    worker: &Path, cancel: &AtomicBool, deadline: Instant,
+    authority: Option<&super::InstalledHostAuthority>) -> io::Result<IsolatedOutcome> {
     let package = super::packages::recheck_approved(home, review)?;
     let frame = super::runner::encode_request(&package)?;
     let mut budget = CgroupBudget::create()?;
-    let WorkerCommand { mut command, status } = command(worker, &budget)?;
+    if let Some(authority) = authority {
+        authority.check(home)?;
+        let metadata = fs::symlink_metadata(&authority.host.parent)?;
+        if budget.path.parent() != Some(authority.host.parent.as_path())
+            || metadata.dev() != authority.host.parent_device || metadata.ino() != authority.host.parent_inode {
+            return Err(unavailable("worker budget escaped signed delegated parent"));
+        }
+    }
+    let WorkerCommand { mut command, status } = command_attested(Path::new(BWRAP), worker,
+        &[], Some(&budget), authority.map(|value| &value.host))?;
+    if let Some(authority) = authority { authority.check(home)?; }
     let result = super::runner_process::supervise_with_input(
         &mut command, Some(&frame), cancel, deadline);
     budget.stop()?;
@@ -673,7 +719,7 @@ mod tests {
         assert!(report.contains("no TUI authority was issued"));
         assert_eq!(fs::read(parent.join("cgroup.procs")).unwrap(), before_procs);
         assert_eq!(fs::read_dir(&parent).unwrap().count(), 3);
-        assert!(super::super::installed_host_authority().is_err());
+        assert!(super::super::installed_host_authority(dir.path()).is_err());
     }
 
     #[test]
@@ -723,6 +769,23 @@ mod tests {
         fs::OpenOptions::new().write(true).open(&executable).unwrap()
             .set_len(MAX_TRUSTED_EXE_BYTES + 1).unwrap();
         assert!(executable_identity(&executable).is_err());
+    }
+
+    #[test]
+    fn signed_launch_identity_is_checked_on_the_actual_opened_descriptors() {
+        let (dir, root, _) = fake_delegated_tree();
+        let frontend = dir.path().join("frontend");
+        let worker = dir.path().join("worker");
+        let bwrap = dir.path().join("bwrap");
+        for path in [&frontend, &worker, &bwrap] { trusted_file(path, b"#!/bin/sh\nexit 0\n"); }
+        let expected = host_observation_at(&root, "0::/delegated/supervisor\n",
+            unsafe { libc::geteuid() }, 4242, &frontend, &worker, &bwrap).unwrap();
+        assert!(command_attested(&bwrap, &worker, &[], None, Some(&expected)).is_ok());
+        trusted_file(&worker, b"#!/bin/sh\nexit 1\n");
+        assert!(command_attested(&bwrap, &worker, &[], None, Some(&expected)).is_err());
+        trusted_file(&worker, b"#!/bin/sh\nexit 0\n");
+        trusted_file(&bwrap, b"#!/bin/sh\nexit 1\n");
+        assert!(command_attested(&bwrap, &worker, &[], None, Some(&expected)).is_err());
     }
 
     #[test]

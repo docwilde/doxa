@@ -342,7 +342,7 @@ class DelegatedShapeTests(unittest.TestCase):
         (alternatives / "awk").symlink_to("../../usr/bin/mawk")
         alias = usr_bin / "awk"
         alias.symlink_to("../../etc/alternatives/awk")
-        self.assertEqual(proof.sandbox_visible_tool(alias, host / "usr"), str(executable))
+        self.assertEqual(proof.sandbox_visible_tool(alias, host / "usr"), str(executable.resolve()))
 
         outside = host / "outside"
         outside.write_bytes(b"#!/bin/sh\nexit 0\n")

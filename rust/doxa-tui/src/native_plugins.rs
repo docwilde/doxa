@@ -1,5 +1,4 @@
-//! Owner-approved TUI content and an explicit, grantless CLI prototype.
-//! The TUI never loads or runs plugin code.
+//! Owner-approved content and a separate, isolated zero-grant plugin worker.
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::ffi::CString;
@@ -23,24 +22,34 @@ pub(crate) mod runner;
 pub(crate) mod runner_process;
 #[cfg(target_os = "linux")]
 pub(crate) mod runner_sandbox;
+#[cfg(target_os = "linux")]
+mod host_authority;
+#[cfg(target_os = "linux")]
+pub(crate) use host_authority::InstalledHostAuthority;
 
 /// Entry used only by the separate `doxa-plugin-worker` binary. Native TUI
 /// commands never invoke it in-process.
 pub fn plugin_worker_stdio() -> io::Result<()> { runner::serve_stdio() }
 
-/// A TUI worker launch must carry installed-host authority in addition to
-/// owner package approval. There is no issuer in production until the
-/// installed delegation and cleanup contract has been accepted. The explicit
-/// CLI prototype has its separate, opt-in admission path.
+#[cfg(not(target_os = "linux"))]
 pub(crate) struct InstalledHostAuthority { _private: () }
 
-pub(crate) fn installed_host_authority() -> io::Result<InstalledHostAuthority> {
+#[cfg(target_os = "linux")]
+pub(crate) fn installed_host_authority(home: &Path) -> io::Result<InstalledHostAuthority> {
+    host_authority::load(home)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn installed_host_authority(_home: &Path) -> io::Result<InstalledHostAuthority> {
     Err(io::Error::new(io::ErrorKind::PermissionDenied,
-        "installed plugin host delegation and cleanup are unverified"))
+        "installed plugin host authority requires Linux"))
 }
 
 #[cfg(test)]
 pub(crate) fn test_installed_host_authority() -> InstalledHostAuthority {
+    #[cfg(target_os = "linux")]
+    return host_authority::test_authority();
+    #[cfg(not(target_os = "linux"))]
     InstalledHostAuthority { _private: () }
 }
 
@@ -84,7 +93,7 @@ pub fn run_grantless_package(home: &Path, name: &str, cancel: &std::sync::atomic
 /// independently authenticated installed-host policy.
 #[cfg(target_os = "linux")]
 pub(crate) fn run_reviewed_grantless_package(
-    _authority: &InstalledHostAuthority, home: &Path, review: &packages::Review,
+    authority: &InstalledHostAuthority, home: &Path, review: &packages::Review,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> io::Result<i32> {
     if !review.owner_approved || !review.requested_grants.is_empty() {
@@ -96,7 +105,8 @@ pub(crate) fn run_reviewed_grantless_package(
     if cancel.load(std::sync::atomic::Ordering::Acquire) {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "plugin run cancelled"));
     }
-    let result = runner_sandbox::supervise_reviewed(home, review, &worker, cancel, deadline)?;
+    let result = authority.supervise(home, cancel, ||
+        runner_sandbox::supervise_authorized(home, review, &worker, cancel, deadline, authority))?;
     match result {
         runner_sandbox::IsolatedOutcome::Return(value) => Ok(value),
         other => Err(io::Error::other(format!("isolated plugin result: {}", outcome_class(other)))),

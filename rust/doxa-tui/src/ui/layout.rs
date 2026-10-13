@@ -582,6 +582,8 @@ impl App {
                         | "compaction"
                         | "native_plugin"
                         | "native_status"
+                        | "native_package"
+                        | "native_package_run"
                 ) {
                     (info.lines.len() + 2).clamp(7, 19) as u16
                 } else {
