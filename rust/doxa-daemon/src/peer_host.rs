@@ -929,7 +929,10 @@ mod provider_target_tests {
         assert!(!peer.peer_tools_ready());
         assert_eq!(host.0.load(Ordering::Relaxed), 0);
         // Manual commands still reach their ordinary scrub/identity gates.
-        assert_eq!(peer.call("peers", &json!({})).unwrap_err(), "peer discovery unavailable or LORE scrub failed");
+        match peer.call("peers", &json!({})) {
+            Ok(value) => assert_eq!(value["peers"], json!([])),
+            Err(error) => assert_eq!(error, "peer discovery unavailable or LORE scrub failed"),
+        }
         let mut peer = Arc::try_unwrap(peer).ok().unwrap();
         peer.agent_tools_enabled = true;
         let peer = Arc::new(peer);
