@@ -30,6 +30,12 @@ fn remaining(deadline: Instant, maximum: u64) -> io::Result<Duration> {
         .map(|duration| duration.min(Duration::from_secs(maximum)))
         .ok_or_else(|| io::Error::other("shared composed proof deadline exceeded"))
 }
+fn bounded<T>(deadline: Instant, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    remaining(deadline, 1)?;
+    let result = operation()?;
+    remaining(deadline, 1)?;
+    Ok(result)
+}
 fn write_bounded(input: &mut ChildStdin, mut bytes: &[u8], deadline: Instant) -> io::Result<()> {
     require(bytes.len() <= 65536, "fixture input exceeded bound")?;
     let flags = unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETFL) };
@@ -298,7 +304,8 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
         std::env::remove_var(key);
     }
     std::env::set_var("DOXA_HOME", home);
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(300);
     let mut progress = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -323,6 +330,7 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
         &mut progress,
         "actual Runtime prepare with harmless settings",
     )?;
+    remaining(deadline, 1)?;
     let mut runtime = Runtime::prepare(
         home,
         sid,
@@ -331,12 +339,20 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
         false,
         None,
     )?;
+    if let Err(clock) = remaining(deadline, 1) {
+        let cleanup = runtime.stop();
+        return Err(io::Error::other(format!(
+            "{clock}; initial Runtime cleanup: {cleanup:?}"
+        )));
+    }
     let manifest = runtime.manifest().clone();
     let cid = manifest
         .container_id
         .clone()
         .ok_or_else(|| io::Error::other("ROOT Runtime CID absent"))?;
-    runtime.prepare_providers(&["claude".into(), "codex".into()])?;
+    bounded(deadline, || {
+        runtime.prepare_providers(&["claude".into(), "codex".into()])
+    })?;
     runtime.activate();
     checkpoint(&mut progress, "actual Runtime ready and active")?;
     let reviewed = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -344,13 +360,13 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
     let hook=HookBroker::start(move|event,manifest| {
         let checked=(||->io::Result<Value>{
             require(event["session_id"]==THREAD&&event["transcript_path"]==ROLLOUT,"callback actual event scope differs")?;
-            let snapshot=doxa_isolation::snapshot_provider_file(Path::new(ROLLOUT),0,LIMIT,Some(THREAD))?
+            let snapshot=bounded(deadline,||doxa_isolation::snapshot_provider_file(Path::new(ROLLOUT),0,LIMIT,Some(THREAD)))?
                 .ok_or_else(||io::Error::other("actual ROOT callback snapshot unavailable"))?;
-            let copy=doxa_isolation::provider_review_file(&snapshot)?;
+            let copy=bounded(deadline,||doxa_isolation::provider_review_file(&snapshot))?;
             let meta=fs::symlink_metadata(&copy.path)?;
             require(meta.uid()==1000&&meta.mode()&0o7777==0o600&&meta.nlink()==1,"callback review copy is not private")?;
             require(fs::read(&copy.path)?==snapshot.bytes,"review copy differs from actual ROOT source")?;
-            require(doxa_isolation::verify_provider_snapshot(&snapshot)?,"callback original source changed")?;
+            require(bounded(deadline,||doxa_isolation::verify_provider_snapshot(&snapshot))?,"callback original source changed")?;
             Ok(json!({"session_id":manifest.session_id,"source_proof":snapshot.proof,"review_private":true,"fixture_approval_only":true}))
         })();
         match checked {
@@ -366,7 +382,7 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
             ready["family"] == "codex" && ready["owner_handshake"] == true,
             "actual protected Codex owner handshake absent",
         )?;
-        doxa_isolation::check_turn_budget(&manifest)?;
+        bounded(deadline, || doxa_isolation::check_turn_budget(&manifest))?;
         checkpoint(
             &mut progress,
             "Codex protected owner handshake and concurrent guard",
@@ -375,13 +391,17 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
             codex.child.try_wait()?.is_none(),
             "guard ended persistent provider",
         )?;
-        let snapshot = doxa_isolation::snapshot_provider_file(Path::new(ROLLOUT), 0, LIMIT, None)?
-            .ok_or_else(|| io::Error::other("ROOT snapshot missing"))?;
+        let snapshot = bounded(deadline, || {
+            doxa_isolation::snapshot_provider_file(Path::new(ROLLOUT), 0, LIMIT, None)
+        })?
+        .ok_or_else(|| io::Error::other("ROOT snapshot missing"))?;
         require(
-            doxa_isolation::verify_provider_snapshot(&snapshot)?,
+            bounded(deadline, || {
+                doxa_isolation::verify_provider_snapshot(&snapshot)
+            })?,
             "initial actual source recheck refused",
         )?;
-        let copy = doxa_isolation::provider_review_file(&snapshot)?;
+        let copy = bounded(deadline, || doxa_isolation::provider_review_file(&snapshot))?;
         let copied = fs::symlink_metadata(&copy.path)?;
         let directory = fs::symlink_metadata(copy.path.parent().unwrap())?;
         require(
@@ -410,10 +430,12 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
         )?;
         checkpoint(&mut progress, "actual callback fixture-only source review")?;
         codex.request(json!({"op":"mutate"}))?;
+        remaining(deadline, 1)?;
         let mutation_refused = matches!(
             doxa_isolation::verify_provider_snapshot(&snapshot),
             Ok(false) | Err(_)
         );
+        remaining(deadline, 1)?;
         require(
             mutation_refused,
             "mutated actual source retained stale proof",
@@ -475,7 +497,7 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
                 && after["diff_marker"] == false,
             "ordinary ROOT apply or filter purity failed",
         )?;
-        doxa_isolation::check_turn_budget(&manifest)?;
+        bounded(deadline, || doxa_isolation::check_turn_budget(&manifest))?;
         checkpoint(&mut progress, "ordinary Root Git apply and guard")?;
         codex.finish()?;
         drop(codex);
@@ -495,7 +517,7 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
                 && claude_ready["settings"]["marker"] == "composed-config-20261013",
             "actual worker did not receive exact harmless private settings",
         )?;
-        doxa_isolation::check_turn_budget(&manifest)?;
+        bounded(deadline, || doxa_isolation::check_turn_budget(&manifest))?;
         claude.finish()?;
         checkpoint(
             &mut progress,
@@ -524,26 +546,54 @@ fn proof(home: &Path, source: &Path, sid: &str) -> io::Result<Value> {
             return Err(io::Error::other(format!("Runtime cleanup: {cleanup}")))
         }
     };
+    remaining(deadline, 1)?;
     checkpoint(&mut progress, "Runtime stopped first CID")?;
     require(
-        root_client::control(sid, "describe")?["status"] == "stopped",
+        bounded(deadline, || root_client::control(sid, "describe"))?["status"] == "stopped",
         "ROOT stop was not current",
     )?;
+    remaining(deadline, 1)?;
     let mut resumed =
         Runtime::prepare(home, sid, source, Some(Profile::DockerHardened), true, None)?;
     let resumed_cid = resumed.manifest().container_id.clone();
-    require(
-        resumed_cid.is_some() && resumed_cid.as_deref() != Some(&cid),
-        "ROOT resume reused old container lease",
-    )?;
-    resumed.activate();
-    doxa_isolation::check_turn_budget(resumed.manifest())?;
-    resumed.stop()?;
+    let resumed_body = (|| -> io::Result<()> {
+        remaining(deadline, 1)?;
+        require(
+            resumed_cid.is_some() && resumed_cid.as_deref() != Some(&cid),
+            "ROOT resume reused old container lease",
+        )?;
+        resumed.activate();
+        bounded(deadline, || {
+            doxa_isolation::check_turn_budget(resumed.manifest())
+        })?;
+        Ok(())
+    })();
+    let resumed_stop = resumed.stop();
+    match (resumed_body, resumed_stop) {
+        (Ok(()), Ok(())) => {}
+        (Err(operation), Err(cleanup)) => {
+            return Err(io::Error::other(format!(
+                "coldresume: {operation}; cleanup: {cleanup}"
+            )))
+        }
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+    }
+    remaining(deadline, 1)?;
     checkpoint(&mut progress, "cold Runtime resume fresh CID guard stop")?;
     report["stopped"] = true.into();
     report["resumed_cid"] = json!(resumed_cid);
     report["resumed_and_stopped"] = true.into();
     report["resume_scope"] = "cold-runtime-new-lease-guard-stop".into();
+    let elapsed = started.elapsed();
+    require(
+        elapsed <= Duration::from_secs(300),
+        "composed body passed its shared deadline",
+    )?;
+    report["body_elapsed_ms"] = json!(elapsed.as_millis());
+    // Output-reader EOF is supervised by the outer retained-pidfd360s host
+    // deadline; the local45s Git bound covers command exit and bounded stdin.
+    report["local_pipe_deadline_scope"] =
+        "host-pidfd-supervisor360s; Git-command-exit45s; body-pass-oracle300s".into();
     Ok(report)
 }
 

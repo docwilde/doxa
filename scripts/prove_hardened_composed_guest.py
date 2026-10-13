@@ -139,10 +139,18 @@ class OwnedProcesses:
     def __init__(self,child):
         self.child=child;self.pins={};self.sockets={}
         self.pin(child.pid);self.capture()
-    def pin(self,pid):
-        before=process_facts(pid);fd=os.pidfd_open(pid)
+    def owned_ancestor(self,pid):
+        fd,expected=self.pins[pid]
+        require(not select.select([fd],[],[],0)[0] and process_facts(pid)==expected,'selected owned ancestor changed/exited')
+    def pin(self,pid,selected=None,ancestor=None):
+        before=process_facts(pid)
+        require(selected is None or before==selected,'selected process generation/PPID/UID changed')
+        if ancestor is not None:
+            require(before['ppid']==ancestor,'selected process is not an owned descendant');self.owned_ancestor(ancestor)
+        fd=os.pidfd_open(pid)
         try:
             require(process_facts(pid)==before,'owned process identity changed while pinning')
+            if ancestor is not None:self.owned_ancestor(ancestor)
             self.pins[pid]=(fd,before)
         except BaseException:os.close(fd);raise
     def live(self):
@@ -164,7 +172,7 @@ class OwnedProcesses:
             added={pid for pid,row in rows.items() if row['ppid'] in ancestors and pid not in self.pins}
             if not added:break
             for pid in added:
-                try:self.pin(pid);ancestors.add(pid)
+                try:self.pin(pid,rows[pid],rows[pid]['ppid']);ancestors.add(pid)
                 except (FileNotFoundError,ProcessLookupError):rows.pop(pid,None)
             require(len(self.pins)<=512,'owned proof process census exceeded bound')
         inodes=set()
@@ -195,6 +203,26 @@ class OwnedProcesses:
         return {'processes':[facts for _,facts in self.pins.values()],'live_processes':self.live(),'socket_paths':sorted(self.sockets)}
     def close(self):
         for fd,_ in self.pins.values():os.close(fd)
+
+def test_selected_process_generation_drift():
+    """Deterministic recycled-PID counterexample; no processes/signals used."""
+    from unittest.mock import patch
+    selected={'pid':45,'ppid':23,'uid':1000,'start':100,'group':23,'session':23}
+    foreign=dict(selected,ppid=1,uid=1001,start=200)
+    owned=OwnedProcesses.__new__(OwnedProcesses);owned.pins={};owned.sockets={}
+    with patch(__name__+'.process_facts',return_value=foreign),patch('os.pidfd_open') as opened,patch('os.close') as close:
+        try:owned.pin(45,selected,23)
+        except RuntimeError as cause:require('generation/PPID/UID' in str(cause),'unexpected generation rejection')
+        else:raise AssertionError('foreign recycled generation was retained')
+        require(not owned.pins,'foreign pidfd entered owned set');opened.assert_not_called();close.assert_not_called()
+    parent=dict(selected,pid=23,ppid=1,start=90)
+    owned.pins={23:(50,parent)};calls=iter([selected,foreign])
+    def facts(pid):return parent if pid==23 else next(calls)
+    with patch(__name__+'.process_facts',side_effect=facts),patch('select.select',return_value=([],[],[])),patch('os.pidfd_open',return_value=91),patch('os.close') as close:
+        try:owned.pin(45,selected,23)
+        except RuntimeError as cause:require('identity changed' in str(cause),'unexpected post-pin rejection')
+        else:raise AssertionError('post-pin foreign generation was retained')
+        require(set(owned.pins)=={23},'post-pin foreign pidfd entered owned set');close.assert_called_once_with(91)
 
 def run(argv,timeout=60,environment=None,observe=None,census=None,uid=None):
     credentials={} if uid is None else {'user':uid,'group':uid,'extra_groups':[]}
@@ -407,12 +435,14 @@ def main():
             live_sockets=sorted(sockets & kernel_paths)
             scoped_socket_files=[str(p) for base in [state,root/'broker'] if base.exists() for p in base.rglob('*') if stat.S_ISSOCK(p.lstat().st_mode)]
             remaining_processes=[]
-            exact_programs={str(client).encode(),str(installed).encode(),str(args.gateway).encode()}
+            exact_programs={str(client).encode(),str(installed).encode()}
+            live_owned=set(broker_owned.live() if broker_owned is not None else ())
             for path in Path('/proc').iterdir():
                 if not path.name.isdecimal() or int(path.name)==os.getpid():continue
                 try:
                     argv=(path/'cmdline').read_bytes().split(b'\0')
-                    if exact_programs.intersection(argv):remaining_processes.append(process_facts(int(path.name)))
+                    native_scoped=str(args.gateway).encode() in argv and (str(destination).encode() in argv or int(path.name) in live_owned)
+                    if exact_programs.intersection(argv) or native_scoped:remaining_processes.append(process_facts(int(path.name)))
                 except (FileNotFoundError,ProcessLookupError):pass
             engine.live();require(engine.pid==report['engine_pid_before'] and engine.socket_identity==tuple(report['engine_socket_before']),'shared Engine changed during cleanup')
             report.update(engine_pid_after=engine.pid,engine_socket_after=engine.socket_identity)
