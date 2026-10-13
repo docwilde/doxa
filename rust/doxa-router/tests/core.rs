@@ -118,8 +118,11 @@ fn malformed_zero_unknown_duplicate_and_private_config_inputs_are_refused() {
         let mut bad=value.clone();*bad.pointer_mut(pointer).unwrap()=new;
         assert!(serde_json::from_value::<Config>(bad).and_then(|cfg|cfg.validate().map_err(serde::de::Error::custom)).is_err(),"{pointer}");
     }
-    let root=tempfile::tempdir().unwrap();let path=root.path().join("router.json");fs::write(&path,serde_json::to_string(&cfg).unwrap()).unwrap();
-    assert!(Config::load(&path).is_err());fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();assert!(Config::load(&path).is_ok());
+    let root=tempfile::tempdir().unwrap();let path=root.path().join("router.json");let input=serde_json::to_string(&cfg).unwrap();fs::write(&path,&input).unwrap();
+    fs::set_permissions(&path,fs::Permissions::from_mode(0o644)).unwrap();assert!(Config::load(&path).is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(),input);assert_eq!(fs::metadata(&path).unwrap().permissions().mode()&0o777,0o644);
+    fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();assert!(Config::load(&path).is_ok());
+    assert_eq!(fs::read_to_string(&path).unwrap(),input);assert_eq!(fs::metadata(&path).unwrap().permissions().mode()&0o777,0o600);
     let link=root.path().join("link");std::os::unix::fs::symlink(&path,&link).unwrap();assert!(Config::load(&link).is_err());
     let mut bad=value.clone();bad["unknown"]=json!(true);fs::write(&path,bad.to_string()).unwrap();assert!(Config::load(&path).is_err());
     fs::write(&path,serde_json::to_string(&cfg).unwrap().replacen("\"version\":1","\"version\":1,\"version\":1",1)).unwrap();assert!(Config::load(&path).is_err());
