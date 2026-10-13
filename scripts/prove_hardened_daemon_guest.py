@@ -8,6 +8,7 @@ No Engine CLI, shared configuration change, paid call or ready flag authorizes.
 from __future__ import annotations
 import argparse
 import ctypes
+import codecs
 import fcntl
 import hashlib
 import importlib.util
@@ -24,9 +25,10 @@ import subprocess
 import sys
 import termios
 import time
+import unicodedata
 
-SID = "root-daemon-r3-20261013"
-PROJECT = 5016
+SID = "root-daemon-r4-20261013"
+PROJECT = 5017
 DAEMON_SHA = "bdab19e567fe3e7b337414933f64d90be5cd361c55434b482d1d1cd7e378b1aa"
 FRONTEND_SHA = "5b4d8ef78eb7c42d84fe9c80f4220cdefdad6d2cad5987399dedc5497aa965c2"
 BROKER_SHA = "6f83930003e5976e8e64f4950ff460c8795ffcc5d12c810f1218b09ff9a62fb5"
@@ -36,7 +38,150 @@ EXPECTED_TEXT = "Deterministic native fixture response."
 PUBLIC = Path("/usr/libexec/doxa/daemon-proof-20261013")
 MAX_FRAME = 65536
 MAX_OUTPUT = 2 * 1024 * 1024
+MAX_TERMINAL = 16 * 1024 * 1024
 FAILED_SPAWNS = []
+
+
+class FixtureScreen:
+    """Bounded incremental replay of the fixed 48x160 fixture PTY only."""
+    CSI = re.compile(r"\x1b\[([0-?]*)([ -/]*)([@-~])")
+    MODES = {25, 1000, 1002, 1003, 1004, 1006, 1015, 2004, 2026}
+
+    def __init__(self):
+        self.normal = self.blank()
+        self.cells = self.normal
+        self.row = self.column = 0
+        self.normal_cursor = (0, 0)
+        self.alternate = False
+        self.pending = ""
+        self.decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        self.bytes = self.controls = 0
+
+    @staticmethod
+    def blank(): return [[" "] * 160 for _ in range(48)]
+
+    @staticmethod
+    def width(character):
+        category = unicodedata.category(character)
+        require(not category.startswith("C") or category == "Co", "unsupported fixture Unicode control")
+        if category in ("Mn", "Me"): return 0
+        return 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
+
+    def clear_cell(self, row, column):
+        value = self.cells[row][column]
+        if value == "" and column > 0: self.cells[row][column-1] = " "
+        if value and self.width(value[0]) == 2 and column < 159: self.cells[row][column+1] = " "
+        self.cells[row][column] = " "
+
+    def write(self, character):
+        width = self.width(character)
+        if width == 0:
+            require(self.column > 0, "unanchored fixture combining mark")
+            previous = self.column-1
+            if self.cells[self.row][previous] == "": previous -= 1
+            require(previous >= 0, "unanchored fixture combining mark")
+            require(len(self.cells[self.row][previous]) < 16, "fixture combining sequence exceeds bound")
+            self.cells[self.row][previous] += character
+            return
+        if self.column >= 160:
+            self.column = 0; self.linefeed()
+        require(self.column + width <= 160, "fixture wide glyph crosses screen edge")
+        self.clear_cell(self.row, self.column)
+        if width == 2: self.clear_cell(self.row, self.column+1)
+        self.cells[self.row][self.column] = character
+        if width == 2: self.cells[self.row][self.column+1] = ""
+        self.column += width
+
+    def linefeed(self):
+        self.row += 1
+        if self.row == 48:
+            self.cells.pop(0); self.cells.append([" "] * 160); self.row = 47
+
+    def control(self, parameters, intermediate, final):
+        self.controls += 1
+        require(self.controls <= 131072, "fixture terminal control count exceeds bound")
+        require(len(parameters) + len(intermediate) <= 512, "fixture terminal control exceeds bound")
+        if final == "m" and not intermediate:
+            require(re.fullmatch(r"[0-9;:]*", parameters) is not None, "unsupported fixture style")
+            return
+        if final in ("h", "l") and not intermediate and parameters.startswith("?"):
+            values = parameters[1:].split(";")
+            require(all(value.isdecimal() and len(value) <= 4 for value in values), "unsupported fixture mode")
+            for value in map(int, values):
+                if value == 1049:
+                    if final == "h" and not self.alternate:
+                        self.normal_cursor = self.row, self.column
+                        self.cells = self.blank(); self.row = self.column = 0; self.alternate = True
+                    elif final == "l" and self.alternate:
+                        self.cells = self.normal; self.row, self.column = self.normal_cursor; self.alternate = False
+                else: require(value in self.MODES, "unsupported fixture screen mode")
+            return
+        require(not intermediate and re.fullmatch(r"[0-9;]*", parameters) is not None,
+                "unsupported fixture screen control")
+        fields = parameters.split(";")
+        require(all(len(value) <= 4 for value in fields), "fixture terminal parameter exceeds bound")
+        values = [int(value) if value else 0 for value in fields]
+        if final in ("H", "f"):
+            require(len(values) <= 2, "unsupported fixture cursor position")
+            row = values[0] or 1; column = (values[1] if len(values) == 2 else 0) or 1
+            require(1 <= row <= 48 and 1 <= column <= 160, "fixture cursor escaped fixed screen")
+            self.row, self.column = row-1, column-1
+        elif final in ("A", "B", "C", "D"):
+            require(len(values) == 1, "unsupported fixture cursor movement")
+            amount = values[0] or 1
+            if final == "A": self.row = max(0, self.row-amount)
+            elif final == "B": self.row = min(47, self.row+amount)
+            elif final == "C": self.column = min(159, self.column+amount)
+            else: self.column = max(0, self.column-amount)
+        elif final in ("J", "K"):
+            require(len(values) == 1 and values[0] in (0, 1, 2), "unsupported fixture erase")
+            mode = values[0]
+            start, end = (0, 48*160-1) if mode == 2 else ((self.row*160+min(self.column,159),48*160-1) if mode == 0 else (0,self.row*160+min(self.column,159)))
+            if final == "K":
+                start = self.row*160 + (min(self.column,159) if mode == 0 else 0)
+                end = self.row*160 + (min(self.column,159) if mode == 1 else 159)
+            for position in range(start,end+1): self.clear_cell(position//160,position%160)
+        else: raise RuntimeError("unsupported fixture screen-mutating control: " + final)
+
+    def feed(self, data):
+        self.bytes += len(data)
+        require(self.bytes <= MAX_TERMINAL, "fixture terminal bytes exceed bound")
+        self.pending += self.decoder.decode(data, final=False)
+        position = 0
+        while position < len(self.pending):
+            character = self.pending[position]
+            if character == "\x1b":
+                if position+1 == len(self.pending): break
+                if self.pending.startswith("\x1b]",position):
+                    end = self.pending.find("\x1b\\",position+2)
+                    if end < 0:
+                        require(len(self.pending)-position <= 512, "fixture OSC exceeds bound")
+                        break
+                    require(end-position <= 512 and self.pending[position+2:end] in ("22;", "22;pointer"),
+                            "unsupported fixture OSC")
+                    self.controls += 1
+                    require(self.controls <= 131072, "fixture terminal control count exceeds bound")
+                    position = end+2; continue
+                require(self.pending.startswith("\x1b[",position), "unsupported fixture escape")
+                match = self.CSI.match(self.pending, position)
+                if match is None:
+                    suffix = self.pending[position:]
+                    require(len(suffix) <= 512 and re.fullmatch(r"\x1b\[[0-?]*[ -/]*", suffix) is not None,
+                            "unsupported or oversized fixture escape")
+                    break
+                require(match.end()-position <= 512, "fixture terminal escape exceeds bound")
+                self.control(*match.groups()); position = match.end(); continue
+            if character == "\r": self.column = 0
+            elif character == "\n": self.linefeed()
+            elif character == "\b": self.column = max(0,self.column-1)
+            elif character == "\t": self.column = min(159,(self.column//8+1)*8)
+            elif character in ("\x00", "\x07"): pass
+            else: self.write(character)
+            position += 1
+        self.pending = self.pending[position:]
+        require(len(self.pending) <= 512, "fixture terminal pending control exceeds bound")
+
+    def text(self): return "\n".join("".join(row).rstrip() for row in self.cells)
 
 
 def require(condition, reason):
@@ -215,6 +360,8 @@ class Pump:
         self.children = []
         self.pty = None
         self.terminal = bytearray()
+        self.screen = FixtureScreen()
+        self.screen_error = None
 
     def add(self, child):
         self.children.append(child)
@@ -242,7 +389,12 @@ class Pump:
                 continue
             if child is None:
                 self.terminal.extend(data)
-                require(len(self.terminal) <= 16 * 1024 * 1024, "terminal evidence exceeds bound")
+                require(len(self.terminal) <= MAX_TERMINAL, "terminal evidence exceeds bound")
+                if self.screen_error is None:
+                    try: self.screen.feed(data)
+                    except (RuntimeError, UnicodeError) as cause:
+                        self.screen_error = str(cause)
+                        raise RuntimeError("fixture terminal replay refused: " + self.screen_error) from cause
             else:
                 target = getattr(child, label)
                 target.extend(data)
@@ -368,9 +520,9 @@ def main(args):
     state = Path("/run/doxa/hardened") / SID
     quota_root = Path("/srv/doxa-quota-proof") / SID
     policy_path = Path("/etc/doxa/hardened") / (SID + ".json")
-    caller_base = Path("/srv/doxa-daemon-proof-r3-20261013")
-    runtime = Path("/run/user/1000/df-r3-20261013")
-    public_script = PUBLIC / "prove-hardened-daemon-r3.py"
+    caller_base = Path("/srv/doxa-daemon-proof-r4-20261013")
+    runtime = Path("/run/user/1000/df-r4-20261013")
+    public_script = PUBLIC / "prove-hardened-daemon-r4.py"
     try:
         for path, digest in [(PUBLIC / "doxa-daemon", DAEMON_SHA), (PUBLIC / "doxa-rs", FRONTEND_SHA)]:
             m = path.lstat()
@@ -488,19 +640,22 @@ def main(args):
         os.close(slave); slave = None
         obs.send(b"status\n")
         pump.wait(lambda: any(frame.get("type") == "reply" and frame.get("id") == 101 for frame in frames()), budget)
-        ansi = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
-        def visible(): return ansi.sub(b"", pump.terminal)
+        def visible():
+            require(pump.screen_error is None, "fixture screen replay failed")
+            return pump.screen.text()
         # Require the actual attached-session opening view before typing.
         pump.wait(lambda: b"\x1b[?1049h" in pump.terminal and not (termios.tcgetattr(master)[3] & termios.ICANON)
-                  and b"Session ready" in visible() and b"Type a prompt below." in visible(), budget)
-        require(b"DOXA operations" not in visible(), "unexpected setup modal blocks fixture input")
+                  and "Session ready" in visible() and "Type a prompt below." in visible(), budget)
+        require("DOXA operations" not in visible(), "unexpected setup modal blocks fixture input")
         report["frontend_input_ready"] = True
+        private_new(args.output / "frontend-ready.screen.txt", visible().encode())
         prompt = "UID1000 frontend ROOT guard fixture 20261013"
         data = prompt.encode()
         require(os.write(master, data) == len(data), "fixture prompt write was short")
         report["frontend_prompt_typed"] = True
-        pump.wait(lambda: data in visible(), budget)
+        pump.wait(lambda: prompt in visible(), budget)
         report["frontend_prompt_rendered"] = True
+        private_new(args.output / "frontend-prompt.screen.txt", visible().encode())
         require(os.write(master, b"\r") == 1, "fixture Enter write was short")
         report["frontend_prompt_submitted"] = True
         pump.wait(lambda: any(frame.get("type") == "event" and frame["event"]["type"] in ("turn_done", "turn_refused") for frame in frames()), budget)
@@ -509,7 +664,8 @@ def main(args):
                 and not any(event["type"] == "turn_refused" for event in events), "one frontend fixture turn did not terminate successfully")
         require("".join(event["data"].get("text", "") for event in events if event["type"] == "text_delta") == EXPECTED_TEXT,
                 "deterministic fixture output differs")
-        pump.wait(lambda: EXPECTED_TEXT.encode() in ansi.sub(b"", pump.terminal), budget)
+        pump.wait(lambda: EXPECTED_TEXT in visible(), budget)
+        private_new(args.output / "frontend-response.screen.txt", visible().encode())
         obs.send(b"status\n")
         pump.wait(lambda: any(frame.get("type") == "reply" and frame.get("id") == 102 for frame in frames()), budget)
         idle = next(frame for frame in frames() if frame.get("type") == "reply" and frame.get("id") == 102)
@@ -602,6 +758,8 @@ def main(args):
             if alive(child.pidfd): cleanup_errors.append(child.name + " pidfd still live")
         if obs is not None: report["observer_records"] = obs.records
         private_new(args.output / "terminal.raw", bytes(pump.terminal))
+        private_new(args.output / "terminal.screen.txt", pump.screen.text().encode())
+        if pump.screen_error is not None: cleanup_errors.append("terminal replay: " + pump.screen_error)
         report["cleanup"]["errors"] = cleanup_errors
         if body_error is not None: report["error"] = body_error
         required = ["cid404", "cgroup_absent", "shared_engine_unchanged", "root_stopped", "sockets_absent", "registry_absent"]
@@ -612,6 +770,49 @@ def main(args):
         if slave is not None: os.close(slave)
     print(json.dumps({"status": report["status"], "output": str(args.output), "scope": report["scope"]}))
     if report["status"] != "passed": raise SystemExit(1)
+
+
+def screen_self_test():
+    """Evidence parser regressions only; these never establish admission."""
+    def replay(data, split=False):
+        screen = FixtureScreen()
+        if split:
+            for value in data: screen.feed(bytes([value]))
+        else: screen.feed(data)
+        require(not screen.pending and not screen.decoder.getstate()[0], "test input ended in partial terminal control")
+        return screen
+    redraw = b"\x1b[?1049h\x1b[2;4HU\xe2\x96\x8f\x1b[10;1Hfooter\x1b[2;5HI\xe2\x96\x8f\x1b[2;6HD\xe2\x96\x8f"
+    painted = replay(redraw, True)
+    require(painted.text().splitlines()[1].startswith("   UID▏"), "cursor overwrite did not reconstruct prompt")
+    require(painted.text() == replay(redraw).text(), "split control replay differs")
+    painted.feed(b"\x1b[2;5H \x1b[2;6H\x1b[K")
+    require(painted.text().splitlines()[1] == "   U", "space/erase retained stale prompt")
+    painted.feed(b"\x1b[2J")
+    require(not painted.text().strip(), "screen erase retained stale text")
+    wide = replay("\x1b[1;1H界e\u0301\x1b[1;4HZ".encode(), True)
+    require(wide.text().splitlines()[0] == "界e\u0301Z", "UTF8 width or combining replay differs")
+    wide.feed(b"\x1b[1;2HX")
+    require(wide.text().splitlines()[0].startswith(" Xe"), "wide continuation overwrite retained old glyph")
+    require(replay(b"ABC\x1b[2DZ").text().splitlines()[0] == "AZC", "relative cursor replay differs")
+    for data in (b"\x1b[1P", b"\x1b[?4h", b"\x1b]52;clipboard\x1b\\", b"\x1b[" + b"1"*513):
+        try: replay(data)
+        except RuntimeError: pass
+        else: raise AssertionError("unsupported/oversized control accepted")
+    for field, maximum, data in (("bytes", MAX_TERMINAL, b"a"), ("controls", 131072, b"\x1b[0m")):
+        bounded = FixtureScreen(); setattr(bounded,field,maximum)
+        try: bounded.feed(data)
+        except RuntimeError: pass
+        else: raise AssertionError("terminal bound accepted excess")
+    raw_path = Path(__file__).resolve().parent / "isolation-daemon-evidence/20261013/run3-terminal.raw"
+    raw = raw_path.read_bytes()
+    whole = replay(raw); split = replay(raw, True)
+    require(whole.text() == split.text(), "actual r3 split-byte replay differs")
+    require("UID1000 frontend ROOT guard fixture 20261013" in whole.text(), "actual r3 prompt not reconstructed")
+    require("Session ready" in whole.text() and "DOXA operations" not in whole.text(), "actual r3 opening view differs")
+    replay(raw+b"\x1b]22;\x1b\\\x1b[?1049l", True)
+    print(json.dumps({"cursor_erase_space": "passed", "utf8_split_width": "passed", "control_byte_bounds": "passed",
+                      "actual_r3_bytes": len(raw), "actual_r3_sha256": hashlib.sha256(raw).hexdigest(),
+                      "actual_r3_prompt_reconstructed": True, "actual_r3_controls": whole.controls}))
 
 
 def self_test():
@@ -661,6 +862,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--observer", action="store_true")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--screen-self-test", action="store_true")
     parser.add_argument("--socket", type=Path)
     parser.add_argument("--daemon-pid", type=int)
     parser.add_argument("--daemon-starttime", type=int)
@@ -673,6 +875,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path)
     options = parser.parse_args()
     require(10 <= options.seconds <= 300, "finite proof deadline outside bound")
-    if options.self_test: self_test()
+    if options.screen_self_test: screen_self_test()
+    elif options.self_test: self_test()
     elif options.observer: observer(options)
     else: main(options)
