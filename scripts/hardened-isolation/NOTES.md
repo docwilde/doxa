@@ -267,3 +267,21 @@ Main independently accepted race8296 source with six supplied and three extra
 actual-child/PIDFD/socket cases under ResourceWarnings:error. Separate diagnostic
 review and fresh coordinator proof remain pending; no guest mutations/reruns or
 resource/admission changes were performed by this worker.
+
+Actual daemon R5 root diagnostic classified stop refusal as busy-transport at
+dispatch-idle while frontend turn/idle103/EOF succeeded. Parent explicitly
+authorized bounded graceful quiescence with existingoperation120, no active
+provider force cancellation or guest rerun. Wrote concurrency tests first;
+paused-workspace test failed against frozen source (no stop reservation).
+New short mutex owns persistent gate and active waiter token. Typed stop reserves
+before deadline-bounded state-lock acquisition, releases state lock while active
+provider/workspace counters settle, then runs unchanged exact idle teardown.
+New guard check precedes its CID/cleanup try; execution/staging/prepare/resume/
+registration gate checks prevent new admission. Existing transports/read-only
+snapshots/unregister can finish. Timeout/disconnect/refusal preserve gate and
+release only owned waiter; overlapping waiters cannot clear another reservation.
+Optional diagnostic state-lock acquisition is nonblocking, preserving stop wait
+deadline. No globalclosing flag, unknown-process force, bounds or Rust changes.
+Seven focused quiescence cases pass0.123s;93 full broker tests pass1.098s, with
+normal stop/resume and exact PIDFD/socket ownership checks retained. Source-only;
+frozen busy-failure guest receipt/artifacts remain untouched.

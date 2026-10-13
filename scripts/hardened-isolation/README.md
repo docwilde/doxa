@@ -203,6 +203,16 @@ absent. The original failure is classified before independent cleanup; logging
 failure does not change refusal, deadlines or admission. Dispatch-idle and reply
 failures are recorded separately from failures inside the stop lifecycle.
 
+Typed `stop` reserves a session gate before waiting for admitted provider and
+workspace ownership to settle. It releases the state lock between observations
+and uses the existing operation deadline and client cancellation. New execution,
+turn guards, staging, prepare/resume and hook registration are refused while the
+gate is pending; existing transports, snapshots and hook unregister can settle.
+Stop does not cancel or force an active provider. Once counters are idle it runs
+the same exact CID/helper/socket teardown. Timeout, disconnect or refusal retain
+the gate; a later typed stop can retry, while overlapping waiters cannot clear
+another's reservation. The stop diagnostic lock is optional and nonblocking.
+
 `prove_git_safe_guest.py` executes actual Git as UID1001 with malicious source
 clean/smudge/process filter configuration. Unsafe diff/apply reproduce marker
 execution; the ROOT-generated metadata must run the reviewed commands without

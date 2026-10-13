@@ -685,6 +685,9 @@ class Broker:
         self.engine = Engine(self.policy)
         self.image_labels = None
         self.state_lock = threading.RLock()
+        self.stop_lock = threading.Lock()
+        self.stop_gate = None
+        self.stop_owner = None
         self.git_lock = threading.Lock()
         self.closing = threading.Event()
         self.active_provider = False
@@ -729,6 +732,7 @@ class Broker:
 
     def guard(self, deadline):
         """Live ROOT authority check for a new turn on a persistent transport."""
+        self.require_new_work()
         cid = None
         try:
             self.require_native_clear()
@@ -774,7 +778,7 @@ class Broker:
     def control_failure(self,operation,phase,error):
         """Optional ROOT-only fixed classification; never store raw control errors."""
         try:
-            require(operation=="stop" and phase in {"request-validation","dispatch-idle","reply","cleanup-retry","scope",
+            require(operation=="stop" and phase in {"request-validation","dispatch-idle","reply","reserve","quiesce","cleanup-retry","scope",
                     "engine-connect","inspect-cid","remove-cid","confirm-cid-absent","persist-stopped",
                     "close-gateway","close-adapters","describe"},"control diagnostic scope")
             classes={Refused:"Refused",GatewayExited:"GatewayExited",ProcessLookupError:"ProcessLookupError",
@@ -786,6 +790,7 @@ class Broker:
             exception,number=classified(error);cause=error.__cause__ or error.__context__
             cause_exception,cause_errno=classified(cause) if cause is not None else (None,None)
             reasons={"session transport is active; lifecycle/staging requires idle":"busy-transport",
+                     "ROOT stop is already in progress":"overlapping-stop","ROOT stop is pending":"stop-pending",
                      "absolute transaction deadline":"deadline","client cancelled":"cancelled",
                      "gateway socket capture requires live owned PIDFD":"gateway-exited-during-capture",
                      "gateway socket capture requires owned PIDFD":"gateway-pidfd-missing",
@@ -810,13 +815,15 @@ class Broker:
                     "policy_sha256":self.policy_sha256,"op":operation,"phase":phase,"reason":reason,
                     "exception":exception,"errno":number,"cause_exception":cause_exception,"cause_errno":cause_errno}
             raw=compact(record)+b"\n";require(len(raw)<=4096,"control diagnostic bound")
-            with self.state_lock:
+            if not self.state_lock.acquire(blocking=False):return False
+            try:
                 controlled(self.state_dir);path=self.state_dir/"control-stop-failure.json"
                 if path.exists():
                     meta=controlled(path,private=True)
                     require(stat.S_ISREG(meta.st_mode) and meta.st_gid==0 and meta.st_nlink==1
                             and stat.S_IMODE(meta.st_mode)==0o600,"unsafe control diagnostic sink")
                 atomic_root_write(path,raw,0o600)
+            finally:self.state_lock.release()
             return True
         except BaseException:return False
 
@@ -941,6 +948,7 @@ class Broker:
                 and result["boot_id"] == boot_id(), "live native quota staging proof is incomplete")
 
     def stage(self, client, family="none", initial=False):
+        self.require_new_work()
         require(initial or family in self.policy["providers"], "staging provider scope refused")
         require(not initial or self.manifest is None, "initial staging requires a new session")
         self.stage_check(client.deadline, "before", family)
@@ -949,6 +957,7 @@ class Broker:
         return result
 
     def hook_control(self, request, deadline):
+        if request["op"]=="register_hook":self.require_new_work()
         self.require_native_clear()
         op = request["op"]
         fields = {"v", "session_id", "op", "client_pid", "capability"} | ({"socket"} if op == "register_hook" else set())
@@ -1208,6 +1217,7 @@ class Broker:
             return False
 
     def prepare(self, deadline):
+        self.require_new_work()
         self.preflight()
         require(not (self.state_dir / "uncertain-create.json").exists(), "uncertain create requires root reconciliation")
         if self.manifest is not None:
@@ -1253,6 +1263,7 @@ class Broker:
             raise
 
     def resume(self, deadline):
+        self.require_new_work()
         cid = self.manifest.get("cid") if self.manifest is not None and self.manifest.get("status") not in {"stopped","cleanup-required"} else None
         try:
             self.preflight()
@@ -1355,6 +1366,40 @@ class Broker:
         return False
 
     def stop(self, deadline):
+        """Reserve new-work gate; existing ownership settles within this deadline."""
+        owner=object();gate=None;reserved=False;entered_idle=False;phase="reserve"
+        try:
+            deadline.check()
+            with getattr(self,"stop_lock",nullcontext()):
+                require(getattr(self,"stop_owner",None) is None,"ROOT stop is already in progress")
+                if getattr(self,"stop_gate",None) is None:self.stop_gate=object()
+                gate=self.stop_gate;self.stop_owner=owner;reserved=True
+            phase="quiesce"
+            while True:
+                deadline.check()
+                if not self.state_lock.acquire(timeout=min(.02,max(0,deadline.end-time.monotonic()))):continue
+                try:
+                    deadline.check()
+                    with getattr(self,"stop_lock",nullcontext()):
+                        require(self.stop_owner is owner and self.stop_gate is gate,"ROOT stop gate ownership changed")
+                    if not self.active_provider and self.active_workspace==0:
+                        self.idle();entered_idle=True
+                        result=self._stop_idle(deadline)
+                        with getattr(self,"stop_lock",nullcontext()):
+                            require(self.stop_owner is owner and self.stop_gate is gate,"ROOT stop gate ownership changed")
+                            self.stop_gate=None
+                        return result
+                finally:self.state_lock.release()
+                select.select([],[],[],min(.02,max(0,deadline.end-time.monotonic())))
+        except BaseException as error:
+            if not entered_idle:self.control_failure("stop",phase,error)
+            raise
+        finally:
+            if reserved:
+                with getattr(self,"stop_lock",nullcontext()):
+                    if self.stop_owner is owner:self.stop_owner=None
+
+    def _stop_idle(self, deadline):
         cid=None;phase="scope"
         try:
             if self.native_quarantined():
@@ -1534,6 +1579,10 @@ class Broker:
     def idle(self):
         require(not self.active_provider and self.active_workspace == 0, "session transport is active; lifecycle/staging requires idle")
 
+    def require_new_work(self):
+        with getattr(self,"stop_lock",nullcontext()):
+            require(getattr(self,"stop_gate",None) is None,"ROOT stop is pending")
+
     def transport_live(self):
         self.require_native_clear()
         require(not self.closing.is_set(), "root broker is closing")
@@ -1570,6 +1619,7 @@ class Broker:
                 while not self.git_lock.acquire(timeout=.1):deadline.check()
                 git_acquired = True
             with self.state_lock:
+                self.require_new_work()
                 require(not self.closing.is_set(), "root broker is closing")
                 if op == "provider_exec":
                     require(not self.active_provider, "one provider transport per session")
@@ -2159,14 +2209,17 @@ def serve(policy_path):
                     else:
                         keys(request, {"v", "session_id", "op"}, {"staging"} if op == "prepare" else ())
                         require(type(request.get("staging", False)) is bool, "staging flag must be boolean")
-                        with broker.state_lock:
-                            control_phase="dispatch-idle"
-                            if op not in {"describe","guard"}: broker.idle()
-                            if request.get("staging") is True: broker.stage(client, initial=True)
-                            deadline = client.deadline
-                            deadline.cancelled = lambda: broker.closing.is_set() or bool(select.select([sock], [], [], 0)[0])
-                            if op=="stop":stop_entered=True
-                            result = broker.describe() if op == "describe" else getattr(broker, op)(deadline)
+                        deadline=client.deadline
+                        deadline.cancelled=lambda:broker.closing.is_set() or bool(select.select([sock],[],[],0)[0])
+                        if op=="stop":
+                            stop_entered=True
+                            result=broker.stop(deadline)
+                        else:
+                            with broker.state_lock:
+                                control_phase="dispatch-idle"
+                                if op not in {"describe","guard"}:broker.idle()
+                                if request.get("staging") is True:broker.stage(client,initial=True)
+                                result=broker.describe() if op=="describe" else getattr(broker,op)(deadline)
                         control_phase="reply"
                         client.json_frame(TAG_JSON, result)
                 except Exception as error:

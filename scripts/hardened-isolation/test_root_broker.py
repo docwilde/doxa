@@ -362,6 +362,7 @@ class NativeDiagnosticTests(unittest.TestCase):
     def fixture(self):
         broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy_sha256="3"*64
         broker.state_dir=Path(os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))).resolve()
+        broker.state_lock=threading.RLock();broker.active_provider=False;broker.active_workspace=0
         broker.native_children_lock=threading.RLock();broker.failed_native_children=[];broker.gateway_teardown_pending=False
         broker.native_diagnostic=Mock();return broker
 
@@ -536,6 +537,7 @@ class GatewaySocketCleanupTests(unittest.TestCase):
                                              stderr=subprocess.PIPE if owned else None,start_new_session=owned)
             broker.gateway_pidfd=os.pidfd_open(child.pid)
             if owned:
+                broker.state_lock=threading.RLock();broker.active_provider=False;broker.active_workspace=0
                 broker.gateway=child;broker.gateway_stderr=b.NativeStderr(child.stderr)
                 broker.gateway_teardown_pending=False;broker.gateway_start_error=None;broker.native_diagnostic=Mock()
             original_stat=os.stat;original_lstat=os.lstat
@@ -602,6 +604,7 @@ class ControlFailureDiagnosticTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))) as directory:
             broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy_sha256="3"*64
             broker.state_dir=Path(directory).resolve();broker.state_lock=threading.RLock()
+            broker.active_provider=False;broker.active_workspace=0
             def root_meta(path,**_):
                 meta=Path(path).lstat();fields=list(meta);fields[4]=0;fields[5]=0;return os.stat_result(fields)
             with patch.object(b,"controlled",side_effect=root_meta):yield broker
@@ -783,6 +786,7 @@ class HardenedFollowupTests(unittest.TestCase):
 
     def test_stop_handles_already_absent_cid(self):
         broker=b.Broker.__new__(b.Broker); broker.manifest={"cid":"2"*64,"status":"ready"}
+        broker.state_lock=threading.RLock();broker.active_provider=False;broker.active_workspace=0
         broker.engine=Mock(); channel=Mock(); broker.engine.connect.return_value=channel
         broker.engine.exchange.return_value=(404,{"message":"absent"})
         broker.persist=Mock(); broker.close_gateway=Mock(); broker.close_adapters=Mock(); broker.describe=Mock(return_value={"status":"stopped"})
@@ -1207,6 +1211,103 @@ class WorkspaceControlTests(unittest.TestCase):
         broker.cleanup.assert_called_once_with("2"*64)
 
 
+class StopQuiescenceTests(unittest.TestCase):
+    def fixture(self):
+        broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy_sha256="3"*64
+        broker.state_lock=threading.RLock();broker.stop_lock=threading.Lock();broker.stop_gate=None;broker.stop_owner=None
+        broker.closing=threading.Event();broker.active_provider=False;broker.active_workspace=0;broker.git_lock=threading.Lock()
+        broker.manifest={"cid":"2"*64,"status":"ready"};broker.engine=Mock();broker.engine.exchange.return_value=(404,{})
+        broker.identity=Mock(return_value="2"*64);broker.preflight=Mock();broker.native_check=Mock();broker.gateway_live=Mock()
+        broker.close_gateway=Mock();broker.close_adapters=Mock();broker.persist=Mock();broker.cleanup=Mock();broker.control_failure=Mock()
+        broker._stop_idle=Mock(return_value={"status":"stopped"});return broker
+
+    def wait_gate(self,broker):
+        end=time.monotonic()+.5
+        while broker.stop_gate is None and time.monotonic()<end:time.sleep(.001)
+        self.assertIsNotNone(broker.stop_gate)
+
+    def test_paused_workspace_settles_while_stop_releases_state_lock(self):
+        broker=self.fixture();broker.active_workspace=1;result=[];errors=[]
+        def stop():
+            try:result.append(broker.stop(b.Deadline(1)))
+            except BaseException as error:errors.append(error)
+        worker=threading.Thread(target=stop);worker.start()
+        try:
+            self.wait_gate(broker);self.assertTrue(worker.is_alive());broker._stop_idle.assert_not_called()
+            self.assertTrue(broker.state_lock.acquire(timeout=.1))
+            try:broker.active_workspace=0
+            finally:broker.state_lock.release()
+            worker.join(1);self.assertFalse(worker.is_alive());self.assertFalse(errors)
+            self.assertEqual(result,[{"status":"stopped"}]);self.assertIsNone(broker.stop_gate);self.assertIsNone(broker.stop_owner)
+        finally:
+            broker.active_workspace=0;worker.join(1)
+
+    def test_pending_stop_refuses_new_work_without_cleanup_of_existing_provider(self):
+        broker=self.fixture();broker.stop_gate=object();broker.active_provider=True
+        request={"v":1,"session_id":"unit-scope","op":"workspace_exec","argv":["status"]}
+        calls=[lambda:broker.guard(b.Deadline(1)),lambda:broker.prepare(b.Deadline(1)),lambda:broker.resume(b.Deadline(1)),
+               lambda:broker.stage(Mock(),"claude"),lambda:broker.execute(request,Mock())]
+        for call in calls:
+            with self.assertRaisesRegex(b.Refused,"stop is pending"):call()
+        broker.cleanup.assert_not_called();broker.engine.connect.assert_not_called();broker.native_check.assert_not_called()
+        self.assertTrue(broker.active_provider);broker.transport_live();broker.gateway_live.assert_called_once()
+
+    def test_timeout_retains_gate_and_allows_later_owned_stop_retry(self):
+        broker=self.fixture();broker.active_workspace=1;start=time.monotonic()
+        with self.assertRaisesRegex(b.Refused,"absolute transaction deadline"):broker.stop(b.Deadline(.03))
+        self.assertLess(time.monotonic()-start,.2);gate=broker.stop_gate;self.assertIsNotNone(gate);self.assertIsNone(broker.stop_owner)
+        broker._stop_idle.assert_not_called();broker.cleanup.assert_not_called();broker.engine.connect.assert_not_called()
+        self.assertEqual(broker.active_workspace,1);broker.active_workspace=0
+        self.assertEqual(broker.stop(b.Deadline(1)),{"status":"stopped"});self.assertIsNone(broker.stop_gate)
+        broker._stop_idle.assert_called_once()
+
+    def test_disconnect_retains_gate_without_cancelling_existing_provider(self):
+        broker=self.fixture();broker.active_provider=True;cancelled=threading.Event();errors=[]
+        def stop():
+            try:broker.stop(b.Deadline(1,cancelled.is_set))
+            except BaseException as error:errors.append(error)
+        worker=threading.Thread(target=stop);worker.start()
+        try:
+            self.wait_gate(broker);cancelled.set();worker.join(.3);self.assertFalse(worker.is_alive())
+            self.assertEqual(len(errors),1);self.assertIn("client cancelled",str(errors[0]))
+            self.assertIsNotNone(broker.stop_gate);self.assertIsNone(broker.stop_owner);self.assertTrue(broker.active_provider)
+            self.assertFalse(broker.closing.is_set());broker.cleanup.assert_not_called();broker._stop_idle.assert_not_called()
+        finally:cancelled.set();worker.join(1)
+
+    def test_overlapping_stop_cannot_release_another_waiters_gate(self):
+        broker=self.fixture();broker.active_workspace=1;errors=[]
+        def stop():
+            try:broker.stop(b.Deadline(1))
+            except BaseException as error:errors.append(error)
+        worker=threading.Thread(target=stop);worker.start()
+        try:
+            self.wait_gate(broker);gate,owner=broker.stop_gate,broker.stop_owner
+            with self.assertRaisesRegex(b.Refused,"stop is already in progress"):broker.stop(b.Deadline(.1))
+            self.assertIs(broker.stop_gate,gate);self.assertIs(broker.stop_owner,owner);self.assertTrue(worker.is_alive())
+            with broker.state_lock:broker.active_workspace=0
+            worker.join(1);self.assertFalse(errors);self.assertIsNone(broker.stop_gate);self.assertIsNone(broker.stop_owner)
+            broker._stop_idle.assert_called_once()
+        finally:broker.active_workspace=0;worker.join(1)
+
+    def test_busy_state_lock_and_logging_do_not_extend_stop_deadline(self):
+        broker=self.fixture();broker.control_failure=b.Broker.control_failure.__get__(broker);errors=[]
+        def stop():
+            try:broker.stop(b.Deadline(.03))
+            except BaseException as error:errors.append(error)
+        with broker.state_lock:
+            worker=threading.Thread(target=stop);worker.start();self.wait_gate(broker)
+            worker.join(.2);self.assertFalse(worker.is_alive())
+            self.assertEqual(len(errors),1);self.assertIn("absolute transaction deadline",str(errors[0]))
+            self.assertIsNotNone(broker.stop_gate);self.assertIsNone(broker.stop_owner)
+        worker.join(1);broker._stop_idle.assert_not_called()
+
+    def test_idle_audit_failure_retains_gate_and_original_refusal(self):
+        broker=self.fixture();original=b.Refused("original owned scope audit refusal")
+        broker._stop_idle.side_effect=original
+        with self.assertRaises(b.Refused) as raised:broker.stop(b.Deadline(1))
+        self.assertIs(raised.exception,original);self.assertIsNotNone(broker.stop_gate);self.assertIsNone(broker.stop_owner)
+
+
 class ConcurrentControlTests(unittest.TestCase):
     def test_control_snapshot_dispatches_while_provider_stdio_is_active(self):
         short=Path.home()/".dt"; short.mkdir(mode=0o700,exist_ok=True)
@@ -1217,9 +1318,14 @@ class ConcurrentControlTests(unittest.TestCase):
             fake.native_quarantined.return_value=False
             fake.describe.return_value={"status":"unprepared","protocol":b.PROTOCOL}
             started,release=threading.Event(),threading.Event()
+            stop_started=threading.Event()
             def execute(request,client):
                 started.set(); release.wait(2)
             fake.execute.side_effect=execute
+            def stop_call(deadline):
+                self.assertFalse(fake.state_lock._is_owned(),"stop dispatcher held the state lock")
+                stop_started.set();self.assertTrue(release.wait(2));return {"status":"stopped"}
+            fake.stop.side_effect=stop_call
             def snapshot(request,client): client.json_frame(b.TAG_JSON,{"status":"concurrent-snapshot"})
             fake.provider_snapshot.side_effect=snapshot
             fake.idle.side_effect=lambda: b.require(not started.is_set(),"session transport is active")
@@ -1253,15 +1359,17 @@ class ConcurrentControlTests(unittest.TestCase):
                         tag,payload=channel.receive_frame()
                         self.assertEqual(tag,b.TAG_JSON); self.assertEqual(b.strict_json(payload)["status"],"concurrent-snapshot")
                     finally: control.close()
-                    for op in ("prepare","stop"):
-                        idle, channel=connection(op)
-                        try:
-                            tag,payload=channel.receive_frame()
-                            self.assertEqual(tag,b.TAG_ERROR); self.assertIn("active",b.strict_json(payload)["error"])
-                            getattr(fake,op).assert_not_called()
-                        finally: idle.close()
-                    fake.control_failure.assert_called_once()
-                    self.assertEqual(fake.control_failure.call_args.args[:2],("stop","dispatch-idle"))
+                    idle,channel=connection("prepare")
+                    try:
+                        tag,payload=channel.receive_frame();self.assertEqual(tag,b.TAG_ERROR)
+                        self.assertIn("active",b.strict_json(payload)["error"]);fake.prepare.assert_not_called()
+                    finally:idle.close()
+                    stopping,channel=connection("stop")
+                    try:
+                        self.assertTrue(stop_started.wait(1));self.assertFalse(b.select.select([stopping],[],[],0)[0])
+                        release.set();tag,payload=channel.receive_frame();self.assertEqual(tag,b.TAG_JSON)
+                        self.assertEqual(b.strict_json(payload)["status"],"stopped");fake.stop.assert_called_once()
+                    finally:stopping.close()
                 finally:
                     release.set(); provider.close()
                     signals[b.signal.SIGTERM]()
