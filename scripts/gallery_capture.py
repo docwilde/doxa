@@ -44,12 +44,13 @@ def validate_screenshot(path: Path, checksum: str) -> None:
         raise ValueError(f"{path.name}: screenshot SHA256 differs from capture record")
 
 
-def load_gallery(root: Path) -> tuple[dict, list[tuple[Path, str]], bytes]:
+def load_gallery(root: Path) -> tuple[dict, list[tuple[Path, str]], bytes, bytes]:
     for relative in ("docs", "docs/gallery", "assets", "assets/shots"):
         directory = root / relative
         if directory.is_symlink() or not directory.is_dir():
             raise ValueError(f"{relative}: gallery directory must not be linked")
-    manifest = json.loads(regular_bytes(root / "docs/gallery/scenes.json", 1024 * 1024))
+    manifest_bytes = regular_bytes(root / "docs/gallery/scenes.json", 1024 * 1024)
+    manifest = json.loads(manifest_bytes)
     if not isinstance(manifest, dict):
         raise ValueError("gallery manifest must be an object")
     version = manifest.get("capture_version")
@@ -106,4 +107,4 @@ def load_gallery(root: Path) -> tuple[dict, list[tuple[Path, str]], bytes]:
         images.append((image, capture["sha256"]))
     if manifest.get("default") not in identifiers:
         raise ValueError("gallery default must name a scene")
-    return manifest, images, record_bytes
+    return manifest, images, record_bytes, manifest_bytes

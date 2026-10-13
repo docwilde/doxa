@@ -13,13 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def build(output: Path) -> int:
     source = ROOT / "docs/gallery"
-    manifest, images, record_bytes = load_gallery(ROOT)
+    manifest, images, record_bytes, manifest_bytes = load_gallery(ROOT)
     if output.exists() and (output.is_symlink() or not output.is_dir() or any(output.iterdir())):
         raise ValueError("gallery output must be an empty directory")
     (output / "gallery").mkdir(parents=True, exist_ok=True)
     (output / "assets/shots").mkdir(parents=True)
-    for name in ("index.html", "scenes.json"):
-        shutil.copyfile(source / name, output / "gallery" / name)
+    shutil.copyfile(source / "index.html", output / "gallery/index.html")
+    (output / "gallery/scenes.json").write_bytes(manifest_bytes)
     for image, checksum in images:
         packaged = output / "assets/shots" / image.name
         shutil.copyfile(image, packaged)

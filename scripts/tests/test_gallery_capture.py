@@ -179,6 +179,28 @@ class GalleryCaptureTests(unittest.TestCase):
                 builder.build(self.root / "site")
         self.assertEqual(self.image.read_bytes(), png())
 
+    def test_manifest_replacement_publishes_only_exact_validated_bytes(self):
+        original = self.manifest_path.read_bytes()
+        copyfile = shutil.copyfile
+        changed = False
+        def changing_copy(source, destination):
+            nonlocal changed
+            # The first copy happens after validation and before publication.
+            # Change the same URI as the independent source-recopy repro.
+            if Path(source).name == "index.html":
+                self.manifest["scenes"][0]["image"] = "../assets/shots/rust-2.0.0-beta.51-hero.png"
+                self.manifest_path.write_text(json.dumps(self.manifest))
+                changed = True
+            return copyfile(source, destination)
+        with patch.object(builder.shutil, "copyfile", changing_copy):
+            self.assertEqual(builder.build(self.root / "site"), 1)
+        self.assertTrue(changed)
+        self.assertNotEqual(self.manifest_path.read_bytes(), original)
+        self.assertEqual((self.root / "site/gallery/scenes.json").read_bytes(), original)
+        self.assertEqual((self.root / "site/assets/shots" / self.record_path.name).read_bytes(),
+                         self.record_path.read_bytes())
+        self.assertTrue((self.root / "site/assets/shots" / self.image.name).is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
