@@ -390,7 +390,8 @@ def main():
             require(stat.S_ISREG(before.st_mode) and before.st_uid==1001 and before.st_gid==1001 and stat.S_IMODE(before.st_mode)==0o600
                     and before.st_nlink==1 and before.st_size<=65536,'host-namespace staged settings identity differs')
             data=os.read(fd,65537);after=os.fstat(fd)
-            require(before==after and data==b'{"fixture_marker":"composed-config-20261013"}\n','actual host staged settings bytes changed/differ')
+            identity=lambda s:(s.st_dev,s.st_ino,s.st_uid,s.st_gid,s.st_mode,s.st_nlink,s.st_size,s.st_ctime_ns,s.st_mtime_ns)
+            require(identity(before)==identity(after) and data==b'{"fixture_marker":"composed-config-20261013"}\n','actual host staged settings bytes changed/differ')
             digest=hashlib.sha256(data).hexdigest()
             require(report['client']['claude_ready']['settings']['sha256']==digest,'worker/host staged settings content differs')
             report['host_settings']={'identity_namespace':'host','uid':before.st_uid,'gid':before.st_gid,'mode':stat.S_IMODE(before.st_mode),
