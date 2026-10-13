@@ -8,6 +8,7 @@ alone, or a fake Engine fixture, does not authorize hardened isolation.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import io
@@ -640,6 +641,8 @@ class Broker:
         self.policy_sha256 = sha(self.raw_policy)
         self.state_dir = Path(policy_paths(self.policy)["state_dir"])
         controlled(self.state_dir)
+        lock = open_git_metadata_lock(self.policy)
+        os.close(lock)
         self.manifest_path = self.state_dir / "manifest.json"
         self.engine = Engine(self.policy)
         self.image_labels = None
@@ -1304,7 +1307,11 @@ class Broker:
             raise
         finally:
             if stream is not None: stream.sock.close()
-            if git_view is not None: shutil.rmtree(git_view,ignore_errors=True)
+            if git_view is not None:
+                try:retire_git_view(p,git_view,Deadline(3))
+                except Exception:
+                    with self.state_lock:
+                        if cid is not None:self.cleanup(cid)
             if git_acquired: self.git_lock.release()
             if active:
                 with self.state_lock:
@@ -1312,26 +1319,102 @@ class Broker:
                     else: self.active_workspace -= 1
 
 
+def check_git_lock(fd,path):
+    controlled(path,private=True)
+    info=os.fstat(fd);current=path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_gid==0 and info.st_nlink==1
+            and stat.S_IMODE(info.st_mode)==0o600 and (info.st_dev,info.st_ino)==(current.st_dev,current.st_ino),
+            "Git metadata lock is outside ROOT control")
+
+
+def open_git_metadata_lock(policy):
+    require(os.geteuid()==0,"Git metadata lock requires ROOT")
+    path=Path(policy_paths(policy)["state_dir"])/"git-metadata.lock"
+    controlled(path.parent)
+    try:
+        fd=os.open(path,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+        os.fchown(fd,0,0);os.fchmod(fd,0o600)
+    except FileExistsError:
+        fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:check_git_lock(fd,path)
+    except BaseException:os.close(fd);raise
+    return fd
+
+
+@contextmanager
+def git_metadata_lock(policy,deadline,exclusive=True):
+    fd=open_git_metadata_lock(policy)
+    try:
+        while True:
+            deadline.check()
+            try:fcntl.flock(fd,(fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)|fcntl.LOCK_NB);break
+            except BlockingIOError:select.select([],[],[],min(.02,max(0,deadline.end-time.monotonic())))
+        check_git_lock(fd,Path(policy_paths(policy)["state_dir"])/"git-metadata.lock")
+        yield
+    finally:os.close(fd)
+
+
+def git_project(fd):
+    fsx=bytearray(28);fcntl.ioctl(fd,0x801c581f,fsx,True)
+    return struct.unpack_from("I",fsx,12)[0],bool(struct.unpack_from("I",fsx,0)[0]&0x200)
+
+
+def private_git_stage(policy,deadline=None):
+    root=Path(policy["root"]);controlled(root)
+    stage=root/".git-staging"
+    if not stage.exists():
+        with git_metadata_lock(policy,deadline or Deadline(3)):
+            try:
+                stage.mkdir(mode=0o700);os.chown(stage,0,0);stage.chmod(0o700)
+            except FileExistsError:pass
+    controlled(stage,private=True);info=stage.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and info.st_gid==0 and stat.S_IMODE(info.st_mode)==0o700,
+            "Git staging directory is outside ROOT private scope")
+    rootfd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    stagefd=os.open(stage,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        expected=git_project(rootfd)
+        require(git_project(stagefd)==expected and os.fstat(stagefd).st_dev==os.fstat(rootfd).st_dev,
+                "Git staging escaped inherited quota project/filesystem")
+    finally:os.close(stagefd);os.close(rootfd)
+    return stage,expected
+
+
+def retire_git_view(policy,view,deadline):
+    stage,_=private_git_stage(policy,deadline)
+    safe=Path(policy_paths(policy)["session_mount"])/"git-safe"
+    require(view.parent==safe and re.fullmatch(r"[0-9a-f]{32}",view.name),"Git retirement scope differs")
+    retired=stage/("retired-"+secrets.token_hex(16))
+    with git_metadata_lock(policy,deadline):
+        require(view.is_dir() and not view.is_symlink(),"Git published view is unavailable")
+        os.rename(view,retired)
+    # The audited tree cannot observe recursive deletion. All retired bytes
+    # remain charged to the same project until this ROOT-only removal completes.
+    shutil.rmtree(retired)
+
+
 def build_git_view(policy, deadline):
-    """ROOT-generated metadata only; no host Git/config parser is executed."""
+    """Build privately; atomically publish immutable metadata under audit lock."""
     require(os.geteuid() == 0, "Git metadata view requires ROOT")
     paths = policy_paths(policy)
-    broker_path = Path(paths["session_mount"])
-    controlled(broker_path)
-    safe = broker_path / "git-safe"
-    if safe.exists():
-        info = safe.lstat()
-        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and info.st_gid == policy["engine"]["gid"]
-                and stat.S_IMODE(info.st_mode) in {0o550,0o750}, "Git metadata root is outside ROOT control")
-        for child in safe.iterdir():
-            require(re.fullmatch(r"[0-9a-f]{32}", child.name) and child.is_dir() and not child.is_symlink(), "unexpected Git metadata generation")
-            shutil.rmtree(child)
-    else:
-        safe.mkdir(mode=0o700)
-        os.chown(safe,0,policy["engine"]["gid"])
-        safe.chmod(0o750)
+    broker_path = Path(paths["session_mount"]);controlled(broker_path)
+    stage,expected_project=private_git_stage(policy,deadline)
+    safe=broker_path/"git-safe"
+    retired=[]
+    with git_metadata_lock(policy,deadline):
+        if safe.exists():
+            info=safe.lstat()
+            require(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and info.st_gid==policy["engine"]["gid"]
+                    and stat.S_IMODE(info.st_mode) in {0o550,0o750},"Git metadata root is outside ROOT control")
+            for child in safe.iterdir():
+                require(re.fullmatch(r"[0-9a-f]{32}",child.name) and child.is_dir() and not child.is_symlink(),"unexpected Git metadata generation")
+                target=stage/("retired-"+secrets.token_hex(16));os.rename(child,target);retired.append(target)
+        else:
+            top=stage/("safe-root-"+secrets.token_hex(16));top.mkdir(mode=0o700)
+            os.chown(top,0,policy["engine"]["gid"]);top.chmod(0o750);os.rename(top,safe)
+    for child in retired:shutil.rmtree(child)
     generation = secrets.token_hex(16)
-    destination = safe / generation
+    destination = stage / generation
     destination.mkdir(mode=0o700)
     os.chown(destination,0,policy["engine"]["gid"])
     cap = min(policy["limits"]["disk_bytes"],128*1024*1024)
@@ -1347,6 +1430,7 @@ def build_git_view(policy, deadline):
         account(depth,len(data))
         fd = os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parentfd)
         try:
+            require(git_project(fd)[0]==expected_project[0],"Git staging file escaped project quota")
             os.fchown(fd,0,policy["engine"]["gid"])
             view = memoryview(data)
             while view:
@@ -1360,6 +1444,7 @@ def build_git_view(policy, deadline):
         fd = os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parentfd)
         observed=0
         try:
+            require(git_project(fd)[0]==expected_project[0],"Git staging copy escaped project quota")
             os.fchown(fd,0,policy["engine"]["gid"])
             while chunk := os.read(source,MAX_FRAME):
                 deadline.check(); observed += len(chunk);require(observed <= before.st_size,"Git metadata file grew")
@@ -1375,7 +1460,10 @@ def build_git_view(policy, deadline):
         account(depth)
         os.mkdir(name,0o700,dir_fd=parentfd)
         fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parentfd)
-        os.fchown(fd,0,policy["engine"]["gid"])
+        try:
+            require(git_project(fd)==expected_project,"Git staging directory escaped quota inheritance")
+            os.fchown(fd,0,policy["engine"]["gid"])
+        except BaseException:os.close(fd);raise
         return fd
     def tree(source,target,prefix,depth):
         before=os.fstat(source)
@@ -1405,6 +1493,7 @@ def build_git_view(policy, deadline):
         rootfd=os.open(paths["workspace"],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
         srcfd=os.open(".git",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=rootfd)
         dstfd=os.open(destination,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        require(git_project(dstfd)==expected_project and os.fstat(dstfd).st_dev==safe.stat().st_dev,"Git generation quota/filesystem differs")
         headfd=os.open("HEAD",os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=srcfd)
         try:
             headmeta=os.fstat(headfd)
@@ -1473,7 +1562,9 @@ def build_git_view(policy, deadline):
         try:write_bytes(infofd,"attributes",b"",3)
         finally:os.fchmod(infofd,0o550);os.fsync(infofd);os.close(infofd)
         os.fchmod(dstfd,0o550);os.fsync(dstfd)
-        return destination,"/run/doxa/session/git-safe/"+generation
+        published=safe/generation
+        with git_metadata_lock(policy,deadline):os.rename(destination,published)
+        return published,"/run/doxa/session/git-safe/"+generation
     except BaseException:
         shutil.rmtree(destination,ignore_errors=True)
         raise
@@ -1614,6 +1705,8 @@ def install(source, destination):
     controlled(destination.parent)
     require(not destination.exists(), "installed session policy is immutable; replace with a new reviewed session")
     controlled(policy_paths(p)["state_dir"])
+    lock=open_git_metadata_lock(p)
+    os.close(lock)
     for name in ("socket", "receipt"):
         controlled(Path(policy_paths(p)[name]).parent)
         require(not Path(policy_paths(p)[name]).exists(), "client endpoint/receipt must be fresh")

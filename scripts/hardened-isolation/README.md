@@ -144,6 +144,20 @@ single-link files0440. One workspace operation owns a metadata generation, then
 removes it. Ordinary `apply` changes worktree bytes; `--cached`/`--index` are
 refused because no atomic original-index synchronization is provided.
 
+Views are built in `ROOT/.git-staging`, a ROOT0:0/0700 directory outside the
+four worker binds. Every temporary inode is checked against the ROOT inherited
+project ID; directories retain quota inheritance and all bytes remain charged
+to the same hard limit. Complete0550/0440 trees are atomically renamed into
+`broker/git-safe`; retirement first renames a complete tree back to private
+staging, then removes it outside the audited namespace. Installation and broker
+startup create the fixed ROOT0:0/0600 single-link regular file
+`/run/doxa/hardened/SESSION/git-metadata.lock`. ROOT producers take an exclusive
+flock only for publication/retirement and initial directory publication; native
+quota checks must take the shared lock around their whole quota audit. No partial
+0700/0600 tree or recursive deletion is visible to a concurrent shared auditor.
+The lock path/inode/owner/mode are validated, wait uses the operation's absolute
+deadline, and the fixed lock is never unlinked. Lock ownership grants no readiness.
+
 `guard` has no caller fields beyond v/session/op. It runs a fresh native
 `provider_exec`/family`none` authority check while persistent provider stdio is
 active and returns ready only after current quota/kernel/filter/gateway checks.

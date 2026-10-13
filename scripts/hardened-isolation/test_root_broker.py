@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Protocol/negative tests; fake Engine fixtures never establish containment."""
 import copy
+from contextlib import ExitStack, contextmanager
 import importlib.util
 import json
 import os
@@ -532,6 +533,31 @@ class LifecycleReconciliationTests(unittest.TestCase):
 
 
 class GitMetadataTests(unittest.TestCase):
+    @contextmanager
+    def fixture_root(self,p):
+        root=Path(p["root"]);runtime=root/"runtime";runtime.mkdir(exist_ok=True)
+        paths=b.policy_paths(p);paths["state_dir"]=str(runtime)
+        def stage(*_):
+            target=root/".git-staging";target.mkdir(mode=0o700,exist_ok=True)
+            return target,(0,False)
+        original_remove=b.shutil.rmtree
+        def remove(target,*args,**kwargs):
+            path=Path(target)
+            if path.exists():
+                for child in path.rglob("*"):
+                    if child.is_dir():child.chmod(0o700)
+                path.chmod(0o700)
+            return original_remove(target,*args,**kwargs)
+        with ExitStack() as stack:
+            for name,args in [("geteuid",{"return_value":0}),("chown",{}),("fchown",{})]:
+                stack.enter_context(patch.object(b.os,name,**args))
+            stack.enter_context(patch.object(b,"controlled"));stack.enter_context(patch.object(b,"check_git_lock"))
+            stack.enter_context(patch.object(b,"policy_paths",return_value=paths))
+            stack.enter_context(patch.object(b,"private_git_stage",side_effect=stage))
+            stack.enter_context(patch.object(b,"git_project",return_value=(0,False)))
+            stack.enter_context(patch.object(b.shutil,"rmtree",side_effect=remove))
+            yield
+
     def test_generated_view_omits_executable_configuration_and_alternates(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))) as directory:
             p=policy(); p["root"]=str(Path(directory).resolve()); p["engine"]["gid"]=os.getgid()
@@ -542,7 +568,7 @@ class GitMetadataTests(unittest.TestCase):
             (source/"config").write_text("[filter escape]\nclean = touch /marker\n[include]\npath = /secret\n")
             (source/"hooks").mkdir();(source/"hooks/pre-commit").write_text("touch /marker")
             (source/"info").mkdir();(source/"info/attributes").write_text("* filter=escape")
-            with patch.object(b.os,"geteuid",return_value=0),patch.object(b,"controlled"),patch.object(b.os,"chown"),patch.object(b.os,"fchown"):
+            with self.fixture_root(p):
                 view,worker=b.build_git_view(p,b.Deadline(1))
             try:
                 self.assertNotIn(b"filter",(view/"config").read_bytes());self.assertNotIn(b"include",(view/"config").read_bytes())
@@ -563,8 +589,76 @@ class GitMetadataTests(unittest.TestCase):
                 (source/"HEAD").write_text("1"*40+"\n");(source/"objects").mkdir()
                 if symlink:(source/"objects/escape").symlink_to("/etc/passwd")
                 else:(source/"objects/large").write_bytes(b"x"*2048)
-                with patch.object(b.os,"geteuid",return_value=0),patch.object(b,"controlled"),patch.object(b.os,"chown"),patch.object(b.os,"fchown"):
+                with self.fixture_root(p):
                     with self.assertRaises(b.Refused):b.build_git_view(p,b.Deadline(1))
+
+    def test_slow_private_build_and_retirement_never_publish_partial_audit_tree(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))) as directory:
+            p=policy();p["root"]=str(Path(directory).resolve());p["engine"]["gid"]=os.getgid()
+            root=Path(p["root"]);(root/"broker").mkdir();source=root/"checkout/.git";source.mkdir(parents=True)
+            (source/"HEAD").write_text("1"*40+"\n");(source/"objects").mkdir();(source/"objects/blob").write_bytes(b"x"*65536)
+            private_write=threading.Event();continue_build=threading.Event();completed=threading.Event()
+            observations=[];errors=[];result=[];original_write=os.write
+            def slow(fd,data):
+                if b"[core]" in bytes(data):
+                    private_write.set();self.assertTrue(continue_build.wait(2))
+                return original_write(fd,data)
+            def producer():
+                try:result.append(b.build_git_view(p,b.Deadline(3)))
+                except BaseException as error:errors.append(error)
+                finally:completed.set()
+            def audit():
+                with b.git_metadata_lock(p,b.Deadline(1),exclusive=False):
+                    safe=root/"broker/git-safe"
+                    rows=list(safe.iterdir()) if safe.exists() else []
+                    for view in rows:
+                        self.assertTrue((view/"config").is_file());self.assertEqual((view/"info/attributes").read_bytes(),b"")
+                        self.assertEqual(view.stat().st_mode&0o777,0o550)
+                        for path in view.rglob("*"):self.assertEqual(path.stat().st_mode&0o777,0o550 if path.is_dir() else 0o440)
+                    observations.append(len(rows))
+            with self.fixture_root(p),patch.object(b.os,"write",side_effect=slow):
+                worker=threading.Thread(target=producer);worker.start()
+                try:
+                    self.assertTrue(private_write.wait(2))
+                    for _ in range(10):audit()
+                    self.assertEqual(observations,[0]*10)
+                    continue_build.set();self.assertTrue(completed.wait(2));worker.join(1);self.assertFalse(errors)
+                    audit();self.assertEqual(observations[-1],1)
+                    view=result[0][0];retired=threading.Event()
+                    def retire():
+                        try:b.retire_git_view(p,view,b.Deadline(1));retired.set()
+                        except BaseException as error:errors.append(error)
+                    with b.git_metadata_lock(p,b.Deadline(1),exclusive=False):
+                        reader=os.open(view,os.O_RDONLY|os.O_DIRECTORY);held=os.fstat(reader)
+                        remover=threading.Thread(target=retire);remover.start()
+                        self.assertFalse(retired.wait(.05));self.assertEqual(view.stat().st_ino,held.st_ino)
+                        self.assertTrue((view/"config").exists());os.close(reader)
+                    self.assertTrue(retired.wait(1));remover.join(1);audit();self.assertEqual(observations[-1],0)
+                    self.assertFalse(errors);self.assertFalse(view.exists())
+                finally:continue_build.set();worker.join(2)
+
+    def test_real_flock_wait_obeys_single_deadline(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))) as directory:
+            p=policy();p["root"]=str(Path(directory).resolve())
+            with self.fixture_root(p),b.git_metadata_lock(p,b.Deadline(1),exclusive=False):
+                start=time.monotonic()
+                with self.assertRaises(b.Refused):
+                    with b.git_metadata_lock(p,b.Deadline(.05)):self.fail("exclusive lock overlapped auditor")
+                self.assertLess(time.monotonic()-start,.3)
+
+    def test_root_lock_rejects_wrong_owner_mode_links_and_inode(self):
+        meta=Mock(st_mode=0o100600,st_uid=0,st_gid=0,st_nlink=1,st_dev=1,st_ino=2)
+        path=Mock();path.lstat.return_value=meta
+        changes=[{"st_uid":1000},{"st_gid":1001},{"st_mode":0o100640},{"st_nlink":2},{"st_mode":0o040600}]
+        with patch.object(b,"controlled"):
+            for change in changes:
+                bad=copy.copy(meta)
+                for key,value in change.items():setattr(bad,key,value)
+                with patch.object(b.os,"fstat",return_value=bad):
+                    with self.assertRaises(b.Refused):b.check_git_lock(1,path)
+            with patch.object(b.os,"fstat",return_value=meta):
+                path.lstat.return_value=Mock(st_dev=1,st_ino=3)
+                with self.assertRaises(b.Refused):b.check_git_lock(1,path)
 
 
 class ConcurrentControlTests(unittest.TestCase):

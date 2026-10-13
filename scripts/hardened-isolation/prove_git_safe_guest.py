@@ -3,7 +3,7 @@
 
 This tests actual Git as UID1001. It installs no quota policy, contacts no Engine,
 starts no provider and makes no hardened-admission claim. Every fixture byte is
-under its unique /run/doxa/git-safe-proof-PID directory and is removed afterward.
+under its unique /srv/git-safe-proof-PID directory and is removed afterward.
 """
 import importlib.util
 import json
@@ -18,12 +18,13 @@ b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)
 
 def main():
     b.require(os.geteuid()==0,"guest Git proof requires ROOT")
-    root=Path("/run/doxa")/("git-safe-proof-"+str(os.getpid()))
+    root=Path("/srv")/("git-safe-proof-"+str(os.getpid()))
     root.mkdir(mode=0o750);os.chown(root,0,1001)
     workspace=root/"checkout";workspace.mkdir(mode=0o770);os.chown(workspace,1001,1001)
     mount=root/"broker";mount.mkdir(mode=0o750);os.chown(mount,0,1001)
     home=root/"home";home.mkdir(mode=0o770);os.chown(home,1001,1001)
-    p={"root":str(root),"engine":{"uid":1001,"gid":1001},"limits":{"disk_bytes":128*1024*1024}}
+    p={"session_id":root.name,"root":str(root),"engine":{"uid":1001,"gid":1001},"limits":{"disk_bytes":128*1024*1024}}
+    runtime=Path(b.policy_paths(p)["state_dir"]);runtime.mkdir(mode=0o755)
     base={"PATH":"/usr/bin:/bin","LANG":"C","HOME":str(home),"TMPDIR":str(home),
           "GIT_CONFIG_NOSYSTEM":"1","GIT_CONFIG_GLOBAL":"/dev/null",
           "GIT_AUTHOR_NAME":"fixture","GIT_AUTHOR_EMAIL":"fixture@example.invalid",
@@ -86,7 +87,7 @@ def main():
                 "metadata_bytes":sum(path.stat().st_size for path in infos if path.is_file()),"denied_index_mutations":denied,
                 "no_engine_api_calls":True,"no_quota_installation":True,"no_provider_calls":True,"worker_view":worker_view}
         print(json.dumps(result,sort_keys=True,indent=2))
-    finally:shutil.rmtree(root)
+    finally:shutil.rmtree(root);shutil.rmtree(runtime)
 
 
 if __name__=="__main__":main()

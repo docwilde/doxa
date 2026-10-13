@@ -100,3 +100,14 @@ Final code baselinef26a69b7:50 focused tests passed0.577s, clean status and
 diff-check. Evidence and exact commands are committed in evidence/RUN.md.
 Native composed admission proof, Runtime wiring and production provisioning
 remain parent/authority-owned; these Git/client fixtures make no readiness claim.
+
+Parent review reopened a real concurrent audit race: in-place0700/0600 Git view
+construction/deletion could make an independent live native gateway reject quota
+metadata. New design builds under ROOT/.git-staging ROOT0:0/0700 on the same
+quota filesystem outside binds; FSGETXATTR verifies inherited project on every
+temporary inode. Whole readonly generations publish/retire by rename under a
+fixed ROOT runtime600 metadata flock. Native takes shared lock around all quota
+audits; ROOT exclusive lock covers only publication/retirement, not slow copy or
+recursive removal. SourceRoot audit ignores extra Root siblings but kernel hard
+limit charges staging. Meaningful real-flock slow-build/held-reader retirement
+and deadline/invalid lock tests added; native composition owned by parent.
