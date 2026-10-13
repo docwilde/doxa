@@ -302,3 +302,11 @@ prepare succeeds after consumed staging. Socketpair test reproduces pre-upload
 readability false cancellation, then verifies closing-only staging consumption,
 post-upload operation and real EOF cancellation. No guest edits/reruns or bounds
 changes. Committing correction before focused verification.
+
+Final graceful-stop correction5e536002:94 full broker tests pass1.056s,
+clean worktree/diff-check. Broker SHA256
+3305ba7bca32430837331e8613852b48ed486bacd2c35393ab0e27a48c616b7b.
+Counter/reservation tests plus actual socketpair EOF/unread staging and live
+Unix dispatcher regression pass; SourceRoot/quota/Engine native admission remains
+unchanged and coordinator-owned. Fresh5019 remains held for independent review;
+no guest commands or immutable failure evidence mutations by this worker.
