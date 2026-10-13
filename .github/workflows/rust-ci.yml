@@ -112,6 +112,8 @@ jobs:
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_plugin_delegated_host_proof.py -v
           python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_plugin_installed_host_proof.py -v
+          python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_remote_platform_preflight.py -v
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_android_recovery_ui.py -v
