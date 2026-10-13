@@ -51,6 +51,36 @@ def sha(path):
     return digest.hexdigest()
 
 
+def root_artifact(path, digest=None, maximum=1024*1024):
+    path = Path(path)
+    require(path.is_absolute() and all(p not in (".", "..") for p in path.parts), "noncanonical ROOT artifact")
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for index, component in enumerate(path.parts[1:]):
+            parent = os.fstat(descriptor)
+            require(stat.S_ISDIR(parent.st_mode) and parent.st_uid == 0 and parent.st_mode & 0o022 == 0,
+                    "ROOT artifact ancestor is mutable outside ROOT")
+            final = index == len(path.parts) - 2
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+            if not final: flags |= os.O_DIRECTORY
+            copied = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor); descriptor = copied
+        before = os.fstat(descriptor)
+        require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1
+                and before.st_mode & 0o7022 == 0 and 0 < before.st_size <= maximum,
+                "ROOT artifact type/ownership/mode/size differs")
+        data = bytearray()
+        while chunk := os.read(descriptor, 65536):
+            data.extend(chunk); require(len(data) <= maximum, "ROOT artifact read exceeds bound")
+        after = os.fstat(descriptor)
+        require((before.st_dev,before.st_ino,before.st_size,before.st_ctime_ns,before.st_mtime_ns)
+                == (after.st_dev,after.st_ino,after.st_size,after.st_ctime_ns,after.st_mtime_ns), "ROOT artifact changed")
+        if digest is not None: require(hashlib.sha256(data).hexdigest() == digest, "ROOT artifact content pin differs")
+        return bytes(data)
+    finally:
+        os.close(descriptor)
+
+
 def private_new(path, data, mode=0o600, uid=0):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
     with os.fdopen(fd, "wb") as out:
@@ -305,12 +335,15 @@ def main(args):
             m = path.lstat()
             require(stat.S_ISREG(m.st_mode) and m.st_uid == 0 and m.st_gid == 0 and m.st_nlink == 1
                     and stat.S_IMODE(m.st_mode) == 0o555 and sha(path) == digest, "staged immutable caller binary differs")
-        require(sha(public_script) == sha(__file__), "public observer source differs from executed harness")
-        policy = json.loads(args.template_policy.read_bytes())
+        require(hashlib.sha256(root_artifact(public_script)).hexdigest() == sha(__file__), "public observer source differs from executed harness")
+        policy = json.loads(root_artifact(args.template_policy))
         require(policy["caller_uid"] == 1000 and policy["engine"]["uid"] == policy["engine"]["gid"] == 1001,
                 "template identities differ")
         require(policy["broker"]["sha256"] == BROKER_SHA and policy["authority"]["sha256"] == GATEWAY_SHA
                 and policy["worker"]["sha256"] == WORKER_SHA, "template must use final frozen ROOT binaries")
+        # Authenticate code bytes and no-follow ROOT ancestors before importing
+        # any Python. A caller pathname cannot select privileged proof code.
+        root_artifact(policy["broker"]["path"], BROKER_SHA, 4*1024*1024)
         spec = importlib.util.spec_from_file_location("reviewed_daemon_root_broker", policy["broker"]["path"])
         require(spec is not None and spec.loader is not None, "frozen ROOT broker source missing")
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
@@ -426,21 +459,23 @@ def main(args):
     finally:
         cleanup = Budget(45)
         # Signal only retained exact own pidfds, never process groups or argv hints.
-        for child in (frontend, obs, daemon):
+        first = [child for child in (frontend, obs, daemon) if child is not None]
+        owned = first + [child for child in pump.children if child is not broker and child not in first]
+        for child in owned:
             if child is None: continue
             try:
                 if alive(child.pidfd): child.signal(signal.SIGTERM)
-                pump.exit(child, cleanup)
+                pump.exit(child, Budget(cleanup.left(5)))
             except BaseException as cause:
                 cleanup_errors.append(child.name + ": " + str(cause))
-                try: child.signal(signal.SIGKILL); pump.exit(child, cleanup)
+                try: child.signal(signal.SIGKILL); pump.exit(child, Budget(cleanup.left(2)))
                 except BaseException as final: cleanup_errors.append(child.name + " kill: " + str(final))
         if broker is not None:
             try:
-                broker.signal(signal.SIGTERM); pump.exit(broker, cleanup)
+                broker.signal(signal.SIGTERM); pump.exit(broker, Budget(cleanup.left(5)))
             except BaseException as cause:
                 cleanup_errors.append("broker: " + str(cause))
-                try: broker.signal(signal.SIGKILL); pump.exit(broker, cleanup)
+                try: broker.signal(signal.SIGKILL); pump.exit(broker, Budget(cleanup.left(2)))
                 except BaseException as final: cleanup_errors.append("broker kill: " + str(final))
         if engine is not None:
             try:
