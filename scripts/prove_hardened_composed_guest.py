@@ -366,7 +366,7 @@ def main():
         provision=Path('/root/isolation-proof/quota-bin/doxa-quota-provision-family')
         run([str(provision),'create',sid,str(root),'1000','1001','1001',str(args.project_id),'67108864',image,args.worker_sha256])
         source=args.output/'source-policy.json';write_new(source,json.dumps(policy,sort_keys=True).encode()+b'\n')
-        policy_dir=Path('/etc/doxa/hardened');policy_dir.mkdir(mode=0o755,parents=True)
+        policy_dir=Path('/etc/doxa/hardened');policy_dir.mkdir(mode=0o755,parents=True,exist_ok=True);module.controlled(policy_dir)
         destination=policy_dir/(sid+'.json');require(not destination.exists(),'installed policy must be fresh')
         python=str(Path(sys.executable).resolve())
         receipt=json.loads(run([python,'-I',str(installed),'install','--source',str(source),'--destination',str(destination)]))
