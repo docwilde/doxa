@@ -541,6 +541,16 @@ class GitMetadataTests(unittest.TestCase):
             target=root/".git-staging";target.mkdir(mode=0o700,exist_ok=True)
             return target,(0,False)
         original_remove=b.shutil.rmtree
+        original_rename=os.rename
+        def rename(source,target):
+            path=Path(source);mode=path.stat().st_mode&0o777
+            # This UID1000 fixture emulates ROOT DAC override for a cross-parent
+            # directory rename. Actual ROOT does not alter the published mode.
+            if path.is_dir():path.chmod(mode|0o200)
+            try:return original_rename(source,target)
+            finally:
+                current=Path(target) if Path(target).exists() else path
+                if current.exists() and current.is_dir():current.chmod(mode)
         def remove(target,*args,**kwargs):
             path=Path(target)
             if path.exists():
@@ -556,6 +566,7 @@ class GitMetadataTests(unittest.TestCase):
             stack.enter_context(patch.object(b,"private_git_stage",side_effect=stage))
             stack.enter_context(patch.object(b,"git_project",return_value=(0,False)))
             stack.enter_context(patch.object(b.shutil,"rmtree",side_effect=remove))
+            stack.enter_context(patch.object(b.os,"rename",side_effect=rename))
             yield
 
     def test_generated_view_omits_executable_configuration_and_alternates(self):
