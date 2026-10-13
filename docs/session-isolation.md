@@ -201,8 +201,17 @@ ioctl refusal, actual UID1000-to-ROOT broker authentication and actual UID1001 G
 filter-marker checks have passed. The
 [credential-free exact-origin run6](../scripts/isolation-authority-evidence/20261013/RUN.md)
 also passed kernel checks, inside/private-PTY frames and six refusal cases, with
-exact container/cgroup/socket cleanup. It reports diagnostics only. The composed
-Runtime/provider/callback/stop-resume proof is being completed separately.
+exact container/cgroup/socket cleanup. It reports diagnostics only. The
+[composed Runtime receipt](composed-runtime-proof-20261013.json), attempt 6,
+passed actual prepare/activation, persistent Codex owner/guard handling, original
+source snapshot and private review-copy checks, a fixture approval callback,
+stale-source refusal, readonly Git metadata and filter rejection, ordinary apply,
+and staged Claude settings. Cold resume produced a fresh CID and passed its live
+guard and stop; it does not prove provider checkpoint or session conservation.
+The body completed in 30.6 seconds. Both exact CIDs returned 404 after teardown;
+owned processes, cgroups and physical/kernel sockets were absent and the shared
+Engine identity was unchanged. Actual daemon/frontend acceptance is separate
+and remains pending.
 Historical passes never grant admission for a different image/policy. Real
 Claude/Codex streaming, login/refresh, redirects and provider-specific alternate
 outbound behavior are not claimed by the dummy fixtures. TLS remains end-to-end;

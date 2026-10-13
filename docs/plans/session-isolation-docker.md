@@ -8,8 +8,10 @@ project quota; the caller's independent mirror is not worker filesystem authorit
 See [the operator guide](../session-isolation.md#root-controlled-hardened-sessions),
 [quota provisioning](../root-controlled-quota.md), and the
 [ROOT broker protocol/package](../../scripts/hardened-isolation/README.md).
-Disposable exact-origin diagnostics passed run6; composed lifecycle proof remains in progress;
-individual fixture receipts and static `ready` flags cannot activate it.
+Disposable exact-origin diagnostics passed run6. Composed Runtime attempt6
+passed its fixture lifecycle and cleanup; actual daemon/frontend acceptance is
+separate and pending. Individual receipts and static `ready` flags cannot
+activate a session.
 Legacy profiles retain their monitored soft ceiling/free-space gates.
 Remote Engines, Docker Desktop and containerized controllers remain unavailable.
 The [remote preflight](../remote-engine-preflight.md) is evidence-shape checking,
@@ -270,9 +272,17 @@ actual Git clean/smudge/process marker rejection. Each receipt names its exact
 source/image/policy and limitations. The
 [live exact-origin run6](../../scripts/isolation-authority-evidence/20261013/RUN.md)
 passed kernel checks, intended-worker/private-PTY frames and six origin/device
-refusals with both CIDs/cgroups/sockets absent afterward. Full credential-free
-Runtime/provider/callback/Git/cleanup composition remains a separate acceptance
-run in progress. The fixtures do not claim real Claude/Codex streaming,
+refusals with both CIDs/cgroups/sockets absent afterward. The
+[composed Runtime attempt6 receipt](../composed-runtime-proof-20261013.json)
+passed prepare/activation, persistent Codex owner/guard handling, original
+snapshot/private review-copy checks, a fixture approval callback and stale-source
+refusal, readonly Git metadata/filter rejection, ordinary apply, and staged
+Claude settings. Cold resume proves a fresh lease, live guard and stop, without
+provider checkpoint/session conservation. The 30.6-second body and teardown
+passed with both exact CIDs returning 404, owned processes/cgroups/physical and
+kernel sockets absent, and the shared Engine unchanged. Actual daemon/frontend
+acceptance remains separate and pending. The fixtures do not claim canonical
+human approval or real Claude/Codex streaming,
 authentication/refresh, redirects, all alternate outbound paths or encrypted
 HTTP authority. The earlier network-none/public-HTTPS and origin namespace
 fixtures remain historical transport observations only.
