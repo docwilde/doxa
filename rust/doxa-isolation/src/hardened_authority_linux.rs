@@ -149,7 +149,7 @@ impl Authority {
         }
         let init=self.manifest.host_init_pid as i32;
         if scope(init)?!=self.init_scope {return Err(error("container init moved between namespace or cgroup scopes"));}
-        check_kernel(&self.policy,init,&self.init_scope,&self.quota,&self.init_pin,deadline)?;
+        check_kernel(&self.policy,init,&self.init_scope,&self.quota,&self.init_pin,self.manifest.engine_pid as i32,deadline)?;
         live_same(&self.init_pin,init)?;
         live_same(&self.engine_pin,self.manifest.engine_pid as i32)?;
         remaining(deadline)?;
@@ -596,7 +596,21 @@ fn check_limits(policy:&Policy,cgroup:&str)->io::Result<()> {
 }
 
 #[derive(Debug)]
-struct Mount {id:u64,target:PathBuf,kind:String,options:BTreeSet<String>,super_options:BTreeSet<String>}
+struct Mount {id:u64,target:PathBuf,source_root:PathBuf,device:u64,kind:String,
+    device_leaf:Option<(u32,u32)>,options:BTreeSet<String>,super_options:BTreeSet<String>}
+fn standard_device_leaf(target:&Path,source_root:&Path,kind:&str,source:&str)->Option<(u32,u32)> {
+    if kind!="devtmpfs"||source!="devtmpfs"{return None;}
+    let (root,rdev)=match target.to_str()? {
+        "/dev/null"=>("/null",(1,3)),"/dev/zero"=>("/zero",(1,5)),"/dev/full"=>("/full",(1,7)),
+        "/dev/random"=>("/random",(1,8)),"/dev/urandom"=>("/urandom",(1,9)),"/dev/tty"=>("/tty",(5,0)),
+        "/proc/interrupts"|"/proc/kcore"|"/proc/keys"|"/proc/latency_stats"|"/proc/timer_list"=>("/null",(1,3)),
+        _=>return None,
+    };
+    (source_root==Path::new(root)).then_some(rdev)
+}
+fn bounded_mount_number(raw:&str)->Option<u32> {
+    let value=raw.parse::<u32>().ok()?;(value>0&&value.to_string()==raw).then_some(value)
+}
 fn decode_mount(raw:&str)->io::Result<PathBuf> {
     let mut out=Vec::new();let mut bytes=raw.as_bytes().iter().copied();
     while let Some(b)=bytes.next(){if b==b'\\'{let a=bytes.next().ok_or_else(||error("mount escape truncated"))?;
@@ -610,17 +624,32 @@ fn mount_inventory(raw:&str)->io::Result<Vec<Mount>> {
     for line in raw.lines(){if entries.len()>=256{return Err(error("container mount inventory exceeds bound"));}
         let (left,right)=line.split_once(" - ").ok_or_else(||error("kernel mount record malformed"))?;
         let left=left.split_whitespace().collect::<Vec<_>>();let right=right.split_whitespace().collect::<Vec<_>>();
-        if left.len()<6||right.len()!=3||left[6..].iter().any(|v|v.starts_with("shared:")||v.starts_with("master:")) {
+        if left.len()<6||right.len()!=3 {
             return Err(error("worker mount is malformed or shares propagation with host"));
         }
-        let target=decode_mount(left[4])?;
+        let target=decode_mount(left[4])?;let source_root=decode_mount(left[3])?;
+        let device_leaf=standard_device_leaf(&target,&source_root,right[0],right[1]);
+        let optional=&left[6..];
+        let private=optional.is_empty()||optional==["unbindable"];
+        let safe_leaf_slave=device_leaf.is_some()&&optional.len()==1
+            &&optional[0].strip_prefix("master:").and_then(bounded_mount_number).is_some();
+        if !private&&!safe_leaf_slave{return Err(error("worker mount has unreviewed/shared propagation or a directory slave"));}
+        let (major,minor)=left[2].split_once(':').ok_or_else(||error("mount device malformed"))?;
+        let major=major.parse::<u32>().map_err(|_|error("mount major invalid"))?;
+        let minor=minor.parse::<u32>().map_err(|_|error("mount minor invalid"))?;
         if !targets.insert(target.clone()){return Err(error("worker has stacked/ambiguous mounts"));}
         let id=left[0].parse::<u64>().ok().filter(|id|*id!=0).ok_or_else(||error("kernel mount ID malformed"))?;
-        entries.push(Mount{id,target,kind:right[0].into(),options:left[5].split(',').map(str::to_owned).collect(),
+        entries.push(Mount{id,target,source_root,device:libc::makedev(major,minor),device_leaf,
+            kind:right[0].into(),options:left[5].split(',').map(str::to_owned).collect(),
             super_options:right[2].split(',').map(str::to_owned).collect()});
     }Ok(entries)
 }
-fn check_mounts(pid:i32,q:&EnforcedQuotaSnapshot,view:&fs_view::Context<'_>,deadline:Instant)->io::Result<()> {
+fn device_leaf_matches(fact:&fs_view::Fact,source:&fs::Metadata,mount:&Mount,rdev:(u32,u32))->bool {
+    fact.character()&&source.file_type().is_char_device()&&fact.rdev==libc::makedev(rdev.0,rdev.1)
+        &&(fact.device,fact.inode,fact.rdev)==(source.dev(),source.ino(),source.rdev())
+        &&fact.mount_id==mount.id&&fact.device==mount.device
+}
+fn check_mounts(pid:i32,q:&EnforcedQuotaSnapshot,view:&fs_view::Context<'_>,engine_pid:i32,deadline:Instant)->io::Result<()> {
     let mounts=mount_inventory(&read_proc(&format!("/proc/{pid}/mountinfo"),MAX_PROC)?)?;
     let root=mounts.iter().find(|m|m.target==Path::new("/")).ok_or_else(||error("worker root mount missing"))?;
     if !root.options.contains("ro"){return Err(error("worker image root is writable"));}
@@ -639,6 +668,21 @@ fn check_mounts(pid:i32,q:&EnforcedQuotaSnapshot,view:&fs_view::Context<'_>,dead
         if !mounted.options.contains(if rw{"rw"}else{"ro"}) {return Err(error("actual worker bind write policy differs"));}
     }
     for m in &mounts {
+        if let Some(rdev)=m.device_leaf {
+            let actual=view.read(fs_view::Operation::RootMetadata{pid,path:m.target.clone(),nofollow:true},deadline)?;
+            let name=m.source_root.file_name().ok_or_else(||error("standard device root is not a leaf"))?;
+            let host=nofollow_object(&Path::new("/dev").join(name))?.metadata()?;
+            if !device_leaf_matches(&actual,&host,m,rdev) {
+                // Some rootless setups have a separate Engine /dev instance.
+                // Only the already pinned live Engine's fixed source node may
+                // supply the alternate identity; a caller path never does.
+                let engine=nofollow_object(&PathBuf::from(format!("/proc/{engine_pid}/root/dev")).join(name))?.metadata()?;
+                if !device_leaf_matches(&actual,&engine,m,rdev) {
+                    return Err(error("standard slave device/masked proc mount is not its exact safe Engine source node"));
+                }
+            }
+            continue;
+        }
         let known=matches!(m.target.to_str(),Some("/"|"/workspace"|"/home/doxa"|"/work-cache"|"/run/doxa/session"|"/tmp"
             |"/etc/hosts"|"/etc/hostname"|"/etc/resolv.conf"|"/dev"|"/dev/pts"|"/dev/shm"|"/dev/mqueue"));
         let kernel=m.target.starts_with("/proc")||m.target.starts_with("/sys");
@@ -860,7 +904,7 @@ fn validate_root_endpoint(pid:i32,address:&[u8],policy:&Policy,quota:&EnforcedQu
     live_same(peer_pin,credentials.pid)
 }
 
-fn check_kernel(policy:&Policy,pid:i32,init:&Scope,q:&EnforcedQuotaSnapshot,pin:&File,deadline:Instant)->io::Result<()> {
+fn check_kernel(policy:&Policy,pid:i32,init:&Scope,q:&EnforcedQuotaSnapshot,pin:&File,engine_pid:i32,deadline:Instant)->io::Result<()> {
     let host=scope_host()?;
     for (name,ns) in &init.namespaces {if host.get(name)==Some(ns){return Err(error("worker shares a host namespace"));}}
     check_uid_map(&read_proc(&format!("/proc/{pid}/uid_map"),8192)?,policy)?;
@@ -871,7 +915,7 @@ fn check_kernel(policy:&Policy,pid:i32,init:&Scope,q:&EnforcedQuotaSnapshot,pin:
     let cmd=read_bytes(&File::open(format!("/proc/{pid}/cmdline"))?,8192)?;
     let argv=cmd.split(|b|*b==0).filter(|b|!b.is_empty()).collect::<Vec<_>>();
     if argv!=[policy.worker.path.as_os_str().as_bytes(),b"hold-hardened"] {return Err(error("container init does not run the mandatory worker filter mode"));}
-    check_mounts(pid,q,&view,deadline)?;check_network(pid)?;check_descriptors(pid,false,policy,q,&view,deadline)?;check_limits(policy,&init.cgroup)?;
+    check_mounts(pid,q,&view,engine_pid,deadline)?;check_network(pid)?;check_descriptors(pid,false,policy,q,&view,deadline)?;check_limits(policy,&init.cgroup)?;
     check_client_cgroup_access(policy,&init.cgroup,deadline)?;
     for provider in policy.providers.values() {
         for (path,hash) in provider.artifacts.iter().chain(std::iter::once((&provider.path,&provider.sha256))) {
@@ -1030,6 +1074,49 @@ mod tests {
         assert_eq!(mount_inventory(good).unwrap().len(),2);
         assert!(mount_inventory("1 0 0:1 / / rw shared:3 - overlay overlay rw\n").is_err());
         assert!(mount_inventory(&(good.to_owned()+"3 1 0:1 / / ro - overlay overlay rw\n")).is_err());
+    }
+    #[test]
+    fn rootless_slave_exception_is_only_exact_standard_device_leaves() {
+        for (root,target,rdev) in [("null","/dev/null",(1,3)),("zero","/dev/zero",(1,5)),
+            ("full","/dev/full",(1,7)),("random","/dev/random",(1,8)),("urandom","/dev/urandom",(1,9)),
+            ("tty","/dev/tty",(5,0)),("null","/proc/interrupts",(1,3)),("null","/proc/kcore",(1,3)),
+            ("null","/proc/keys",(1,3)),("null","/proc/latency_stats",(1,3)),("null","/proc/timer_list",(1,3))] {
+            let raw=format!("1 0 0:7 /{root} {target} rw,nosuid master:2 - devtmpfs devtmpfs rw\n");
+            assert_eq!(mount_inventory(&raw).unwrap()[0].device_leaf,Some(rdev));
+        }
+        for raw in [
+            "1 0 0:7 /null /dev/null-extra rw master:2 - devtmpfs devtmpfs rw\n",
+            "1 0 0:7 / /dev rw master:2 - devtmpfs devtmpfs rw\n",
+            "1 0 0:7 /zero /dev/null rw master:2 - devtmpfs devtmpfs rw\n",
+            "1 0 0:7 /zero /proc/kcore rw master:2 - devtmpfs devtmpfs rw\n",
+            "1 0 0:7 /null /dev/null rw shared:2 - devtmpfs devtmpfs rw\n",
+            "1 0 0:7 /null /dev/null rw master:2 shared:3 - devtmpfs devtmpfs rw\n",
+            "1 0 0:7 /null /dev/null rw master:2 propagate_from:3 - devtmpfs devtmpfs rw\n",
+            "1 0 0:7 /null /dev/null rw master:4294967296 - devtmpfs devtmpfs rw\n",
+            "1 0 0:7 /null /dev/null rw master:02 - devtmpfs devtmpfs rw\n",
+            "1 0 0:7 /null /dev/null rw alien:2 - devtmpfs devtmpfs rw\n",
+            "1 0 0:7 /null /dev/null rw master:2 - ext4 /dev/vda1 rw\n",
+        ] {assert!(mount_inventory(raw).is_err(),"unexpected mount accepted: {raw}");}
+    }
+    #[test]
+    fn slave_device_leaf_requires_real_type_rdev_inode_and_mount_identity() {
+        let source=nofollow_object(Path::new("/dev/null")).unwrap().metadata().unwrap();
+        let raw=format!("3 0 {}:{} /null /dev/null rw master:2 - devtmpfs devtmpfs rw\n",
+            libc::major(source.dev()),libc::minor(source.dev()));
+        let mount=mount_inventory(&raw).unwrap().remove(0);
+        let fact=fs_view::Fact{device:source.dev(),inode:source.ino(),rdev:source.rdev(),mode:source.mode(),
+            size:source.len(),mount_id:3,sha256:None};
+        assert!(device_leaf_matches(&fact,&source,&mount,(1,3)));
+        for change in 0..5 {
+            let mut wrong=fact.clone();match change {
+                0=>wrong.mode=libc::S_IFDIR,1=>wrong.rdev=libc::makedev(1,8),2=>wrong.inode+=1,
+                3=>wrong.device+=1,_=>wrong.mount_id+=1,
+            }
+            assert!(!device_leaf_matches(&wrong,&source,&mount,(1,3)));
+        }
+        assert!(!device_leaf_matches(&fact,&source,&mount,(1,5)));
+        let regular=tempfile::NamedTempFile::new().unwrap();
+        assert!(!device_leaf_matches(&fact,&regular.as_file().metadata().unwrap(),&mount,(1,3)));
     }
     #[test]
     fn rootless_uid_map_excludes_client_and_host_root() {
