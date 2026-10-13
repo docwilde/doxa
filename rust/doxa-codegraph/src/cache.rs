@@ -416,8 +416,10 @@ mod tests {
         assert!(error.contains("hash/mode changed"), "{error}");
         let mut cache = ReadOnlyQueryCache::default();
         fs::write(root.path().join("service.py"), "def first(): pass\n").unwrap();
+        let source = root.path().join("lib.rs");
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
         cache.query(root.path(), Query::File("lib.rs".into())).unwrap();
-        fs::set_permissions(root.path().join("lib.rs"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(cache.query(root.path(), Query::File("lib.rs".into())).unwrap().1, Origin::Fresh);
     }
 
