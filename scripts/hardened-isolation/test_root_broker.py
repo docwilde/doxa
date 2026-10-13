@@ -1002,6 +1002,7 @@ class ConcurrentControlTests(unittest.TestCase):
             runtime=Path(directory); endpoint=runtime/"broker.sock"; original_uid=os.geteuid()
             p=policy(); p["caller_uid"]=original_uid
             fake=Mock(policy=p,state_dir=runtime,manifest=None,state_lock=threading.RLock(),closing=threading.Event())
+            fake.native_quarantined.return_value=False
             fake.describe.return_value={"status":"unprepared","protocol":b.PROTOCOL}
             started,release=threading.Event(),threading.Event()
             def execute(request,client):
