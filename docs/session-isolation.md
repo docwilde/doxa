@@ -148,6 +148,17 @@ IDs. The root broker service is an explicit administrator operation, never a
 launcher side effect. Its unit shares the installation mount namespace so boot
 and unique mount pins remain meaningful.
 
+ROOT shutdown reserves a gate for new work and waits for already admitted
+provider/workspace transports to settle within the installed operation deadline.
+It releases the state lock while waiting so those transports can finish their
+cleanup. New turns, execution, staging, prepare/resume and hook registration are
+refused while the gate is pending. Existing transports, snapshots and hook
+unregistration can finish. Timeout, disconnect or cleanup refusal retains the
+gate; an explicit typed ROOT stop retry must finish before prepare/resume can
+proceed. A `stop_if_idle` acknowledgement precedes this cleanup; the daemon's
+clean exit confirms its completion. See the
+[broker lifecycle contract](../scripts/hardened-isolation/README.md).
+
 The native gateway holds Engine/init pidfds, immutable ROOT files and quota
 descriptors. It checks exact inspect on its pinned Engine connection, private
 namespaces, finite effective cgroups, all worker thread filters and descriptors,
@@ -210,10 +221,16 @@ and staged Claude settings. Cold resume produced a fresh CID and passed its live
 guard and stop; it does not prove provider checkpoint or session conservation.
 The body completed in 30.6 seconds. Both exact CIDs returned 404 after teardown;
 owned processes, cgroups and physical/kernel sockets were absent and the shared
-Engine identity was unchanged. Actual daemon/frontend acceptance is separate
-and remains pending.
-Historical passes never grant admission for a different image/policy. Real
-Claude/Codex streaming, login/refresh, redirects and provider-specific alternate
+Engine identity was unchanged. The separate
+[daemon/frontend run 6](../scripts/isolation-daemon-evidence/20261013/RUN.md)
+also passed. One actual UID1000 frontend prompt crossed the IsolationHost ROOT
+guard and produced the exact fixture start, text and done events, rendered
+response and idle status. The frontend reached complete PTY EOF, the daemon and
+owned broker exited cleanly, and ROOT stop confirmed the exact CID absent.
+Owned processes, cgroups, sockets and registry entries were absent after cleanup;
+the shared Engine was unchanged. The earlier failed attempts remain recorded.
+Historical passes never grant admission for a different image/policy. Canonical
+human approval, real Claude/Codex streaming, login/refresh, redirects and provider-specific alternate
 outbound behavior are not claimed by the dummy fixtures. TLS remains end-to-end;
 the gateway checks CONNECT/SNI/public addresses, not encrypted HTTP authority.
 

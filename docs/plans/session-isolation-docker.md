@@ -8,9 +8,9 @@ project quota; the caller's independent mirror is not worker filesystem authorit
 See [the operator guide](../session-isolation.md#root-controlled-hardened-sessions),
 [quota provisioning](../root-controlled-quota.md), and the
 [ROOT broker protocol/package](../../scripts/hardened-isolation/README.md).
-Disposable exact-origin diagnostics passed run6. Composed Runtime attempt6
-passed its fixture lifecycle and cleanup; actual daemon/frontend acceptance is
-separate and pending. Individual receipts and static `ready` flags cannot
+Disposable exact-origin diagnostics, composed Runtime attempt6 and separate
+daemon/frontend run6 passed their respective fixture scopes and cleanup.
+Individual receipts and static `ready` flags cannot
 activate a session.
 Legacy profiles retain their monitored soft ceiling/free-space gates.
 Remote Engines, Docker Desktop and containerized controllers remain unavailable.
@@ -280,8 +280,14 @@ refusal, readonly Git metadata/filter rejection, ordinary apply, and staged
 Claude settings. Cold resume proves a fresh lease, live guard and stop, without
 provider checkpoint/session conservation. The 30.6-second body and teardown
 passed with both exact CIDs returning 404, owned processes/cgroups/physical and
-kernel sockets absent, and the shared Engine unchanged. Actual daemon/frontend
-acceptance remains separate and pending. The fixtures do not claim canonical
+kernel sockets absent, and the shared Engine unchanged. The separate
+[daemon/frontend run6](../../scripts/isolation-daemon-evidence/20261013/RUN.md)
+passed one actual UID1000 frontend turn through the IsolationHost ROOT guard,
+exact start/text/done events and response rendering, idle status and owner
+`stop_if_idle`. The frontend completed PTY EOF and the daemon and owned broker
+exited cleanly. ROOT stop and teardown confirmed exact CID404, absent owned
+processes/cgroups/sockets/registry, and unchanged shared Engine. The five failed
+daemon attempts remain preserved with their diagnostics. The fixtures do not claim canonical
 human approval or real Claude/Codex streaming,
 authentication/refresh, redirects, all alternate outbound paths or encrypted
 HTTP authority. The earlier network-none/public-HTTPS and origin namespace
@@ -294,6 +300,14 @@ without a direct Engine or native fallback. Hardened-to-native/legacy migration
 refuses before shutdown until a typed stopped-workspace/transcript export/import
 exists. Ordinary legacy migration remains separately tested; it cannot copy the
 hardened caller mirror as if it were the actual ROOT worker checkout.
+
+ROOT stop reserves a gate against new turns, execution, staging, prepare/resume
+and hook registration, then waits for already admitted transports within the
+existing operation deadline. It releases the state lock while they settle and
+preserves active provider ownership. Timeout/disconnect/refusal retains the gate
+for an explicit typed stop retry. Overlapping waiters cannot clear another
+reservation. Only verified idle CID/helper/socket teardown clears the gate;
+`stop_if_idle` acknowledges the caller request before that cleanup completes.
 
 API vendor keys stay in the host supervisor; it performs provider HTTP calls
 or grants a narrowly scoped per-session provider proxy. Claude and Codex may
