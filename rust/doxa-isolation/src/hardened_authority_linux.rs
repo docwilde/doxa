@@ -75,7 +75,9 @@ pub fn stage_check(path:&Path,phase:&str,family:&str)->io::Result<Value> {
         return Err(error("staging verifier is not the administrator-pinned native executable"));
     }
     pin_artifact(&policy.broker.path,&policy.broker.sha256,deadline)?;
-    let quota=enforcement::load_root_enforcement_policy(&policy.session_id)?.verify_for_gateway()?;
+    let quota={let lock=metadata_audit_lock(&policy,deadline)?;
+        let quota=enforcement::load_root_enforcement_policy(&policy.session_id)?.verify_for_gateway()?;
+        lock.revalidate()?;quota};
     check_quota(&policy,&quota)?;
     remaining(deadline)?;
     Ok(json!({"contract":"doxa-root-session-staging-v1","policy_sha256":policy_sha256,
@@ -105,7 +107,9 @@ impl Authority {
             return Err(error("current ROOT verifier is not the administrator-pinned native executable"));
         }
         check_engine_config(&policy,&config_file.file)?;
-        let quota=enforcement::load_root_enforcement_policy(&policy.session_id)?.verify_for_gateway()?;
+        let quota={let lock=metadata_audit_lock(&policy,deadline)?;
+            let quota=enforcement::load_root_enforcement_policy(&policy.session_id)?.verify_for_gateway()?;
+            lock.revalidate()?;quota};
         check_quota(&policy,&quota)?;
         let init_pin=open_pidfd(manifest.host_init_pid as i32)?;
         let init_scope=scope(manifest.host_init_pid as i32)?;
@@ -137,7 +141,7 @@ impl Authority {
         self.authority_file.revalidate(deadline)?;
         self.broker_file.revalidate(deadline)?;
         check_engine(&self.policy,&self.manifest,&self.engine_pin,&self.engine_file.file)?;
-        self.quota.revalidate()?;
+        {let lock=metadata_audit_lock(&self.policy,deadline)?;self.quota.revalidate()?;lock.revalidate()?;}
         check_quota(&self.policy,&self.quota)?;
         live_same(&self.init_pin,self.manifest.host_init_pid as i32)?;
         let inspect=self.inspect(deadline)?;
@@ -280,6 +284,44 @@ fn root_file(path:&Path,max:u64,private:bool)->io::Result<File> {
         ||(private&&m.mode()&0o077!=0)||m.len()==0||m.len()>max {
         return Err(error("authority input is not a bounded single-link ROOT-controlled regular file"));
     } Ok(file)
+}
+struct MetadataAuditLock {file:File,parent:File,identity:Identity}
+impl MetadataAuditLock {
+    fn revalidate(&self)->io::Result<()> {
+        let current=open_metadata_lock(&self.parent)?;
+        if Identity::of(&self.file)?!=self.identity||Identity::of(&current)?!=self.identity {
+            return Err(error("ROOT Git metadata audit lock was replaced"));
+        }Ok(())
+    }
+}
+fn open_metadata_lock(parent:&File)->io::Result<File> {
+    let fd=unsafe{libc::openat(parent.as_raw_fd(),c"git-metadata.lock".as_ptr(),
+        libc::O_RDONLY|libc::O_NOFOLLOW|libc::O_CLOEXEC|libc::O_NONBLOCK)};
+    if fd<0{return Err(io::Error::last_os_error());}Ok(unsafe{File::from_raw_fd(fd)})
+}
+fn acquire_shared_metadata_lock(file:&File,owner:u32,group:u32,deadline:Instant)->io::Result<Identity> {
+    let meta=file.metadata()?;
+    if !meta.is_file()||meta.uid()!=owner||meta.gid()!=group||meta.nlink()!=1||meta.mode()&0o7777!=0o600||meta.len()!=0 {
+        return Err(error("ROOT metadata lock must be an empty ROOT:ROOT600 single-link regular file"));
+    }
+    let before=Identity::of(file)?;
+    loop {
+        remaining(deadline)?;
+        if unsafe{libc::flock(file.as_raw_fd(),libc::LOCK_SH|libc::LOCK_NB)}==0 {break;}
+        let err=io::Error::last_os_error();
+        if !matches!(err.raw_os_error(),Some(libc::EAGAIN)|Some(libc::EINTR)){return Err(err);}
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if Identity::of(file)?!=before{return Err(error("ROOT metadata lock changed while waiting"));}Ok(before)
+}
+fn metadata_audit_lock(policy:&Policy,deadline:Instant)->io::Result<MetadataAuditLock> {
+    // A single ROOT-controlled inode coordinates publication/retirement only.
+    // Its existence is not quota or origin authority; every kernel check still
+    // runs. Missing installation is refused, never created by a caller.
+    let parent=open_directory(&Path::new("/run/doxa/hardened").join(&policy.session_id),None)?;
+    let file=open_metadata_lock(&parent)?;
+    let identity=acquire_shared_metadata_lock(&file,0,0,deadline.min(Instant::now()+Duration::from_secs(3)))?;
+    let lock=MetadataAuditLock{file,parent,identity};lock.revalidate()?;Ok(lock)
 }
 fn hash_file(file:&File,max:u64,deadline:Instant)->io::Result<String> {
     let before=Identity::of(file)?;let mut source=file.try_clone()?;
@@ -1137,3 +1179,25 @@ mod tests {
         assert!(start.elapsed()<Duration::from_millis(300));drop(reader);send.join().unwrap();
     }
 }
+    #[test]
+    fn metadata_audit_lock_is_bounded_and_refuses_replaced_or_weakened_inodes() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory=tempfile::tempdir().unwrap();let path=directory.path().join("git-metadata.lock");
+        let writer=fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+        fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(unsafe{libc::flock(writer.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0);
+        let reader=File::open(&path).unwrap();let owner=unsafe{libc::geteuid()};let group=unsafe{libc::getegid()};
+        let began=Instant::now();
+        assert!(acquire_shared_metadata_lock(&reader,owner,group,began+Duration::from_millis(50)).is_err());
+        assert!(began.elapsed()<Duration::from_millis(300));
+        assert_eq!(unsafe{libc::flock(writer.as_raw_fd(),libc::LOCK_UN)},0);
+        let identity=acquire_shared_metadata_lock(&reader,owner,group,Instant::now()+Duration::from_secs(1)).unwrap();
+        let lock=MetadataAuditLock{file:reader,parent:File::open(directory.path()).unwrap(),identity};lock.revalidate().unwrap();
+        fs::set_permissions(&path,fs::Permissions::from_mode(0o640)).unwrap();assert!(lock.revalidate().is_err());
+        fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
+        let changed=File::open(&path).unwrap();assert!(acquire_shared_metadata_lock(&changed,owner.wrapping_add(1),group,Instant::now()+Duration::from_secs(1)).is_err());
+        fs::hard_link(&path,directory.path().join("alias")).unwrap();assert!(acquire_shared_metadata_lock(&changed,owner,group,Instant::now()+Duration::from_secs(1)).is_err());
+        fs::remove_file(directory.path().join("alias")).unwrap();
+        let replacement=directory.path().join("replacement");fs::write(&replacement,b"").unwrap();fs::rename(&replacement,&path).unwrap();
+        assert!(lock.revalidate().is_err());
+    }
