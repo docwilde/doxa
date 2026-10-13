@@ -185,6 +185,9 @@ in three fixed ROOT600 files under the private runtime directory:
 `native-broker-check.json`, `native-stage-check.json`, `native-serve.json`.
 These capture native diagnostics only, never provider stdio or provider secret
 environment, and are neither client receipts nor admission evidence.
+All post-launch pipe/PIDFD/drainer setup is inside owned-child cleanup guards;
+setup failure kills/reaps the child with bounded waits and closes descriptors.
+Native helpers do not rely on a context-manager implicit unbounded child wait.
 
 `prove_git_safe_guest.py` executes actual Git as UID1001 with malicious source
 clean/smudge/process filter configuration. Unsafe diff/apply reproduce marker
@@ -220,3 +223,7 @@ Exited/absent containers remain stoppable. Explicit idle ROOT resume may re-pin 
 restarted Engine only after exact read-only config/executable checks, verify the
 previous exact CID/image/labels/current quota/kernel scope, remove it and prepare
 fresh; active transports never cross an Engine identity change.
+Explicit idle resume of a ROOT-owned stopped manifest verifies the same version,
+SID, policy, boot, current authority/Engine/quota and old-CID absence, then creates
+a fresh CID over retained data. It does not upload checkout or auth again.
+Cleanup-required manifests remain quarantined for verified ROOT reconciliation.

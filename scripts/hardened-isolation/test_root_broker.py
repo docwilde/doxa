@@ -386,6 +386,42 @@ class NativeDiagnosticTests(unittest.TestCase):
             data,total=drain.finish();self.assertEqual(len(data),b.MAX_NATIVE_STDERR);self.assertEqual(total,2*1024*1024)
             self.assertFalse(drain.thread.is_alive());self.assertTrue(child.stderr.closed)
 
+    def test_native_helper_setup_failure_kills_reaps_and_closes_actual_child(self):
+        broker=self.fixture();children=[];original=subprocess.Popen
+        def launch(*args,**kwargs):
+            child=original(*args,**kwargs);children.append(child);return child
+        command=[sys.executable,"-I","-c","import time;time.sleep(10)"]
+        with patch.object(b.subprocess,"Popen",side_effect=launch),patch.object(b.os,"set_blocking",side_effect=OSError("injected setup failure")):
+            start=time.monotonic()
+            with self.assertRaises(OSError):broker.run_native(command,b.Deadline(2),"stage-check","before","none","native refused")
+            self.assertLess(time.monotonic()-start,.5)
+        self.assertEqual(children[0].returncode,-9);self.assertTrue(children[0].stdout.closed);self.assertTrue(children[0].stderr.closed)
+
+    def test_gateway_setup_failure_kills_reaps_and_closes_actual_child_and_pidfd(self):
+        for fail_pidfd in (False,True):
+            with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))) as directory:
+                broker=self.fixture();broker.state_dir=Path(directory).resolve();broker.gateway=None;broker.gateway_pidfd=None
+                broker.gateway_stderr=None;broker.gateway_socket_paths=Mock(return_value=[]);broker.check_unknown_gateway_sockets=Mock()
+                broker.capture_gateway_sockets=Mock();broker.remove_gateway_sockets=Mock();broker.policy_path="/unused"
+                broker.manifest_path=Path("/unused");broker.engine=Mock();rd,wr=os.pipe();broker.engine.pidfd=rd
+                children=[];pidfds=[];original=subprocess.Popen;original_pidfd=os.pidfd_open
+                def launch(*args,**kwargs):
+                    child=original([sys.executable,"-I","-c","import time;time.sleep(10)"],**kwargs);children.append(child);return child
+                def pin(pid):
+                    if fail_pidfd:raise OSError("injected pidfd failure")
+                    fd=original_pidfd(pid);pidfds.append(fd);return fd
+                try:
+                    with patch.object(b.subprocess,"Popen",side_effect=launch),patch.object(b.os,"pidfd_open",side_effect=pin),\
+                         patch.object(b,"NativeStderr",side_effect=RuntimeError("injected stderr setup failure")):
+                        start=time.monotonic()
+                        with self.assertRaises((OSError,RuntimeError)):broker.start_gateway(b.Deadline(2))
+                        self.assertLess(time.monotonic()-start,.5)
+                    self.assertEqual(children[0].returncode,-9);self.assertTrue(children[0].stderr.closed)
+                    self.assertIsNone(broker.gateway);self.assertIsNone(broker.gateway_pidfd)
+                    for fd in pidfds:
+                        with self.assertRaises(OSError):os.fstat(fd)
+                finally:os.close(rd);os.close(wr)
+
 
 class GatewaySocketCleanupTests(unittest.TestCase):
     @contextmanager
@@ -548,6 +584,36 @@ class HardenedFollowupTests(unittest.TestCase):
 
 
 class LifecycleReconciliationTests(unittest.TestCase):
+    def stopped_fixture(self):
+        broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy_sha256="3"*64
+        broker.manifest={"version":1,"session_id":"unit-scope","policy_sha256":"3"*64,"boot_id":b.boot_id(),"cid":"2"*64,"status":"stopped"}
+        broker.preflight=Mock();broker.close_gateway=Mock();broker.close_adapters=Mock();broker.cleanup=Mock();broker.engine=Mock()
+        broker.engine.request.return_value=(404,{});broker.prepare=Mock(return_value={"cid":"4"*64,"status":"ready"});broker.stage=Mock()
+        return broker
+
+    def test_stopped_resume_creates_fresh_cid_without_reuploading_retained_data(self):
+        broker=self.stopped_fixture()
+        result=broker.resume(b.Deadline(1));self.assertEqual(result,{"cid":"4"*64,"status":"ready"})
+        broker.engine.request.assert_called_once();self.assertEqual(broker.engine.request.call_args.args[1:3],("GET","/containers/"+"2"*64+"/json"))
+        self.assertEqual(broker.engine.request.call_args.kwargs["statuses"],(404,));broker.prepare.assert_called_once()
+        broker.stage.assert_not_called();broker.cleanup.assert_not_called();broker.close_gateway.assert_called_once();broker.close_adapters.assert_called_once()
+
+    def test_stopped_resume_rejects_stale_scope_authority_and_cleanup_required(self):
+        for field,value in [("policy_sha256","5"*64),("boot_id","stale"),("session_id","another"),("status","cleanup-required")]:
+            broker=self.stopped_fixture();broker.manifest[field]=value
+            with self.assertRaises(b.Refused):broker.resume(b.Deadline(1))
+            broker.prepare.assert_not_called();broker.stage.assert_not_called();broker.cleanup.assert_not_called();broker.engine.connect.assert_not_called()
+        broker=self.stopped_fixture();broker.preflight.side_effect=b.Refused("stale authority artifact")
+        with self.assertRaisesRegex(b.Refused,"stale authority"):broker.resume(b.Deadline(1))
+        broker.prepare.assert_not_called();broker.cleanup.assert_not_called()
+
+    def test_stopped_resume_controlled_engine_repin_never_adopts_old_cid(self):
+        broker=self.stopped_fixture();old=broker.engine;old.connect.side_effect=b.Refused("old daemon exited")
+        fresh=Mock();fresh.request.return_value=(404,{})
+        with patch.object(b,"Engine",return_value=fresh):self.assertEqual(broker.resume(b.Deadline(1))["cid"],"4"*64)
+        self.assertIs(broker.engine,fresh);fresh.connect.assert_called_once();old.close.assert_called_once()
+        fresh.request.assert_called_once();broker.stage.assert_not_called()
+
     def test_guard_revalidates_active_provider_without_idle_requirement(self):
         broker=b.Broker.__new__(b.Broker);broker.policy=policy();broker.policy_sha256="3"*64
         broker.closing=threading.Event();broker.active_provider=True;broker.manifest={"status":"ready"}

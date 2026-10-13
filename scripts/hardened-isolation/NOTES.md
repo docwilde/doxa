@@ -148,3 +148,13 @@ three fixed Root600 diagnostic files. Provider stdout/stderr/environment is
 separate; diagnostics never admit a session. Meaningful socket replacement,
 unlink error, live PIDFD, stderr flood and absolute deadline regressions added.
 Only source/tests/docs changed; frozen4ff9 broker and guest5012 remain untouched.
+
+Cleanup/diagnostic baseline002a4d2b:62 focused tests passed0.822s. Main review
+required guarding all fallible post-Popen setup before any pipe mode/PIDFD/
+drainer allocation, removing implicit unbounded context-manager waits. Actual
+benign-child injected setup failure tests now verify bounded kill/reap and pipe/
+PIDFD closure. Parent also confirmed Runtime.stop→explicitRootresume contract:
+same ROOT manifest policy/SID/boot/current authority, owned helper retirement,
+oldCID404 and controlled Engine pin precede fresh CID; data is retained without
+staging, while cleanup-required/stale scope stays refused. All edits remain
+source-only; running guest broker/policy/Engine state were not changed.

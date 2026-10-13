@@ -763,31 +763,32 @@ class Broker:
 
     def run_native(self,command,deadline,operation,phase,family,refusal,pass_fds=()):
         output=bytearray();diagnostic=bytearray();total=0;failure=None
-        with subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+        child=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                               env={"PATH":"/usr/bin:/bin","LANG":"C","TMPDIR":str(self.state_dir)},
-                              pass_fds=pass_fds,start_new_session=True) as child:
+                              pass_fds=pass_fds,start_new_session=True)
+        try:
             pipes={child.stdout.fileno():"stdout",child.stderr.fileno():"stderr"}
             for fd in pipes:os.set_blocking(fd,False)
-            try:
-                while pipes:
-                    deadline.check()
-                    ready,_,_=select.select(list(pipes),[],[],min(.05,max(0,deadline.end-time.monotonic())))
-                    for fd in ready:
-                        try:chunk=os.read(fd,MAX_FRAME)
-                        except BlockingIOError:continue
-                        if not chunk:del pipes[fd];continue
-                        if pipes[fd]=="stdout":
-                            output.extend(chunk);require(len(output)<=MAX_JSON,"native authority response bound")
-                        else:
-                            total=min(2**63-1,total+len(chunk));diagnostic.extend(chunk[:MAX_NATIVE_STDERR-len(diagnostic)])
-                deadline.check();code=child.wait(timeout=max(.001,deadline.end-time.monotonic()));deadline.check()
-                require(code==0,refusal+" (exit="+str(code)+")")
-            except BaseException as error:
-                failure=error;kill_owned_child(child);raise
-            finally:
-                # Diagnostics are private and cannot weaken or replace a gate.
-                try:self.native_diagnostic(operation,phase,family,child.pid,child.returncode,bytes(diagnostic),total,failure)
-                except Exception:pass
+            while pipes:
+                deadline.check()
+                ready,_,_=select.select(list(pipes),[],[],min(.05,max(0,deadline.end-time.monotonic())))
+                for fd in ready:
+                    try:chunk=os.read(fd,MAX_FRAME)
+                    except BlockingIOError:continue
+                    if not chunk:del pipes[fd];continue
+                    if pipes[fd]=="stdout":
+                        output.extend(chunk);require(len(output)<=MAX_JSON,"native authority response bound")
+                    else:
+                        total=min(2**63-1,total+len(chunk));diagnostic.extend(chunk[:MAX_NATIVE_STDERR-len(diagnostic)])
+            deadline.check();code=child.wait(timeout=max(.001,deadline.end-time.monotonic()));deadline.check()
+            require(code==0,refusal+" (exit="+str(code)+")")
+        except BaseException as error:
+            failure=error;kill_owned_child(child);raise
+        finally:
+            # No Popen context-manager unbounded wait after failed setup.
+            child.stdout.close();child.stderr.close()
+            try:self.native_diagnostic(operation,phase,family,child.pid,child.returncode,bytes(diagnostic),total,failure)
+            except Exception:pass
         return bytes(output)
 
     def native_check(self, deadline, phase, family="none"):
@@ -900,12 +901,11 @@ class Broker:
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             env={"PATH": "/usr/bin:/bin", "LANG": "C", "TMPDIR": str(self.state_dir)},
             pass_fds=(self.engine.pidfd,), start_new_session=True)
-        self.gateway_pidfd = os.pidfd_open(self.gateway.pid)
-        self.gateway_stderr=NativeStderr(self.gateway.stderr)
-        status_path = self.state_dir / "gateway-status.sock"
         # Existence is only a startup signal. Native broker-check authenticates
         # root peer pidfd, executable, fresh nonce and all current scope facts.
         try:
+            self.gateway_pidfd = os.pidfd_open(self.gateway.pid)
+            self.gateway_stderr=NativeStderr(self.gateway.stderr)
             while len(self.gateway_sockets)!=len(self.gateway_socket_paths()):
                 deadline.check()
                 self.capture_gateway_sockets()
@@ -914,9 +914,24 @@ class Broker:
             self.gateway_live()
         except BaseException as error:
             self.gateway_start_error=error
-            data,total=self.gateway_stderr.snapshot()
-            try:self.native_diagnostic("serve","startup","none",self.gateway.pid,self.gateway.poll(),data,total,error)
-            except Exception:pass
+            try:
+                if self.gateway_pidfd is not None and not select.select([self.gateway_pidfd],[],[],0)[0]:
+                    try:self.capture_gateway_sockets()
+                    except Exception:pass
+                kill_owned_child(self.gateway)
+                if self.gateway_pidfd is not None:
+                    try:self.remove_gateway_sockets()
+                    except Exception:pass  # Retained physical endpoint makes subsequent cleanup refuse.
+            finally:
+                data,total=(b"",0)
+                try:
+                    if self.gateway_stderr is not None:data,total=self.gateway_stderr.finish()
+                finally:
+                    self.gateway.stderr.close();self.gateway_stderr=None
+                    if self.gateway_pidfd is not None:os.close(self.gateway_pidfd);self.gateway_pidfd=None
+                try:self.native_diagnostic("serve","startup","none",self.gateway.pid,self.gateway.returncode,data,total,error)
+                except Exception:pass
+                self.gateway=None
             raise
 
     def gateway_socket_paths(self):
@@ -998,6 +1013,10 @@ class Broker:
             if failure is None:self.remove_gateway_sockets()
             if failure is not None:raise failure
             self.gateway = None
+        else:
+            self.check_unknown_gateway_sockets()
+            require(not any(path.exists() or path.is_symlink() for path,_,_ in self.gateway_socket_paths()),
+                    "untracked gateway endpoints require ROOT cleanup")
         if self.gateway_pidfd is not None:
             os.close(self.gateway_pidfd)
             self.gateway_pidfd = None
@@ -1110,9 +1129,28 @@ class Broker:
             raise
 
     def resume(self, deadline):
-        cid = self.manifest.get("cid") if self.manifest is not None and self.manifest.get("status") != "stopped" else None
+        cid = self.manifest.get("cid") if self.manifest is not None and self.manifest.get("status") not in {"stopped","cleanup-required"} else None
         try:
             self.preflight()
+            if self.manifest is not None and self.manifest.get("status")=="cleanup-required":
+                cid=None
+                raise Refused("ROOT cleanup-required scope needs verified operator reconciliation")
+            if self.manifest is not None and self.manifest.get("status")=="stopped":
+                require(self.manifest.get("version")==1 and self.manifest.get("session_id")==self.policy["session_id"]
+                        and self.manifest.get("policy_sha256")==self.policy_sha256 and self.manifest.get("boot_id")==boot_id()
+                        and hash_value(self.manifest.get("cid")),"stopped manifest differs from installed ROOT scope")
+                self.close_gateway();self.close_adapters()
+                old_engine=self.engine
+                try:old_engine.connect(deadline).sock.close()
+                except (Refused,OSError):
+                    fresh=Engine(self.policy)
+                    try:fresh.connect(deadline).sock.close()
+                    except BaseException:fresh.close();raise
+                    self.engine=fresh;old_engine.close()
+                # Explicit stopped resume recreates; it never adopts any old CID.
+                self.engine.request(deadline,"GET",f"/containers/{self.manifest['cid']}/json",statuses=(404,))
+                self.host_init_pid=None
+                return self.prepare(deadline)
             require(self.manifest is not None and self.manifest.get("status") != "stopped", "session is not prepared")
             cid = self.manifest["cid"]
             old_engine = self.engine
