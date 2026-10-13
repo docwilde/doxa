@@ -87,3 +87,11 @@ metadata checked. No Engine/quota/provider writes. Initial fixture lacked its
 session_id; fixed and reran; both private scopes cleaned. Parent review requires
 live ROOT /proc/PID/stat starttime equality before/after fresh client challenge;
 added exact checks plus mismatch/reuse regression and updated actual-client proof.
+
+Starttime baseline2766a54d:49 tests passed0.576s. Actual client reproof18a45886
+passes PID47166/starttime856669 with UID1000 live-stat equality, exeEACCES13.
+Tar-preserved source UID/groupwrite initially failed ROOT setup; normalized only
+unique guest package toROOT0:0/0644 and ensured setup failure fixture cleanup.
+P2 additional fix: absent-CID resume also retires old gateway/adapter handles via
+independent cleanup before handing ownership to fresh prepare; uncertain helper
+retirement prevents fresh scope creation even when the old container is absent.

@@ -42,3 +42,18 @@ field and reran. Both attempts removed their unique /run/doxa proof scope.
 Only versioned proof source copies remain under /root/isolation-proof. No Engine
 API, quota installation, provider or workstation provisioning was performed.
 Evidence: git-safe-20261013.json, `admissible_as_hardened:false`.
+
+Actual UID1000 client proof, latest baseline18a45886:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I /usr/libexec/doxa-client-peer-proof-18a45886/prove_root_client_guest.py
+```
+
+Package artifacts are ROOT0:0 mode0644, parents ROOT0755. Tar source-owner and
+group-write modes initially failed root-control setup checks; corrected only the
+unique proof package. The updated fixture cleans its own scope after setup
+failure as well as success. Exit0: UID1000 connected ROOT brokerPID47166 through
+actualSO_PEERPIDFD/fresh nonce. ROOT `/proc/PID/exe` remains EACCES13; readable
+live stat starttime856669 equals instance before/after the CLI challenge. Reply
+unprepared/CIDnull, no Engine call or provider/quota installation. Runtime and
+policy scopes were removed, proof package retained. Evidence root-client-20261013.json.

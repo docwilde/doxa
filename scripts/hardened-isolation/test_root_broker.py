@@ -483,7 +483,13 @@ class LifecycleReconciliationTests(unittest.TestCase):
             broker.prepare=Mock(side_effect=failed_prepare)
             with self.assertRaisesRegex(b.Refused,"new CID cleanup uncertain"):broker.resume(b.Deadline(1))
             self.assertEqual(broker.manifest,{"cid":"4"*64,"status":"cleanup-required"})
-            self.assertEqual(broker.cleanup.call_args_list,[] if absent else [unittest.mock.call("2"*64)])
+            self.assertEqual(broker.cleanup.call_args_list,[unittest.mock.call("2"*64)])
+
+    def test_absent_resume_refuses_new_scope_until_old_helpers_retire(self):
+        broker=self.resume_fixture();broker.engine.exchange.return_value=(404,{})
+        broker.cleanup.return_value=False;broker.prepare=Mock()
+        with self.assertRaisesRegex(b.Refused,"helper cleanup is uncertain"):broker.resume(b.Deadline(1))
+        broker.prepare.assert_not_called();self.assertTrue(broker.cleanup.called)
 
     def test_helper_teardown_error_never_skips_engine_removal(self):
         broker=b.Broker.__new__(b.Broker); broker.manifest={"cid":"2"*64,"status":"ready"}

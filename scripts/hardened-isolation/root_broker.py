@@ -1004,7 +1004,7 @@ class Broker:
                 status, observed = self.engine.exchange(channel, "GET", f"/containers/{cid}/json", statuses=(200,404))
                 if status == 404:
                     self.host_init_pid = None
-                    self.persist(cid, "stopped")
+                    require(self.cleanup(cid), "absent session helper cleanup is uncertain")
                     cid = None
                     return self.prepare(deadline)
                 inspected = self.checked_inspect(channel, cid, live=False)

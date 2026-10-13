@@ -51,6 +51,8 @@ against the exact live ROOT PID/pidfd, socket inode, immutable artifact/policy
 hashes, boot, start time and isolated argv. ROOT computes its actual executable
 and script hashes when publishing this instance. A fresh nonce challenge on that
 same peer stream binds the response to the instance bytes and live process.
+The caller checks readable live `/proc/PID/stat` start time against that instance
+before and after the challenge, bracketing possible PID reuse.
 Unprivileged clients need no cross-UID `/proc/PID/exe` read; the actual UID1000
 guest proof records EACCES13 there and successful client authentication. Root
 writer control on every ancestor, policy, receipt, instance and endpoint excludes

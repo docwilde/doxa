@@ -8,14 +8,16 @@
   "reply": {
     "admission": "requires-live-composed-native-check",
     "cid": null,
-    "policy_sha256": "7fbf7aeb0066581f09cf07d5f24950a7e8097cbbdbda46f6c5ecc2c05f86f8bd",
+    "policy_sha256": "42c506b61dc8d09baa780d75879b7a6fa87765c7a2de48c85f3e54a9b5ae278a",
     "protocol": "doxa-root-session-broker-v1",
-    "session_id": "root-client-proof-45515",
+    "session_id": "root-client-proof-47165",
     "status": "unprepared"
   },
-  "root_broker_pid": 45516,
-  "root_instance_pid": 45516,
+  "root_broker_pid": 47166,
+  "root_instance_pid": 47166,
+  "root_instance_start_time": 856669,
   "root_owned_instance": true,
   "root_proc_exe_errno": 13,
+  "root_proc_stat_start_time": 856669,
   "scope": "actual-unprivileged-client-root-instance-attestation"
 }
