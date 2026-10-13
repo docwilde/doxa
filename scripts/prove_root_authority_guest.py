@@ -24,7 +24,7 @@ import time
 
 PROVIDER = r'''#!/usr/bin/env python3
 """Reviewed ROOT-authority proof fixture; no credentials or live provider."""
-import ctypes, errno, fcntl, json, os, socket, struct, sys
+import array, ctypes, errno, fcntl, json, os, socket, struct, sys
 from pathlib import Path
 
 def exact(s, count):
@@ -82,7 +82,27 @@ def main():
         s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(40)
         s.connect('/run/doxa/session/egress-claude.sock')
         result={'action':action,'connector_pid':os.getpid(),'uid':os.getuid()}
-        if action=='inside':result['frame']=exchange(s,'inside')
+        if action=='inside':
+            result['stdio']={str(fd):{'name':os.readlink('/proc/self/fd/'+str(fd)),
+                'device':os.fstat(fd).st_dev,'inode':os.fstat(fd).st_ino,'rdev':os.fstat(fd).st_rdev} for fd in (0,1,2)}
+            result['private_devpts_device']=Path('/dev/pts').stat().st_dev
+            result['frame']=exchange(s,'inside')
+        elif action=='foreign-pty':
+            result['first_frame']=exchange(s,'first')
+            data,ancillary,flags,_=s.recvmsg(1,socket.CMSG_SPACE(4),socket.MSG_CMSG_CLOEXEC)
+            if data!=b'F' or flags & (socket.MSG_TRUNC|socket.MSG_CTRUNC):raise RuntimeError('descriptor diagnostic framing')
+            received=[]
+            for level,kind,content in ancillary:
+                if level!=socket.SOL_SOCKET or kind!=socket.SCM_RIGHTS:raise RuntimeError('unreviewed diagnostic ancillary')
+                numbers=array.array('i');numbers.frombytes(content);received.extend(numbers)
+            if len(received)!=1:raise RuntimeError('exactly one diagnostic descriptor required')
+            fd=received[0]
+            try:
+                actual=os.fstat(fd)
+                result['received_device']={'name':os.readlink('/proc/self/fd/'+str(fd)),'device':actual.st_dev,
+                    'inode':actual.st_ino,'rdev':actual.st_rdev,'private_devpts_device':Path('/dev/pts').stat().st_dev}
+                result['second_frame']=exchange(s,'foreign-device')
+            finally:os.close(fd)
         elif action in ('delegated','post-handshake'):
             if action=='post-handshake':result['first_frame']=exchange(s,'first')
             pid=os.fork()
@@ -201,12 +221,13 @@ def image_build(module, engine, base: str, output: Path, worker: Path | None, wo
 
 
 class ProbeExec:
-    def __init__(self, module, engine, cid: str, action: str):
+    def __init__(self, module, engine, cid: str, action: str, tty: bool = False):
         self.module, self.engine, self.cid = module, engine, cid
+        self.tty = tty
         self.deadline = module.Deadline(60)
         _, created = engine.request(self.deadline, "POST", f"/containers/{cid}/exec", {
             "AttachStdin": True, "AttachStdout": True, "AttachStderr": True,
-            "Tty": False, "User": "0:0", "WorkingDir": "/workspace",
+            "Tty": tty, "User": "0:0", "WorkingDir": "/workspace",
             "Cmd": [module.WORKER, "exec-hardened", "/usr/local/bin/claude", action],
             "Env": ["HOME=/home/doxa", "TMPDIR=/work-cache/tmp", "PATH=/usr/local/bin:/usr/bin:/bin"]}, (201,))
         self.eid = created.get("Id")
@@ -214,7 +235,7 @@ class ProbeExec:
         self.channel = engine.connect(self.deadline)
         # Verify the exact CID on the same pinned connection before upgrading.
         engine.exchange(self.channel, "GET", f"/containers/{cid}/json")
-        engine.send_request(self.channel, "POST", f"/exec/{self.eid}/start", {"Detach": False, "Tty": False}, upgrade=True)
+        engine.send_request(self.channel, "POST", f"/exec/{self.eid}/start", {"Detach": False, "Tty": tty}, upgrade=True)
         status, headers, _ = module.response(self.channel)
         require(status == 101 and headers.get("upgrade") == "tcp", "typed Engine exec did not upgrade")
         engine.live()
@@ -226,6 +247,11 @@ class ProbeExec:
                 self.deadline.wait(reads=[self.channel.sock])
                 if not self.channel.sock.recv(1, socket.MSG_PEEK):
                     break
+                if self.tty:
+                    data = self.channel.sock.recv(65536)
+                    require(data and len(output)+len(data) <= 128*1024, "private TTY raw stream bound")
+                    output.extend(data)
+                    continue
                 header = self.channel.exact(8)
                 count = int.from_bytes(header[4:], "big")
                 require(header[0] in (1, 2) and header[1:4] == b"\0\0\0" and count <= 65536, "Engine exec framing drift")
@@ -257,6 +283,7 @@ def main() -> None:
     parser.add_argument("--project-id", type=int, default=5003)
     parser.add_argument("--root-base", type=Path, default=Path("/srv/doxa-quota-proof"))
     parser.add_argument("--positive-only", action="store_true")
+    parser.add_argument("--trace-native", action="store_true")
     args = parser.parse_args()
     require(os.geteuid() == 0, "disposable guest proof requires ROOT")
     require(re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9-]{0,63}", args.session_id) is not None, "proof session ID is unsafe")
@@ -292,6 +319,7 @@ def main() -> None:
               "native_gateway_sha256": policy["authority"]["sha256"], "cases": {}, "cleanup": {}}
     containers, cgroups, listeners = [], [], []
     active = None
+    host_pty_fds = []
     try:
         image, helper_sha = image_build(module, engine, args.base_image, args.output, args.worker_file, args.worker_sha256)
         policy["image"] = image
@@ -342,7 +370,9 @@ def main() -> None:
             "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(), "gateway_pid": None, "status": "preparing"})
         native = [str(args.gateway), "kernel-check", "--policy", str(policy_path), "--manifest", str(manifest_path),
                   "--engine-pidfd", str(engine.pidfd)]
-        result = checked_process(native, (engine.pidfd,))
+        traced_native = (["/usr/bin/strace", "-ff", "-o", str(args.output / "native-trace"), "-s", "128", *native]
+                         if args.trace_native else native)
+        result = checked_process(traced_native, (engine.pidfd,))
         report["cases"]["kernel_positive"] = result
         require(result["returncode"] == 0, "actual native kernel authority positive failed")
         facts = json.loads(result["stdout"])
@@ -364,18 +394,28 @@ def main() -> None:
             return
 
         endpoint_path = root / "broker" / "egress-claude.sock"
-        for name, actor_cid, action, expected, frames in [("inside", cid, "inside", 0, 1),
-            ("delegated_descriptor", cid, "delegated", 1, 1), ("post_handshake_descriptor", cid, "post-handshake", 1, 2)]:
+        for name, actor_cid, action, expected, frames, tty in [("inside", cid, "inside", 0, 1, False),
+            ("private_pty", cid, "inside", 0, 1, True), ("delegated_descriptor", cid, "delegated", 1, 1, False),
+            ("post_handshake_descriptor", cid, "post-handshake", 1, 2, False),
+            ("foreign_host_pty", cid, "foreign-pty", 1, 2, False)]:
             command = native.copy()
             command[1] = "kernel-listener"
             command += ["--frames", str(frames)]
-            active = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, pass_fds=(engine.pidfd,))
+            inherited = (engine.pidfd,)
+            if action == "foreign-pty":
+                master, slave = os.openpty()
+                host_pty_fds.extend([master, slave])
+                command += ["--send-fd", str(slave)]
+                inherited += (slave,)
+                report["host_pty_source"] = {"name":os.ttyname(slave),"device":os.fstat(slave).st_dev,
+                    "inode":os.fstat(slave).st_ino,"rdev":os.fstat(slave).st_rdev}
+            active = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, pass_fds=inherited)
             listeners.append(endpoint_path)
             end = time.monotonic() + 10
             while not endpoint_path.exists() and active.poll() is None and time.monotonic() < end:
                 time.sleep(.02)
             require(endpoint_path.exists(), "native kernel diagnostic listener did not bind")
-            provider_exec = ProbeExec(module, engine, actor_cid, action)
+            provider_exec = ProbeExec(module, engine, actor_cid, action, tty=tty)
             stdout, stderr = active.communicate(timeout=45)
             report["cases"][name] = {"native_returncode": active.returncode, "native_stdout": stdout, "native_stderr": stderr,
                                      "fixture": provider_exec.finish()}
@@ -383,6 +423,10 @@ def main() -> None:
             active = None
             if endpoint_path.exists():
                 endpoint_path.unlink()
+            if action == "foreign-pty":
+                for fd in host_pty_fds:
+                    os.close(fd)
+                host_pty_fds.clear()
         # A same-UID host writer is refused by actual container scope, while
         # the client identity is refused earlier by the kernel socket mode.
         for uid in [1000, 1001]:
@@ -429,6 +473,8 @@ def main() -> None:
     finally:
         if active is not None:
             active.kill(); active.communicate(timeout=5)
+        for fd in host_pty_fds:
+            os.close(fd)
         for cid in reversed(containers):
             cleanup = {"cid": cid}
             try:
