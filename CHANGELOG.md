@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.52 — 2026-10-13
+
+**Fleet recovery**
+
+- Fix **`fleet_control`** resume rejecting healthy Router work as unknown spending. Reattach to authenticated, already-dispatched running slots when both accounting ledgers are known; preserve reservations and prevent prompt replay.
+- Retain refusal for unknown or missing accounting, ambiguous dispatch and inactive unfinished turns. Keep the saved worker, configuration, permission and budget identity checks.
+
+**Claude turns**
+
+- Fix **`finish_terminal`** publishing `turn_done` before clearing the busy state. Settle the completed turn before announcing completion so immediate settings changes see an idle session.
+
 ## 2.0.0-beta.51 — 2026-10-13
 
 **Routing and fleets**
