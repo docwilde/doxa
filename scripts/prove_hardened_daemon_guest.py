@@ -27,11 +27,11 @@ import termios
 import time
 import unicodedata
 
-SID = "root-daemon-r5-20261013"
-PROJECT = 5018
+SID = "root-daemon-r6-20261013"
+PROJECT = 5019
 DAEMON_SHA = "bdab19e567fe3e7b337414933f64d90be5cd361c55434b482d1d1cd7e378b1aa"
 FRONTEND_SHA = "5b4d8ef78eb7c42d84fe9c80f4220cdefdad6d2cad5987399dedc5497aa965c2"
-BROKER_SHA = "4f6b59be1b4baf329b4eb641ef40654eea0d3096555c074b6418096e9955c2f5"
+BROKER_SHA = "3305ba7bca32430837331e8613852b48ed486bacd2c35393ab0e27a48c616b7b"
 GATEWAY_SHA = "18d1d633a67aee1dd1bfd67eaf5de82ebcc42dfb0ef112198c6691439de98fe9"
 WORKER_SHA = "cfbf9586d176289a53cfbe5c9c8fbd9d7f253a4c20525941dceb7bc68bf2dd1f"
 EXPECTED_TEXT = "Deterministic native fixture response."
@@ -532,9 +532,9 @@ def main(args):
     state = Path("/run/doxa/hardened") / SID
     quota_root = Path("/srv/doxa-quota-proof") / SID
     policy_path = Path("/etc/doxa/hardened") / (SID + ".json")
-    caller_base = Path("/srv/doxa-daemon-proof-r5-20261013")
-    runtime = Path("/run/user/1000/df-r5-20261013")
-    public_script = PUBLIC / "prove-hardened-daemon-r5.py"
+    caller_base = Path("/srv/doxa-daemon-proof-r6-20261013")
+    runtime = Path("/run/user/1000/df-r6-20261013")
+    public_script = PUBLIC / "prove-hardened-daemon-r6.py"
     try:
         for path, digest in [(PUBLIC / "doxa-daemon", DAEMON_SHA), (PUBLIC / "doxa-rs", FRONTEND_SHA)]:
             m = path.lstat()
