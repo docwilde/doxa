@@ -199,9 +199,10 @@ def main():
         path=caller/name;path.mkdir(mode=0o700);os.chown(path,1000,1000)
     for name,data in [('plain.txt',b'before\n'),('filtered.txt',b'safe initial fixture\n'),('.gitattributes',b'filtered.txt filter=proof diff=proof\n')]:
         write_new(caller/'source'/name,data,0o600,1000,1000)
-    env={'PATH':'/usr/bin:/bin','HOME':str(caller/'home'),'DOXA_HOME':str(caller/'state'),'LANG':'C','XDG_RUNTIME_DIR':'/run/user/1000'}
+    env={'PATH':'/usr/bin:/bin','HOME':str(caller/'home'),'DOXA_HOME':str(caller/'state'),'LANG':'C','XDG_RUNTIME_DIR':'/run/user/1000',
+         'GIT_CONFIG_NOSYSTEM':'1','GIT_CONFIG_GLOBAL':'/dev/null','GIT_TERMINAL_PROMPT':'0'}
     for argv in [['git','init','-q',str(caller/'source')],['git','-C',str(caller/'source'),'add','.'],
-                 ['git','-C',str(caller/'source'),'-c','user.name=Disposable Fixture','-c','user.email=fixture@example.invalid','commit','-qm','credential-free fixture']]:
+                 ['git','-C',str(caller/'source'),'-c','user.name=Disposable Fixture','-c','user.email=fixture@example.invalid','commit','-qm','test: add credential-free fixture']]:
         run(['runuser','-u','doxa','--',*argv],environment=env)
     runtime=Path('/run/user/1000')
     if not runtime.exists():runtime.mkdir(mode=0o700);os.chown(runtime,1000,1000)
