@@ -1,0 +1,214 @@
+{
+  "base_image": "sha256:5eb3f63be16d9bd9d0794e52feb02534ca6c1d581d535c8d3adb3df012aa2eaa",
+  "cases": {
+    "delegated_descriptor": {
+      "fixture": {
+        "exec_id": "d4bcc99f483d86150abb58be0697af8ef673bcdffca1c7a5a0d55087efdda905",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\"child\": {\"writer_pid\": 42, \"error\": \"[Errno 104] Connection reset by peer\"}}\n{\"action\": \"delegated\", \"child_status\": 0, \"connector_pid\": 40, \"delegated_writer_pid\": 42, \"uid\": 0}\n"
+      },
+      "native_returncode": 1,
+      "native_stderr": "doxa hardened gateway: guarded stream writer differs from connector\n",
+      "native_stdout": ""
+    },
+    "foreign_host_pty": {
+      "fixture": {
+        "exec_id": "8bebe5281c37eb47ea7ab0d8004eab236a9f25e74d04a18765f7181271e9594f",
+        "exit_code": 1,
+        "stderr": "Traceback (most recent call last):\n  File \"/usr/local/bin/claude\", line 99, in <module>\n    if __name__=='__main__':main()\n                            ~~~~^^\n  File \"/usr/local/bin/claude\", line 80, in main\n    result['second_frame']=exchange(s,'foreign-device')\n                           ~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/bin/claude\", line 17, in exchange\n    header = exact(s,4)\n  File \"/usr/local/bin/claude\", line 9, in exact\n    part = s.recv(count-len(out))\nConnectionResetError: [Errno 104] Connection reset by peer\ndoxa isolation worker: worker provider exited unsuccessfully\n",
+        "stdout": ""
+      },
+      "native_returncode": 1,
+      "native_stderr": "doxa hardened gateway: worker PTY descriptor is outside its private devpts instance\n",
+      "native_stdout": ""
+    },
+    "host_uid_1000": {
+      "actor": {
+        "argv": [
+          "/usr/bin/python3",
+          "-c",
+          "import json,os,socket;os.setgroups([]);os.setgid(1000);os.setuid(1000);s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(5)\ntry:s.connect('/srv/doxa-quota-proof/root-authority-20261013-r6/broker/egress-claude.sock');print(json.dumps({'uid':os.getuid(),'connected':True}));s.sendall(b'\\x00\\x00\\x00\\x01X');s.recv(16)\nexcept OSError as e:print(json.dumps({'uid':os.getuid(),'errno':e.errno}))"
+        ],
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\"uid\": 1000, \"errno\": 13}\n"
+      },
+      "native_returncode": -15,
+      "native_stderr": "",
+      "native_stdout": ""
+    },
+    "host_uid_1001": {
+      "actor": {
+        "argv": [
+          "/usr/bin/python3",
+          "-c",
+          "import json,os,socket;os.setgroups([]);os.setgid(1001);os.setuid(1001);s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(5)\ntry:s.connect('/srv/doxa-quota-proof/root-authority-20261013-r6/broker/egress-claude.sock');print(json.dumps({'uid':os.getuid(),'connected':True}));s.sendall(b'\\x00\\x00\\x00\\x01X');s.recv(16)\nexcept OSError as e:print(json.dumps({'uid':os.getuid(),'errno':e.errno}))"
+        ],
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\"uid\": 1001, \"connected\": true}\n{\"uid\": 1001, \"errno\": 104}\n"
+      },
+      "native_returncode": 1,
+      "native_stderr": "doxa hardened gateway: connector is outside the pinned container namespace/cgroup\n",
+      "native_stdout": ""
+    },
+    "inside": {
+      "fixture": {
+        "exec_id": "eed2e30a33841692b986cb45f588b734b2adab5cb23b503cce60f42eca9054a4",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\"action\": \"inside\", \"connector_pid\": 22, \"frame\": {\"reply\": {\"pid\": 22, \"proof\": \"root-authority-origin\", \"stage\": \"inside\"}, \"reply_bytes\": 64}, \"private_devpts_device\": 70, \"stdio\": {\"0\": {\"device\": 16, \"inode\": 263772, \"name\": \"pipe:[263772]\", \"rdev\": 0}, \"1\": {\"device\": 16, \"inode\": 263075, \"name\": \"pipe:[263075]\", \"rdev\": 0}, \"2\": {\"device\": 16, \"inode\": 263076, \"name\": \"pipe:[263076]\", \"rdev\": 0}}, \"uid\": 0}\n"
+      },
+      "native_returncode": 0,
+      "native_stderr": "",
+      "native_stdout": "{\"boot_id\":\"d606e7c5-c113-477e-b804-8449e367d706\",\"cid\":\"606d074eca1fe61dc0f71d379ef5aea6fa39630cac4774cfda890609e0f68825\",\"contract\":\"doxa-root-origin-diagnostic-v1\",\"engine_pid\":27821,\"filter_ready\":true,\"frames_verified\":1,\"host_init_pid\":53419,\"policy_sha256\":\"7b93823c4e22b19f5ac1042a1dfc0a3ffb2cffff4936342f900f39bb360a7c9b\",\"quota_ready\":true}\n"
+    },
+    "kernel_after_restriction_probe": {
+      "argv": [
+        "/usr/libexec/doxa/doxa-hardened-gateway-isolation-proof",
+        "kernel-check",
+        "--policy",
+        "/run/doxa/hardened/root-authority-20261013-r6/policy.json",
+        "--manifest",
+        "/run/doxa/hardened/root-authority-20261013-r6/manifest.json",
+        "--engine-pidfd",
+        "4"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "{\"boot_id\":\"d606e7c5-c113-477e-b804-8449e367d706\",\"cid\":\"606d074eca1fe61dc0f71d379ef5aea6fa39630cac4774cfda890609e0f68825\",\"engine_pid\":27821,\"filter_ready\":true,\"host_init_pid\":53419,\"policy_sha256\":\"7b93823c4e22b19f5ac1042a1dfc0a3ffb2cffff4936342f900f39bb360a7c9b\",\"quota_ready\":true}\n"
+    },
+    "kernel_positive": {
+      "argv": [
+        "/usr/bin/strace",
+        "-ff",
+        "-o",
+        "/root/isolation-proof/root-authority-run6/native-trace",
+        "-s",
+        "128",
+        "/usr/libexec/doxa/doxa-hardened-gateway-isolation-proof",
+        "kernel-check",
+        "--policy",
+        "/run/doxa/hardened/root-authority-20261013-r6/policy.json",
+        "--manifest",
+        "/run/doxa/hardened/root-authority-20261013-r6/manifest.json",
+        "--engine-pidfd",
+        "4"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "{\"boot_id\":\"d606e7c5-c113-477e-b804-8449e367d706\",\"cid\":\"606d074eca1fe61dc0f71d379ef5aea6fa39630cac4774cfda890609e0f68825\",\"engine_pid\":27821,\"filter_ready\":true,\"host_init_pid\":53419,\"policy_sha256\":\"7b93823c4e22b19f5ac1042a1dfc0a3ffb2cffff4936342f900f39bb360a7c9b\",\"quota_ready\":true}\n"
+    },
+    "post_handshake_descriptor": {
+      "fixture": {
+        "exec_id": "9d609ca84f9de7fe682560d8233a814bca01997e1add4949f05bcf686e0db088",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\"child\": {\"writer_pid\": 52, \"error\": \"[Errno 104] Connection reset by peer\"}}\n{\"action\": \"post-handshake\", \"child_status\": 0, \"connector_pid\": 50, \"delegated_writer_pid\": 52, \"first_frame\": {\"reply\": {\"pid\": 50, \"proof\": \"root-authority-origin\", \"stage\": \"first\"}, \"reply_bytes\": 63}, \"uid\": 0}\n"
+      },
+      "native_returncode": 1,
+      "native_stderr": "doxa hardened gateway: guarded stream writer differs from connector\n",
+      "native_stdout": ""
+    },
+    "private_pty": {
+      "fixture": {
+        "exec_id": "ead38ddd5c6d221d188fc98169f880217f2a2586c5d3f7b6abf94bad86d258d5",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\"action\": \"inside\", \"connector_pid\": 31, \"frame\": {\"reply\": {\"pid\": 31, \"proof\": \"root-authority-origin\", \"stage\": \"inside\"}, \"reply_bytes\": 64}, \"private_devpts_device\": 70, \"stdio\": {\"0\": {\"device\": 16, \"inode\": 263994, \"name\": \"pipe:[263994]\", \"rdev\": 0}, \"1\": {\"device\": 70, \"inode\": 3, \"name\": \"/dev/pts/0\", \"rdev\": 34816}, \"2\": {\"device\": 70, \"inode\": 3, \"name\": \"/dev/pts/0\", \"rdev\": 34816}}, \"uid\": 0}\r\n"
+      },
+      "native_returncode": 0,
+      "native_stderr": "",
+      "native_stdout": "{\"boot_id\":\"d606e7c5-c113-477e-b804-8449e367d706\",\"cid\":\"606d074eca1fe61dc0f71d379ef5aea6fa39630cac4774cfda890609e0f68825\",\"contract\":\"doxa-root-origin-diagnostic-v1\",\"engine_pid\":27821,\"filter_ready\":true,\"frames_verified\":1,\"host_init_pid\":53419,\"policy_sha256\":\"7b93823c4e22b19f5ac1042a1dfc0a3ffb2cffff4936342f900f39bb360a7c9b\",\"quota_ready\":true}\n"
+    },
+    "sibling_scope": {
+      "fixture": {
+        "exec_id": "bbad467906fd25aac46c97d7abf47633569dab7d153a6d35214badfbd1c3c4b4",
+        "exit_code": 1,
+        "stderr": "Traceback (most recent call last):\n  File \"/usr/local/bin/claude\", line 99, in <module>\n    if __name__=='__main__':main()\n                            ~~~~^^\n  File \"/usr/local/bin/claude\", line 65, in main\n    result['frame']=exchange(s,'inside')\n                    ~~~~~~~~^^^^^^^^^^^^\n  File \"/usr/local/bin/claude\", line 17, in exchange\n    header = exact(s,4)\n  File \"/usr/local/bin/claude\", line 9, in exact\n    part = s.recv(count-len(out))\nConnectionResetError: [Errno 104] Connection reset by peer\ndoxa isolation worker: worker provider exited unsuccessfully\n",
+        "stdout": ""
+      },
+      "native_returncode": 1,
+      "native_stderr": "doxa hardened gateway: connector is outside the pinned container namespace/cgroup\n",
+      "native_stdout": ""
+    },
+    "worker_no_migration_authority": {
+      "exec_id": "a1220bebfb9bec19cf8d42e1141c026deca6a40e3bf024914361f7bd9f37e970",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout": "{\"/sys/fs/cgroup/cgroup.procs\": 30, \"/sys/fs/cgroup/cgroup.subtree_control\": 30, \"/sys/fs/cgroup/cgroup.threads\": 30, \"cgroup\": \"0::/\", \"pid\": 14, \"quota_mutation\": {\"errno\": 1, \"inherits_after\": true, \"inherits_before\": true, \"project_after\": 5009, \"project_before\": 5009}, \"setns\": {\"errno\": 1, \"result\": -1}, \"status\": {\"CapBnd\": \"0000000000000000\", \"CapEff\": \"0000000000000000\", \"CapPrm\": \"0000000000000000\", \"NoNewPrivs\": \"1\", \"Seccomp\": \"2\", \"Seccomp_filters\": \"2\"}, \"uid\": 0, \"unshare\": {\"errno\": 1, \"result\": -1}}\n"
+    }
+  },
+  "cleanup": {
+    "606d074eca1fe61dc0f71d379ef5aea6fa39630cac4774cfda890609e0f68825": {
+      "cid": "606d074eca1fe61dc0f71d379ef5aea6fa39630cac4774cfda890609e0f68825",
+      "engine_confirmed_absent": true
+    },
+    "ca72f3d8d006ea09eec85747e78d4e1432ab9489763004877463fb53ff696dad": {
+      "cid": "ca72f3d8d006ea09eec85747e78d4e1432ab9489763004877463fb53ff696dad",
+      "engine_confirmed_absent": true
+    },
+    "cgroups_absent": true,
+    "sockets_absent": true
+  },
+  "engine_pid": 27821,
+  "engine_socket_device": 56,
+  "engine_socket_inode": 688,
+  "host_pty_source": {
+    "device": 27,
+    "inode": 3,
+    "name": "/dev/pts/0",
+    "rdev": 34816
+  },
+  "image": "sha256:b0ed50bef3b08af8ff10cbe4895a62e635294697694a67ad45de8185bef2aaa7",
+  "inspect_init": {
+    "Config": {
+      "Cmd": [
+        "hold-hardened"
+      ],
+      "Entrypoint": [
+        "/usr/local/bin/doxa-isolation-worker"
+      ],
+      "Labels": {
+        "io.doxa.root-policy": "7b93823c4e22b19f5ac1042a1dfc0a3ffb2cffff4936342f900f39bb360a7c9b",
+        "io.doxa.root-session": "root-authority-20261013-r6",
+        "org.doxa.quota-proof": "credential-free",
+        "org.doxa.root-authority-proof": "credential-free",
+        "org.doxa.worker-sha256": "06fd63d262a84c6e49df2e33bb10d27247ab943e787247279ce1a2bff03908cb"
+      },
+      "OpenStdin": false,
+      "Tty": false,
+      "User": "0:0",
+      "WorkingDir": "/workspace"
+    },
+    "cgroup": "/user.slice/user-1001.slice/user@1001.service/user.slice/docker-606d074eca1fe61dc0f71d379ef5aea6fa39630cac4774cfda890609e0f68825.scope",
+    "cid": "606d074eca1fe61dc0f71d379ef5aea6fa39630cac4774cfda890609e0f68825",
+    "host_init_pid": 53419
+  },
+  "kernel_mountinfo": "476 418 0:61 / / ro,noatime - fuse.fuse-overlayfs fuse-overlayfs rw,user_id=0,group_id=0,default_permissions,allow_other\n478 476 0:68 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n479 476 0:69 / /dev rw,nosuid - tmpfs tmpfs rw,size=65536k,mode=755,uid=1001,gid=1001,inode64\n480 479 0:70 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,gid=165540,mode=620,ptmxmode=666\n481 476 0:71 / /sys ro,nosuid,nodev,noexec,relatime - sysfs sysfs ro\n482 481 0:29 /user.slice/user-1001.slice/user@1001.service/user.slice/docker-606d074eca1fe61dc0f71d379ef5aea6fa39630cac4774cfda890609e0f68825.scope /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw,nsdelegate,memory_recursiveprot,memory_hugetlb_accounting\n483 479 0:66 / /dev/mqueue rw,nosuid,nodev,noexec,relatime - mqueue mqueue rw\n484 476 0:72 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=65536k,uid=1001,gid=1001,inode64\n485 476 7:0 /root-authority-20261013-r6/checkout /workspace rw,relatime - ext4 /dev/loop0 rw,prjquota\n486 476 7:0 /root-authority-20261013-r6/cache /work-cache rw,relatime - ext4 /dev/loop0 rw,prjquota\n487 476 7:0 /root-authority-20261013-r6/home /home/doxa rw,relatime - ext4 /dev/loop0 rw,prjquota\n488 476 253:1 /var/lib/doxa-proof-engine/containers/606d074eca1fe61dc0f71d379ef5aea6fa39630cac4774cfda890609e0f68825/resolv.conf /etc/resolv.conf ro,relatime - ext4 /dev/vda1 rw,discard,errors=remount-ro,commit=30\n489 476 253:1 /var/lib/doxa-proof-engine/containers/606d074eca1fe61dc0f71d379ef5aea6fa39630cac4774cfda890609e0f68825/hostname /etc/hostname ro,relatime - ext4 /dev/vda1 rw,discard,errors=remount-ro,commit=30\n490 476 253:1 /var/lib/doxa-proof-engine/containers/606d074eca1fe61dc0f71d379ef5aea6fa39630cac4774cfda890609e0f68825/hosts /etc/hosts ro,relatime - ext4 /dev/vda1 rw,discard,errors=remount-ro,commit=30\n491 476 7:0 /root-authority-20261013-r6/broker /run/doxa/session ro,relatime - ext4 /dev/loop0 rw,prjquota\n492 479 0:7 /null /dev/null rw,nosuid master:2 - devtmpfs devtmpfs rw,size=2451332k,nr_inodes=612833,mode=755,inode64\n493 479 0:7 /random /dev/random rw,nosuid master:2 - devtmpfs devtmpfs rw,size=2451332k,nr_inodes=612833,mode=755,inode64\n494 479 0:7 /full /dev/full rw,nosuid master:2 - devtmpfs devtmpfs rw,size=2451332k,nr_inodes=612833,mode=755,inode64\n495 479 0:7 /tty /dev/tty rw,nosuid master:2 - devtmpfs devtmpfs rw,size=2451332k,nr_inodes=612833,mode=755,inode64\n496 479 0:7 /zero /dev/zero rw,nosuid master:2 - devtmpfs devtmpfs rw,size=2451332k,nr_inodes=612833,mode=755,inode64\n497 479 0:7 /urandom /dev/urandom rw,nosuid master:2 - devtmpfs devtmpfs rw,size=2451332k,nr_inodes=612833,mode=755,inode64\n419 478 0:68 /bus /proc/bus ro,nosuid,nodev,noexec,relatime - proc proc rw\n420 478 0:68 /fs /proc/fs ro,nosuid,nodev,noexec,relatime - proc proc rw\n430 478 0:68 /irq /proc/irq ro,nosuid,nodev,noexec,relatime - proc proc rw\n431 478 0:68 /sys /proc/sys ro,nosuid,nodev,noexec,relatime - proc proc rw\n432 478 0:68 /sysrq-trigger /proc/sysrq-trigger ro,nosuid,nodev,noexec,relatime - proc proc rw\n433 478 0:73 / /proc/acpi ro,relatime - tmpfs tmpfs ro,uid=1001,gid=1001,inode64\n434 478 0:7 /null /proc/interrupts rw,nosuid master:2 - devtmpfs devtmpfs rw,size=2451332k,nr_inodes=612833,mode=755,inode64\n435 478 0:7 /null /proc/kcore rw,nosuid master:2 - devtmpfs devtmpfs rw,size=2451332k,nr_inodes=612833,mode=755,inode64\n436 478 0:7 /null /proc/keys rw,nosuid master:2 - devtmpfs devtmpfs rw,size=2451332k,nr_inodes=612833,mode=755,inode64\n437 478 0:7 /null /proc/latency_stats rw,nosuid master:2 - devtmpfs devtmpfs rw,size=2451332k,nr_inodes=612833,mode=755,inode64\n438 478 0:74 / /proc/scsi ro,relatime - tmpfs tmpfs ro,uid=1001,gid=1001,inode64\n439 478 0:7 /null /proc/timer_list rw,nosuid master:2 - devtmpfs devtmpfs rw,size=2451332k,nr_inodes=612833,mode=755,inode64\n440 481 0:75 / /sys/firmware ro,relatime - tmpfs tmpfs ro,uid=1001,gid=1001,inode64\n",
+  "native_gateway_sha256": "7a634a8b36380fbfab9b1ffb818bf485e1fa58789ae988b5f85e994fdc7b43c3",
+  "provider_sha256": "6ad420a142938942c5609ea81709f229a1d91d37d9ab24e0bd14a3c58b1f324d",
+  "quota_provision": {
+    "argv": [
+      "/root/isolation-proof/quota-bin/doxa-quota-provision-family",
+      "create",
+      "root-authority-20261013-r6",
+      "/srv/doxa-quota-proof/root-authority-20261013-r6",
+      "1000",
+      "1001",
+      "1001",
+      "5009",
+      "67108864",
+      "sha256:b0ed50bef3b08af8ff10cbe4895a62e635294697694a67ad45de8185bef2aaa7",
+      "06fd63d262a84c6e49df2e33bb10d27247ab943e787247279ce1a2bff03908cb"
+    ],
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "{\"admissible_as_hard_quota\":false,\"policy\":{\"bindings\":{\"broker\":{\"device\":1792,\"inode\":48,\"mount_id\":2147500504},\"cache\":{\"device\":1792,\"inode\":47,\"mount_id\":2147500504},\"checkout\":{\"device\":1792,\"inode\":45,\"mount_id\":2147500504},\"home\":{\"device\":1792,\"inode\":46,\"mount_id\":2147500504},\"root\":{\"device\":1792,\"inode\":8197,\"mount_id\":2147500504}},\"boot_id\":\"d606e7c5-c113-477e-b804-8449e367d706\",\"caller_uid\":1000,\"engine_gid\":1001,\"engine_uid\":1001,\"hard_limit_bytes\":67108864,\"project_id\":5009,\"root\":\"/srv/doxa-quota-proof/root-authority-20261013-r6\",\"security_contract_version\":1,\"session_id\":\"root-authority-20261013-r6\",\"version\":2,\"worker_binary_sha256\":\"06fd63d262a84c6e49df2e33bb10d27247ab943e787247279ce1a2bff03908cb\",\"worker_image\":\"sha256:b0ed50bef3b08af8ff10cbe4895a62e635294697694a67ad45de8185bef2aaa7\"},\"policy_identity\":{\"device\":64769,\"inode\":530108,\"sha256\":\"f2d7699997c5c77566b66fbd5f333521a37ef43fb8df74f1b0313c38a037de01\"}}\n"
+  },
+  "scope": "credential-free-kernel-authority-proof",
+  "scope_note": "Actual kernel checks and credential-free fixture origin only; no full gateway/provider admission or send-time cgroup claim. ROOT-assisted outside-send/move-back is not a worker capability.",
+  "session_id": "root-authority-20261013-r6",
+  "worker_sha256": "06fd63d262a84c6e49df2e33bb10d27247ab943e787247279ce1a2bff03908cb"
+}
