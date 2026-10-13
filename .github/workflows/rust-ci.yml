@@ -90,6 +90,7 @@ jobs:
             -s scripts/tests -p test_semantic_attested_broker.py -v
       - name: Check task, quota fixture and release installer
         run: |
+          python3 -W error::ResourceWarning scripts/hardened-isolation/test_root_broker.py -v
           python3 scripts/check_workflow_action_pins.py
           python3 scripts/build_gallery_site.py --output "$RUNNER_TEMP/doxa-gallery-site"
           sh -n scripts/install.sh task

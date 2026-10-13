@@ -6,7 +6,7 @@
 use std::io;
 use std::os::unix::{process::CommandExt, net::UnixStream, io::AsRawFd};
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -152,6 +152,7 @@ pub struct AppServerDriver {
     frame_buffer: Vec<u8>,
     next_id: u64,
     thread_id: Option<String>,
+    rollout_path: Option<PathBuf>,
     turn_id: Option<String>,
     reasoning_bytes: usize,
     reasoning_chars: usize,
@@ -165,6 +166,16 @@ pub struct AppServerDriver {
     pending_notifications: VecDeque<(Value, usize)>,
     pending_bytes: usize,
     tool_normalizer: CodexJsonlNormalizer,
+}
+
+fn provider_rollout_path(value: &Value) -> Option<PathBuf> {
+    let text = value.as_str().filter(|text| !text.is_empty() && text.len() <= 4096
+        && !text.chars().any(char::is_control))?;
+    let path = Path::new(text);
+    if !path.is_absolute() || path.components().any(|part| matches!(part, Component::ParentDir)) {
+        return None;
+    }
+    Some(path.to_owned())
 }
 
 fn codex_billing(reply: &Value) -> Option<Value> {
@@ -311,7 +322,7 @@ impl AppServerDriver {
         let tool_scrub = scrub.clone();
         let mut driver = Self {
             options, effort: None, interactive: false, live_auto_supported: false, peer_tools: false, agent_tools: Vec::new(), dynamic_tool_names: Vec::new(), compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, owner_control: owner_control.take(), supervised: false, stdin, stdout, frame_buffer: Vec::new(), next_id: 0,
-            thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
+            thread_id: None, rollout_path: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
             assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None, effective_model: None,
             pending_notifications: VecDeque::new(),
@@ -407,6 +418,7 @@ impl AppServerDriver {
             return Err(AppServerError::Protocol("resume returned a different thread ID"));
         }
         driver.thread_id = Some(id.to_owned());
+        driver.rollout_path = provider_rollout_path(&result["thread"]["path"]);
         if let Some(gate) = driver.compact_gate.as_mut() {
             gate.bind_thread(id).map_err(|_| AppServerError::Protocol("DOXA compaction gate could not bind the actual thread"))?;
         }
@@ -521,6 +533,10 @@ impl AppServerDriver {
     }
 
     pub fn thread_id(&self) -> &str { self.thread_id.as_deref().expect("thread start succeeded") }
+
+    /// Official thread/start, thread/resume or thread/read metadata. The path
+    /// still needs a thread-bound owned read or ROOT snapshot before use.
+    pub fn rollout_path(&self) -> Option<&Path> { self.rollout_path.as_deref() }
 
     pub fn model(&self) -> Option<&str> { self.effective_model.as_deref() }
 
@@ -1047,6 +1063,17 @@ fn normalize_tool_item(item: &Value) -> Option<Value> {
 #[cfg(test)]
 mod web_item_tests {
     use super::*;
+
+    #[test]
+    fn official_rollout_path_is_bounded_metadata_without_filesystem_access() {
+        let path = "/home/doxa/codex/sessions/2026/10/13/rollout-thread.jsonl";
+        assert_eq!(provider_rollout_path(&json!(path)).as_deref(), Some(Path::new(path)));
+        for value in [Value::Null, json!(12), json!(""), json!("sessions/thread.jsonl"),
+            json!("/home/doxa/codex/../other/thread.jsonl"), json!("/home/doxa/codex/thread\n.jsonl"),
+            json!(format!("/{}", "x".repeat(4096)))] {
+            assert!(provider_rollout_path(&value).is_none(), "{value}");
+        }
+    }
 
     #[test]
     fn auto_cannot_inherit_an_unrestricted_configured_sandbox() {

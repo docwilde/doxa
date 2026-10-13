@@ -604,9 +604,10 @@ fn run() -> io::Result<()> {
             Some(profile), options.resume, options.base_branch.as_deref())?;
         options.cwd = runtime.checkout().to_owned();
         if let Some(config)=&router_config {
-            for (provider,family) in [(doxa_router::Provider::Claude,"claude"),(doxa_router::Provider::Codex,"codex")] {
-                if config.candidates.iter().any(|row|row.provider==provider){runtime.prepare_provider(family)?;}
-            }
+            let families:Vec<String> = [(doxa_router::Provider::Claude,"claude"),(doxa_router::Provider::Codex,"codex")]
+                .into_iter().filter(|(provider,_)|config.candidates.iter().any(|row|row.provider==*provider))
+                .map(|(_,family)|family.to_owned()).collect();
+            runtime.prepare_providers(&families)?;
         } else {runtime.prepare_provider(options.engine.name())?;}
         runtime.activate(); Some(runtime)
     } else { None };

@@ -90,10 +90,18 @@ fn process_client(mut stream: UnixStream, capability: &str, manifest: &Manifest,
         .and_then(|_| stream.write_all(&bytes));
 }
 
-pub struct HookBroker { socket: PathBuf, identity: (u64,u64), stopping: Arc<AtomicBool>, worker: Option<std::thread::JoinHandle<()>>, command: String }
+pub struct HookBroker { socket: PathBuf, identity: (u64,u64), stopping: Arc<AtomicBool>, worker: Option<std::thread::JoinHandle<()>>, command: String,
+    #[cfg(target_os="linux")] root:Option<crate::root_callback::Callback> }
 impl HookBroker {
     pub fn start(handler: impl Fn(Value, &Manifest) -> Value + Send + 'static) -> io::Result<Option<Self>> {
         let Some(manifest) = active()? else { return Ok(None); };
+        if manifest.profile==crate::Profile::DockerHardened {
+            #[cfg(target_os="linux")]
+            {let root=crate::root_callback::Callback::start(manifest,handler)?;let command=root.command.clone();
+                return Ok(Some(Self{socket:PathBuf::new(),identity:(0,0),stopping:Arc::new(AtomicBool::new(false)),worker:None,command,root:Some(root)}));}
+            #[cfg(not(target_os="linux"))]
+            {return Err(error("ROOT compaction callbacks require Linux"));}
+        }
         let socket = manifest.broker.join("hook.sock");
         // A previous host may have crashed. Only a socket in our already
         // owner-checked private directory may be replaced, never a symlink.
@@ -124,12 +132,15 @@ impl HookBroker {
                 process_client(stream, &capability, &manifest, &handler);
             }
         });
-        Ok(Some(Self { socket, identity, stopping, worker:Some(worker), command }))
+        Ok(Some(Self { socket, identity, stopping, worker:Some(worker), command,
+            #[cfg(target_os="linux")]root:None }))
     }
     pub fn command(&self) -> &str { &self.command }
 }
 impl Drop for HookBroker {
     fn drop(&mut self) {
+        #[cfg(target_os="linux")]
+        if self.root.take().is_some(){return;}
         self.stopping.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() { let _ = worker.join(); }
         if fs::symlink_metadata(&self.socket).is_ok_and(|m| (m.dev(),m.ino()) == self.identity) { let _ = fs::remove_file(&self.socket); }

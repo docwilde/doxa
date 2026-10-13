@@ -25,31 +25,101 @@ pub mod workspace;
 pub mod test_runner;
 pub mod migration;
 pub mod cgroup;
+pub mod worker_security;
+pub mod hardened_authority;
+#[cfg(target_os = "linux")]
+pub mod root_gateway;
+#[cfg(target_os = "linux")]
+mod root_hooks;
+#[cfg(target_os = "linux")]
+mod root_callback;
 mod command_runner;
 mod disk;
 mod source_git;
+pub mod root_client;
 pub use source_git::staged_diff;
 pub use disk::{check_disk_budget, DiskSnapshot};
+pub fn check_turn_budget(manifest:&Manifest)->io::Result<()> {
+    if manifest.profile==Profile::DockerHardened {root_client::guard(manifest)}
+    else if manifest.profile.docker(){check_disk_budget(manifest).map(|_|())}else{Ok(())}
+}
 
 pub const ACTIVE_MANIFEST: &str = "DOXA_ISOLATION_MANIFEST";
 pub const SESSION_MANIFEST: &str = "DOXA_SESSION_MANIFEST";
+
+/// Bytes obtained through this session's independently authenticated ROOT
+/// transport. `proof` identifies the actual Engine-owned source, rather than
+/// the caller's temporary copy. The original must be rechecked after review.
+#[derive(Clone, Debug)]
+pub struct ProviderSnapshot {
+    pub bytes: Vec<u8>, pub proof: Value,
+    pub(crate) session_id: String, pub(crate) family: String,
+    pub(crate) relative: PathBuf, pub(crate) thread: Option<String>,
+}
+
+pub struct ProviderReviewFile { pub path: PathBuf, _directory: tempfile::TempDir }
+
+/// Materialize bytes in the caller-owned review home. Its filesystem proof is
+/// separate from `snapshot.proof`, which continues to identify the original
+/// Engine-owned file and is revalidated over ROOT IPC after human review.
+pub fn provider_review_file(snapshot: &ProviderSnapshot) -> io::Result<ProviderReviewFile> {
+    let manifest=active()?.ok_or_else(||error("provider review requires an active session"))?;
+    if manifest.session_id!=snapshot.session_id || manifest.profile.key()!="docker-hardened"
+        || snapshot.family!="codex" || snapshot.bytes.is_empty() || snapshot.bytes.len()>32*1024*1024 {
+        return Err(error("provider review snapshot scope or byte limit changed"));
+    }
+    if snapshot.proof["size"].as_u64()!=Some(snapshot.bytes.len() as u64)
+        || snapshot.proof["sha256"]!=format!("{:x}",Sha256::digest(&snapshot.bytes)) {
+        return Err(error("review requires complete bytes matching the original ROOT source proof"));
+    }
+    let parent=manifest.private_home.join("codex/sessions");private_directory(&parent,true)?;
+    let directory=tempfile::Builder::new().permissions(fs::Permissions::from_mode(0o700)).prefix(".root-review-").tempdir_in(parent)?;
+    let path=directory.path().join("rollout.jsonl");
+    let mut file=OpenOptions::new().write(true).create_new(true).mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&path)?;
+    file.write_all(&snapshot.bytes)?;file.sync_all()?;
+    Ok(ProviderReviewFile{path,_directory:directory})
+}
+
+pub fn snapshot_provider_file(path: &Path, offset: u64, limit: usize, thread: Option<&str>) -> io::Result<Option<ProviderSnapshot>> {
+    let Some(manifest)=active()? else{return Ok(None);};
+    if manifest.profile!=Profile::DockerHardened {return Ok(None);}
+    let relative=provider_relative(&manifest,path)?;
+    root_client::snapshot(&manifest,"codex",&relative,thread,offset,limit as u64).map(Some)
+}
+
+pub fn verify_provider_snapshot(snapshot: &ProviderSnapshot) -> io::Result<bool> {
+    root_client::verify_snapshot(snapshot)
+}
+fn provider_relative(manifest:&Manifest,path:&Path)->io::Result<PathBuf>{
+    let relative=path.strip_prefix("/home/doxa").or_else(|_|path.strip_prefix(&manifest.private_home))
+        .map_err(|_|error("hardened provider path escapes the official worker home"))?;
+    let parts:Vec<_>=relative.components().collect();
+    if parts.len()<3||parts.len()>24||parts.iter().any(|p|!matches!(p,Component::Normal(_)))
+        ||!matches!(parts[0],Component::Normal(n) if n=="codex")
+        ||!matches!(parts[1],Component::Normal(n) if n=="sessions"||n=="archived_sessions") {
+        return Err(error("hardened provider source is outside the fixed rollout scope"));
+    }
+    Ok(relative.to_owned())
+}
 const RESUME_ROLLOUT: &str = "DOXA_CODEX_RESUME_ROLLOUT";
 const MAX_MANIFEST: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Profile { #[default] Native, DockerOpen, DockerOffline }
+pub enum Profile { #[default] Native, DockerOpen, DockerOffline, DockerHardened }
 impl Profile {
     pub fn parse(value: &str) -> io::Result<Self> {
         match value { "native" => Ok(Self::Native), "docker-open" => Ok(Self::DockerOpen),
             "docker-offline" => Ok(Self::DockerOffline),
-            "docker-hardened" => Err(error("docker-hardened is unavailable: per-session kernel hard-quota, restart and provider-egress proofs are required")),
-            _ => Err(error("isolation must be native, docker-open or docker-offline")) }
+            "docker-hardened" if cfg!(target_os="linux") => Ok(Self::DockerHardened),
+            "docker-hardened" => Err(error("docker-hardened requires Linux ROOT provisioning")),
+            _ => Err(error("isolation must be native, docker-open, docker-offline or docker-hardened")) }
     }
-    pub fn key(self) -> &'static str { match self { Self::Native => "native", Self::DockerOpen => "docker-open", Self::DockerOffline => "docker-offline" } }
-    pub fn label(self) -> &'static str { match self { Self::Native => "native", Self::DockerOpen => "docker · open egress", Self::DockerOffline => "docker · no network" } }
+    pub fn key(self) -> &'static str { match self { Self::Native => "native", Self::DockerOpen => "docker-open", Self::DockerOffline => "docker-offline",Self::DockerHardened=>"docker-hardened" } }
+    pub fn label(self) -> &'static str { match self { Self::Native => "native", Self::DockerOpen => "docker · open egress", Self::DockerOffline => "docker · no network",Self::DockerHardened=>"docker · ROOT authority" } }
     pub fn docker(self) -> bool { self != Self::Native }
-    fn network(self) -> &'static str { if self == Self::DockerOffline { "none" } else { "bridge" } }
+    fn network(self) -> &'static str { if matches!(self,Self::DockerOffline|Self::DockerHardened) { "none" } else { "bridge" } }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -142,7 +212,16 @@ impl Manifest {
             "mounts":if self.profile.docker(){vec!["independent checkout","private home","private cache","session hook broker"]}else{vec![]},
             "credential_exposure":if self.profile.docker(){"only selected provider auth copied to private session home; visible to worker tools"}else{"native provider environment"},
             "can_set_isolation":true});
-        if self.profile.docker() {
+        if self.profile==Profile::DockerHardened {
+            result["engine"]=json!("ROOT-controlled separate-UID rootless Docker");
+            result["network"]=json!("fixed family ROOT egress gateway");
+            result["disk_limit"]=json!("aggregate kernel project hard quota");
+            result["can_set_isolation"]=json!(false);
+            match root_client::installed(&self.session_id) {
+                Ok(installed)=>{result["disk_hard_limit_bytes"]=json!(installed.policy.limits.disk_bytes);},
+                Err(e)=>{result["authority_error"]=json!(e.to_string());},
+            }
+        } else if self.profile.docker() {
             match disk::sample(self) {
                 Ok(sample) => {
                     result["disk_usage_bytes"] = json!(sample.usage_bytes);
@@ -209,13 +288,24 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         if (meta.dev(), meta.ino()) != (manifest.checkout_device, manifest.checkout_inode) { return Err(error("isolated checkout identity changed")); }
         if manifest.profile.docker() {
             let policy = manifest.policy.as_ref().ok_or_else(|| error("Docker manifest has no policy"))?; policy.validate()?;
-            if policy.hash(manifest.profile) != manifest.policy_hash { return Err(error("isolation policy hash changed")); }
-            if ![policy.hash(Profile::DockerOpen),policy.hash(Profile::DockerOffline)].contains(&manifest.creation_policy_hash) {
-                return Err(error("invalid immutable creation policy hash"));
+            if manifest.profile==Profile::DockerHardened {
+                let installed=root_client::installed(&manifest.session_id)?;
+                if manifest.policy_hash!=installed.policy_sha256||manifest.creation_policy_hash!=installed.policy_sha256
+                    ||*policy!=root_display_policy(&installed.policy) {
+                    return Err(error("hardened manifest differs from the ROOT-installed immutable policy"));
+                }
+            } else {
+                if policy.hash(manifest.profile) != manifest.policy_hash { return Err(error("isolation policy hash changed")); }
+                if ![policy.hash(Profile::DockerOpen),policy.hash(Profile::DockerOffline)].contains(&manifest.creation_policy_hash) {
+                    return Err(error("invalid immutable creation policy hash"));
+                }
             }
         }
         if manifest.context_cwd.as_ref().is_some_and(|path|!path.is_absolute()||path.components().any(|c|matches!(c,Component::ParentDir))){return Err(error("invalid logical session cwd"));}
-        if manifest.provider_rollout.as_ref().is_some_and(|path|!path.starts_with(manifest.private_home.join("codex/sessions"))){return Err(error("provider rollout escapes private session home"));}
+        if let Some(path)=&manifest.provider_rollout {
+            if manifest.profile==Profile::DockerHardened {provider_relative(&manifest,path)?;}
+            else if !path.starts_with(manifest.private_home.join("codex/sessions")){return Err(error("provider rollout escapes private session home"));}
+        }
     }
     Ok(manifest)
 }
@@ -229,6 +319,19 @@ fn write_manifest(path: &Path, manifest: &Manifest) -> io::Result<()> {
 fn nonce() -> io::Result<String> {
     let mut bytes = [0; 24]; File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+fn root_display_policy(policy:&hardened_authority::Policy)->Policy {
+    Policy{image:policy.image.clone(),docker_host:format!("unix://{}",policy.engine.socket.display()),
+        memory_bytes:policy.limits.memory_bytes,cpus:policy.limits.cpu_quota as f64/policy.limits.cpu_period as f64,
+        pids:policy.limits.pids,disk_soft_limit_bytes:None,disk_free_floor_bytes:None}
+}
+fn root_ready(manifest:&mut Manifest,reply:&Value)->io::Result<()> {
+    let cid=reply["cid"].as_str().filter(|s|s.len()==64&&s.bytes().all(|b|b.is_ascii_hexdigit()))
+        .ok_or_else(||error("ROOT session did not return an exact live container identity"))?;
+    if reply["status"]!="ready"||reply["session_id"]!=manifest.session_id||reply["policy_sha256"]!=manifest.policy_hash {
+        return Err(error("ROOT session scope or live admission changed"));
+    }
+    manifest.container_id=Some(cid.into());manifest.state="ready".into();Ok(())
 }
 fn run(command: Command) -> io::Result<Vec<u8>> { command_runner::run(command) }
 fn docker(policy: &Policy) -> Command {
@@ -289,6 +392,7 @@ fn clone_checkout(source: &Path, checkout: &Path, id: &str, base: Option<&str>) 
 }
 
 pub fn create_args(manifest: &Manifest) -> io::Result<Vec<OsString>> {
+    if manifest.profile==Profile::DockerHardened {return Err(error("hardened containers are created exclusively by the ROOT broker"));}
     let policy = manifest.policy.as_ref().ok_or_else(|| error("Docker policy missing"))?;
     let mut args: Vec<OsString> = ["create", "--name"].into_iter().map(Into::into).collect();
     args.push(format!("doxa-{}-{}", manifest.session_id, &manifest.nonce[..12]).into());
@@ -321,16 +425,24 @@ impl Runtime {
             let mut manifest = read_manifest(&path)?;
             if requested.is_some_and(|p| p != manifest.profile) { return Err(error("resume isolation differs from saved policy; attach and change it while idle or explicitly migrate the session")); }
             if source != manifest.checkout && source != manifest.source { return Err(error("resume project does not match isolation manifest")); }
-            if manifest.profile.docker() { preflight(manifest.policy.as_ref().unwrap())?; check_disk_budget(&manifest)?; reconcile(&mut manifest, true)?; }
+            if manifest.profile==Profile::DockerHardened {
+                let reply=root_client::control(&manifest.session_id,"resume")?;root_ready(&mut manifest,&reply)?;
+            } else if manifest.profile.docker() { preflight(manifest.policy.as_ref().unwrap())?; check_disk_budget(&manifest)?; reconcile(&mut manifest, true)?; }
             else {manifest.state="ready".into();}
             write_manifest(&path,&manifest)?;
             return Ok(Self { path, manifest, migration_stop:false });
         }
         let profile = requested.unwrap_or(configured_profile(home)?);
         if resume && profile.docker() { return Err(error("saved native session has no Docker manifest; automatic backend migration is forbidden")); }
+        // ROOT provisioning is checked before making a client mirror. No
+        // direct Engine socket or caller-owned policy can satisfy this gate.
+        let root_install=if profile==Profile::DockerHardened {Some(root_client::installed(id)?)}else{None};
         private_directory(&home.join("isolation"), true)?;
         let root = path.parent().unwrap(); private_directory(root, true)?;
         let source = fs::canonicalize(source)?;
+        if active()?.is_some_and(|parent|parent.profile==Profile::DockerHardened&&source.starts_with(&parent.checkout)) {
+            return Err(error("cloning a hardened worker requires an actual ROOT workspace export; the caller mirror is not the worker checkout"));
+        }
         let project_source = active()?.filter(|parent| parent.checkout == source).map(|parent|parent.source).unwrap_or_else(||source.clone());
         let mut manifest = Manifest { version: 1, session_id: id.into(), profile, policy: None,
             policy_hash: String::new(), creation_policy_hash:String::new(), source: project_source, checkout: source.clone(),
@@ -338,7 +450,18 @@ impl Runtime {
             checkout_device: 0, checkout_inode: 0, base_sha: String::new(), branch: String::new(),
             private_home: root.join("home"), cache: root.join("cache"), broker: root.join("broker"),
             container_id: None, nonce: nonce()?, state: "preparing".into() };
-        if profile.docker() {
+        if let Some(installed)=root_install {
+            manifest.policy=Some(root_display_policy(&installed.policy));
+            manifest.policy_hash=installed.policy_sha256.clone();manifest.creation_policy_hash=installed.policy_sha256;
+            manifest.checkout=root.join("checkout");
+            for directory in [&manifest.private_home,&manifest.cache,&manifest.broker,&manifest.cache.join("tmp")] {private_directory(directory,true)?;}
+            let(sha,branch)=clone_checkout(&source,&manifest.checkout,id,base)?;manifest.base_sha=sha;manifest.branch=branch;
+            let meta=fs::metadata(&manifest.checkout)?;manifest.checkout_device=meta.dev();manifest.checkout_inode=meta.ino();
+            write_manifest(&path,&manifest)?;
+            match root_client::prepare(id,&manifest.checkout,&manifest.private_home).and_then(|reply|root_ready(&mut manifest,&reply)) {
+                Ok(())=>{},Err(e)=>{manifest.state="failed".into();let _=write_manifest(&path,&manifest);return Err(e);},
+            }
+        } else if profile.docker() {
             let policy = Policy::configured(home)?; preflight(&policy)?;
             manifest.policy_hash = policy.hash(profile); manifest.creation_policy_hash=manifest.policy_hash.clone(); manifest.policy = Some(policy);
             let fs_stats = fs::metadata(home)?;
@@ -394,6 +517,18 @@ impl Runtime {
         let mut output = OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(target)?;
         output.write_all(&bytes)?; output.sync_all()
     }
+    /// Router resolves CLI families from reviewed configuration. Validate the
+    /// whole set before any credential snapshot; model-provided program names
+    /// never become preparation or host execution authority.
+    pub fn prepare_providers(&self, engines: &[String]) -> io::Result<()> {
+        if engines.len() > 16 || engines.iter().any(|engine| !matches!(engine.as_str(), "claude" | "codex")) {
+            return Err(error("provider preparation requires configured Claude/Codex CLI families"));
+        }
+        for engine in ["claude", "codex"] {
+            if engines.iter().any(|value| value == engine) { self.prepare_provider(engine)?; }
+        }
+        Ok(())
+    }
     pub fn activate(&self) {
         std::env::remove_var(RESUME_ROLLOUT);
         // Called once by the trusted daemon before any provider threads exist.
@@ -415,6 +550,9 @@ impl Runtime {
     pub fn set_profile(&mut self, profile: Profile, confirmed: bool) -> io::Result<Value> {
         if !confirmed { return Err(error("isolation changes require explicit confirmation")); }
         if profile == self.profile() { return Ok(self.status()); }
+        if profile==Profile::DockerHardened||self.profile()==Profile::DockerHardened {
+            return Err(error("changing ROOT isolation requires a stopped-session ROOT export/import transaction"));
+        }
         if !profile.docker() || !self.profile().docker() { return Err(error("native/Docker migration requires an explicit stopped-session checkout and transcript import; running provider cannot be relabeled")); }
         let policy = self.manifest.policy.as_ref().unwrap();
         check_disk_budget(&self.manifest)?;
@@ -440,7 +578,12 @@ impl Runtime {
         Ok(self.status())
     }
     pub fn stop(&mut self) -> io::Result<()> {
-        if let Some(policy) = self.manifest.policy.as_ref().filter(|_|self.profile().docker()) {
+        if self.profile()==Profile::DockerHardened {
+            self.manifest.state="stopping".into();write_manifest(&self.path,&self.manifest)?;
+            let reply=root_client::control(&self.manifest.session_id,"stop")?;
+            if reply["status"]!="stopped" {return Err(error("ROOT session cleanup was not confirmed"));}
+            self.manifest.container_id=None;
+        } else if let Some(policy) = self.manifest.policy.as_ref().filter(|_|self.profile().docker()) {
             inspect(&self.manifest)?;
             self.manifest.state = "stopping".into(); write_manifest(&self.path, &self.manifest)?;
             docker_run(policy, &["stop", "--time", "5", self.manifest.container_id.as_deref().unwrap()])?;
@@ -456,6 +599,7 @@ pub(crate) fn free_bytes(path: &Path) -> io::Result<u64> {
     let stat = unsafe { stat.assume_init() }; Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
 }
 fn inspect(manifest: &Manifest) -> io::Result<Value> {
+    if manifest.profile==Profile::DockerHardened {return Err(error("hardened inspection requires the live ROOT broker authority"));}
     let policy = manifest.policy.as_ref().unwrap(); let id = manifest.container_id.as_deref().ok_or_else(|| error("container identity unavailable"))?;
     let rows: Value = serde_json::from_slice(&docker_run(policy, &["inspect", id])?)?; let actual = &rows[0];
     validate_inspect(manifest, actual)?; Ok(actual.clone())
@@ -550,7 +694,7 @@ fn inspect_network(manifest: &Manifest) -> io::Result<()> {
     let actual = inspect(manifest)?;
     let networks = actual["NetworkSettings"]["Networks"].as_object().ok_or_else(|| error("Docker network state unavailable"))?;
     let valid = match manifest.profile { Profile::DockerOffline => networks.is_empty() || networks.len() == 1 && networks.contains_key("none"),
-        Profile::DockerOpen => networks.len() == 1 && networks.contains_key("bridge"), Profile::Native => false };
+        Profile::DockerOpen => networks.len() == 1 && networks.contains_key("bridge"), Profile::Native|Profile::DockerHardened => false };
     if !valid { return Err(error("container network differs from requested isolation policy")); }
     Ok(())
 }
@@ -600,11 +744,20 @@ pub fn resume_rollout() -> io::Result<Option<PathBuf>> {
 /// after an earlier import. The selection stays in the trusted host process.
 pub fn select_resume_rollout(path:&Path)->io::Result<bool>{
     let Some(manifest)=session_manifest()? else{return Ok(false);};
+    if manifest.profile==Profile::DockerHardened {
+        validate_resume_rollout(&manifest,path)?;std::env::set_var(RESUME_ROLLOUT,path);return Ok(true);
+    }
     if manifest.provider_rollout.is_none()||!path.starts_with(manifest.private_home.join("codex/sessions")){return Ok(false);}
     validate_resume_rollout(&manifest,path)?;
     std::env::set_var(RESUME_ROLLOUT,path);Ok(true)
 }
 fn validate_resume_rollout(manifest:&Manifest,path:&Path)->io::Result<()>{
+    if manifest.profile==Profile::DockerHardened {
+        let relative=provider_relative(manifest,path)?;
+        let snapshot=root_client::snapshot(manifest,"codex",&relative,None,0,65536)?;
+        if !root_client::verify_snapshot(&snapshot)? {return Err(error("ROOT resume source changed"));}
+        return Ok(());
+    }
     if !path.starts_with(manifest.private_home.join("codex/sessions")) {return Err(error("imported rollout escaped private provider home"));}
     if fs::canonicalize(path)?!=path{return Err(error("imported rollout contains symlink components"));}
     let file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(&path)?;
@@ -639,6 +792,7 @@ pub fn map_frame(mut value: Value) -> io::Result<Value> {
 pub fn isolate_command(command: Command, provider: &str) -> io::Result<Command> {
     let Some(manifest) = active()? else { return Ok(command); };
     if !matches!(provider, "claude" | "codex") { return Err(error("unsupported Docker provider")); }
+    if manifest.profile==Profile::DockerHardened {return root_client::provider_command(command,&manifest,provider);}
     check_disk_budget(&manifest)?;
     inspect(&manifest)?; inspect_network(&manifest)?;
     probe_worker(&manifest)?;

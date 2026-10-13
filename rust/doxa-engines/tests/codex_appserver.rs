@@ -32,7 +32,7 @@ if thread['method'] == 'thread/resume':
     assert thread['params']['threadId'] == 'thread_1'
 else:
     assert thread['params']['approvalPolicy'] == 'never'
-send({'id':thread['id'],'result':{'thread':{'id':'thread_1'}}})
+send({'id':thread['id'],'result':{'thread':{'id':'thread_1','path':'/home/doxa/codex/sessions/2026/10/13/rollout-thread_1.jsonl'}}})
 turn = read()
 assert turn['method'] == 'turn/start'
 assert turn['params']['input'][0]['text'] == 'hello'
@@ -62,6 +62,7 @@ async fn fake_appserver_streams_reasoning_progress_and_exact_usage() {
     let (_dir, options) = fake();
     let mut driver = AppServerDriver::spawn(options, |s| s.replace("answer", "clean").replace("secret", "[redacted]")).await.unwrap();
     assert_eq!(driver.thread_id(), "thread_1");
+    assert_eq!(driver.rollout_path(), Some(std::path::Path::new("/home/doxa/codex/sessions/2026/10/13/rollout-thread_1.jsonl")));
     let mut events = Vec::new();
     driver.run_turn("hello", &CancellationToken::new(), |event| events.push(event)).await.unwrap();
     assert_eq!(events.iter().map(|event| event.kind.as_str()).collect::<Vec<_>>(),
@@ -84,6 +85,7 @@ async fn fake_appserver_resume_uses_the_recorded_thread() {
     let (_dir, mut options) = fake();
     options.resume_thread = Some("thread_1".into());
     let mut driver = AppServerDriver::spawn(options, |s| s.to_owned()).await.unwrap();
+    assert_eq!(driver.rollout_path(), Some(std::path::Path::new("/home/doxa/codex/sessions/2026/10/13/rollout-thread_1.jsonl")));
     driver.run_turn("hello", &CancellationToken::new(), |_| {}).await.unwrap();
 }
 

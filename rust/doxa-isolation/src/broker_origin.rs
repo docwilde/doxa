@@ -24,10 +24,15 @@ pub(crate) struct ContainerOriginPin {
     init_pin: File,
     init_scope: ProcessScope,
     host_scope: ProcessScope,
+    engine_uid: libc::uid_t,
 }
 
 impl ContainerOriginPin {
     pub(crate) fn new(init_pid: libc::pid_t) -> io::Result<Self> {
+        Self::new_for_uid(init_pid, unsafe { libc::geteuid() })
+    }
+
+    pub(crate) fn new_for_uid(init_pid: libc::pid_t, engine_uid: libc::uid_t) -> io::Result<Self> {
         let init_pin = open_pidfd(init_pid)?;
         pidfd_alive(&init_pin)?;
         let init_scope = scope(init_pid)?;
@@ -39,7 +44,7 @@ impl ContainerOriginPin {
             || init_scope.cgroup == "/" || init_scope.cgroup.is_empty() {
             return Err(error("inspected container init is outside a private scope"));
         }
-        Ok(Self { init_pid, init_pin, init_scope, host_scope })
+        Ok(Self { init_pid, init_pin, init_scope, host_scope, engine_uid })
     }
 
     pub(crate) fn require_connector(&self, stream: &UnixStream) -> io::Result<()> {
@@ -49,7 +54,7 @@ impl ContainerOriginPin {
             return Err(error("inspected container init changed during gateway lifetime"));
         }
         let peer = observe_connector(stream)?;
-        if peer.uid != unsafe { libc::geteuid() } {
+        if peer.uid != self.engine_uid {
             return Err(error("broker connector is not the rootless Engine owner"));
         }
         if !candidate_matches(&peer.scope, &self.init_scope, &self.host_scope) {

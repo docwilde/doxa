@@ -165,6 +165,9 @@ pub(crate) fn enforce(sample: DiskSnapshot, policy: &Policy) -> io::Result<()> {
 }
 
 pub fn check_disk_budget(manifest: &Manifest) -> io::Result<DiskSnapshot> {
+    if manifest.profile==crate::Profile::DockerHardened {
+        return Err(error("hardened turns require the live ROOT guard; the client mirror cannot measure worker disk usage"));
+    }
     let policy = manifest.policy.as_ref().ok_or_else(|| error("Docker disk policy missing"))?;
     let snapshot = sample(manifest)?;
     enforce(snapshot, policy)?;

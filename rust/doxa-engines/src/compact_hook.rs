@@ -56,35 +56,61 @@ pub(crate) fn review_job(manifest_path: &Path, event: &Value) -> io::Result<Opti
     review_job_for_manifest(&manifest, event)
 }
 
+fn complete_provider_source(bytes: &[u8], proof: &Value) -> bool {
+    !bytes.is_empty() && bytes.len() <= MAX_ROLLOUT
+        && proof["size"].as_u64() == Some(bytes.len() as u64)
+        && proof["sha256"].as_str() == Some(format!("{:x}", Sha256::digest(bytes)).as_str())
+}
+
 pub(crate) fn review_job_for_manifest(manifest: &Value, event: &Value) -> io::Result<Option<ReviewJob>> {
     if manifest["version"] != crate::codex_compact::SUPPORTED_VERSION || event["hook_event_name"] != "PreCompact"
         || !matches!(event["trigger"].as_str(),Some("auto" | "manual"))
         || manifest["provider_thread"].as_str().is_none_or(str::is_empty) || event["session_id"] != manifest["provider_thread"]
         || manifest["lore_enabled"] != true || crate::review_worker::review_disabled() { return Ok(None); }
     let source = Path::new(event["transcript_path"].as_str().ok_or_else(|| io::Error::other("missing transcript"))?);
-    let root = fs::canonicalize(manifest["codex_home"].as_str().ok_or_else(|| io::Error::other("missing Codex home"))?)?;
-    if !source.starts_with(root.join("sessions")) && !source.starts_with(root.join("archived_sessions")) { return Ok(None); }
-    let (bytes, before) = safe_read(source, MAX_ROLLOUT)?;
+    let provider = doxa_isolation::snapshot_provider_file(source, 0, MAX_ROLLOUT, manifest["provider_thread"].as_str())?;
+    let bytes = if let Some(snapshot)=&provider {
+        if !complete_provider_source(&snapshot.bytes, &snapshot.proof) {
+            return Err(io::Error::other("provider review source is incomplete or differs from its original proof"));
+        }
+        snapshot.bytes.clone()
+    }else{
+        let root = fs::canonicalize(manifest["codex_home"].as_str().ok_or_else(|| io::Error::other("missing Codex home"))?)?;
+        if !source.starts_with(root.join("sessions")) && !source.starts_with(root.join("archived_sessions")) { return Ok(None); }
+        safe_read(source, MAX_ROLLOUT)?.0
+    };
     if bytes.is_empty() || bytes.split(|byte| *byte == b'\n').any(|line| line.len() > MAX_LINE) { return Ok(None); }
     let first: Value = serde_json::from_slice(bytes.split(|byte| *byte == b'\n').next().unwrap_or_default())?;
     if first["type"] != "session_meta" || first["payload"]["id"] != manifest["provider_thread"] { return Ok(None); }
     let cwd = manifest["cwd"].as_str().filter(|cwd| Path::new(cwd).is_absolute()).ok_or_else(|| io::Error::other("invalid cwd"))?;
     let session = manifest["doxa_session"].as_str().filter(|id| !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)))
         .ok_or_else(|| io::Error::other("invalid session"))?;
-    Ok(Some(ReviewJob { source: source.to_owned(), proof: before.clone(), metadata: json!({"cwd":cwd,"session_id":session,"provider_thread":manifest["provider_thread"],"transcript":source,
-        "older":true,"expected_source":before.json()}) }))
+    let review_file=provider.as_ref().map(doxa_isolation::provider_review_file).transpose()?;
+    let review_source=review_file.as_ref().map(|file|file.path.as_path()).unwrap_or(source);
+    let (review_bytes,before)=safe_read(review_source,MAX_ROLLOUT)?;
+    if review_bytes!=bytes {return Err(io::Error::other("provider review copy differs from its frozen source"));}
+    let mut metadata=json!({"cwd":cwd,"session_id":session,"provider_thread":manifest["provider_thread"],"transcript":review_source,
+        "older":true,"expected_source":before.json()});
+    if let Some(snapshot)=&provider {metadata["origin_source"]=snapshot.proof.clone();}
+    Ok(Some(ReviewJob { source: review_source.to_owned(), proof: before, provider, _review_file:review_file, metadata }))
 }
 
-/// An owned source snapshot. The worker's answer is accepted only while the
-/// original rollout still has the same bytes and filesystem identity.
+/// An owned review copy and, for hardened isolation, its opaque ROOT source.
+/// The worker's answer is accepted only while both identities remain current.
 pub(crate) struct ReviewJob {
     source: std::path::PathBuf,
     proof: SourceProof,
+    provider: Option<doxa_isolation::ProviderSnapshot>,
+    _review_file: Option<doxa_isolation::ProviderReviewFile>,
     pub(crate) metadata: Value,
 }
 impl ReviewJob {
     pub(crate) fn unchanged(&self) -> io::Result<bool> {
-        Ok(safe_read(&self.source, MAX_ROLLOUT)?.1 == self.proof)
+        if safe_read(&self.source, MAX_ROLLOUT)?.1!=self.proof {return Ok(false);}
+        match &self.provider {
+            Some(snapshot)=>doxa_isolation::verify_provider_snapshot(snapshot),
+            None=>Ok(true),
+        }
     }
 }
 
@@ -131,6 +157,36 @@ pub fn hook_main(manifest: &Path, expected_digest: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn provider_review_requires_full_original_bytes_and_hash() {
+        let bytes = b"complete original rollout\n";
+        let proof = json!({"size":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes))});
+        assert!(complete_provider_source(bytes, &proof));
+        assert!(!complete_provider_source(&bytes[..bytes.len()-1], &proof));
+        let mut changed = bytes.to_vec(); changed[0] = b'X';
+        assert!(!complete_provider_source(&changed, &proof));
+        assert!(!complete_provider_source(bytes, &json!({"size":bytes.len()})));
+        assert!(!complete_provider_source(bytes, &json!({"size":bytes.len()+1,"sha256":proof["sha256"]})));
+        assert!(!complete_provider_source(&[], &json!({"size":0,"sha256":format!("{:x}",Sha256::digest([]))})));
+    }
+
+    #[test]
+    fn identical_rollout_replacement_after_review_changes_source_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions"); fs::create_dir(&sessions).unwrap();
+        let source = sessions.join("thread.jsonl");
+        let bytes = br#"{"type":"session_meta","payload":{"id":"provider-thread"}}"#;
+        fs::write(&source, bytes).unwrap();
+        let manifest = json!({"version":"0.156.1","provider_thread":"provider-thread","doxa_session":"doxa-session",
+            "codex_home":dir.path(),"cwd":dir.path(),"lore_enabled":true});
+        let event = json!({"hook_event_name":"PreCompact","trigger":"manual","session_id":"provider-thread","transcript_path":source});
+        let job = review_job_for_manifest(&manifest, &event).unwrap().unwrap();
+        assert!(job.unchanged().unwrap());
+        let replacement = sessions.join("replacement.jsonl"); fs::write(&replacement, bytes).unwrap();
+        fs::rename(&replacement, &source).unwrap();
+        assert_eq!(fs::read(&source).unwrap(), bytes);
+        assert!(!job.unchanged().unwrap());
+    }
     #[test]
     fn executable_hardlinks_are_pinned_without_relaxing_transcript_sources(){
         use std::os::unix::fs::PermissionsExt;

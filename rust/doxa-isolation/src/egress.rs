@@ -36,7 +36,7 @@ use std::os::{fd::{FromRawFd, OwnedFd}, unix::ffi::OsStrExt};
 
 type Resolver = dyn Fn(&str) -> io::Result<Vec<SocketAddr>> + Send + Sync;
 type Connector = dyn Fn(SocketAddr) -> io::Result<TcpStream> + Send + Sync;
-type OriginGuard = dyn Fn(&UnixStream) -> io::Result<()> + Send + Sync;
+pub(crate) type OriginGuard = dyn Fn(&UnixStream) -> io::Result<()> + Send + Sync;
 
 /// An exact, owner supplied hostname list. No wildcard or suffix matching.
 #[derive(Clone)]
@@ -362,16 +362,20 @@ fn gateway_lock_path(broker_dir: &Path) -> io::Result<PathBuf> {
 }
 fn gateway_lock(broker_dir: &Path) -> io::Result<File> {
     let path = gateway_lock_path(broker_dir)?;
+    open_gateway_lock(&path)
+}
+
+fn open_gateway_lock(path: &Path) -> io::Result<File> {
     // Reject known special files before opening them. A concurrent swap can
     // still occur, so O_NONBLOCK and the descriptor check remain mandatory.
-    match fs::symlink_metadata(&path) {
+    match fs::symlink_metadata(path) {
         Ok(meta) if !meta.is_file() => return Err(error("unsafe egress gateway lock")),
         Ok(_) => {},
         Err(e) if e.kind() == io::ErrorKind::NotFound => {},
         Err(e) => return Err(e),
     }
     let file = OpenOptions::new().read(true).write(true).create(true).mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(&path)?;
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.nlink() != 1 || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
         return Err(error("unsafe egress gateway lock"));
@@ -381,7 +385,7 @@ fn gateway_lock(broker_dir: &Path) -> io::Result<File> {
         if err.kind() == io::ErrorKind::WouldBlock { return Err(error("egress gateway already starting or live")); }
         return Err(err);
     }
-    let current = fs::symlink_metadata(&path)?;
+    let current = fs::symlink_metadata(path)?;
     if !current.is_file() || (current.dev(), current.ino()) != (meta.dev(), meta.ino()) {
         return Err(error("egress gateway lock changed during startup"));
     }
@@ -441,6 +445,35 @@ pub struct EgressGateway {
     socket: PathBuf, identity: (u64, u64), stop: Arc<AtomicBool>, worker: Option<JoinHandle<()>>, _lock: File,
 }
 impl EgressGateway {
+    /// Only the independently authenticated ROOT authority calls this path.
+    /// Separate sockets prevent one provider's host list from authorizing the
+    /// other family. ROOT owns the source directory and socket inode.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn start_root_controlled(broker_dir: &Path, family: &str,
+        engine_uid: u32, engine_gid: u32, hosts: AllowedHosts,
+        origin: Arc<OriginGuard>) -> io::Result<Self> {
+        if unsafe { libc::geteuid() } != 0 || engine_uid == 0 || engine_gid == 0
+            || !matches!(family, "claude" | "codex") {
+            return Err(error("root egress requires a fixed provider family and distinct Engine identity"));
+        }
+        // Run libc DNS in a killable child: socket timeouts cannot bound a
+        // resolver blocked in NSS. The fixed native executable is independently
+        // pinned by the ROOT authority before this constructor is reached.
+        let resolver_executable = std::env::current_exe()?;
+        let resolver = Arc::new(move |host: &str| {
+            let mut command = std::process::Command::new(&resolver_executable);
+            command.env_clear().args(["resolve", host]);
+            let bytes = crate::command_runner::run_with_timeout(command, Duration::from_secs(2))?;
+            let addresses: Vec<SocketAddr> = serde_json::from_slice(&bytes)?;
+            if addresses.is_empty() || addresses.len() > 16 {
+                return Err(error("ROOT DNS response exceeds its address bound"));
+            }
+            Ok(addresses)
+        });
+        let connector = Arc::new(|address| TcpStream::connect_timeout(&address, CONNECT_TIMEOUT));
+        Self::start_configured(broker_dir, hosts, resolver, connector, Some(origin),
+            Some((family.to_owned(), engine_uid, engine_gid)), || {})
+    }
     /// Reserved production entry point. It cannot open a socket until quota
     /// enforcement is verified on this exact session after restart. A fixture
     /// receipt is insufficient, even if a caller changes its Boolean fields.
@@ -502,10 +535,30 @@ impl EgressGateway {
         Self::start_with_after_lock_and_origin(broker_dir, hosts, resolver, connector, None, after_lock)
     }
     fn start_with_after_lock_and_origin(broker_dir: &Path, hosts: AllowedHosts, resolver: Arc<Resolver>, connector: Arc<Connector>, origin: Option<Arc<OriginGuard>>, after_lock: impl FnOnce()) -> io::Result<Self> {
-        private_directory(broker_dir, false)?;
-        let lock = gateway_lock(broker_dir)?;
+        Self::start_configured(broker_dir, hosts, resolver, connector, origin, None, after_lock)
+    }
+    fn start_configured(broker_dir: &Path, hosts: AllowedHosts, resolver: Arc<Resolver>, connector: Arc<Connector>,
+        origin: Option<Arc<OriginGuard>>, root: Option<(String, u32, u32)>, after_lock: impl FnOnce()) -> io::Result<Self> {
+        let (lock, socket, sender_uid, socket_mode) = if let Some((family, uid, gid)) = &root {
+            #[cfg(not(target_os = "linux"))]
+            return Err(error("ROOT egress requires Linux"));
+            #[cfg(target_os = "linux")]
+            {
+                for path in [broker_dir, broker_dir.parent().ok_or_else(|| error("ROOT broker has no parent"))?] {
+                    let meta = fs::symlink_metadata(path)?;
+                    if !meta.is_dir() || meta.file_type().is_symlink() || meta.uid() != 0
+                        || meta.gid() != *gid || meta.mode() & 0o777 != 0o750 {
+                        return Err(error("ROOT broker directory authority differs from quota policy"));
+                    }
+                }
+                let lock = open_gateway_lock(&broker_dir.parent().unwrap().join(format!(".egress-{family}.lock")))?;
+                (lock, broker_dir.join(format!("egress-{family}.sock")), *uid, 0o660)
+            }
+        } else {
+            private_directory(broker_dir, false)?;
+            (gateway_lock(broker_dir)?, broker_dir.join("egress.sock"), unsafe { libc::geteuid() }, 0o600)
+        };
         after_lock();
-        let socket = broker_dir.join("egress.sock");
         if let Ok(meta) = fs::symlink_metadata(&socket) {
             if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() } { return Err(error("unsafe stale egress socket")); }
             if !stale_socket(&socket)? { return Err(error("egress gateway already live")); }
@@ -523,7 +576,15 @@ impl EgressGateway {
                 return Err(err);
             }
         }
-        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+        #[cfg(target_os = "linux")]
+        if let Some((_, _, gid)) = &root {
+            use std::ffi::CString;
+            let path = CString::new(socket.as_os_str().as_bytes()).map_err(|_| error("invalid ROOT socket path"))?;
+            if unsafe { libc::chown(path.as_ptr(), 0, *gid) } != 0 {
+                let err = io::Error::last_os_error(); let _ = fs::remove_file(&socket); return Err(err);
+            }
+        }
+        fs::set_permissions(&socket, fs::Permissions::from_mode(socket_mode))?;
         listener.set_nonblocking(true)?;
         let meta = fs::metadata(&socket)?;
         let identity = (meta.dev(), meta.ino());
@@ -552,7 +613,7 @@ impl EgressGateway {
                 }
                 #[cfg(target_os = "linux")]
                 let pin = if origin.is_some() {
-                    match broker_sender::pin_connector_sender(&stream) {
+                    match broker_sender::pin_connector_sender_for_uid(&stream, sender_uid) {
                         Ok(pin) => Some(pin), Err(_) => continue,
                     }
                 } else { None };
@@ -592,6 +653,21 @@ impl Drop for EgressGateway {
 /// loopback; it forwards the raw proxy stream to the mounted host socket.
 /// A dead host gateway yields 502, never a direct network fallback.
 pub fn serve_loopback_adapter(port: u16) -> io::Result<()> {
+    serve_adapter(port, Path::new("/run/doxa/session/egress.sock"))
+}
+
+/// Family selection is fixed by the root-installed policy and transport.
+/// It can never redirect the connector to a caller-selected Unix socket.
+pub fn serve_family_loopback_adapter(family: &str) -> io::Result<()> {
+    let (port, socket) = match family {
+        "claude" => (3128, "/run/doxa/session/egress-claude.sock"),
+        "codex" => (3129, "/run/doxa/session/egress-codex.sock"),
+        _ => return Err(error("unsupported hardened egress provider family")),
+    };
+    serve_adapter(port, Path::new(socket))
+}
+
+fn serve_adapter(port: u16, socket: &Path) -> io::Result<()> {
     if port < 1024 { return Err(error("fixture proxy port must be unprivileged")); }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
     let active = Arc::new(AtomicUsize::new(0));
@@ -602,8 +678,9 @@ pub fn serve_loopback_adapter(port: u16) -> io::Result<()> {
         }
         active.fetch_add(1, Ordering::AcqRel);
         let active = active.clone();
+        let socket = socket.to_owned();
         thread::spawn(move || {
-            let _ = bridge_loopback_client(client, Path::new("/run/doxa/session/egress.sock"));
+            let _ = bridge_loopback_client(client, &socket);
             active.fetch_sub(1, Ordering::AcqRel);
         });
     }

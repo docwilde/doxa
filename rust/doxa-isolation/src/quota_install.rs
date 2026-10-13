@@ -1,5 +1,7 @@
 //! Read-only checks for an administrator-staged, inactive quota helper unit.
 //! This reports a current prerequisite snapshot, never hardened admission.
+#[path = "quota_enforce.rs"]
+pub mod enforcement;
 use crate::{error, quota_helper::load_root_policy};
 use serde::Serialize;
 use sha2::{Digest, Sha256};

@@ -11,6 +11,9 @@ use std::{ffi::{CStr, CString}, fs::File, io, os::fd::{AsRawFd, BorrowedFd, From
 const MAX_HARD_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const MAX_DESCENDANTS: usize = 4096;
 const MAX_DEPTH: usize = 64;
+const MAX_GIT_SAFE_ENTRIES: usize = 4096;
+const MAX_GIT_SAFE_DEPTH: usize = 24;
+const MAX_GIT_SAFE_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuotaExpectation { pub project_id: u32, pub hard_limit_bytes: u64 }
@@ -30,6 +33,151 @@ pub struct QuotaBinding { pub device: u64, pub inode: u64, pub mount_id: u64 }
 #[serde(deny_unknown_fields)]
 pub struct QuotaBindings { pub root: QuotaBinding, pub checkout: QuotaBinding,
     pub home: QuotaBinding, pub cache: QuotaBinding, pub broker: QuotaBinding }
+
+/// Directory capabilities retained by the root Engine gateway. These bind
+/// roots are root owned; the Engine can write inside data roots but cannot
+/// replace them or modify their project attributes. Descendant attributes
+/// still require the gateway's mandatory worker seccomp contract.
+#[derive(Debug)]
+pub struct RootControlledQuotaTree {
+    pub root: File,
+    pub checkout: File,
+    pub home: File,
+    pub cache: File,
+    pub broker: File,
+    pub snapshot: QuotaSnapshot,
+}
+
+/// Root-only current kernel check. This returns capabilities, not admission.
+/// It deliberately does not consume fixture receipts or claim that a worker
+/// seccomp filter has been installed.
+pub fn inspect_root_controlled_session_hard_quota(root_path: &Path,
+    expected: QuotaExpectation, engine_gid: u32, bindings: &QuotaBindings)
+    -> io::Result<RootControlledQuotaTree> {
+    if unsafe { libc::geteuid() } != 0 || engine_gid == 0 {
+        return Err(error("root-controlled quota inspection requires root and a dedicated Engine group"));
+    }
+    validate_expectation(expected)?;
+    let root = open_root_controlled_directory(root_path)?;
+    inspect_root_controlled_with(root_path, expected, engine_gid, bindings, root, &UniqueKernelQuotaReader)
+}
+
+fn validate_expectation(expected: QuotaExpectation) -> io::Result<()> {
+    if expected.project_id == 0 || expected.project_id > i32::MAX as u32
+        || expected.hard_limit_bytes == 0 || expected.hard_limit_bytes % 512 != 0
+        || expected.hard_limit_bytes > MAX_HARD_BYTES {
+        return Err(error("hard-quota expectation has no finite project ID and hard block limit"));
+    }
+    Ok(())
+}
+
+fn inspect_root_controlled_with(root_path: &Path, expected: QuotaExpectation, engine_gid: u32,
+    bindings: &QuotaBindings, root: File, reader: &impl QuotaReader) -> io::Result<RootControlledQuotaTree> {
+    controlled_metadata(&root, engine_gid, 0o750)?;
+    let state = reader.project(&root)?;
+    if state.id != expected.project_id || !state.inherits || state.mount_id == 0 {
+        return Err(error("root-controlled session project or inheritance differs from policy"));
+    }
+    verify_unique_binding(&root, bindings.root, state.mount_id)?;
+    let checkout = open_child(&root, "checkout")?;
+    let home = open_child(&root, "home")?;
+    let cache = open_child(&root, "cache")?;
+    let broker = open_child(&root, "broker")?;
+    let mut descendants = 0;
+    for (directory, identity, mode, data) in [(&checkout, bindings.checkout, 0o770, true),
+        (&home, bindings.home, 0o770, true), (&cache, bindings.cache, 0o770, true),
+        (&broker, bindings.broker, 0o750, false)] {
+        controlled_metadata(directory, engine_gid, mode)?;
+        verify_unique_binding(directory, identity, state.mount_id)?;
+        let child = reader.project(directory)?;
+        if child.id != expected.project_id || !child.inherits || child.mount_id != state.mount_id {
+            return Err(error("root-controlled bind project or inheritance differs from policy"));
+        }
+        if data {
+            audit_descendants(directory, reader, expected.project_id, state.mount_id,
+                bindings.root.device, &mut descendants, 0)?;
+        }
+    }
+    let broker_entries = audit_broker_entries_with_access(&broker, state.mount_id,
+        bindings.root.device, 0, Some(engine_gid), expected, reader)?;
+    let limit = reader.limit(&root, expected.project_id)?;
+    if limit.id != expected.project_id || !limit.accounting || !limit.enforcing
+        || limit.hard_limit_bytes != expected.hard_limit_bytes {
+        return Err(error("root-controlled project quota is not enforcing the exact hard limit"));
+    }
+    let visible_root = open_root_controlled_directory(root_path)?;
+    controlled_metadata(&visible_root, engine_gid, 0o750)?;
+    verify_unique_binding(&visible_root, bindings.root, state.mount_id)?;
+    for (name, identity) in [("checkout", bindings.checkout), ("home", bindings.home),
+        ("cache", bindings.cache), ("broker", bindings.broker)] {
+        verify_unique_binding(&open_child(&visible_root, name)?, identity, state.mount_id)?;
+    }
+    Ok(RootControlledQuotaTree { root, checkout, home, cache, broker,
+        snapshot: QuotaSnapshot { project_id: expected.project_id, hard_limit_bytes: limit.hard_limit_bytes,
+            mount_id: state.mount_id, filesystem_device: bindings.root.device,
+            descendants_checked: descendants, broker_entries_checked: broker_entries } })
+}
+
+/// Only the final directory may have Engine group write permission. All
+/// ancestors are root owned and not group/other writable, so a worker cannot
+/// replace a bind source between inspection and Engine bind creation.
+pub(crate) fn open_root_controlled_directory(path: &Path) -> io::Result<File> {
+    if !path.is_absolute() { return Err(error("root-controlled directory must be absolute")); }
+    let mut directory = File::open("/")?;
+    let mut parts = path.components().skip(1).peekable();
+    while let Some(part) = parts.next() {
+        let Component::Normal(name) = part else { return Err(error("unsafe root-controlled directory component")); };
+        let parent = directory.metadata()?;
+        if parent.uid() != 0 || parent.mode() & 0o022 != 0 {
+            return Err(error("quota bind ancestor is not immutable to the Engine"));
+        }
+        let name = CString::new(name.as_bytes()).map_err(|_| error("unsafe quota directory name"))?;
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        directory = unsafe { File::from_raw_fd(fd) };
+        if parts.peek().is_some() {
+            let meta = directory.metadata()?;
+            if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+                return Err(error("quota bind ancestor is not immutable to the Engine"));
+            }
+        }
+    }
+    Ok(directory)
+}
+
+fn controlled_metadata(directory: &File, engine_gid: u32, mode: u32) -> io::Result<()> {
+    let meta = directory.metadata()?;
+    if !meta.is_dir() || meta.uid() != 0 || meta.gid() != engine_gid || meta.mode() & 0o7777 != mode {
+        return Err(error("quota bind directory is not root controlled with exact Engine access"));
+    }
+    #[cfg(target_os = "linux")]
+    for name in [c"system.posix_acl_access", c"system.posix_acl_default"] {
+        let result = unsafe { libc::fgetxattr(directory.as_raw_fd(), name.as_ptr(), std::ptr::null_mut(), 0) };
+        if result >= 0 { return Err(error("quota bind directory has an unreviewed ACL")); }
+        let cause = io::Error::last_os_error();
+        if cause.raw_os_error() != Some(libc::ENODATA) { return Err(cause); }
+    }
+    Ok(())
+}
+
+pub(crate) fn capture_quota_binding(directory: &File) -> io::Result<QuotaBinding> {
+    let state = UniqueKernelQuotaReader.project(directory)?;
+    let meta = directory.metadata()?;
+    Ok(QuotaBinding { device: meta.dev(), inode: meta.ino(), mount_id: state.mount_id })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn provision_project_quota(directory: &File, expected: QuotaExpectation) -> io::Result<()> {
+    if unsafe { libc::geteuid() } != 0 { return Err(error("project quota provisioning requires root")); }
+    validate_expectation(expected)?;
+    linux::provision(directory, expected)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn set_project_inheritance(directory: &File, project_id: u32) -> io::Result<()> {
+    linux::set_project(directory, project_id)
+}
 
 #[derive(Clone, Copy, Debug)]
 struct ProjectState { id: u32, inherits: bool, mount_id: u64 }
@@ -158,7 +306,7 @@ fn inspect_with_root_pinned(manifest: &Manifest, expected: QuotaExpectation, own
         return Err(error("session broker has wrong project ID, inheritance, or mount"));
     }
     if let Some(pinned) = bindings { verify_binding(&broker, pinned.broker, root_state.mount_id)?; }
-    let broker_entries = audit_broker_entries(&broker, root_state.mount_id, root_meta.dev(), owner_uid)?;
+    let broker_entries = audit_broker_entries(&broker, root_state.mount_id, root_meta.dev(), owner_uid, expected, reader)?;
     let visible_broker = open_absolute_directory(&manifest.broker)?;
     let visible_meta = visible_broker.metadata()?;
     if (broker_meta.dev(), broker_meta.ino()) != (visible_meta.dev(), visible_meta.ino()) {
@@ -198,6 +346,15 @@ fn inspect_with_root_pinned(manifest: &Manifest, expected: QuotaExpectation, own
 }
 
 fn verify_binding(directory: &File, expected: QuotaBinding, common_mount_id: u64) -> io::Result<()> {
+    verify_binding_with_mount_identity(directory, expected, common_mount_id, false)
+}
+
+fn verify_unique_binding(directory: &File, expected: QuotaBinding, common_mount_id: u64) -> io::Result<()> {
+    verify_binding_with_mount_identity(directory, expected, common_mount_id, true)
+}
+
+fn verify_binding_with_mount_identity(directory: &File, expected: QuotaBinding,
+    common_mount_id: u64, unique: bool) -> io::Result<()> {
     let meta = directory.metadata()?;
     if expected.device == 0 || expected.inode == 0 || expected.mount_id == 0
         || expected.mount_id != common_mount_id || meta.dev() != expected.device
@@ -205,7 +362,7 @@ fn verify_binding(directory: &File, expected: QuotaBinding, common_mount_id: u64
         return Err(error("quota binding differs from administrator policy"));
     }
     #[cfg(target_os = "linux")]
-    if entry_mount_id(directory)? != expected.mount_id {
+    if read_mount_id(directory, unique)? != expected.mount_id {
         return Err(error("quota binding mount differs from administrator policy"));
     }
     #[cfg(not(target_os = "linux"))]
@@ -213,11 +370,18 @@ fn verify_binding(directory: &File, expected: QuotaBinding, common_mount_id: u64
     Ok(())
 }
 
-// Only the two host-created Unix sockets may appear in the read-only worker
-// broker bind. This checks visible inode identities, ownership, permissions
+// Advisory brokers permit two legacy sockets; root-controlled brokers permit
+// the hook plus two separate family sockets and an optional root-owned Git
+// metadata tree. This checks inode identities, ownership, permissions
 // and mount identity at one instant; it does not prove the peer or quota on
 // future socket writes. A live transport attestation is still required.
-fn audit_broker_entries(directory: &File, mount_id: u64, device: u64, owner_uid: u32) -> io::Result<usize> {
+fn audit_broker_entries(directory: &File, mount_id: u64, device: u64, owner_uid: u32,
+    expected: QuotaExpectation, reader: &impl QuotaReader) -> io::Result<usize> {
+    audit_broker_entries_with_access(directory, mount_id, device, owner_uid, None, expected, reader)
+}
+
+fn audit_broker_entries_with_access(directory: &File, mount_id: u64, device: u64,
+    owner_uid: u32, engine_gid: Option<u32>, expected: QuotaExpectation, reader: &impl QuotaReader) -> io::Result<usize> {
     let before = directory.metadata()?;
     let duplicate = directory.try_clone()?;
     let stream = unsafe { libc::fdopendir(duplicate.as_raw_fd()) };
@@ -228,6 +392,9 @@ fn audit_broker_entries(directory: &File, mount_id: u64, device: u64, owner_uid:
         fn drop(&mut self) { unsafe { libc::closedir(self.0); } }
     }
     let stream = DirectoryStream(stream);
+    // A duplicate shares the caller descriptor's directory position. Rewind
+    // so repeated audits still inspect current entries rather than old EOF.
+    unsafe { libc::rewinddir(stream.0); }
     let mut checked = 0;
     loop {
         errno::set_errno(errno::Errno(0));
@@ -239,12 +406,24 @@ fn audit_broker_entries(directory: &File, mount_id: u64, device: u64, owner_uid:
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
         if name.to_bytes() == b"." || name.to_bytes() == b".." { continue; }
         checked += 1;
-        if checked > 2 || !matches!(name.to_bytes(), b"hook.sock" | b"egress.sock") {
+        if !allowed_broker_entry(name.to_bytes(), checked, engine_gid.is_some()) {
             return Err(error("session broker contains an unexpected entry"));
         }
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         if unsafe { libc::fstatat(directory.as_raw_fd(), name.as_ptr(), &mut stat,
             libc::AT_SYMLINK_NOFOLLOW) } < 0 { return Err(io::Error::last_os_error()); }
+        if name.to_bytes() == b"git-safe" {
+            let gid = engine_gid.ok_or_else(|| error("advisory broker cannot contain root Git metadata"))?;
+            let pinned = open_git_safe_entry(directory, name)?;
+            let meta = pinned.metadata()?;
+            if !same_entry(&stat, &meta) { return Err(error("root Git metadata changed before audit")); }
+            audit_git_safe(&pinned, reader, expected, mount_id, device, owner_uid, gid)?;
+            let visible = open_git_safe_entry(directory, name)?;
+            if !unchanged_git_safe_entry(&meta, &visible.metadata()?) {
+                return Err(error("root Git metadata tree changed during broker audit"));
+            }
+            continue;
+        }
         #[cfg(target_os = "linux")]
         let pinned = {
             let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(),
@@ -260,10 +439,11 @@ fn audit_broker_entries(directory: &File, mount_id: u64, device: u64, owner_uid:
             let meta = pinned.metadata()?;
             if !same_entry(&stat, &meta) || !meta.file_type().is_socket()
                 || meta.uid() != owner_uid || meta.nlink() != 1
-                || meta.mode() & 0o777 != 0o600 || meta.dev() != device {
+                || meta.mode() & 0o777 != if engine_gid.is_some() { 0o660 } else { 0o600 }
+                || engine_gid.is_some_and(|gid| meta.gid() != gid) || meta.dev() != device {
                 return Err(error("session broker socket has unsafe identity or permissions"));
             }
-            if entry_mount_id(&pinned)? != mount_id {
+            if read_mount_id(&pinned, engine_gid.is_some())? != mount_id {
                 return Err(error("session broker socket crosses a mount boundary"));
             }
             let current = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(),
@@ -283,14 +463,125 @@ fn audit_broker_entries(directory: &File, mount_id: u64, device: u64, owner_uid:
     Ok(checked)
 }
 
+fn allowed_broker_entry(name: &[u8], checked: usize, root_controlled: bool) -> bool {
+    if root_controlled {
+        checked <= 4 && matches!(name, b"hook.sock" | b"egress-claude.sock" | b"egress-codex.sock" | b"git-safe")
+    } else {
+        checked <= 2 && matches!(name, b"hook.sock" | b"egress.sock")
+    }
+}
+
+fn open_git_safe_entry(parent: &File, name: &CStr) -> io::Result<File> {
+    open_entry(parent, name).map_err(|cause| error(format!("root Git metadata entry could not be pinned without symlink/special entries: {cause}")))
+}
+
+fn unchanged_git_safe_entry(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    before.dev() == after.dev() && before.ino() == after.ino() && before.uid() == after.uid()
+        && before.gid() == after.gid() && before.mode() == after.mode() && before.nlink() == after.nlink()
+        && before.len() == after.len() && before.mtime() == after.mtime() && before.mtime_nsec() == after.mtime_nsec()
+        && before.ctime() == after.ctime() && before.ctime_nsec() == after.ctime_nsec()
+}
+
+fn git_safe_metadata(file: &File, owner_uid: u32, engine_gid: u32, top: bool) -> io::Result<std::fs::Metadata> {
+    let meta = file.metadata()?;
+    if meta.uid() != owner_uid || meta.gid() != engine_gid {
+        return Err(error("root Git metadata has wrong root owner or Engine group"));
+    }
+    let mode = meta.mode() & 0o7777;
+    if top && (!meta.is_dir() || !matches!(mode, 0o550 | 0o750))
+        || !top && (meta.is_dir() && mode != 0o550 || meta.is_file() && mode != 0o440)
+        || !meta.is_dir() && !meta.is_file() || meta.is_file() && meta.nlink() != 1 {
+        return Err(error("root Git metadata has unsafe type, readonly mode or link count"));
+    }
+    #[cfg(target_os = "linux")]
+    for name in [c"system.posix_acl_access", c"system.posix_acl_default"] {
+        let result = unsafe { libc::fgetxattr(file.as_raw_fd(), name.as_ptr(), std::ptr::null_mut(), 0) };
+        if result >= 0 { return Err(error("root Git metadata has an unreviewed ACL")); }
+        let cause = io::Error::last_os_error();
+        if cause.raw_os_error() != Some(libc::ENODATA) { return Err(cause); }
+    }
+    Ok(meta)
+}
+
+// The public enforced entry point always supplies owner_uid0 and the actual
+// UniqueKernelQuotaReader. The private owner parameter allows ordinary-UID
+// fixture tests; those snapshots have no admission or installed-policy API.
+fn audit_git_safe(directory: &File, reader: &impl QuotaReader, expected: QuotaExpectation,
+    mount_id: u64, device: u64, owner_uid: u32, engine_gid: u32) -> io::Result<()> {
+    let mut checked = 0;
+    let mut bytes = 0;
+    audit_git_safe_node(directory, reader, expected.project_id, mount_id, device, owner_uid, engine_gid,
+        expected.hard_limit_bytes.min(MAX_GIT_SAFE_BYTES), &mut checked, &mut bytes, 0)?;
+    Ok(())
+}
+
+fn audit_git_safe_node(file: &File, reader: &impl QuotaReader, project_id: u32, mount_id: u64,
+    device: u64, owner_uid: u32, engine_gid: u32, max_bytes: u64, checked: &mut usize,
+    bytes: &mut u64, depth: usize) -> io::Result<()> {
+    if depth > MAX_GIT_SAFE_DEPTH { return Err(error("root Git metadata depth exceeds 24")); }
+    let before = git_safe_metadata(file, owner_uid, engine_gid, depth == 0)?;
+    if before.dev() != device { return Err(error("root Git metadata crosses a filesystem boundary")); }
+    let state = reader.project(file).map_err(|_| error("root Git metadata project attributes unavailable"))?;
+    if state.id != project_id || state.mount_id != mount_id || before.is_dir() && !state.inherits {
+        return Err(error("root Git metadata has wrong project ID, inheritance or unique mount identity"));
+    }
+    if before.is_file() {
+        *bytes = bytes.checked_add(before.len()).ok_or_else(|| error("root Git metadata byte count overflows"))?;
+        if *bytes > max_bytes { return Err(error("root Git metadata exceeds quota/128 MiB byte bound")); }
+    } else {
+        let duplicate = file.try_clone()?;
+        let stream = unsafe { libc::fdopendir(duplicate.as_raw_fd()) };
+        if stream.is_null() { return Err(io::Error::last_os_error()); }
+        std::mem::forget(duplicate);
+        struct DirectoryStream(*mut libc::DIR);
+        impl Drop for DirectoryStream {
+            fn drop(&mut self) { unsafe { libc::closedir(self.0); } }
+        }
+        let stream = DirectoryStream(stream);
+        unsafe { libc::rewinddir(stream.0); }
+        loop {
+            errno::set_errno(errno::Errno(0));
+            let entry = unsafe { libc::readdir(stream.0) };
+            if entry.is_null() {
+                if errno::errno().0 != 0 { return Err(io::Error::last_os_error()); }
+                break;
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if matches!(name.to_bytes(), b"." | b"..") { continue; }
+            *checked += 1;
+            if *checked > MAX_GIT_SAFE_ENTRIES { return Err(error("root Git metadata entry count exceeds 4096")); }
+            let child = open_git_safe_entry(file, name)?;
+            let child_before = child.metadata()?;
+            audit_git_safe_node(&child, reader, project_id, mount_id, device, owner_uid, engine_gid,
+                max_bytes, checked, bytes, depth + 1)?;
+            if !unchanged_git_safe_entry(&child_before, &open_git_safe_entry(file, name)?.metadata()?) {
+                return Err(error("root Git metadata entry changed during audit"));
+            }
+        }
+    }
+    if !unchanged_git_safe_entry(&before, &file.metadata()?) {
+        return Err(error("root Git metadata descriptor changed during audit"));
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn entry_mount_id(file: &File) -> io::Result<u64> {
+    read_mount_id(file, false)
+}
+
+#[cfg(target_os = "linux")]
+fn read_mount_id(file: &File, unique: bool) -> io::Result<u64> {
+    // Ordinary STATX_MNT_ID can recycle on the very next mount. Root policy
+    // capabilities need the non-reusable mount identity introduced in 6.8.
+    const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
+    let mask = if unique { STATX_MNT_ID_UNIQUE } else { libc::STATX_MNT_ID };
     let mut statx: libc::statx = unsafe { std::mem::zeroed() };
     if unsafe { libc::statx(file.as_raw_fd(), c"".as_ptr(),
-        libc::AT_EMPTY_PATH | libc::AT_STATX_DONT_SYNC, libc::STATX_MNT_ID, &mut statx) } < 0 {
+        libc::AT_EMPTY_PATH | libc::AT_STATX_DONT_SYNC, mask, &mut statx) } < 0 {
         return Err(io::Error::last_os_error());
     }
-    if statx.stx_mask & libc::STATX_MNT_ID == 0 {
+    if statx.stx_mask & mask == 0 {
         return Err(error("kernel did not report entry mount identity"));
     }
     Ok(statx.stx_mnt_id)
@@ -443,15 +734,36 @@ fn open_absolute_directory(path: &Path) -> io::Result<File> {
 }
 
 struct KernelQuotaReader;
+struct UniqueKernelQuotaReader;
+
+#[cfg(target_os = "linux")]
+impl QuotaReader for UniqueKernelQuotaReader {
+    fn project(&self, directory: &File) -> io::Result<ProjectState> {
+        let mut state = KernelQuotaReader.project(directory)?;
+        state.mount_id = read_mount_id(directory, true)?;
+        Ok(state)
+    }
+    fn limit(&self, directory: &File, project_id: u32) -> io::Result<LimitState> {
+        KernelQuotaReader.limit(directory, project_id)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl QuotaReader for UniqueKernelQuotaReader {
+    fn project(&self, _: &File) -> io::Result<ProjectState> { Err(error("unique quota mount identities require Linux 6.8 or newer")) }
+    fn limit(&self, _: &File, _: u32) -> io::Result<LimitState> { Err(error("project quota authority requires Linux")) }
+}
 
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
     const FS_IOC_FSGETXATTR: libc::c_ulong = 0x801c581f;
+    const FS_IOC_FSSETXATTR: libc::c_ulong = 0x401c5820;
     const FS_XFLAG_PROJINHERIT: u32 = 0x00000200;
     const XFS_SUPER_MAGIC: libc::c_long = 0x58465342;
     const EXT4_SUPER_MAGIC: libc::c_long = 0xEF53;
     const Q_XGETQUOTA: libc::c_int = 0x5803;
+    const Q_XSETQLIM: libc::c_int = 0x5804;
     const Q_XGETQSTATV: libc::c_int = 0x5808;
     const PRJQUOTA: libc::c_int = 2;
     const FS_PROJ_QUOTA: i8 = 2;
@@ -493,6 +805,54 @@ mod linux {
     }
     fn supported_project_quota_filesystem(kind: libc::c_long) -> bool {
         kind == XFS_SUPER_MAGIC || kind == EXT4_SUPER_MAGIC
+    }
+
+    pub(super) fn provision(directory: &File, expected: QuotaExpectation) -> io::Result<()> {
+        let mut filesystem: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatfs(directory.as_raw_fd(), &mut filesystem) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // The strict EDQUOT acceptance path currently supports ext4 only;
+        // existing read-only XFS snapshots remain available to advisory users.
+        if filesystem.f_type != EXT4_SUPER_MAGIC {
+            return Err(error("authoritative quota provisioning requires ext4"));
+        }
+        let mut status = QuotaStatV { version: 1, ..Default::default() };
+        quota_call(directory, Q_XGETQSTATV, 0, &mut status)?;
+        if status.version != 1 || status.flags & (FS_QUOTA_PDQ_ACCT | FS_QUOTA_PDQ_ENFD)
+            != FS_QUOTA_PDQ_ACCT | FS_QUOTA_PDQ_ENFD {
+            return Err(error("project quota accounting and enforcement must already be enabled"));
+        }
+        let mut current = FsDiskQuota::default();
+        match quota_call(directory, Q_XGETQUOTA, expected.project_id, &mut current) {
+            Ok(()) => {
+                if current.id != expected.project_id || current.blk_hardlimit != 0
+                    || current.blk_softlimit != 0 || current.bcount != 0 || current.icount != 0
+                    || current.ino_hardlimit != 0 || current.ino_softlimit != 0 {
+                    return Err(error("project ID is already allocated or in use"));
+                }
+            }
+            Err(cause) if cause.raw_os_error() == Some(libc::ESRCH) => (),
+            Err(cause) => return Err(cause),
+        }
+        let mut quota = FsDiskQuota { version: 1, flags: FS_PROJ_QUOTA, fieldmask: 1 << 3,
+            id: expected.project_id, blk_hardlimit: expected.hard_limit_bytes / 512,
+            ..Default::default() };
+        quota_call(directory, Q_XSETQLIM, expected.project_id, &mut quota)?;
+        set_project(directory, expected.project_id)
+    }
+
+    pub(super) fn set_project(directory: &File, project_id: u32) -> io::Result<()> {
+        let mut attr = Fsxattr::default();
+        if unsafe { libc::ioctl(directory.as_raw_fd(), FS_IOC_FSGETXATTR, &mut attr) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        attr.project_id = project_id;
+        attr.flags |= FS_XFLAG_PROJINHERIT;
+        if unsafe { libc::ioctl(directory.as_raw_fd(), FS_IOC_FSSETXATTR, &attr) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
     impl QuotaReader for KernelQuotaReader {
         fn project(&self, directory: &File) -> io::Result<ProjectState> {
@@ -570,6 +930,23 @@ impl QuotaReader for KernelQuotaReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enforced_broker_names_are_family_scoped_and_advisory_contract_is_preserved() {
+        for name in [b"hook.sock".as_slice(), b"egress-claude.sock", b"egress-codex.sock", b"git-safe"] {
+            assert!(allowed_broker_entry(name, 4, true));
+            assert!(!allowed_broker_entry(name, 5, true));
+        }
+        for name in [b"egress.sock".as_slice(), b"other.sock", b"hook.sock/escape", b"egress-other.sock"] {
+            assert!(!allowed_broker_entry(name, 1, true));
+        }
+        assert!(allowed_broker_entry(b"hook.sock", 2, false));
+        assert!(allowed_broker_entry(b"egress.sock", 2, false));
+        assert!(!allowed_broker_entry(b"egress.sock", 3, false));
+        assert!(!allowed_broker_entry(b"egress-claude.sock", 1, false));
+        assert!(!allowed_broker_entry(b"egress-codex.sock", 1, false));
+        assert!(!allowed_broker_entry(b"git-safe", 1, false));
+    }
     use std::{cell::Cell, collections::HashMap, fs, os::unix::fs::{symlink, PermissionsExt}, path::PathBuf};
 
     struct FakeReader { states: HashMap<u64, ProjectState>, limit: io::Result<LimitState> }
@@ -583,6 +960,169 @@ mod tests {
                 None => error("fake quota read failure"),
             })
         }
+    }
+
+    // Owner-parametrized private walker fixtures prove only audit grammar.
+    // The public enforced path always uses uid0 and UniqueKernelQuotaReader.
+    struct GitFixture { _temp: tempfile::TempDir, root: PathBuf, reader: FakeReader, expected: QuotaExpectation }
+    impl GitFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("git-safe");
+            fs::create_dir(&root).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o750)).unwrap();
+            let reader = FakeReader { states:HashMap::new(), limit:Err(error("fixture has no live kernel quota")) };
+            let mut fixture = Self { _temp:temp,root,reader,
+                expected:QuotaExpectation { project_id:41,hard_limit_bytes:64*1024*1024 } };
+            fixture.remember(fixture.root.clone());
+            fixture.add_file("config", b"[core]\nrepositoryformatversion = 0\n");
+            fixture.add_dir("0123456789abcdef0123456789abcdef");
+            fixture.add_file("0123456789abcdef0123456789abcdef/HEAD", b"ref: refs/heads/main\n");
+            fixture.add_dir("0123456789abcdef0123456789abcdef/info");
+            fixture.add_file("0123456789abcdef0123456789abcdef/info/attributes", b"");
+            fixture
+        }
+        fn remember(&mut self, path: PathBuf) {
+            self.reader.states.insert(fs::metadata(path).unwrap().ino(),
+                ProjectState { id:41,inherits:true,mount_id:9 });
+        }
+        fn add_dir(&mut self, relative: &str) {
+            let path = self.root.join(relative); let parent = path.parent().unwrap();
+            let mode = fs::metadata(parent).unwrap().mode() & 0o7777;
+            fs::set_permissions(parent,fs::Permissions::from_mode(0o750)).unwrap();
+            fs::create_dir(&path).unwrap(); fs::set_permissions(&path,fs::Permissions::from_mode(0o550)).unwrap();
+            fs::set_permissions(parent,fs::Permissions::from_mode(mode)).unwrap(); self.remember(path);
+        }
+        fn add_file(&mut self, relative: &str, bytes: &[u8]) {
+            let path = self.root.join(relative); let parent = path.parent().unwrap();
+            let mode = fs::metadata(parent).unwrap().mode() & 0o7777;
+            fs::set_permissions(parent,fs::Permissions::from_mode(0o750)).unwrap();
+            fs::write(&path,bytes).unwrap(); fs::set_permissions(&path,fs::Permissions::from_mode(0o440)).unwrap();
+            fs::set_permissions(parent,fs::Permissions::from_mode(mode)).unwrap(); self.remember(path);
+        }
+        fn audit(&self, file: &File) -> io::Result<()> {
+            audit_git_safe(file,&self.reader,self.expected,9,file.metadata()?.dev(),
+                unsafe { libc::geteuid() },unsafe { libc::getegid() })
+        }
+    }
+    impl Drop for GitFixture {
+        fn drop(&mut self) {
+            fn writable(path:&Path) {
+                if let Ok(meta)=fs::symlink_metadata(path) {
+                    if meta.is_dir() {
+                        let _=fs::set_permissions(path,fs::Permissions::from_mode(0o700));
+                        if let Ok(entries)=fs::read_dir(path) { for entry in entries.flatten() { writable(&entry.path()); } }
+                    }
+                }
+            }
+            writable(&self.root);
+        }
+    }
+
+    #[test]
+    fn git_safe_metadata_requires_exact_owner_group_project_inheritance_and_mount() {
+        let mut fixture=GitFixture::new(); let root=File::open(&fixture.root).unwrap();
+        fixture.audit(&root).unwrap(); fixture.audit(&root).unwrap();
+        let uid=unsafe { libc::geteuid() }; let gid=unsafe { libc::getegid() };
+        assert!(audit_git_safe(&root,&fixture.reader,fixture.expected,9,root.metadata().unwrap().dev(),uid.wrapping_add(1),gid)
+            .unwrap_err().to_string().contains("wrong root owner"));
+        assert!(audit_git_safe(&root,&fixture.reader,fixture.expected,9,root.metadata().unwrap().dev(),uid,gid.wrapping_add(1))
+            .unwrap_err().to_string().contains("Engine group"));
+        assert!(audit_git_safe(&root,&fixture.reader,fixture.expected,9,root.metadata().unwrap().dev()+1,uid,gid)
+            .unwrap_err().to_string().contains("filesystem boundary"));
+        let ino=fs::metadata(fixture.root.join("0123456789abcdef0123456789abcdef")).unwrap().ino();
+        let original=fixture.reader.states[&ino];
+        for state in [ProjectState { id:42,..original },ProjectState { inherits:false,..original },ProjectState { mount_id:10,..original }] {
+            fixture.reader.states.insert(ino,state);
+            // A second audit of the same FD must not inherit the previous EOF.
+            assert!(fixture.audit(&root).unwrap_err().to_string().contains("project ID, inheritance or unique mount"));
+        }
+        fixture.reader.states.insert(ino,original); fixture.audit(&root).unwrap();
+    }
+
+    #[test]
+    fn git_safe_readonly_modes_and_regular_file_link_counts_are_exact() {
+        let fixture=GitFixture::new(); let root=File::open(&fixture.root).unwrap();
+        let path=fixture.root.join("config");
+        for mode in [0o400,0o444,0o660,0o450,0o2440] {
+            fs::set_permissions(&path,fs::Permissions::from_mode(mode)).unwrap();
+            assert!(fixture.audit(&root).unwrap_err().to_string().contains("readonly mode or link count"));
+        }
+        fs::set_permissions(&path,fs::Permissions::from_mode(0o440)).unwrap();
+        let directory=fixture.root.join("0123456789abcdef0123456789abcdef");
+        for mode in [0o750,0o770,0o555,0o2550] {
+            fs::set_permissions(&directory,fs::Permissions::from_mode(mode)).unwrap();
+            assert!(fixture.audit(&root).is_err());
+        }
+        fs::set_permissions(directory,fs::Permissions::from_mode(0o550)).unwrap();
+        fs::hard_link(&path,fixture.root.join("hardlinked")).unwrap();
+        assert!(fixture.audit(&root).unwrap_err().to_string().contains("link count"));
+        fs::remove_file(fixture.root.join("hardlinked")).unwrap();
+        for mode in [0o700,0o770,0o755,0o2750] {
+            fs::set_permissions(&fixture.root,fs::Permissions::from_mode(mode)).unwrap();
+            assert!(fixture.audit(&root).is_err());
+        }
+        fs::set_permissions(&fixture.root,fs::Permissions::from_mode(0o550)).unwrap(); fixture.audit(&root).unwrap();
+        fs::set_permissions(&fixture.root,fs::Permissions::from_mode(0o750)).unwrap(); fixture.audit(&root).unwrap();
+    }
+
+    #[test]
+    fn git_safe_links_special_entries_and_extra_broker_names_refuse() {
+        let fixture=GitFixture::new(); let root=File::open(&fixture.root).unwrap();
+        let shortcut=fixture.root.join("shortcut"); symlink("config",&shortcut).unwrap();
+        assert!(fixture.audit(&root).unwrap_err().to_string().contains("symlink/special")); fs::remove_file(shortcut).unwrap();
+        let fifo=fixture.root.join("fifo"); let name=CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(),0o440) },0);
+        assert!(fixture.audit(&root).unwrap_err().to_string().contains("symlink/special")); fs::remove_file(fifo).unwrap();
+        let parent=File::open(fixture.root.parent().unwrap()).unwrap(); let uid=unsafe { libc::geteuid() }; let gid=unsafe { libc::getegid() };
+        assert_eq!(audit_broker_entries_with_access(&parent,9,root.metadata().unwrap().dev(),uid,Some(gid),fixture.expected,&fixture.reader).unwrap(),1);
+        assert!(audit_broker_entries(&parent,9,root.metadata().unwrap().dev(),uid,fixture.expected,&fixture.reader)
+            .unwrap_err().to_string().contains("unexpected entry"));
+        fs::write(fixture.root.parent().unwrap().join("git-unsafe"),b"extra").unwrap();
+        assert!(audit_broker_entries_with_access(&parent,9,root.metadata().unwrap().dev(),uid,Some(gid),fixture.expected,&fixture.reader)
+            .unwrap_err().to_string().contains("unexpected entry"));
+    }
+
+    #[test]
+    fn git_safe_entry_depth_and_quota_byte_bounds_refuse() {
+        let mut fixture=GitFixture::new(); let root=File::open(&fixture.root).unwrap();
+        let mut relative=String::new();
+        for _ in 0..=MAX_GIT_SAFE_DEPTH { if !relative.is_empty() { relative.push('/'); } relative.push('d'); fixture.add_dir(&relative); }
+        assert!(fixture.audit(&root).unwrap_err().to_string().contains("depth exceeds 24"));
+        drop(fixture);
+        let mut fixture=GitFixture::new(); let root=File::open(&fixture.root).unwrap();
+        for index in 0..MAX_GIT_SAFE_ENTRIES { fixture.add_file(&format!("f{index}"),b""); }
+        assert!(fixture.audit(&root).unwrap_err().to_string().contains("entry count exceeds 4096"));
+        drop(fixture);
+        let mut fixture=GitFixture::new(); fixture.add_file("large",b""); let root=File::open(&fixture.root).unwrap();
+        let path=fixture.root.join("large"); fs::set_permissions(&path,fs::Permissions::from_mode(0o640)).unwrap();
+        let file=std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        for hard in [32*1024*1024,256*1024*1024] {
+            fixture.expected.hard_limit_bytes=hard;
+            file.set_len(hard.min(MAX_GIT_SAFE_BYTES)+1).unwrap();
+            fs::set_permissions(&path,fs::Permissions::from_mode(0o440)).unwrap();
+            assert!(fixture.audit(&root).unwrap_err().to_string().contains("quota/128 MiB byte bound"));
+        }
+    }
+
+    #[test]
+    fn git_safe_descriptor_and_visible_replacement_during_audit_refuse() {
+        struct ReplacingReader { path:PathBuf, replaced:Cell<bool> }
+        impl QuotaReader for ReplacingReader {
+            fn project(&self,file:&File)->io::Result<ProjectState> {
+                if file.metadata()?.is_file() && !self.replaced.replace(true) {
+                    fs::remove_file(&self.path)?; fs::write(&self.path,b"replacement")?;
+                    fs::set_permissions(&self.path,fs::Permissions::from_mode(0o440))?;
+                }
+                Ok(ProjectState { id:41,inherits:true,mount_id:9 })
+            }
+            fn limit(&self,_:&File,_:u32)->io::Result<LimitState> { unreachable!() }
+        }
+        let fixture=GitFixture::new(); let root=File::open(&fixture.root).unwrap();
+        let reader=ReplacingReader { path:fixture.root.join("config"),replaced:Cell::new(false) };
+        assert!(audit_git_safe(&root,&reader,fixture.expected,9,root.metadata().unwrap().dev(),
+            unsafe { libc::geteuid() },unsafe { libc::getegid() }).unwrap_err().to_string().contains("changed during audit"));
+        assert!(reader.replaced.get());
     }
     fn fixture() -> (tempfile::TempDir, Manifest, FakeReader, QuotaExpectation) {
         let temp = tempfile::tempdir().unwrap();

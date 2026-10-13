@@ -75,7 +75,7 @@ fn cleanup(child: &mut Child) -> io::Result<()> {
     }
 }
 
-fn run_with_timeout(command: Command, timeout: Duration) -> io::Result<Vec<u8>> {
+pub(super) fn run_with_timeout(command: Command, timeout: Duration) -> io::Result<Vec<u8>> {
     run_with_cleanup(command, timeout, cleanup)
 }
 

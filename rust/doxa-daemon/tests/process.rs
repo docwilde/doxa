@@ -3773,7 +3773,7 @@ if thread['method']=='model/list':
     sys.exit(0)
 log.write(thread['method']+'\n'); log.flush()
 assert thread['method'] in ('thread/start','thread/resume')
-send({'id':thread['id'],'result':{'thread':{'id':'thread-1'},'model':'gpt-test'}})
+send({'id':thread['id'],'result':{'thread':{'id':'thread-1','path':'/home/doxa/codex/sessions/2026/10/13/rollout-thread-1.jsonl'},'model':'gpt-test'}})
 turn=read(); assert turn['method']=='turn/start'
 assert 'sk-ownedCanonicalFixtureSecret1234567890' in turn['params']['input'][0]['text']
 if 'second' in turn['params']['input'][0]['text']:
@@ -3887,6 +3887,9 @@ for line in sys.stdin: pass
     let thread: Value = serde_json::from_slice(&fs::read(native_transcript(dir.path(), "codex-session.codex.json")).unwrap()).unwrap();
     assert_eq!(thread["transport"], "app-server");
     assert_eq!(thread["turn_incomplete"], false);
+    // The official worker path is metadata even before a local rollout is
+    // available; read/review authority still requires a bound source proof.
+    assert_eq!(thread["rollout_path"], "/home/doxa/codex/sessions/2026/10/13/rollout-thread-1.jsonl");
     assert_eq!(thread["model"], "gpt-test");
     assert_eq!(thread["effort"], "high");
     let transcript = fs::read_to_string(native_transcript(dir.path(), "codex-session.jsonl")).unwrap();

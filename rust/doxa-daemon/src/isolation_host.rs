@@ -103,7 +103,7 @@ impl IsolationHost {
             // the transport launch independently checks the actual container.
             if let Err(error) = doxa_isolation::active().and_then(|manifest|
                 manifest.ok_or_else(||doxa_isolation::error("Docker session manifest unavailable"))
-                    .and_then(|manifest|doxa_isolation::check_disk_budget(&manifest).map(|_|()))) {
+                    .and_then(|manifest|doxa_isolation::check_turn_budget(&manifest))) {
                 emit(json!({"type":"turn_refused","data":{"message":error.to_string()}})); return;
             }
         }

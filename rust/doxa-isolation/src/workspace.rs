@@ -43,6 +43,9 @@ pub fn command(command: Command) -> io::Result<Command> {
     let cwd = command.get_current_dir().ok_or_else(|| error("workspace command requires an explicit directory"))?;
     let Some(manifest) = manifest_for(cwd)? else { return Ok(command); };
     if !manifest.profile.docker() { return Ok(command); }
+    if manifest.profile==crate::Profile::DockerHardened {
+        let cwd=cwd.to_owned();return crate::root_client::workspace_command(command,&manifest,&cwd);
+    }
     let actual = inspect(&manifest)?;
     inspect_network(&manifest)?;
     if actual["State"]["Running"] != true {

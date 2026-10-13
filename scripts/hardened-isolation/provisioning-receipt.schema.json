@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Root-installed DOXA session broker client receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "session_id", "caller_uid", "broker_uid", "broker_socket", "policy_path", "policy_sha256", "broker_script", "broker_sha256", "broker_exe", "broker_exe_sha256", "boot_id"],
+  "properties": {
+    "contract": {"const": "doxa-root-session-broker-v1"},
+    "session_id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$"},
+    "caller_uid": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+    "broker_uid": {"const": 0},
+    "broker_socket": {"type": "string", "pattern": "^/run/doxa/hardened/[a-zA-Z0-9-]+/broker[.]sock$"},
+    "policy_path": {"type": "string", "pattern": "^/"},
+    "policy_sha256": {"$ref": "#/$defs/sha256"},
+    "broker_script": {"type": "string", "pattern": "^/"},
+    "broker_sha256": {"$ref": "#/$defs/sha256"},
+    "broker_exe": {"type": "string", "pattern": "^/"},
+    "broker_exe_sha256": {"$ref": "#/$defs/sha256"},
+    "boot_id": {"type": "string", "pattern": "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"}
+  },
+  "$defs": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

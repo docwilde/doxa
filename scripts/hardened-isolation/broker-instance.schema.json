@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Live ROOT broker instance attestation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "session_id", "pid", "pidfd_pid", "start_time", "boot_id", "socket_dev", "socket_ino", "exe_sha256", "script_sha256", "policy_sha256", "argv"],
+  "properties": {
+    "contract": {"const": "doxa-root-broker-instance-v1"},
+    "session_id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$"},
+    "pid": {"type": "integer", "minimum": 1},
+    "pidfd_pid": {"type": "integer", "minimum": 1},
+    "start_time": {"type": "integer", "minimum": 1},
+    "boot_id": {"type": "string"},
+    "socket_dev": {"type": "integer", "minimum": 0},
+    "socket_ino": {"type": "integer", "minimum": 1},
+    "exe_sha256": {"$ref": "#/$defs/sha256"},
+    "script_sha256": {"$ref": "#/$defs/sha256"},
+    "policy_sha256": {"$ref": "#/$defs/sha256"},
+    "argv": {"type": "array", "items": {"type": "string"}, "minItems": 6, "maxItems": 6}
+  },
+  "$defs": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

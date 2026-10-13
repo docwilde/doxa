@@ -1,0 +1,20 @@
+[Unit]
+Description=DOXA root-controlled project quota inspector for session %i
+RefuseManualStart=yes
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/doxa/doxa-quota-helper --enforced %i
+User=root
+Group=root
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+# The policy pins unique mount IDs in the administrator's mount namespace.
+# Mount-namespace sandboxing would clone those mounts and break the identity.
+PrivateMounts=no
+SystemCallFilter=~@mount @module @raw-io @reboot @swap
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+UMask=0077
