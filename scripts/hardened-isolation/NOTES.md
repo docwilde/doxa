@@ -192,3 +192,15 @@ helper failure without issuing stopped until the retained helper is reclaimed.
 Broker SHA256 a04d2d5d0fb3df93cb3201d2d3e1cb322829ed4ddc5d52938e17fe0a95a0056f.
 No guest commands or live artifacts were changed; final5013 composition is
 pending independent review and coordinator freeze.
+
+Actual composed5013/R5 reached Runtime/ready/activate/hook/protectedCodex/guard/
+snapshot/private copy/refusal checks, then RootGit status refused a newline-only
+packed-refs file. Peer inspected retained source bytes: exactly header-only
+`# pack-refs with: peeled fully-peeled sorted ` plus newline. Sanitizer dropped
+the header but unconditionally appended newline to an empty row set. Narrow
+source fix emits empty bytes for an empty sanitized set, preserving validated
+heads/tags/peeled rows. Actual local Git readonly-view regressions cover empty,
+exact R5 header-only, fully filtered remote/peeled inventories, and normal packed
+heads/tags/annotated peeled refs; fixtures substitute ROOT/quota metadata only,
+and do not authorize live isolation. Frozen R5 broker/policy/artifacts untouched;
+no guest edits. Committing before focused verification.

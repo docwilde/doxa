@@ -865,6 +865,53 @@ class GitMetadataTests(unittest.TestCase):
                     if path.is_dir():path.chmod(0o700)
                 view.chmod(0o700)
 
+    def test_actual_git_accepts_empty_and_filtered_packed_refs_in_readonly_view(self):
+        header=b"# pack-refs with: peeled fully-peeled sorted \n"
+        for inventory in (b"",header,header+b"1"*40+b" refs/remotes/origin/main\n^"+b"2"*40+b"\n"):
+            with self.subTest(inventory=inventory):self.actual_packed_refs_view(inventory)
+
+    def test_actual_git_preserves_normal_heads_tags_and_peeled_packed_refs(self):
+        self.actual_packed_refs_view(None)
+
+    def actual_packed_refs_view(self,inventory):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))) as directory:
+            root=Path(directory).resolve();checkout=root/"checkout";checkout.mkdir();(root/"broker").mkdir()
+            p=policy();p["root"]=str(root);p["engine"]["gid"]=os.getgid()
+            env={"PATH":"/usr/bin:/bin","LANG":"C","HOME":str(root),"GIT_CONFIG_NOSYSTEM":"1","GIT_CONFIG_GLOBAL":"/dev/null"}
+            def git(argv,environment=env):
+                result=subprocess.run(["/usr/bin/git",*argv],cwd=checkout,env=environment,capture_output=True,timeout=3)
+                self.assertEqual(result.returncode,0,result.stderr.decode("utf-8","replace"));return result.stdout
+            git(["init","-q","-b","main"]);tracked=checkout/"file.txt";tracked.write_bytes(b"original\n");git(["add","file.txt"])
+            identity=["-c","user.name=Fixture","-c","user.email=fixture@example.invalid"]
+            git([*identity,"commit","-q","-m","fixture"]);oid=git(["rev-parse","HEAD"]).strip()
+            source=checkout/".git";packed=source/"packed-refs"
+            if inventory is None:
+                git(["branch","topic"]);git([*identity,"tag","-a","v1","-m","fixture tag"]);git(["pack-refs","--all"])
+                original=packed.read_bytes();expected=b"\n".join(row for row in original.splitlines() if not row.startswith(b"#"))+b"\n"
+                self.assertIn(b" refs/heads/main\n",expected);self.assertIn(b" refs/heads/topic\n",expected)
+                self.assertIn(b" refs/tags/v1\n^",expected)
+            else:packed.write_bytes(inventory);expected=b""
+            source_packed=packed.read_bytes();source_index=(source/"index").read_bytes();tracked.write_bytes(b"modified\n")
+            with self.fixture_root(p):
+                view,_=b.build_git_view(p,b.Deadline(3))
+                try:
+                    self.assertEqual((view/"packed-refs").read_bytes(),expected)
+                    self.assertEqual((view/"packed-refs").stat().st_mode&0o777,0o440)
+                    self.assertEqual(view.stat().st_mode&0o777,0o550)
+                    snapshot={str(path.relative_to(view)):(path.stat().st_mode,path.read_bytes())
+                              for path in view.rglob("*") if path.is_file()}
+                    environment={**env,**b.git_environment(str(view)),"GIT_WORK_TREE":str(checkout)}
+                    self.assertEqual(git(b.git_arguments(["status","--porcelain"]),environment),b" M file.txt\n")
+                    self.assertIn(b"+modified\n",git(b.git_arguments(["diff","--no-color"]),environment))
+                    self.assertEqual(git(b.git_arguments(["rev-parse","--verify","HEAD"]),environment).strip(),oid)
+                    if inventory is None:
+                        self.assertEqual(git(b.git_arguments(["rev-parse","--verify","refs/heads/topic"]),environment).strip(),oid)
+                        self.assertEqual(git(b.git_arguments(["rev-parse","--verify","refs/tags/v1^{}"]),environment).strip(),oid)
+                    self.assertEqual(snapshot,{str(path.relative_to(view)):(path.stat().st_mode,path.read_bytes())
+                                              for path in view.rglob("*") if path.is_file()})
+                    self.assertEqual(packed.read_bytes(),source_packed);self.assertEqual((source/"index").read_bytes(),source_index)
+                finally:b.retire_git_view(p,view,b.Deadline(3))
+
     def test_git_objects_links_and_byte_overrun_fail_closed(self):
         for symlink in (False,True):
             with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))) as directory:

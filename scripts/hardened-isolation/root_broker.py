@@ -1790,7 +1790,9 @@ def build_git_view(policy, deadline, publication_scope=None):
                     require(re.fullmatch(b"[\x5e](?:[0-9a-f]{40}|[0-9a-f]{64})",row),"peeled ref syntax")
                     rows.append(row);accept_peeled=False
                 else:accept_peeled=False
-            write_bytes(dstfd,"packed-refs",b"\n".join(rows)+b"\n",2)
+            # A header-only clone or fully filtered inventory is a valid empty
+            # set. Git rejects a newline-only file as an unexpected blank ref.
+            write_bytes(dstfd,"packed-refs",b"\n".join(rows)+(b"\n" if rows else b""),2)
         for name in ("objects","refs"):
             try:source=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=srcfd)
             except FileNotFoundError:
