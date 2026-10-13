@@ -1,0 +1,1036 @@
+{
+  "cold_source_cli": {
+    "benchmark": "source_page_cold_cli_scan",
+    "controls": "all source pages evicted and mincore=0 before every scan; other caches uncontrolled",
+    "p50_ms": 938.0321050120983,
+    "p95_ms": 1013.9173780044075,
+    "root": "/home/docwilde/Schreibtisch/Ampiric/repo/doxa/.worktrees/codex-codegraph-completion-20261013/.scratch/large-fixture",
+    "samples": [
+      {
+        "elapsed_ms": 1013.9173780044075,
+        "pages": 8000,
+        "parsed_python_files": 4000,
+        "parsed_rust_files": 4000,
+        "resident_pages_before": 0
+      },
+      {
+        "elapsed_ms": 938.0321050120983,
+        "pages": 8000,
+        "parsed_python_files": 4000,
+        "parsed_rust_files": 4000,
+        "resident_pages_before": 0
+      },
+      {
+        "elapsed_ms": 944.5502779853996,
+        "pages": 8000,
+        "parsed_python_files": 4000,
+        "parsed_rust_files": 4000,
+        "resident_pages_before": 0
+      },
+      {
+        "elapsed_ms": 934.4174349971581,
+        "pages": 8000,
+        "parsed_python_files": 4000,
+        "parsed_rust_files": 4000,
+        "resident_pages_before": 0
+      },
+      {
+        "elapsed_ms": 919.8704939917661,
+        "pages": 8000,
+        "parsed_python_files": 4000,
+        "parsed_rust_files": 4000,
+        "resident_pages_before": 0
+      }
+    ],
+    "source_inventory_sha256": "e82f266ff2f0c3c33ab2596b111e2b849676ecc05197322a5dea78e472d5d564"
+  },
+  "doxa": {
+    "benchmark": "prepared_inventory_novel_queries",
+    "controls": "five alternating-order pairs; identical normalized answers and complete inventories",
+    "elapsed_ms": 10700.330933,
+    "root": "/home/docwilde/Schreibtisch/Ampiric/repo/doxa/.worktrees/codex-codegraph-completion-20261013",
+    "samples": [
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 1,
+        "prepare_ms": 352.95853900000003,
+        "query": "File(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            false,
+            346.921062,
+            "6f9ea241ee1ad86b7d42417a410b6c6b006c2125f0be265be14be0c935e4b781",
+            "Fresh"
+          ],
+          [
+            true,
+            69.672644,
+            "6f9ea241ee1ad86b7d42417a410b6c6b006c2125f0be265be14be0c935e4b781",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 1,
+        "prepare_ms": 352.95853900000003,
+        "query": "Calls(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            false,
+            345.79331,
+            "81b3fb2c062cc374deece3f2d78a37aa988256b695e5820d9246c55929fddb97",
+            "Fresh"
+          ],
+          [
+            true,
+            71.946599,
+            "81b3fb2c062cc374deece3f2d78a37aa988256b695e5820d9246c55929fddb97",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 1,
+        "prepare_ms": 352.95853900000003,
+        "query": "Imports(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            false,
+            350.052417,
+            "bf1b173ef5f1186df3cd0c74318695d0bde170da4f7029461a577355be4bdfa9",
+            "Fresh"
+          ],
+          [
+            true,
+            71.25926100000001,
+            "bf1b173ef5f1186df3cd0c74318695d0bde170da4f7029461a577355be4bdfa9",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 1,
+        "prepare_ms": 352.95853900000003,
+        "query": "Symbol(\"__missing_pair_0__\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            false,
+            357.83787299999995,
+            "0132c6a04133d66fc0c72f2778ba6c86cdba311287f05bc06cb442fb49a37c10",
+            "Fresh"
+          ],
+          [
+            true,
+            72.20549199999999,
+            "0132c6a04133d66fc0c72f2778ba6c86cdba311287f05bc06cb442fb49a37c10",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 2,
+        "prepare_ms": 364.538778,
+        "query": "File(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            true,
+            74.36559500000001,
+            "6f9ea241ee1ad86b7d42417a410b6c6b006c2125f0be265be14be0c935e4b781",
+            "Indexed"
+          ],
+          [
+            false,
+            360.55345300000005,
+            "6f9ea241ee1ad86b7d42417a410b6c6b006c2125f0be265be14be0c935e4b781",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 2,
+        "prepare_ms": 364.538778,
+        "query": "Calls(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            true,
+            70.24658000000001,
+            "81b3fb2c062cc374deece3f2d78a37aa988256b695e5820d9246c55929fddb97",
+            "Indexed"
+          ],
+          [
+            false,
+            356.955044,
+            "81b3fb2c062cc374deece3f2d78a37aa988256b695e5820d9246c55929fddb97",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 2,
+        "prepare_ms": 364.538778,
+        "query": "Imports(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            true,
+            74.158903,
+            "bf1b173ef5f1186df3cd0c74318695d0bde170da4f7029461a577355be4bdfa9",
+            "Indexed"
+          ],
+          [
+            false,
+            357.10623499999997,
+            "bf1b173ef5f1186df3cd0c74318695d0bde170da4f7029461a577355be4bdfa9",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 2,
+        "prepare_ms": 364.538778,
+        "query": "Symbol(\"__missing_pair_1__\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            true,
+            68.02971600000001,
+            "0ebcc5cb1eea82b9ed1791b371b7f08059a7b2d3433d64a69cf4e00f659346f4",
+            "Indexed"
+          ],
+          [
+            false,
+            354.377475,
+            "0ebcc5cb1eea82b9ed1791b371b7f08059a7b2d3433d64a69cf4e00f659346f4",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 3,
+        "prepare_ms": 358.932925,
+        "query": "File(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            false,
+            359.47040200000004,
+            "6f9ea241ee1ad86b7d42417a410b6c6b006c2125f0be265be14be0c935e4b781",
+            "Fresh"
+          ],
+          [
+            true,
+            74.194014,
+            "6f9ea241ee1ad86b7d42417a410b6c6b006c2125f0be265be14be0c935e4b781",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 3,
+        "prepare_ms": 358.932925,
+        "query": "Calls(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            false,
+            359.292579,
+            "81b3fb2c062cc374deece3f2d78a37aa988256b695e5820d9246c55929fddb97",
+            "Fresh"
+          ],
+          [
+            true,
+            77.170106,
+            "81b3fb2c062cc374deece3f2d78a37aa988256b695e5820d9246c55929fddb97",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 3,
+        "prepare_ms": 358.932925,
+        "query": "Imports(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            false,
+            368.38448,
+            "bf1b173ef5f1186df3cd0c74318695d0bde170da4f7029461a577355be4bdfa9",
+            "Fresh"
+          ],
+          [
+            true,
+            73.147642,
+            "bf1b173ef5f1186df3cd0c74318695d0bde170da4f7029461a577355be4bdfa9",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 3,
+        "prepare_ms": 358.932925,
+        "query": "Symbol(\"__missing_pair_2__\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            false,
+            355.292285,
+            "f076d186053e57e79957b816a835b4c0b5dddd331c216261e8edf8687fbd5eb9",
+            "Fresh"
+          ],
+          [
+            true,
+            72.688027,
+            "f076d186053e57e79957b816a835b4c0b5dddd331c216261e8edf8687fbd5eb9",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 4,
+        "prepare_ms": 380.426404,
+        "query": "File(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            true,
+            75.026713,
+            "6f9ea241ee1ad86b7d42417a410b6c6b006c2125f0be265be14be0c935e4b781",
+            "Indexed"
+          ],
+          [
+            false,
+            365.65181,
+            "6f9ea241ee1ad86b7d42417a410b6c6b006c2125f0be265be14be0c935e4b781",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 4,
+        "prepare_ms": 380.426404,
+        "query": "Calls(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            true,
+            77.955245,
+            "81b3fb2c062cc374deece3f2d78a37aa988256b695e5820d9246c55929fddb97",
+            "Indexed"
+          ],
+          [
+            false,
+            368.69158400000003,
+            "81b3fb2c062cc374deece3f2d78a37aa988256b695e5820d9246c55929fddb97",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 4,
+        "prepare_ms": 380.426404,
+        "query": "Imports(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            true,
+            85.082064,
+            "bf1b173ef5f1186df3cd0c74318695d0bde170da4f7029461a577355be4bdfa9",
+            "Indexed"
+          ],
+          [
+            false,
+            371.862429,
+            "bf1b173ef5f1186df3cd0c74318695d0bde170da4f7029461a577355be4bdfa9",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 4,
+        "prepare_ms": 380.426404,
+        "query": "Symbol(\"__missing_pair_3__\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            true,
+            78.378871,
+            "3be3c7418589a7c5979513a1eb0c2e5c08f4ac09470fc76b92a54972e0479bfe",
+            "Indexed"
+          ],
+          [
+            false,
+            391.295915,
+            "3be3c7418589a7c5979513a1eb0c2e5c08f4ac09470fc76b92a54972e0479bfe",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 5,
+        "prepare_ms": 399.554956,
+        "query": "File(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            false,
+            387.61977399999995,
+            "6f9ea241ee1ad86b7d42417a410b6c6b006c2125f0be265be14be0c935e4b781",
+            "Fresh"
+          ],
+          [
+            true,
+            84.114354,
+            "6f9ea241ee1ad86b7d42417a410b6c6b006c2125f0be265be14be0c935e4b781",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 5,
+        "prepare_ms": 399.554956,
+        "query": "Calls(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            false,
+            361.247472,
+            "81b3fb2c062cc374deece3f2d78a37aa988256b695e5820d9246c55929fddb97",
+            "Fresh"
+          ],
+          [
+            true,
+            85.011504,
+            "81b3fb2c062cc374deece3f2d78a37aa988256b695e5820d9246c55929fddb97",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 5,
+        "prepare_ms": 399.554956,
+        "query": "Imports(\"rust/doxa-codegraph/src/main.rs\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            false,
+            399.082022,
+            "bf1b173ef5f1186df3cd0c74318695d0bde170da4f7029461a577355be4bdfa9",
+            "Fresh"
+          ],
+          [
+            true,
+            85.213886,
+            "bf1b173ef5f1186df3cd0c74318695d0bde170da4f7029461a577355be4bdfa9",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 84
+      },
+      {
+        "indexed_files": 349,
+        "indexed_rows": 7652,
+        "pair": 5,
+        "prepare_ms": 399.554956,
+        "query": "Symbol(\"__missing_pair_4__\")",
+        "retained_bytes": 2606339,
+        "samples": [
+          [
+            false,
+            379.363632,
+            "d48849bc046e112f8d19922603130735314a28d168d6218299180b46ceba67a0",
+            "Fresh"
+          ],
+          [
+            true,
+            87.72587399999999,
+            "d48849bc046e112f8d19922603130735314a28d168d6218299180b46ceba67a0",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 84
+      }
+    ],
+    "source_cache_state": "warm/uncontrolled; use dedicated eviction harness for cold sources",
+    "summary": {
+      "fresh": {
+        "n": 20,
+        "p50_ms": 360.01192750000007,
+        "p95_ms": 391.295915
+      },
+      "prepared": {
+        "n": 20,
+        "p50_ms": 74.27980450000001,
+        "p95_ms": 85.213886
+      }
+    }
+  },
+  "large": {
+    "benchmark": "prepared_inventory_novel_queries",
+    "controls": "five alternating-order pairs; identical normalized answers and complete inventories",
+    "elapsed_ms": 27890.161762,
+    "root": "/home/docwilde/Schreibtisch/Ampiric/repo/doxa/.worktrees/codex-codegraph-completion-20261013/.scratch/large-fixture",
+    "samples": [
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 1,
+        "prepare_ms": 670.284602,
+        "query": "File(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            false,
+            682.092134,
+            "6a4dea07c5d52c783a06b4e44f7d4c00666ef9e68119ea2488852802aa6945ea",
+            "Fresh"
+          ],
+          [
+            true,
+            620.564271,
+            "6a4dea07c5d52c783a06b4e44f7d4c00666ef9e68119ea2488852802aa6945ea",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 1,
+        "prepare_ms": 670.284602,
+        "query": "Calls(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            false,
+            670.376364,
+            "e5fa4bad8ba143583099a07ebcdf6d2fb9cb3ee5d145917edebc37d8ce5ab35e",
+            "Fresh"
+          ],
+          [
+            true,
+            637.61257,
+            "e5fa4bad8ba143583099a07ebcdf6d2fb9cb3ee5d145917edebc37d8ce5ab35e",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 1,
+        "prepare_ms": 670.284602,
+        "query": "Imports(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            false,
+            646.376717,
+            "f7baa79a7a27e0f04818d3562f3b61dec55e8eb4bb00e3a7d3fb3a9cc007a492",
+            "Fresh"
+          ],
+          [
+            true,
+            631.975878,
+            "f7baa79a7a27e0f04818d3562f3b61dec55e8eb4bb00e3a7d3fb3a9cc007a492",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 1,
+        "prepare_ms": 670.284602,
+        "query": "Symbol(\"__missing_pair_0__\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            false,
+            658.150738,
+            "f33ad5b3ba4de1ad224e93c60b587ac14d29f9bffae279e5b711ae76a3b5f372",
+            "Fresh"
+          ],
+          [
+            true,
+            611.264197,
+            "f33ad5b3ba4de1ad224e93c60b587ac14d29f9bffae279e5b711ae76a3b5f372",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 2,
+        "prepare_ms": 649.975937,
+        "query": "File(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            true,
+            567.290219,
+            "6a4dea07c5d52c783a06b4e44f7d4c00666ef9e68119ea2488852802aa6945ea",
+            "Indexed"
+          ],
+          [
+            false,
+            609.67782,
+            "6a4dea07c5d52c783a06b4e44f7d4c00666ef9e68119ea2488852802aa6945ea",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 2,
+        "prepare_ms": 649.975937,
+        "query": "Calls(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            true,
+            603.944626,
+            "e5fa4bad8ba143583099a07ebcdf6d2fb9cb3ee5d145917edebc37d8ce5ab35e",
+            "Indexed"
+          ],
+          [
+            false,
+            631.4169509999999,
+            "e5fa4bad8ba143583099a07ebcdf6d2fb9cb3ee5d145917edebc37d8ce5ab35e",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 2,
+        "prepare_ms": 649.975937,
+        "query": "Imports(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            true,
+            595.416941,
+            "f7baa79a7a27e0f04818d3562f3b61dec55e8eb4bb00e3a7d3fb3a9cc007a492",
+            "Indexed"
+          ],
+          [
+            false,
+            624.272271,
+            "f7baa79a7a27e0f04818d3562f3b61dec55e8eb4bb00e3a7d3fb3a9cc007a492",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 2,
+        "prepare_ms": 649.975937,
+        "query": "Symbol(\"__missing_pair_1__\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            true,
+            573.0387219999999,
+            "d7708092c997be38c70006397bf06c2bc64c8ba34446c38c31e64ab1dc831c9f",
+            "Indexed"
+          ],
+          [
+            false,
+            604.4547110000001,
+            "d7708092c997be38c70006397bf06c2bc64c8ba34446c38c31e64ab1dc831c9f",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 3,
+        "prepare_ms": 665.722992,
+        "query": "File(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            false,
+            606.335573,
+            "6a4dea07c5d52c783a06b4e44f7d4c00666ef9e68119ea2488852802aa6945ea",
+            "Fresh"
+          ],
+          [
+            true,
+            568.370971,
+            "6a4dea07c5d52c783a06b4e44f7d4c00666ef9e68119ea2488852802aa6945ea",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 3,
+        "prepare_ms": 665.722992,
+        "query": "Calls(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            false,
+            643.274572,
+            "e5fa4bad8ba143583099a07ebcdf6d2fb9cb3ee5d145917edebc37d8ce5ab35e",
+            "Fresh"
+          ],
+          [
+            true,
+            626.6460579999999,
+            "e5fa4bad8ba143583099a07ebcdf6d2fb9cb3ee5d145917edebc37d8ce5ab35e",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 3,
+        "prepare_ms": 665.722992,
+        "query": "Imports(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            false,
+            615.088929,
+            "f7baa79a7a27e0f04818d3562f3b61dec55e8eb4bb00e3a7d3fb3a9cc007a492",
+            "Fresh"
+          ],
+          [
+            true,
+            603.030756,
+            "f7baa79a7a27e0f04818d3562f3b61dec55e8eb4bb00e3a7d3fb3a9cc007a492",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 3,
+        "prepare_ms": 665.722992,
+        "query": "Symbol(\"__missing_pair_2__\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            false,
+            619.432308,
+            "defe6bb0552750b8a6a70e9e5bf3a39602836046aa99bab66113968ba46940e3",
+            "Fresh"
+          ],
+          [
+            true,
+            610.898503,
+            "defe6bb0552750b8a6a70e9e5bf3a39602836046aa99bab66113968ba46940e3",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 4,
+        "prepare_ms": 687.587035,
+        "query": "File(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            true,
+            575.4621,
+            "6a4dea07c5d52c783a06b4e44f7d4c00666ef9e68119ea2488852802aa6945ea",
+            "Indexed"
+          ],
+          [
+            false,
+            624.10457,
+            "6a4dea07c5d52c783a06b4e44f7d4c00666ef9e68119ea2488852802aa6945ea",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 4,
+        "prepare_ms": 687.587035,
+        "query": "Calls(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            true,
+            606.818358,
+            "e5fa4bad8ba143583099a07ebcdf6d2fb9cb3ee5d145917edebc37d8ce5ab35e",
+            "Indexed"
+          ],
+          [
+            false,
+            683.590731,
+            "e5fa4bad8ba143583099a07ebcdf6d2fb9cb3ee5d145917edebc37d8ce5ab35e",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 4,
+        "prepare_ms": 687.587035,
+        "query": "Imports(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            true,
+            566.5650009999999,
+            "f7baa79a7a27e0f04818d3562f3b61dec55e8eb4bb00e3a7d3fb3a9cc007a492",
+            "Indexed"
+          ],
+          [
+            false,
+            582.244095,
+            "f7baa79a7a27e0f04818d3562f3b61dec55e8eb4bb00e3a7d3fb3a9cc007a492",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 4,
+        "prepare_ms": 687.587035,
+        "query": "Symbol(\"__missing_pair_3__\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            true,
+            562.323844,
+            "7f83371cc81f9688c879c2f5e734ff80d579c35670015bee78e10146a7a78c79",
+            "Indexed"
+          ],
+          [
+            false,
+            617.604138,
+            "7f83371cc81f9688c879c2f5e734ff80d579c35670015bee78e10146a7a78c79",
+            "Fresh"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 5,
+        "prepare_ms": 623.402302,
+        "query": "File(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            false,
+            681.266055,
+            "6a4dea07c5d52c783a06b4e44f7d4c00666ef9e68119ea2488852802aa6945ea",
+            "Fresh"
+          ],
+          [
+            true,
+            640.994507,
+            "6a4dea07c5d52c783a06b4e44f7d4c00666ef9e68119ea2488852802aa6945ea",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 5,
+        "prepare_ms": 623.402302,
+        "query": "Calls(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            false,
+            613.120908,
+            "e5fa4bad8ba143583099a07ebcdf6d2fb9cb3ee5d145917edebc37d8ce5ab35e",
+            "Fresh"
+          ],
+          [
+            true,
+            582.309546,
+            "e5fa4bad8ba143583099a07ebcdf6d2fb9cb3ee5d145917edebc37d8ce5ab35e",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 5,
+        "prepare_ms": 623.402302,
+        "query": "Imports(\"rust/f0000.rs\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            false,
+            642.747827,
+            "f7baa79a7a27e0f04818d3562f3b61dec55e8eb4bb00e3a7d3fb3a9cc007a492",
+            "Fresh"
+          ],
+          [
+            true,
+            564.337216,
+            "f7baa79a7a27e0f04818d3562f3b61dec55e8eb4bb00e3a7d3fb3a9cc007a492",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 0
+      },
+      {
+        "indexed_files": 8000,
+        "indexed_rows": 20000,
+        "pair": 5,
+        "prepare_ms": 623.402302,
+        "query": "Symbol(\"__missing_pair_4__\")",
+        "retained_bytes": 8248230,
+        "samples": [
+          [
+            false,
+            611.8479140000001,
+            "f89d51d42fd818ecc055af8bac651d5e2d2acedaed30df0c262a2a398ba79f96",
+            "Fresh"
+          ],
+          [
+            true,
+            537.865653,
+            "f89d51d42fd818ecc055af8bac651d5e2d2acedaed30df0c262a2a398ba79f96",
+            "Indexed"
+          ]
+        ],
+        "unparseable_files": 0
+      }
+    ],
+    "source_cache_state": "warm/uncontrolled; use dedicated eviction harness for cold sources",
+    "summary": {
+      "fresh": {
+        "n": 20,
+        "p50_ms": 624.1884205,
+        "p95_ms": 682.092134
+      },
+      "prepared": {
+        "n": 20,
+        "p50_ms": 599.2238485,
+        "p95_ms": 637.61257
+      }
+    }
+  },
+  "retained_binary_sha256": {
+    "/home/docwilde/ssd-cache/doxa-codegraph-completion-20261013-target/release/doxa-codegraph": "36aeda1a64bb0ae20358c78b4bf8e428bc83f09bde787a79d97acd4257f98eb7",
+    "/home/docwilde/ssd-cache/doxa-codegraph-completion-20261013-target/release/examples/bench_index": "53520f2aad676761021fcba65bb31ed722af82236815a5d62fa9b5fac15e101f"
+  },
+  "viewer_debug": {
+    "doxa": {
+      "open_poll_render_ms": [
+        560.643,
+        556.681,
+        537.317,
+        536.625,
+        547.98
+      ],
+      "prepare_ms": 2098.427
+    },
+    "large": {
+      "open_poll_render_ms": [
+        885.342,
+        854.775,
+        876.742,
+        781.165,
+        804.303
+      ],
+      "prepare_ms": 1289.009
+    },
+    "surface": "production modal open + worker polling + format + ratatui TestBackend 96x32 render; excludes session/app startup and physical terminal paint"
+  }
+}

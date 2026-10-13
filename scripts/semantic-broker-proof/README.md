@@ -1,4 +1,94 @@
-# Disposable socket-observation counterexample
+# Explicit attested semantic broker
+
+`attested_broker.py`, `read_analyzer.py`, `provision-attested.sh` and
+`prove-attested-guest.py` implement a separate, optional Linux broker path.
+The [implementation contract](../../docs/plans/codegraph-semantic-verification.md)
+describes the signer, immutable source, distinct-UID Engine, exact attach FD,
+kernel limits, analyzer identity, settings and cleanup gates. The offline
+fixtures below remain historical untrusted observations and never authorize
+this path.
+
+## Provision on a reviewed disposable host
+
+The operator needs real rootless Docker with cgroup-v2/systemd delegation under
+an identity distinct from the DOXA client, reviewed Docker/Python/nsenter bytes,
+and root-controlled broker/configuration/key/snapshot directories. The sample
+script assumes guest users `doxa` UID 1000 and `engine` UID 1001. It is an explicit
+root provisioning script; DOXA never invokes it or installs a host service.
+Do not use it to overwrite an existing owner-host installation.
+
+Review the source and stage `attested_broker.py`, `read_analyzer.py` and a reviewed
+rust-analyzer binary. The acceptance fixture uses the official
+[rust-analyzer 2026-10-12 release](https://github.com/rust-lang/rust-analyzer/releases/tag/2026-10-12),
+version 0.3.3081. Linux gzip asset SHA256 is
+`040cab4e2abc490fadd95c3f6cbc60b941a78761dbc3acf0ec66fd7a97f31db3`;
+uncompressed analyzer SHA is
+`fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49`.
+These recorded hashes must be independently reviewed; a freshly downloaded
+binary's self-reported hash does not create a trust anchor.
+
+Build the development codegraph client from the reviewed checkout. Then,
+inside the disposable guest, run:
+
+```sh
+bash provision-attested.sh ROOT_CONTROLLED_STAGING ENGINE_SOCKET CODEGRAPH_BINARY
+```
+
+Provisioning pulls an official Rust 1.94.0 base, records its RepoDigest, builds
+rust-src and the reviewed analyzer into an image, then records the final local
+image ID. Runtime uses the direct native toolchain path, a read-only root,
+private temporary Cargo/Rustup homes, offline Cargo and disabled project
+executable overrides. Provisioning network access is distinct from runtime
+no-egress policy. Version-matched rust-src is necessary: analyzer 0.3.3081
+refused to become healthy with the guest's Rust 1.93.1 package.
+
+The script emits `/var/lib/doxa-semantic/operator-pins.json`, containing only
+public pins. Obtain `public_key_hex` through a separate trusted provisioning
+channel and pass it explicitly; do not derive authorization from a socket
+reply or an unreviewed writable pins file. The private signer stays root-only
+and is never copied to the client or evidence bundle. The helper/config paths
+and SHA pins are bound by the signed config hash. Review any code/config/image
+update and publish new pins before using it; mismatches fail closed.
+
+## Query and prove
+
+Both Linux entry points use the same parser and library gates:
+
+```sh
+doxa codegraph --semantic-broker --root WORKTREE --socket /run/doxa-semantic/broker.sock   --pins REVIEWED_RECEIPT.json --broker-key OUT_OF_BAND_PUBLIC_KEY_HEX   --file src/lib.rs --edge 0 --candidate 0
+```
+
+The result selects one fresh displayed syntax edge/candidate. Only a complete,
+checkable plain Rust source inventory can yield `analyzer_resolved`; the result
+states that it is an analyzer-definition observation, not compiler execution
+or a persistent graph. Ordinary TUI syntax and stored answers are unchanged.
+
+Run the acceptance script only in its disposable provisioned guest:
+
+```sh
+python3 prove-attested-guest.py --output /root/codegraph-proof/acceptance.json --repetitions 5
+```
+
+Five positives use the unprivileged installed client and actual signed broker.
+Negative fault cases import the exact reviewed broker without loading a signer,
+use actual Engine containers/analyzer/namespace helpers, and never sign or
+promote their receipts. They exercise policy and kernel-limit drift, immutable
+writes, lost/malformed create responses, wrong actual CID on a pinned daemon
+FD, status/shutdown errors, cancellation, a stopped analyzer, helper pins,
+namespace/output/time/cancellation/reap gates, and truthful cleanup failure
+followed by exact administrative removal. Real unprivileged attacks exercise
+key/code/socket/FD/Engine isolation, same-UID fake daemons, forged signatures,
+genuine signed-receipt replay and trailing bytes. The separate coordinated
+restart observer holds an actual daemon pidfd/socket identity across an Engine
+restart; the acceptance runner never restarts shared Engine services.
+
+The retained [2026-10-13 receipt](evidence/attested-2026-10-13/RUN.md) distinguishes
+actual signed positives, runtime fault injection, unprivileged attacks and the
+coordinated restart observation. Python unit regressions remain protocol tests,
+not live attestation evidence. The older root-listener/sender fixtures below
+remain unknown even when every observation test passes.
+
+# Historical offline socket-observation counterexamples
 
 This fixture boots an offline QEMU/KVM initramfs with only static BusyBox,
 the codegraph Rust test binary, and a Unix echo server. The server creates

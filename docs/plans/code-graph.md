@@ -1,11 +1,14 @@
 # Code graph: native syntax-query slice
 
-Status: **read-only syntax queries, explicit file-map export, and reviewed LORE
-snapshot reads implemented**. DOXA can query current Rust source for definitions, imports,
+Status: **read-only syntax queries, bounded automatic preparation, explicit
+file-map export and reviewed LORE snapshot reads implemented**. An explicit
+Linux semantic query can use an externally provisioned, pinned attested broker;
+ordinary syntax answers keep their original binding claims. DOXA can query current Rust source for definitions, imports,
 conservative call-site candidates, and bounded top-level module-file layout,
 including literal paths and unverified conditional candidates. Python `.py`
 files support syntax-only definitions, imports, call sites, and module import spellings.
-LORE 0.62.20 owns durable source-hashed snapshots; DOXA does not write them.
+Released LORE owns durable source-hashed snapshots; the combined integration
+targets LORE 0.62.22. DOXA does not write them.
 
 ## Contents
 
@@ -86,7 +89,20 @@ and qualified-self paths are not resolved. Neither macro expansion nor
 conditional compilation is evaluated.
 TypeScript and other recognized languages without a parser are reported as
 unsupported rather than silently treated as empty. Semantic binding remains
-unknown for both Rust and Python rows.
+unknown for both Rust and Python rows in ordinary syntax answers.
+
+Linux also exposes `doxa codegraph --semantic-broker --root WORKTREE --socket
+SOCKET --pins RECEIPT.json --broker-key ED25519_HEX --file PATH --edge N
+--candidate N`. It selects one displayed plain Rust call candidate and requires
+an operator-provisioned root broker, a public key obtained separately, and exact
+broker/configuration/Engine/analyzer/image pins. A successful immutable-source
+and live Engine/LSP transaction says `analyzer_resolved`, with an explicit
+analyzer-definition limit. It does not establish compiler execution, cfg
+reachability, general Rust type resolution or a persistent graph. Conditional,
+generated, ambiguous and uncheckable inputs fail closed. The
+[semantic implementation and provisioning contract](codegraph-semantic-verification.md)
+records the trust boundary and measured guest acceptance. The older
+`--semantic-probe` and UID/socket observation seams remain untrusted.
 
 ## Freshness and coverage
 
@@ -156,47 +172,45 @@ that read.
 
 ## Repeated explicit TUI queries
 
-The TUI keeps up to eight prior `file`, `symbol`, `imports`, or `calls` syntax
-answers in process memory for exact `/codegraph` queries in one canonical
-worktree. The combined serialized-answer budget is 256 KiB, in addition to
-the Rust values' allocation overhead and bounded query/root metadata.
-Entries are evicted in least-recently-used order when either bound is reached.
-This supports explicit alternating queries, such as `file`, `calls`, `imports`,
-then `file` again. Module queries always scan afresh and clear the cache: their structural
-candidate checks also probe ignored and unlisted paths. Before reuse, it re-enumerates
-the complete Git path list and reads every listed Rust and Python source three
-times: one inventory pass and two hash rechecks. The check is capped at 64 MiB
-per language per pass and a ten-second elapsed check between reads, with the
-same no-symlink reader as a fresh query. A stalled filesystem read fails the
-two-second source deadline and disables the reader for this process. It
-compares both language digests and the whole path listing;
-any mismatch or failed check discards every answer from that inventory and
-triggers a fresh query. Changing worktree roots, failed queries, or a fresh
-scan with skipped or unparseable inputs also clears every entry. An ignored
-source entering the tracked inventory invalidates the generation even if
-the displayed query names a different file. Skipped or unparseable inputs are never
-cached. New answers enter the cache only after their complete source digests
-and Git listing match another bounded revalidation. The viewer labels a reused answer and preserves its original observed
-time, so a cache hit is not presented as a newly parsed graph. The CLI and
-reviewed LORE snapshot path do not use this cache.
+The active local-session TUI automatically prepares one process-local Rust/Python
+source index outside the input/render loop. One preparation worker and nonblocking
+cache lock prevent concurrent scans; attempts are throttled to 300 seconds for
+the same root and 30 seconds across root changes. This is bounded background
+preparation, not a scan on every agent turn or a persistent watcher.
 
-This is a read-only optimization for repeated **explicit** queries. It does
-not index a worktree persistently, run on every agent turn, or prove an atomic
-snapshot. Changes restored between reads can escape detection. Cold-cache
-tails and representative larger repositories still need measurement before
-any automatic turn path or multi-query index is justified.
+The index retains declarations/imports and hashed parse-failure tombstones,
+within a 16 MiB estimated allocation budget and 100,000 declarations. It retains
+no ASTs or source bytes. Novel file/symbol/imports/calls queries can reuse these
+facts; calls in the requested file are reparsed. Every indexed answer still
+re-enumerates the complete tracked/untracked nonignored Git inventory, reads
+all readable Rust/Python files and checks their hashes and modes, then repeats
+the complete source hash check twice. Listing changes, byte/mode drift, failed
+reads, root changes and overflow discard the index and exact-answer entries.
+The existing source deadlines, 64 MiB per-language/pass limit and ten-second
+recheck limit remain. A source timeout permanently disables this process's
+reader; one blocked kernel worker can remain until exit.
 
-For the explicit repeated-query path, the warmed-answer-cache DOXA target is
-p95 below 100 ms. The [paired measurement](../codegraph-query-cache-benchmark-2026-10-11.md)
-compares baseline and optimized release binaries against the same frozen
-source inventory and normalized answers over five alternating-order pairs.
-Aggregate warmed p95 is 116.954 → 91.929 ms on this checkout; one optimized
-pair reaches 101.120 ms. Linux uses a symlink-refusing `openat2` beneath the
-worktree descriptor with portable-walk fallback; bounded Git polling is 1 ms.
-All three source-read passes and their limits remain in force.
-An empty answer cache is not a cold filesystem cache. Filesystem cache state
-and other desktop load are uncontrolled; cold-filesystem tails, representative
-larger repositories, and automatic query frequency remain open.
+The existing eight-entry, 256 KiB serialized exact-answer cache remains for
+complete inventories. Answers with parser failures are never retained there.
+The index can reuse hashed parser-failure tombstones, preserving the original
+skipped/unparseable counts and reasons on every answer. These failures never
+create a complete scan digest, semantic promotion or verified stored coverage.
+This matters on DOXA itself: the measured inventory contains 84 of 295 Rust
+files withheld by the existing parser guard. The viewer labels indexed answers
+and revalidated exact answers separately and retains original read times.
+Module queries scan afresh and clear both caches because structural candidates
+also probe ignored/unlisted paths. CLI syntax and reviewed LORE reads stay fresh.
+
+The [controlled index/cold-source/viewer measurement](../codegraph-index-benchmark-2026-10-13.md)
+compares five alternating-order release-library pairs and identical normalized
+answers. Prepared novel-query p95 is 85.214 ms on DOXA and 637.613 ms on an
+8,000-source fixture. A separate five-repetition source-page-cold CLI scan has
+p95 1,013.917 ms after eviction with mincore=0; other caches are uncontrolled.
+Production viewer open, worker scheduling, formatting and drawing measured in
+a debug TUI build have p95 560.643/885.342 ms respectively. Library latency is
+not complete TUI latency, and an empty answer cache is not a cold filesystem.
+The previous warmed exact-answer benchmark remains historical evidence.
+Repeated mutable observations do not establish an atomic repository snapshot.
 
 ## Explicit snapshot export
 
@@ -220,7 +234,7 @@ unparseable source, or oversized export fails closed.
 
 `doxa codegraph --stored [--root WORKTREE] file|imports|calls|modules PATH`
 returns a validated LORE `current` snapshot or `{"status":"missing"}`. DOXA
-currently pins `lore-core` 0.62.20 and calls only `codegraph_snapshot_read_v1`; it checks
+calls only `codegraph_snapshot_read_v1`; it checks
 the exact project, canonical worktree, query, path, revision, source hash,
 graph digest, and `unknown` binding claim. LORE checks Git worktree identity
 and rehashes the requested file on each read. A source edit or checkout
@@ -242,9 +256,9 @@ after a file's second read, or an edit restored between reads, can still escape
 detection; this is not an atomic repository snapshot. Omitted result rows and
 semantic bindings remain outside its claim.
 
-Python snapshot reads use released **LORE v0.62.21**, commit
-`e398ea2b0d8b1a8c52614ee69fa483005c5e9c81`, pinned in the native dependency
-and lockfile. The client and service validate bounded `.rs` and `.py` paths;
+Python snapshot support was introduced in released **LORE v0.62.21**, commit
+`e398ea2b0d8b1a8c52614ee69fa483005c5e9c81`. The combined integration targets
+released **LORE v0.62.22**, commit `71f9698a`, preserving this reviewed-store gate. The client and service validate bounded `.rs` and `.py` paths;
 Python binding remains `unknown`. DOXA does not store snapshots automatically.
 
 To persist an export, an owner must inspect it and invoke LORE's explicit
@@ -275,30 +289,18 @@ is read-only and creates no second memory authority.
   and explicit invalidation across worktree lifecycle. The current read is
   exact worktree/query/path; it verifies the requested source, included
   references, and complete Git-listed Rust and Python scan inputs when a digest exists.
-- Resolve imports and actual Rust call bindings with crate, trait, type, and
-  conditional-compilation context. Module edges remain top-level and structural;
-  `cfg_attr` and conditional reachability are unresolved. Call candidates stop
-  at spelling matches. An optional rust-analyzer evidence overlay needs a
-  quota-limited, no-egress container, disabled build scripts and proc macros,
-  pinned toolchain/configuration, and source/target hash rechecks before it can
-  claim analyzer-resolved definitions. The development-only
-  `doxa-codegraph --semantic-probe --root WORKTREE --image NAME@sha256:DIGEST
-  --docker-host unix:///run/user/UID/docker.sock` checks the opt-in plan and
-  reports `unknown` with `docker_launch: not_attempted`. Its bounded LSP
-  session driver is covered by fake-server tests for initialization,
-  [rust-analyzer's server status](https://github.com/rust-lang/rust-analyzer/blob/master/docs/book/src/contributing/lsp-extensions.md#server-status)
-  quiescence, definition, deadlines, output caps, rehashes, and kill/reap.
-  It has no production runtime attester or launcher. Effective rootless
-  Docker quotas, no egress, mount restrictions, and analyzer configuration
-  still need independent verification before any binding can be promoted.
-- Decide whether a reviewed agent tool or persistent TUI tree is useful. The
-  current viewer offers explicit fresh and stored queries only.
+- General Rust imports, traits/types, macro expansion and conditional compilation
+  remain outside the analyzer-definition slice. Structural module candidates
+  keep their existing limits. Semantic activation requires the externally
+  provisioned host-controlled signer/Engine/image contract described above;
+  no automatic owner-host installation is performed.
+- Decide whether a reviewed agent tool, persistent TUI tree or explicit semantic
+  viewer overlay is useful. Automatic preparation serves read-only syntax
+  queries; attested definitions are explicit CLI requests and are not stored.
 - Decide whether other languages justify a parser dependency and coverage bar.
   Python runtime module resolution, dynamic imports, and type-aware
   binding remain outside the shipped syntax slice.
-- The [warm-cache scan benchmark](../codegraph-scan-benchmark-2026-10-09.md)
-  measured 0.371 s median on DOXA and 1.641 s on a 6,944-file Python-heavy
-  checkout. The explicit TUI answer cache now supports bounded alternating
-  queries under a warmed-answer p95 target of 100 ms. Measure query frequency,
-  cold-filesystem tails, and representative larger repositories before adding
-  an automatic turn path or a persistent parsed-source index.
+- Prepared library queries meet the DOXA p95 target in the measured workload.
+  Larger/cold-source/viewer measurements are now recorded separately. A release
+  TUI measurement and representative user workloads may justify further work;
+  no timing result is a universal latency guarantee.

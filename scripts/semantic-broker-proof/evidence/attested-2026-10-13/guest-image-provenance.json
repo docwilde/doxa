@@ -1,0 +1,12 @@
+{
+  "daemon_config_sha256": "3a6774e75043931ce3dd1874bac3aabc86908a1bb21fe07c68eb7e46054f26c9",
+  "guest_cpus": 4,
+  "guest_kernel": "7.0.0-34-generic",
+  "guest_os": "Ubuntu26.04.1 LTS",
+  "guest_ram_mib": 6144,
+  "image_sha256": "8800651811af9a85465ad1d552add729947bb16488dddb4a9b5305a3d97332b2",
+  "image_url": "https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img",
+  "signature_key_fingerprint": "D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81",
+  "source_receipt_sha256": "2c210af4c0a5457ecda0ae0bfa58dbad9b80a7f0e9b7e3f0c44fb0b41e1d5327",
+  "verification": "gpgv with /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg and sha256sum -c passed"
+}

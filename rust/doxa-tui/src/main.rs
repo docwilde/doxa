@@ -221,6 +221,16 @@ fn run(args: &[String]) -> io::Result<()> {
                 return Ok(());
             }
             "codegraph" => {
+                if args.get(1).is_some_and(|arg| arg == "--semantic-broker") {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let answer = doxa_codegraph::semantic_attested::definition_cli(&args[1..]).map_err(invalid)?;
+                        println!("{}", answer);
+                        return Ok(());
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    return Err(invalid("attested codegraph broker requires Linux"));
+                }
                 if args.get(1).is_some_and(|arg| arg == "--stored") {
                     let (root, request) = doxa_codegraph::parse_cli(&args[2..]).map_err(invalid)?;
                     let (kind, path) = request.file_scope()
