@@ -82,6 +82,12 @@ jobs:
           cargo +stable build --locked --package lore-core --bin lore-rs
       - name: Test native runtime, providers and interaction
         run: cargo +stable test --locked --workspace --features doxa-daemon/local-test-server,doxa-vendors/local-test-server
+      - name: Verify semantic broker refusal and helper cleanup
+        run: |
+          python3 -m venv "$RUNNER_TEMP/semantic-broker-tests"
+          "$RUNNER_TEMP/semantic-broker-tests/bin/python" -m pip install --disable-pip-version-check cryptography==46.0.5
+          "$RUNNER_TEMP/semantic-broker-tests/bin/python" -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_semantic_attested_broker.py -v
       - name: Check task, quota fixture and release installer
         run: |
           python3 scripts/check_workflow_action_pins.py
