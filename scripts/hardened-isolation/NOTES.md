@@ -111,3 +111,13 @@ audits; ROOT exclusive lock covers only publication/retirement, not slow copy or
 recursive removal. SourceRoot audit ignores extra Root siblings but kernel hard
 limit charges staging. Meaningful real-flock slow-build/held-reader retirement
 and deadline/invalid lock tests added; native composition owned by parent.
+
+Atomic sourcef7745094 committed before verification. Initial UID1000 unitfixture
+lacked ROOT DAC override for cross-parent readonly directory rename; corrected
+fixture-only rename emulation3b76635a,53 tests passed0.698s. Actual ROOT guest
+proof4b5690b1 passes without that emulation: intentionally paused private0600
+copy, actual shared-lock audit counts[0x10,1,0], held-reader retirement blocks,
+Root600 lock validated, eight actual UID1001 Git operations no markers/index
+unchanged. Updated UID1000 client proof also passes RootPID55863/start1159695,
+exeEACCES13. No Engine/provider/quota writes or admission claim. Both private
+data/runtime scopes cleaned; versioned ROOT proof packages/evidence retained.

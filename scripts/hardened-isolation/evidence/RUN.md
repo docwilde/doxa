@@ -57,3 +57,29 @@ actualSO_PEERPIDFD/fresh nonce. ROOT `/proc/PID/exe` remains EACCES13; readable
 live stat starttime856669 equals instance before/after the CLI challenge. Reply
 unprepared/CIDnull, no Engine call or provider/quota installation. Runtime and
 policy scopes were removed, proof package retained. Evidence root-client-20261013.json.
+
+Atomic publication and concurrent shared-audit proof, source4b5690b1:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I /root/isolation-proof/broker-git-safe-atomic-broker/prove_git_safe_guest.py
+PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -I /usr/libexec/doxa-client-peer-proof-atomic-broker/prove_root_client_guest.py
+```
+
+Both exit0. Actual ROOT writer pauses with a0600 config file under private
+ROOT/.git-staging while ten real shared-flock auditors observe no generation in
+the published tree. Atomic publication yields one complete readonly tree;
+retirement yields none. A held shared reader retains canonical inode/config and
+blocks retirement until release. The actual lock is ROOT0:0/0600, single-link.
+Eight actual UID1001 Git operations still create no clean/smudge/process marker
+and preserve original index SHA. Metadata remains21 entries/663 logical bytes.
+The temporary Git fixture is on /srv, enabling actual FSGETXATTR inheritance/
+project comparisons; it has no installed hardquota and makes no quota admission
+claim. Private /srv and runtime scopes were removed; source package retained.
+Evidence: git-safe-atomic-20261013.json.
+
+The updated describe-only ROOT broker also passes actual UID1000 authentication:
+PID55863/starttime1159695 equals root instance and caller-readable live stat;
+cross-UID exe still EACCES13, replyunprepared/CIDnull. New metadata lock bootstrap
+does not change client access. Root package is0:0/0444 under protected parents.
+Its runtime/policy scopes were removed. Evidence root-client-atomic-20261013.json.
+No EngineAPI, provider, quota installation or workstation service was involved.
