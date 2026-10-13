@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import threading
 
 spec=importlib.util.spec_from_file_location("root_broker",Path(__file__).with_name("root_broker.py"))
 b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)
@@ -62,7 +63,32 @@ def main():
         unsafe_process=git(["diff","--no-color"],expected=None)
         b.require(unsafe_process.returncode!=0 and markers()==["marker-process"],"process filter fixture did not execute");clear()
         source_index=b.sha_file(workspace/".git/index")
-        view,worker_view=b.build_git_view(p,b.Deadline(8))
+        copying=threading.Event();continue_build=threading.Event();build_done=threading.Event()
+        built=[];build_errors=[];observations=[];original_write=os.write
+        def slow_write(fd,data):
+            if bytes(data).startswith(b"[core]"):
+                copying.set();b.require(continue_build.wait(5),"guest slow-copy barrier timed out")
+            return original_write(fd,data)
+        def build():
+            try:built.append(b.build_git_view(p,b.Deadline(8)))
+            except BaseException as error:build_errors.append(error)
+            finally:build_done.set()
+        def audit():
+            with b.git_metadata_lock(p,b.Deadline(2),exclusive=False):
+                safe=mount/"git-safe";rows=list(safe.iterdir()) if safe.exists() else []
+                for generation in rows:
+                    b.require((generation/"config").is_file() and (generation/"info/attributes").read_bytes()==b"","audit saw partial metadata")
+                    b.require(all(path.stat().st_mode&0o777==(0o550 if path.is_dir() else 0o440) for path in [generation,*generation.rglob("*")]),"audit saw mutable metadata")
+                observations.append(len(rows))
+        os.write=slow_write;producer=threading.Thread(target=build);producer.start()
+        try:
+            b.require(copying.wait(5),"private Git copy never reached barrier")
+            for _ in range(10):audit()
+            b.require(observations==[0]*10,"partial Git generation was visible to actual shared auditor")
+            continue_build.set();b.require(build_done.wait(5),"atomic Git builder timed out");producer.join(1)
+            b.require(not build_errors,"atomic Git build failed: "+str(build_errors))
+            view,worker_view=built[0];audit();b.require(observations[-1]==1,"complete Git generation missing")
+        finally:continue_build.set();producer.join(5);os.write=original_write
         tested=[]
         for args in (["diff","--no-color"],["status","--porcelain"],["diff","--cached","HEAD"],
                      ["ls-files","--cached"],["rev-parse","--verify","HEAD"],["merge-base","HEAD","HEAD"],
@@ -74,17 +100,33 @@ def main():
         infos=[view,*view.rglob("*")]
         b.require(all(path.lstat().st_uid==0 and path.lstat().st_gid==1001 and path.lstat().st_mode&0o777==(0o550 if path.is_dir() else 0o440) for path in infos),"ROOT Git metadata owner/mode differs")
         b.require(all(path.is_dir() or path.stat().st_nlink==1 for path in infos),"ROOT Git metadata hardlink")
+        metadata_bytes=sum(path.stat().st_size for path in infos if path.is_file())
         denied=[]
         for args in (["apply","--index","-"],["apply","--cached","-"]):
             try:b.git_arguments(args)
             except b.Refused:denied.append(args)
         b.require(len(denied)==2,"snapshot index mutations admitted")
+        retired=threading.Event();retirement_errors=[]
+        def retire():
+            try:b.retire_git_view(p,view,b.Deadline(2));retired.set()
+            except BaseException as error:retirement_errors.append(error)
+        with b.git_metadata_lock(p,b.Deadline(2),exclusive=False):
+            held=os.open(view,os.O_RDONLY|os.O_DIRECTORY);identity=os.fstat(held)
+            remover=threading.Thread(target=retire);remover.start()
+            b.require(not retired.wait(.05) and view.stat().st_ino==identity.st_ino and (view/"config").exists(),"retirement invalidated held shared auditor")
+            os.close(held)
+        b.require(retired.wait(2),"retirement did not complete after shared audit released");remover.join(1)
+        b.require(not retirement_errors,"retirement failed: "+str(retirement_errors));audit()
+        b.require(observations[-1]==0 and not view.exists(),"retired generation remained published")
+        lock=(runtime/"git-metadata.lock").stat()
+        b.require(lock.st_uid==0 and lock.st_gid==0 and lock.st_nlink==1 and lock.st_mode&0o777==0o600,"actual ROOT metadata lock differs")
         result={"scope":"actual-root-readonly-git-metadata-and-filter-regression","admissible_as_hardened":False,
                 "root_uid":os.geteuid(),"git_uid":1001,"git_version":git(["--version"]).stdout.decode().strip(),
                 "unsafe_clean_markers":unsafe_clean,"unsafe_apply_markers":unsafe_apply,"unsafe_process_exit":unsafe_process.returncode,
                 "unsafe_process_marker":"marker-process","safe_commands":tested,"safe_markers":markers(),"original_index_unchanged":True,
                 "worktree_apply_changed_bytes":True,"root_metadata_readonly_single_link":True,"metadata_entries":len(infos),
-                "metadata_bytes":sum(path.stat().st_size for path in infos if path.is_file()),"denied_index_mutations":denied,
+                "metadata_bytes":metadata_bytes,"denied_index_mutations":denied,
+                "shared_audit_generation_counts":observations,"held_reader_blocks_retirement":True,"root_metadata_lock_valid":True,
                 "no_engine_api_calls":True,"no_quota_installation":True,"no_provider_calls":True,"worker_view":worker_view}
         print(json.dumps(result,sort_keys=True,indent=2))
     finally:shutil.rmtree(root);shutil.rmtree(runtime)
