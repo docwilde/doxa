@@ -161,7 +161,10 @@ fn in_root(root:&File,path:&Path,flags:i32)->io::Result<File> {
     }
     let path=CString::new(relative.as_os_str().as_bytes()).map_err(|_|error("view path contains NUL"))?;
     #[repr(C)]struct How{flags:u64,mode:u64,resolve:u64}
-    let how=How{flags:(flags|libc::O_CLOEXEC|libc::O_NONBLOCK) as u64,mode:0,resolve:0x10|0x02}; // IN_ROOT | NO_MAGICLINKS
+    // openat2 rejects O_NONBLOCK combined with O_PATH; metadata handles never
+    // perform blocking I/O. Content handles remain explicitly nonblocking.
+    let flags=flags|libc::O_CLOEXEC|if flags&libc::O_PATH==0{libc::O_NONBLOCK}else{0};
+    let how=How{flags:flags as u64,mode:0,resolve:0x10|0x02}; // IN_ROOT | NO_MAGICLINKS
     let fd=unsafe{libc::syscall(libc::SYS_openat2,root.as_raw_fd(),path.as_ptr(),&how as *const How,mem::size_of::<How>())};
     if fd<0{return Err(io::Error::last_os_error());}Ok(unsafe{File::from_raw_fd(fd as i32)})
 }
