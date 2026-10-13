@@ -14,7 +14,7 @@ use std::{
         fd::{AsRawFd, FromRawFd},
         unix::{
             ffi::OsStrExt,
-            fs::{MetadataExt, OpenOptionsExt},
+            fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
         },
     },
     path::{Component, Path, PathBuf},
@@ -185,7 +185,8 @@ pub fn installed(id: &str) -> io::Result<Installed> {
     session_id(id)?;
     let directory = Path::new("/run/doxa/hardened").join(id);
     let receipt_path = directory.join("broker-receipt.json");
-    let receipt_file = root_file(&receipt_path, true, false, MAX_REPLY)?;
+    let receipt_file = root_file(&receipt_path, true, false, MAX_REPLY).map_err(|e|
+        if e.kind()==io::ErrorKind::NotFound {error(format!("docker-hardened requires administrator provisioning for the reserved session {id}"))}else{e})?;
     let raw = read_pin(&receipt_file, &receipt_path, true, false, MAX_REPLY)?;
     let receipt: Receipt =
         serde_json::from_slice(&raw).map_err(|_| error("ROOT client receipt is malformed"))?;
@@ -1235,10 +1236,14 @@ fn hook_command(
         return Err(error("ROOT callback identity or capability is invalid"));
     }
     if register {
-        if socket.parent() != Some(manifest.broker.as_path()) {
-            return Err(error("ROOT callback socket escapes caller broker mirror"));
+        if !callback_path_scope(socket,manifest) {
+            return Err(error("ROOT callback socket escapes the private caller callback scope"));
         }
-        caller_directory(&manifest.broker, true)?;
+        caller_directory(socket.parent().unwrap(), true)?;
+        let meta=fs::symlink_metadata(socket)?;
+        if !meta.file_type().is_socket()||meta.uid()!=unsafe{libc::geteuid()}||meta.mode()&0o777!=0o600||meta.nlink()!=1 {
+            return Err(error("ROOT callback socket is not private and owned"));
+        }
     }
     let operation = if register {
         "register_hook"
@@ -1258,6 +1263,16 @@ fn hook_command(
         command.arg("--callback-socket").arg(socket);
     }
     Ok(command)
+}
+fn callback_path_scope(socket:&Path,manifest:&Manifest)->bool {
+    if !absolute(socket){return false;}
+    if socket.parent()==Some(manifest.broker.as_path()){return true;}
+    let base=PathBuf::from(format!("/run/user/{}/doxa-hooks",unsafe{libc::geteuid()}));
+    let Ok(relative)=socket.strip_prefix(base) else{return false;};
+    let parts:Vec<_>=relative.components().collect();
+    parts.len()==2&&matches!(parts[0],Component::Normal(name) if name.to_str().is_some_and(|name|
+        name.strip_prefix("review-").is_some_and(|value|value.len()==6&&value.bytes().all(|b|b.is_ascii_alphanumeric()))))
+        &&matches!(parts[1],Component::Normal(name) if name=="callback.sock")
 }
 
 #[cfg(test)]
@@ -1764,6 +1779,8 @@ mod tests {
         let manifest = mirror(dir.path());
         let installed = fixture();
         let socket = manifest.broker.join("hook.sock");
+        let _listener=std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket,std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         let capability = "a".repeat(48);
         let command = hook_command(&installed, &manifest, &socket, &capability, 123, true).unwrap();
         assert!(!args(&command).contains(&capability));
@@ -1780,5 +1797,11 @@ mod tests {
         )
         .is_err());
         assert!(hook_command(&installed, &manifest, &socket, "forged", 123, true).is_err());
+        let runtime=PathBuf::from(format!("/run/user/{}/doxa-hooks",unsafe{libc::geteuid()}));
+        assert!(callback_path_scope(&runtime.join("review-ABC123/callback.sock"),&manifest));
+        for path in ["review-ABC123/other.sock","review-ABC123/sub/callback.sock","review-ABC123/../callback.sock",
+            "review-bad/callback.sock","other-ABC123/callback.sock"] {
+            assert!(!callback_path_scope(&runtime.join(path),&manifest),"{path}");
+        }
     }
 }
