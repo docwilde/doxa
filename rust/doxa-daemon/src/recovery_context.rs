@@ -89,14 +89,19 @@ fn envelope(turns: &[Value], omitted: usize) -> io::Result<String> {
 pub(super) fn assess(store: &TranscriptStore, budget: Budget, request_bytes: usize,
     measured: Option<(usize, &'static str)>) -> io::Result<Plan> {
     let records = store.read_records()?;
-    let source_bytes = serde_json::to_vec(&records)?.len();
+    let file_bytes = store.transcript_snapshot()?.map(|(_,bytes)|bytes).unwrap_or(0);
+    let source_bytes = serde_json::to_vec(&records)?.len().max(
+        usize::try_from(file_bytes).unwrap_or(usize::MAX));
+    let scan_limited = file_bytes > doxa_transcript::MAX_TRANSCRIPT_BYTES as u64
+        || records.len() >= doxa_transcript::MAX_TRANSCRIPT_LINES;
     let (used, basis) = measured.unwrap_or((source_bytes, "serialized_history_byte_bound"));
     let remaining = budget.limit.checked_sub(budget.reserve).and_then(|limit| limit.checked_sub(request_bytes))
         .ok_or_else(|| io::Error::other("Current request and response headroom exceed the continuation context budget"))?;
     let all = turns(&records);
     let mut data = json!({"history_bytes":source_bytes,"history_input_bound":used,"measurement":basis,
         "input_limit":budget.limit,"limit_verified":budget.verified,"reserved_tokens":budget.reserve,
-        "new_request_byte_bound":request_bytes,"retained_turns":all.len(),"omitted_turns":0,"trimmed":false});
+        "new_request_byte_bound":request_bytes,"retained_turns":all.len(),"omitted_turns":0,"trimmed":false,
+        "history_scan_limited":scan_limited});
     if used <= remaining { return Ok(Plan { context: None, data }); }
     // A new native context also has to fit the CLI's JSON transport envelope.
     // Provider token telemetry already counts native system text and tools.
@@ -186,5 +191,19 @@ mod tests {
         let context=plan.context.unwrap();assert!(context.contains("run the checks") && context.contains("Checks passed."));
         assert!(!context.contains("PRIVATE_REASONING") && !context.contains("tool output"));
         assert_eq!(plan.data["retained_turns"],1);
+    }
+    #[test]
+    fn history_larger_than_the_restore_scan_uses_the_entire_owned_file_bound() {
+        let root=tempfile::tempdir().unwrap();
+        let store=TranscriptStore::new(root.path(),"project","session").unwrap();
+        for index in 0..3 {
+            store.try_append(json!({"type":"user","message":{"content":format!("turn-{index} {}","x".repeat(3*1024*1024))}}),"claude",|s|Ok(s.into())).unwrap();
+        }
+        let bytes=store.transcript_snapshot().unwrap().unwrap().1;
+        let plan=assess(&store,Budget::native(Some(8_000_000),None),1000,None).unwrap();
+        assert!(plan.context.is_some());
+        assert_eq!(plan.data["history_bytes"],bytes);
+        assert_eq!(plan.data["history_scan_limited"],true);
+        assert_eq!(store.transcript_snapshot().unwrap().unwrap().1,bytes);
     }
 }

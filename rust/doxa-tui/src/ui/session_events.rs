@@ -782,8 +782,10 @@ impl App {
                         let basis = if data["measurement"] == "provider_tokens" {"reported tokens"} else {"conservative token bound"};
                         let policy = if verified {String::new()} else {" · model limit unavailable; conservative budget".into()};
                         let trim = if trimmed {
-                            format!(" · {omitted} oldest turns omitted{}; full transcript retained",
-                                if data["truncated_latest_turn"]==true {", latest turn clipped"} else {""})
+                            let scan = if data["history_scan_limited"]==true {"at least "} else {""};
+                            format!(" · {scan}{omitted} oldest turns omitted{}{}; full transcript retained",
+                                if data["truncated_latest_turn"]==true {", latest turn clipped"} else {""},
+                                if data["history_scan_limited"]==true {", earlier records outside restore scan"} else {""})
                         } else {String::new()};
                         let clipped = append_transcript(session,&format!("\n\n*Conversation restored · history {used} {basis} · input budget {limit}{policy}{trim}*\n"));
                         self.transcript_evicted(&id,clipped);

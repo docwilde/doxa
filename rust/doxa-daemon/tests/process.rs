@@ -2196,7 +2196,7 @@ mod vendor_process {
                     chunks += 1;
                 }
                 Some("turn_done") => return (text, frame, chunks),
-                Some("reasoning_delta" | "reasoning_progress") => {},
+                Some("reasoning_delta" | "reasoning_progress" | "resume_context") => {},
                 _ => panic!("unexpected vendor event: {frame}"),
             }
         }
