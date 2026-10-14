@@ -3977,6 +3977,7 @@ fn codex_provider_errors_settle_without_poisoning_the_durable_session() {
             let (mut reader, mut socket) = resumed.connect();
             reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
             receive(&mut reader);
+            send(&mut socket, json!({"type":"attach","cursor":null}));
             let mut frames = Vec::new();
             let verified = codex_auto_rpc(&mut reader, &mut socket, 4, "verify_resume", json!({}), &mut frames);
             assert_eq!(verified["ok"], true, "{scenario}: {verified}");
