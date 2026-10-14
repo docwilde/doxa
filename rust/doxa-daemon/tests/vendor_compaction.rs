@@ -41,6 +41,78 @@ fn private_credentials(root:&Path){
 fn transcript_dir(runtime:&Path)->PathBuf{let slug:String=runtime.to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();runtime.join("projects").join(slug)}
 
 #[test]
+fn long_vendor_resume_sends_complete_saved_history_on_first_request() {
+    for (engine, model, key) in [
+        ("deepseek", "deepseek-flash", "DEEPSEEK_API_KEY"),
+        ("glm", "glm-5.3-flash", "ZAI_API_KEY"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        private_credentials(root);
+        let slug = transcript_dir(root).file_name().unwrap().to_str().unwrap().to_owned();
+        let store = doxa_transcript::TranscriptStore::new(&root.join("projects"), &slug, "vendor-resume").unwrap();
+        let history = vec![
+            json!({"role":"user","content":"Keep the EARLY_CONTEXT_SENTINEL requirement."}),
+            json!({"role":"assistant","content":"EARLY_CONTEXT_SENTINEL acknowledged."}),
+            json!({"role":"user","content":"intermediate detail ".repeat(2000)}),
+            json!({"role":"assistant","content":"intermediate answer ".repeat(2000)}),
+            json!({"role":"user","content":"recent task"}),
+            json!({"role":"assistant","content":"recent answer"}),
+        ];
+        for message in &history {
+            let content = if message["role"] == "assistant" {
+                json!([{"type":"text","text":message["content"]}])
+            } else { message["content"].clone() };
+            store.try_append(json!({"type":message["role"],"message":{"role":message["role"],"content":content}}),
+                engine, |text| Ok(text.to_owned())).unwrap();
+        }
+        store.try_write_vendor_messages(engine, model, &history, |text| Ok(text.to_owned())).unwrap();
+        let before = fs::read(store.transcript_path()).unwrap();
+        assert!(before.len() > 16_384);
+        let response = json!({"model":model,"choices":[{"finish_reason":"stop","delta":{"content":"continued"}}],
+            "usage":{"prompt_tokens":3,"completion_tokens":4}});
+        let (endpoint, server) = serve_events(vec![vec![response]]);
+        let mut daemon = Daemon(Command::new(env!("CARGO_BIN_EXE_doxa-daemon")).env_clear()
+            .args(["--runtime-dir",root.to_str().unwrap(),"--cwd",root.to_str().unwrap(),"--session-id","vendor-resume",
+                "--engine",engine,"--model",model,"--vendor-endpoint",&endpoint,"--resume","true","--linger","20"])
+            .env("PATH","/usr/bin:/bin").env("TMPDIR",root).env("HOME",root.join("home")).env("DOXA_HOME",root.join("doxa"))
+            .env("LORE_ROOT",root.join("lore")).env("LORE_PROJECTS_DIR",root.join("projects"))
+            .env("LORE_SKILLS_DIR",root.join("skills")).env("LORE_DISABLE_SYNC","1").env("LORE_DISABLE_REVIEW","1")
+            .env("DOXA_LORE","0").env(key,"local-fixture-key")
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap());
+        let registry = root.join("registry/vendor-resume.json");
+        wait(|| {
+            if registry.exists() { true } else {
+                if daemon.0.try_wait().unwrap().is_some() {
+                    let mut detail = String::new();
+                    daemon.0.stderr.take().unwrap().read_to_string(&mut detail).unwrap();
+                    panic!("native daemon: {detail}");
+                }
+                false
+            }
+        });
+        let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+        let mut socket = UnixStream::connect(entry["daemon_socket"].as_str().unwrap()).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        receive(&mut reader);
+        send(&mut socket,json!({"type":"attach","cursor":null}));
+        assert_eq!(fs::read(store.transcript_path()).unwrap(),before);
+        send(&mut socket,json!({"type":"prompt","id":1,"text":"continue"}));
+        assert_eq!(done(&mut reader)["is_error"],false);
+        send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));
+        wait(||daemon.0.try_wait().unwrap().is_some());
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(),1);
+        let sent = requests[0]["messages"].as_array().unwrap();
+        let prior: Vec<Value> = sent.iter().filter(|message| message["role"] != "system").cloned().collect();
+        assert_eq!(prior[..history.len()],history, "{engine} dropped or rewrote saved context");
+        assert_eq!(prior[history.len()],json!({"role":"user","content":"continue"}));
+        assert!(fs::read(store.transcript_path()).unwrap().starts_with(&before));
+    }
+}
+
+#[test]
 fn reviewed_managed_compaction_preserves_originals_and_review_refusal_keeps_session_usable(){
     for approved in [true,false]{
         let dir=tempfile::tempdir().unwrap();let root=dir.path();private_credentials(root);
