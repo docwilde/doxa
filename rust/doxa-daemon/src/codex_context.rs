@@ -173,8 +173,14 @@ fn appended_context(bytes: &[u8], before: u64, after: u64) -> Option<Value> {
     let appended = after.checked_sub(before)?;
     if appended == 0 || appended > MAX_NEW_BYTES || bytes.len() != appended as usize { return None; }
     let mut latest = None;
+    let mut model = None;
     for line in bytes.split(|byte| *byte == b'\n') {
         let Ok(frame) = serde_json::from_slice::<Value>(line) else { continue; };
+        if frame["type"] == "turn_context" {
+            model = frame["payload"]["model"].as_str().filter(|model| !model.is_empty()
+                && model.len() <= 128 && !model.chars().any(char::is_control)).map(str::to_owned);
+            continue;
+        }
         if frame["type"] == "compacted" {
             latest = None;
             continue;
@@ -187,6 +193,8 @@ fn appended_context(bytes: &[u8], before: u64, after: u64) -> Option<Value> {
         let used = tokens.saturating_sub(BASELINE_TOKENS);
         let effective = limit - BASELINE_TOKENS;
         latest = Some(json!({"ctx_tokens":used,"ctx_max_tokens":effective,
+            "raw_context_tokens":tokens,"raw_context_window":limit,
+            "context_model":model,
             "ctx_percentage":(used as f64 / effective as f64 * 100.0).clamp(0.0,100.0),
             "ctx_source":"codex_rollout_token_count"}));
     }

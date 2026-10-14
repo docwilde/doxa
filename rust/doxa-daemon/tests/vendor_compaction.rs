@@ -46,6 +46,7 @@ fn long_vendor_resume_sends_complete_saved_history_on_first_request() {
         ("deepseek", "deepseek-flash", "DEEPSEEK_API_KEY"),
         ("glm", "glm-5.3-flash", "ZAI_API_KEY"),
     ] {
+      for trimmed in [false,true] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         private_credentials(root);
@@ -54,8 +55,8 @@ fn long_vendor_resume_sends_complete_saved_history_on_first_request() {
         let history = vec![
             json!({"role":"user","content":"Keep the EARLY_CONTEXT_SENTINEL requirement."}),
             json!({"role":"assistant","content":"EARLY_CONTEXT_SENTINEL acknowledged."}),
-            json!({"role":"user","content":"intermediate detail ".repeat(2000)}),
-            json!({"role":"assistant","content":"intermediate answer ".repeat(2000)}),
+            json!({"role":"user","content":"intermediate detail ".repeat(if trimmed {30_000} else {1000})}),
+            json!({"role":"assistant","content":"intermediate answer ".repeat(if trimmed {30_000} else {1000})}),
             json!({"role":"user","content":"recent task"}),
             json!({"role":"assistant","content":"recent answer"}),
         ];
@@ -63,10 +64,11 @@ fn long_vendor_resume_sends_complete_saved_history_on_first_request() {
             let content = if message["role"] == "assistant" {
                 json!([{"type":"text","text":message["content"]}])
             } else { message["content"].clone() };
-            store.try_append(json!({"type":message["role"],"message":{"role":message["role"],"content":content}}),
+            store.try_append(json!({"type":message["role"],"sessionId":"vendor-resume","message":{"role":message["role"],"content":content}}),
                 engine, |text| Ok(text.to_owned())).unwrap();
         }
         store.try_write_vendor_messages(engine, model, &history, |text| Ok(text.to_owned())).unwrap();
+        store.verify_vendor_transcript(engine, &history).unwrap();
         let before = fs::read(store.transcript_path()).unwrap();
         assert!(before.len() > 16_384);
         let response = json!({"model":model,"choices":[{"finish_reason":"stop","delta":{"content":"continued"}}],
@@ -106,9 +108,16 @@ fn long_vendor_resume_sends_complete_saved_history_on_first_request() {
         assert_eq!(requests.len(),1);
         let sent = requests[0]["messages"].as_array().unwrap();
         let prior: Vec<Value> = sent.iter().filter(|message| message["role"] != "system").cloned().collect();
-        assert_eq!(prior[..history.len()],history, "{engine} dropped or rewrote saved context");
-        assert_eq!(prior[history.len()],json!({"role":"user","content":"continue"}));
+        if trimmed {
+            let summary=prior.iter().find(|message|message["role"]=="assistant").unwrap()["content"].as_str().unwrap();
+            let tail:Value=serde_json::from_str(summary).unwrap();
+            assert_eq!(tail["omitted_turns"],2);assert!(summary.contains("recent task") && summary.contains("recent answer"));
+            assert!(!summary.contains("EARLY_CONTEXT_SENTINEL"));
+            assert!(requests[0].to_string().len()<65_536);
+        } else { assert_eq!(prior[..history.len()],history, "{engine} dropped or rewrote saved context"); }
+        assert_eq!(prior.last().unwrap(),&json!({"role":"user","content":"continue"}));
         assert!(fs::read(store.transcript_path()).unwrap().starts_with(&before));
+      }
     }
 }
 

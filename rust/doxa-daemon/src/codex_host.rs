@@ -61,7 +61,7 @@ pub struct CodexHost {
     index_worker: Mutex<Option<thread::JoinHandle<()>>>,
     store: TranscriptStore,
     session_id: String,
-    recovery_context: Option<String>,
+    resume_preflight: AtomicBool,
     cwd: String,
     selection: Mutex<(Option<String>, Option<String>)>,
     permission: Mutex<CodexPermission>,
@@ -218,7 +218,8 @@ impl CodexHost {
             None
         };
         let restoring = previous.is_some();
-        let recovery_context = if resume {crate::recovery_context::restore(&store,"codex",options.model.as_deref()).map_err(|_|"Codex saved context could not be verified")?}else{None};
+        // Transcript size is not a compaction signal. The verified provider
+        // thread owns its conversation and must be resumed before any turn.
         if let Some(id) = previous {
             options.resume_thread = Some(id);
             options.require_resume = true;
@@ -295,7 +296,6 @@ impl CodexHost {
                 }
             }
         };
-        if recovery_context.is_some() {options.resume_thread=None;options.require_resume=false;rollout_path=None;}
         let driver = if transport == "app-server" {
             CodexTransport::AppServer {
                 options: AppServerOptions { executable: options.executable.clone(), cwd: options.cwd.clone(),
@@ -320,7 +320,7 @@ impl CodexHost {
             index_worker: Mutex::new(Some(index_worker)),
             store,
             session_id: session_id.to_owned(),
-            recovery_context,
+            resume_preflight: AtomicBool::new(resume),
             cwd,
             selection: Mutex::new(selection),
             permission: Mutex::new(permission),
@@ -482,15 +482,89 @@ impl CodexHost {
         let _ = self.index_tx.try_send(IndexCommand::Index);
     }
 
-    /// Codex has no system-message channel. Send memory only when creating a
-    /// provider thread; an existing thread already contains its first turn.
-    /// Snapshot failure is a memory-less turn, as in Python CodexEngine.
+    fn prepare_resume_prompt(&self, text: &str, token: &CancellationToken,
+        emit: &mut dyn FnMut(Value)) -> Result<Option<String>, String> {
+        if !self.resume_preflight.load(Ordering::Acquire) { return Ok(None); }
+        let checkpoint = self.store.read_thread().map_err(|_| "Codex continuation checkpoint unavailable")?
+            .ok_or("Codex continuation checkpoint missing")?;
+        self.store.verify_thread_checkpoint(&checkpoint).map_err(|_| "Codex saved transcript changed before continuation")?;
+        let runtime = self.runtime.lock().unwrap();
+        let mut driver = self.driver.lock().unwrap();
+        let CodexTransport::AppServer { options, active, resume_thread } = &mut *driver else { return Ok(None); };
+        let spawn = |options: AppServerOptions| {
+            let lore = self.lore.clone(); let failure = self.scrub_failed.clone();
+            let scrub = move |text: &str| lore.lock().unwrap().scrub(text).unwrap_or_else(|_| {
+                failure.store(true, Ordering::Release); SCRUB_FAILURE.into()
+            });
+            let mut tools = self.agent_tools.as_ref().map(|tools| tools.definitions()).unwrap_or_default();
+            if self.session_tools.lock().unwrap().is_some() { tools.extend(doxa_engines::session_tools::definitions()); }
+            runtime.block_on(async {
+                tokio::select! { biased;
+                    _ = token.cancelled() => Err(AppServerError::Cancelled),
+                    result = async {
+                        AppServerDriver::spawn_protected_with_agent_tools(options, scrub,
+                            self.peer_tools.lock().unwrap().is_some(), self.compact_gate()?, tools).await
+                    } => result,
+                }
+            }).map_err(|error| match error {
+                AppServerError::Protocol(reason) => reason.into(),
+                AppServerError::Server(reason) => reason,
+                _ => "Codex continuation preflight could not verify its provider".into(),
+            })
+        };
+        let mut app = match active.take() { Some(app) => app, None => spawn(options.clone())? };
+        let prepared = (|| {
+            let recorded = self.rollout_path.lock().unwrap().clone().or_else(|| app.rollout_path().map(PathBuf::from));
+            let usage = recorded.as_deref().and_then(|path| codex_context::read_since(path, app.thread_id(), 0))
+                .filter(|data| data["context_model"].as_str().is_none_or(|model|Some(model)==app.model()));
+            let resumed_usage = app.continuation_usage();
+            let (configured_window, compact_limit, post_percent) = app.continuation_limits();
+            // API model pages do not attest a native account's allocation.
+            let reported_window = resumed_usage.map(|(_,window)|window)
+                .or_else(||usage.as_ref().and_then(|data| data["raw_context_window"].as_u64()));
+            let window = [configured_window,reported_window].into_iter().flatten().min();
+            let post_limit = window.zip(post_percent).map(|(window,percent)|window.saturating_mul(percent)/100);
+            let compact_limit = [compact_limit,post_limit].into_iter().flatten().min();
+            let measured = resumed_usage.map(|(used,_)|used)
+                .or_else(||usage.as_ref().and_then(|data| data["raw_context_tokens"].as_u64()))
+                .filter(|tokens|*tokens>0)
+                .and_then(|tokens| usize::try_from(tokens).ok()).map(|tokens| (tokens,"provider_tokens"));
+            let memory = self.first_turn_prompt("");
+            let mut budget = crate::recovery_context::Budget::native(window,compact_limit);
+            let tools = self.agent_tools.as_ref().map(|tools| tools.definitions()).unwrap_or_default();
+            budget.replay_overhead = budget.replay_overhead.saturating_add(
+                serde_json::to_vec(&tools).map_err(|_| "Native tool definitions cannot be measured")?.len());
+            let plan = crate::recovery_context::assess(&self.store,budget,
+                text.len().saturating_add(memory.len()).saturating_add(128),measured)
+                .map_err(|error| error.to_string())?;
+            let prompt = plan.context.as_ref().map(|context|
+                format!("{memory}[DOXA RESTORED CONVERSATION]\n{context}\n[CURRENT USER REQUEST]\n{text}"));
+            Ok::<_,String>((plan,prompt))
+        })();
+        let (plan,prompt) = match prepared {
+            Ok(prepared) => prepared,
+            Err(reason) => { *active = Some(app); return Err(reason); }
+        };
+        if prompt.is_some() {
+            runtime.block_on(app.shutdown());
+            let mut fresh = options.clone(); fresh.resume_thread = None;
+            app = spawn(fresh)?;
+        }
+        if let Some(model) = app.model() { self.selection.lock().unwrap().0 = Some(model.into()); }
+        *resume_thread = Some(app.thread_id().into()); options.resume_thread = resume_thread.clone();
+        self.remember_rollout(&app); *active = Some(app);
+        self.resume_preflight.store(false,Ordering::Release);
+        emit(plan.event());
+        Ok(prompt)
+    }
+
+    /// An existing provider thread already contains its first memory snapshot.
+    /// A fresh thread receives this bounded snapshot with its first prompt.
     fn first_turn_prompt(&self, text: &str) -> String {
         let mut context=if self.lore_enabled {
             let snapshot=self.lore.lock().unwrap().snapshot(&self.cwd,"all").unwrap_or_default();
             if snapshot.is_empty() || snapshot.len()>MAX_CONTEXT_BYTES {String::new()} else {format!("{MEMORY_HEADER}\n\n{snapshot}\n{MEMORY_FOOTER}\n\n")}
         } else {"[DOXA MEMORY OFF] This session has memory disabled. Do not use LORE memory tools.\n\n".into()};
-        if let Some(recovery)=&self.recovery_context {context.push_str("[DOXA RESTORED CONVERSATION]\n");context.push_str(recovery);context.push_str("\n[CURRENT USER REQUEST]\n");}
         context.push_str(text);context
     }
 
@@ -594,6 +668,17 @@ impl CodexHost {
             );
             return;
         }
+        let resumed_prompt = if compaction { None } else {
+            match self.prepare_resume_prompt(text,&token,emit) {
+                Ok(prompt) => prompt,
+                Err(reason) => {
+                    *self.active.lock().unwrap() = None;
+                    self.permission_control.lock().unwrap().take();
+                    emit(json!({"type":"turn_done","data":{"is_error":true,"error":reason}}));
+                    return;
+                }
+            }
+        };
         let display_prompt = match self.public_prompt(text) {
             Ok(display) => display,
             Err(_) => {
@@ -680,7 +765,9 @@ impl CodexHost {
                 // pipes and process watcher belong to this session runtime.
                 let runtime = self.runtime.lock().unwrap();
                 let mut driver = self.driver.lock().unwrap();
-                let provider_prompt = if driver.thread_id().is_none() {
+                let provider_prompt = if let Some(prompt) = resumed_prompt {
+                    prompt
+                } else if driver.thread_id().is_none() {
                     self.first_turn_prompt(text)
                 } else {
                     text.to_owned()

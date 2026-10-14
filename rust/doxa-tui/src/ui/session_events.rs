@@ -774,6 +774,21 @@ impl App {
                         self.transcript_evicted(&id, clipped);
                         true
                     }
+                    "resume_context" => {
+                        let (Some(used),Some(limit),Some(omitted),Some(trimmed),Some(verified)) = (
+                            data["history_input_bound"].as_u64(),data["input_limit"].as_u64(),
+                            data["omitted_turns"].as_u64(),data["trimmed"].as_bool(),data["limit_verified"].as_bool()) else { return false; };
+                        let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else { return false; };
+                        let basis = if data["measurement"] == "provider_tokens" {"reported tokens"} else {"conservative token bound"};
+                        let policy = if verified {String::new()} else {" · model limit unavailable; conservative budget".into()};
+                        let trim = if trimmed {
+                            format!(" · {omitted} oldest turns omitted{}; full transcript retained",
+                                if data["truncated_latest_turn"]==true {", latest turn clipped"} else {""})
+                        } else {String::new()};
+                        let clipped = append_transcript(session,&format!("\n\n*Conversation restored · history {used} {basis} · input budget {limit}{policy}{trim}*\n"));
+                        self.transcript_evicted(&id,clipped);
+                        true
+                    }
                     "billing" => {
                         if !self.sessions.iter().any(|session| session.id == id) {
                             return false;

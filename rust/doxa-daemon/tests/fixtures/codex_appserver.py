@@ -79,7 +79,11 @@ for line in sys.stdin:
         continue
     elif method == 'config/read':
         assert 'features.token_budget=false' in sys.argv
-        reply(request, {'config': {'features': {'token_budget': False}}, 'origins': {}, 'layers': None})
+        config = {'features': {'token_budget': False}}
+        context_file = Path(__file__).with_suffix('.context')
+        if context_file.exists():
+            config.update(json.loads(context_file.read_text()))
+        reply(request, {'config': config, 'origins': {}, 'layers': None})
     elif method == 'hooks/list':
         overrides = [sys.argv[i+1] for i, item in enumerate(sys.argv[:-1]) if item == '-c']
         hooks = next(tomllib.loads(value)['hooks'] for value in overrides if value.startswith('hooks='))
@@ -97,6 +101,8 @@ for line in sys.stdin:
         resumed = method == 'thread/resume'
         if resumed:
             assert request['params']['threadId'] == thread_id
+        elif Path(__file__).with_suffix('.fresh-thread').exists():
+            thread_id = Path(__file__).with_suffix('.fresh-thread').read_text().strip()
         reply(request, {'thread': {'id': thread_id}, 'model': request['params'].get('model')})
     elif method == 'turn/start':
         params = request['params']

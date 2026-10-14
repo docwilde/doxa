@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.53 — 2026-10-14
+
+**Session continuation**
+
+- Fix **`recovery_context::assess`** discarding fitting conversation history at the fixed **16 KiB** cutoff. Measure the first continued request against provider context telemetry or a conservative input bound.
+- Include the new request, memory, tools and response headroom; respect configured native compaction thresholds and Router input caps. Keep fitting native sessions and reviewed API summaries intact.
+- Trim the oldest turns when the budget is exceeded; mark omissions and clipped text. Show the measurement and unknown model limits in the transcript; preserve original records, permissions and accounting.
+
 ## 2.0.0-beta.52 — 2026-10-13
 
 **Fleet recovery**
