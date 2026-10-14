@@ -3975,6 +3975,7 @@ fn codex_provider_errors_settle_without_poisoning_the_durable_session() {
             wait_until(|| process.exited());
             let mut resumed = Process::start_codex_appserver(dir.path(), &codex, Path::new("python3"), true);
             let (mut reader, mut socket) = resumed.connect();
+            reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
             receive(&mut reader);
             let mut frames = Vec::new();
             let verified = codex_auto_rpc(&mut reader, &mut socket, 4, "verify_resume", json!({}), &mut frames);
