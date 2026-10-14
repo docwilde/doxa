@@ -1841,6 +1841,7 @@ fn claude_reported_spend_blocks_next_prompt_over_daemon_socket() {
 fn claude_legacy_resume_requires_owned_provider_and_lore_source_then_verifies_live_identity() {
     let dir=tempfile::tempdir().unwrap();let script=dir.path().join("legacy-cli");
     fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(dir.path().join("provider-context.json"),json!({"totalTokens":123,"maxTokens":1_000_000,"model":"opus"}).to_string()).unwrap();
     claude_fixture(&script,"assert '--resume' in args",r#"if frame['type']=='user':
   emit({'type':'system','subtype':'init','session_id':session,'model':model});delta('restored');result()
 "#);
@@ -1855,7 +1856,7 @@ fn claude_legacy_resume_requires_owned_provider_and_lore_source_then_verifies_li
     let registry=dir.path().join("registry").join(format!("{CLAUDE_SESSION}.json"));let mut process=Process{child,registry,socket:PathBuf::new()};
     wait_until(||process.registry.exists()||process.exited());if process.exited(){let mut error=String::new();process.child.stderr.take().unwrap().read_to_string(&mut error).unwrap();panic!("legacy fixture failed: {error}");}process.socket=process.entry()["daemon_socket"].as_str().unwrap().into();
     let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));send(&mut socket,json!({"type":"prompt","id":1,"text":"continue"}));
-    let completed=claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");assert_eq!(completed["event"]["data"]["is_error"],false);
+    let completed=claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");assert_eq!(completed["event"]["data"]["is_error"],false,"{completed}");
     let metadata:Value=serde_json::from_slice(&fs::read(native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.codex.json"))).unwrap()).unwrap();assert_eq!(metadata["legacy_imported"],true);assert_eq!(metadata["thread_id"],CLAUDE_SESSION);
     assert!(fs::read_to_string(transcript).unwrap().starts_with(&source),"legacy source was rewritten");
     send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));claude_receive_until(&mut reader,|f|f["id"]==2);wait_until(||process.exited());

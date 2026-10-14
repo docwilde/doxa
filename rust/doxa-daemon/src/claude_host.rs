@@ -583,9 +583,10 @@ impl ClaudeHost {
                 return;
             }
         }
-        if !matches!(answer.recv_timeout(RPC_TIMEOUT), Ok(Ok(_))) {
-            emit(done("Claude refused prompt"));
-            return;
+        match answer.recv_timeout(RPC_TIMEOUT) {
+            Ok(Ok(_)) => {}
+            Ok(Err(reason)) => { emit(done(&reason)); return; }
+            Err(_) => { emit(done("Claude prompt admission timed out or closed")); return; }
         }
         while let Ok(event) = rx.recv() {
             let terminal = matches!(event["type"].as_str(), Some("turn_done" | "turn_refused"));
