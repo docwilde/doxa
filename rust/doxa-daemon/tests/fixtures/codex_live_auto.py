@@ -58,6 +58,21 @@ for line in sys.stdin:
     elif method == 'turn/start':
         turn_number += 1
         send({'id': request['id'], 'result': {'turn': {'id': 'turn-' + str(turn_number)}}})
+        if turn_number == 1 and scenario in ('terminal-retry', 'terminal-failure', 'unsettled-error', 'terminal-corrupt'):
+            params = {'threadId': 'thread-auto', 'turnId': 'turn-1'}
+            send({'method': 'error', 'params': {**params, 'willRetry': scenario == 'terminal-retry',
+                  'error': {'message': 'exceeded retry limit, last status: 429 Too Many Requests'}}})
+            if scenario == 'unsettled-error':
+                break
+            send({'method': 'item/completed', 'params': {**params, 'item': {
+                  'type': 'agentMessage', 'id': 'partial', 'text': 'public partial response'}}})
+            if scenario == 'terminal-corrupt':
+                while not release.exists():
+                    time.sleep(.01)
+            send({'method': 'turn/completed', 'params': {'threadId': 'thread-auto', 'turn': {
+                  'id': 'turn-1', 'status': 'completed' if scenario == 'terminal-retry' else 'failed',
+                  'error': None if scenario == 'terminal-retry' else {'message': 'exceeded retry limit, last status: 429 Too Many Requests'}}}})
+            continue
         if turn_number > 1 or (request['params']['approvalPolicy'] == 'never' and scenario != 'fullaccess'):
             assert request['params']['approvalPolicy'] == 'never'
             assert request['params']['sandboxPolicy']['type'] == 'workspaceWrite'
