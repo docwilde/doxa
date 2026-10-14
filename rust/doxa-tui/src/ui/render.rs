@@ -2,7 +2,7 @@
 use super::{
     belief_review_buttons, chip_text, chooser_list_lines, chooser_row_style,
     chooser_visible_start, clipped_title, input_request_body, launch, links, raw_visual_rows,
-    repo_path_label, safe_label, theme, vendor_models, permission_choices, App, ChipHit, Focus, RailGroupKey, RailRow,
+    repo_path_label, safe_label, theme, permission_choices, App, ChipHit, Focus, RailGroupKey, RailRow,
     RenderedTranscript, ENGINE_CHOICES, MAX_RENDERED_TRANSCRIPTS,
     REVIEW_BODY_RESERVE, SPINNER_FRAMES, wrapped_rows,
 };
@@ -347,15 +347,9 @@ impl App {
         let title;
         let mut scrollbar = None;
         if self.engine_picker {
-            title = " New session · choose engine · Enter continue · Esc close ";
-            if height >= 10 {
-                lines.push(Line::from(" Select an engine for a new session:"));
-                lines.push(Line::from(" Model and first prompt follow."));
-                lines.push(Line::from(""));
-            } else {
-                lines.push(Line::from(" Choose engine:"));
-            }
-            let offset = if height >= 10 { 4 } else { 2 };
+            title = " Engine · Enter · Esc ";
+            lines.push(Line::from(" New session:"));
+            let offset = 2;
             let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
             let start =
                 chooser_visible_start(&self.chooser_view_start, self.engine_selected, visible);
@@ -375,7 +369,7 @@ impl App {
                 ));
             }
         } else if let Some(form) = &self.new_session {
-            title = " New session · Tab field · Enter choose/start · Esc close ";
+            title = " New session · Tab fields · R refresh · Esc close ";
             let name = match form.engine {
                 launch::Engine::Codex => "codex",
                 launch::Engine::Claude => "claude",
@@ -384,51 +378,20 @@ impl App {
                 launch::Engine::Router => "Model Router",
                 launch::Engine::Fixture => "fixture",
             };
-            if height < 8 && form.launch_error.is_some() {
-                lines.push(Line::styled(
-                    clipped_title(
-                        form.launch_error.as_deref().unwrap(),
-                        usize::from(area.width.saturating_sub(2)),
-                    )
-                    .0,
-                    Style::default().fg(theme::ERROR),
-                ));
-            } else {
-                lines.push(Line::from(format!(" Engine: {name}")));
+            let (offset,visible,start)=form.field_rows(height,&self.chooser_view_start);
+            if offset>1 {
+                if offset==2 && form.launch_error.is_some() {
+                    lines.push(Line::styled(clipped_title(form.launch_error.as_deref().unwrap(),usize::from(area.width.saturating_sub(3))).0,
+                        Style::default().fg(theme::ERROR)));
+                } else { lines.push(Line::from(format!(" Engine: {name}"))); }
             }
-            if height >= 8 && form.launch_error.is_some() {
-                lines.push(Line::styled(
-                    clipped_title(
-                        form.launch_error.as_deref().unwrap(),
-                        usize::from(area.width.saturating_sub(2)),
-                    )
-                    .0,
-                    Style::default().fg(theme::ERROR),
-                ));
-                lines.push(Line::from(if form.isolation.docker() {
-                    " Ctrl+O Docker image Settings · Enter retry · Esc close"
-                } else if form.retry_allowed {
-                    " Esc close · /setup checks authentication · Enter retry"
-                } else {
-                    " Session exists; use doxa-rs attach · Esc close"
-                }));
-            } else if height >= 8 {
-                lines.push(Line::from(if form.engine==launch::Engine::Router {
-                    " Click/Enter: Auto routing or configured target."
-                } else if vendor_models(form.engine).is_empty() {
-                    " Click/Enter chooses a live model · R refreshes the list."
-                } else {
-                    " Click/Enter choose vendor model and effort."
-                }));
-                lines.push(Line::from(if form.engine==launch::Engine::Router {
-                    format!(" {}",safe_label(&form.catalog_note))
-                } else if vendor_models(form.engine).is_empty() {
-                    format!(" {}", safe_label(&form.catalog_note))
-                } else {
-                    format!(" {}", safe_label(&form.catalog_note))
-                }));
+            if offset>2 {
+                let note=form.launch_error.as_deref().unwrap_or(&form.catalog_note);
+                lines.push(Line::styled(clipped_title(&format!(" {}",safe_label(note)),usize::from(area.width.saturating_sub(3))).0,
+                    Style::default().fg(if form.launch_error.is_some() {theme::ERROR} else {theme::MUTED})));
             }
-            lines.push(Line::styled(
+            let mut field_lines=Vec::new();
+            field_lines.push(Line::styled(
                 format!(
                     " {} {}: {}",
                     if form.field == 0 { '›' } else { ' ' },
@@ -437,13 +400,9 @@ impl App {
                 ),
                 chooser_row_style(form.field == 0),
             ));
-            let prompt_field = if vendor_models(form.engine).is_empty() {
-                2
-            } else {
-                3
-            };
+            let prompt_field = form.prompt_field();
             if prompt_field == 3 {
-                lines.push(Line::styled(
+                field_lines.push(Line::styled(
                     format!(
                         " {} Effort: {}",
                         if form.field == 1 { '›' } else { ' ' },
@@ -452,12 +411,11 @@ impl App {
                     chooser_row_style(form.field == 1),
                 ));
             }
-            lines.push(Line::styled(
-                format!(" {} Isolation: [{} ▾]{}",if form.field==prompt_field-1{'›'}else{' '},form.isolation.label(),
-                    if form.engine==launch::Engine::Router {" · worker command permissions reviewed separately"} else {" · Click/Enter choose"}),
+            field_lines.push(Line::styled(
+                format!(" {} Isolation: [{} ▾]",if form.field==prompt_field-1{'›'}else{' '},form.isolation.label()),
                 chooser_row_style(form.field==prompt_field-1),
             ));
-            lines.push(Line::styled(
+            field_lines.push(Line::styled(
                 format!(
                     " {} First prompt: {}",
                     if form.field == prompt_field {
@@ -469,9 +427,9 @@ impl App {
                 ),
                 chooser_row_style(form.field == prompt_field),
             ));
-            lines.push(Line::styled(
+            field_lines.push(Line::styled(
                 if self.launching {
-                    " Starting session… · waiting for launch result"
+                    " Starting session…"
                 } else if form.isolation.docker() && self.docker_setup.as_ref().is_some_and(|setup| !setup.ready()) {
                     " [ Start session · setup required ]"
                 } else {
@@ -479,6 +437,8 @@ impl App {
                 },
                 chooser_row_style(form.field == prompt_field + 1),
             ));
+            lines.extend(field_lines.into_iter().skip(start).take(visible));
+            if visible<form.field_count() {scrollbar=Some((form.field_count(),visible,start));}
             if form.isolation.docker() {
                 let status = self.docker_setup.as_ref().map(|setup| setup.label())
                     .unwrap_or_else(|| "Start checks image policy and local rootless socket".into());
@@ -491,28 +451,14 @@ impl App {
             let engine = self.session_identity.get(id).and_then(|identity| identity.0.as_deref());
             let choices = permission_choices(engine);
             title = if engine == Some("codex") {
-                " Codex permissions · next turn · Enter select · Esc close "
+                " Permissions · next turn · Enter · Esc "
             } else {
-                " Claude permissions · this session · Enter select · Esc close "
+                " Permissions · Enter · Esc "
             };
-            if height >= 10 {
-                lines.push(Line::from(if engine == Some("codex") {
-                    " Choose how Codex handles approvals and sandbox limits."
-                } else {
-                    " Changes how Claude handles tool permission requests."
-                }));
-                lines.push(Line::from(if engine == Some("codex") {
-                    " Current mode marked with ●; changes apply next turn."
-                } else if self.permission_confirm_dont_ask {
-                    " dontAsk silently denies unapproved calls. Enter again to confirm."
-                } else {
-                    " Current mode marked with ●; dontAsk requires confirmation."
-                }));
-                lines.push(Line::from(""));
-            } else {
-                lines.push(Line::from(" Permission mode:"));
-            }
-            let offset = if height >= 10 { 4 } else { 2 };
+            lines.push(Line::from(if self.permission_confirm_dont_ask {
+                " dontAsk denies unapproved calls · Enter to confirm"
+            } else {" ● Current mode"}));
+            let offset = 2;
             let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
             let start = chooser_visible_start(&self.chooser_view_start, *selected, visible);
             scrollbar = Some((choices.len(), visible, start));
@@ -538,14 +484,14 @@ impl App {
                 ));
             }
         } else if let Some(picker) = &self.effort_picker {
-            title = " Effort · this session · Enter select · Esc close ";
+            title = " Effort · Enter · Esc ";
             let current = self
                 .session_efforts
                 .get(&picker.session_id)
                 .map(String::as_str)
                 .unwrap_or("unknown");
             lines.push(Line::from(format!(
-                " Current: {current} · {}/{} · idle session required",
+                " Current: {current} · {}/{}",
                 picker.engine, picker.model
             )));
             lines.push(Line::from(""));
@@ -563,7 +509,7 @@ impl App {
                 ));
             }
         } else {
-            title = " Model · this session · R retry · Enter select · Esc close ";
+            title = " Model · Enter · Esc · R refresh ";
             let picker = self.model_picker.as_ref().unwrap();
             lines.push(Line::from(format!(" {}", picker.note)));
             if let Some(model) = picker.models.get(picker.selected) {
@@ -577,10 +523,10 @@ impl App {
             lines.push(Line::from(""));
             if picker.catalog_pending {
                 lines.push(Line::from(
-                    " Catalog probe in progress · refreshes automatically",
+                    " Checking catalog…",
                 ));
             } else if !picker.loading && picker.models.is_empty() {
-                lines.push(Line::from(" No verified models available for this session"));
+                lines.push(Line::from(" No verified models"));
             }
             let visible = picker.visible_rows(height);
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
@@ -617,7 +563,7 @@ impl App {
             return;
         };
         let mut lines = vec![
-            Line::from(format!(" env > config.toml > default · {} unsaved", menu.edits.len() + usize::from(menu.draft.is_some()))),
+            Line::from(format!(" {} unsaved", menu.edits.len() + usize::from(menu.draft.is_some()))),
             Line::from(""),
         ];
         let (indices, start, visible) = menu.visible_window(area.height);
@@ -681,18 +627,6 @@ impl App {
         {
             lines.push(Line::from(""));
             lines.push(Line::from(format!(" {}", row.setting.help)));
-            if !row.setting.choices.is_empty() {
-                lines.push(Line::from(format!(
-                    " Choices: {}",
-                    row.setting
-                        .choices
-                        .iter()
-                        .filter(|s| !s.is_empty())
-                        .map(|choice|if row.setting.key=="engine" {crate::settings::engine_label(choice)} else {choice})
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                )));
-            }
             if ["derive_secs", "consult_floor", "graph_context"].contains(&row.setting.key) {
                 lines.push(Line::from(" Claude session memory control; Codex/vendor use their engine's snapshot policy."));
             }
@@ -737,14 +671,14 @@ impl App {
             let path=std::path::PathBuf::from(menu.effective_value("mcp_config"));
             let width=usize::from(area.width.saturating_sub(3)).max(1);
             let mut footer=vec![Line::styled(if self.mcp_secret.is_some() {
-                " Key editor · masked · Enter/Ctrl+S save privately · Esc discards"
-            } else {" Ctrl+P probe · Ctrl+R reload config · PgUp/PgDn servers · no tools"},Style::default().fg(theme::ACCENT))];
+                " Key editor · Enter save · Esc cancel"
+            } else {" Ctrl+P check · Ctrl+R reload · PgUp/PgDn"},Style::default().fg(theme::ACCENT))];
             footer.extend(self.mcp_probe_lines(&path).into_iter().flat_map(|line|
                 crate::memory_menu::wrap_review(&format!(" {line}"),width)).take(4).map(Line::from));
             footer
         } else if router_selected {
             let path=std::path::PathBuf::from(menu.effective_value("router_config"));
-            let mut footer=vec![Line::styled(" Ctrl+P: review Model Router config/accounts/catalogs · no inference",
+            let mut footer=vec![Line::styled(" Ctrl+P review Router",
                 Style::default().fg(theme::ACCENT))];
             let width=usize::from(area.width.saturating_sub(3)).max(1);
             footer.extend(self.router_review_lines(&path).into_iter().flat_map(|line|
@@ -755,7 +689,7 @@ impl App {
                 .map(|preflight| preflight.message(&menu.mermaid_paths()))
                 .unwrap_or_else(|| "Not checked".into());
             let width = usize::from(area.width.saturating_sub(3)).max(1);
-            let mut footer = vec![Line::styled(" Ctrl+P: check proposed values with a fixed sample (no transcript source)",
+            let mut footer = vec![Line::styled(" Ctrl+P check renderer",
                 Style::default().fg(theme::ACCENT))];
             footer.extend(crate::memory_menu::wrap_review(&format!(" Preflight: {status}"), width)
                 .into_iter().take(3).map(Line::from));

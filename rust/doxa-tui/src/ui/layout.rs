@@ -1,11 +1,10 @@
 //! Derive pane geometry, focus order and chip hit regions from frontend state.
 use super::{
     chip_hint, chip_text, clipped_title, input_request_body, memory_fill_label, panes, prompt_height,
-    repo_chip, safe_label, vendor_models, wrapped_rows, App, ChipHit, ChipInfo, Focus, PaneGroup,
+    repo_chip, safe_label, wrapped_rows, App, ChipHit, ChipInfo, Focus, PaneGroup,
     PaneLayout, RailGroupKey, RailRow, Split, INPUT_BLINK_INTERVAL, MIN_PANE_HEIGHT, MIN_PANE_WIDTH,
     MIN_RAIL_WIDTH, SPINNER_FRAMES, SPINNER_INTERVAL,
 };
-use crate::launch;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
@@ -511,15 +510,7 @@ impl App {
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
-            if form.isolation.docker() {
-                if vendor_models(form.engine).is_empty() { 12 } else { 13 }
-            } else if !vendor_models(form.engine).is_empty() {
-                10
-            } else if form.engine == launch::Engine::Claude {
-                9
-            } else {
-                8
-            }
+            if form.isolation.docker() {12} else {9}
         } else if let Some(picker) = &self.effort_picker {
             (4 + picker.levels.len()).clamp(5, 10) as u16
         } else if self.permission_picker.is_some() {

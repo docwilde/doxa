@@ -184,7 +184,11 @@ impl App {
                 let menu = self.settings_menu.as_ref()?;
                 parent.y + 3 + menu.visible_indices(parent.height).iter().position(|index| *index == menu.selected)? as u16
             }
-            Owner::NewSession { field, .. } => parent.y + if parent.height >= 8 { 4 } else { 2 } + *field as u16,
+            Owner::NewSession { field, .. } => {
+                let form=self.new_session.as_ref()?;
+                let (offset,_,start)=form.field_rows(parent.height,&self.chooser_view_start);
+                parent.y+offset+field.checked_sub(start)? as u16
+            },
         };
         let height = (dropdown.choices.len() as u16 + 2).min(parent.height.saturating_sub(2)).max(3);
         let width = dropdown.choices.iter().map(|value| self.dropdown_choice_label(&dropdown.owner,value).width() as u16 + 4).max().unwrap_or(10)
@@ -240,7 +244,7 @@ impl App {
         frame.render_widget(Clear, area);
         frame.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL)
             .title(format!(" {} ", safe_label(&dropdown.title)))
-            .title_bottom(if model { " Enter · Esc · R refresh " } else { " Enter select · Esc cancel " })
+            .title_bottom(if model { " Enter · Esc · R refresh " } else { " Enter · Esc " })
             .border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
         super::render::draw_menu_scrollbar(frame, area, dropdown.choices.len(), count, start);
@@ -587,7 +591,7 @@ mod tests {
         let mut app = vendor_app();
         assert!(paint(&app).contains("[fixture-a ▾]"));
         let area = app.active_chooser_rect().unwrap();
-        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), area.x + 3, area.y + 4);
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), area.x + 3, area.y + 3);
         assert!(app.choice_dropdown.is_some());
         key(&mut app, KeyCode::Down);
         assert_eq!(app.new_session.as_ref().unwrap().model, "fixture-a");

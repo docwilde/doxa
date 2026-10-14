@@ -804,8 +804,8 @@ impl App {
         let form = self.new_session.as_mut().unwrap();
         let vendor = !vendor_models(form.engine).is_empty();
         let router = form.engine==launch::Engine::Router;
-        let fields = if vendor { 4 } else { 3 };
-        let prompt_field = fields - 1;
+        let fields = form.field_count();
+        let prompt_field = form.prompt_field();
         match key.code {
             KeyCode::Esc => { self.cancel_new_session_catalog(); self.new_session = None; }
             KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
@@ -827,7 +827,7 @@ impl App {
                     }
                 }
             }
-            KeyCode::Enter if form.field < prompt_field => form.field += 1,
+            KeyCode::Enter if form.field < fields-1 => form.field += 1,
             KeyCode::Enter => {
                 if self.launching {
                     self.notice = "Session launch already in progress".into();

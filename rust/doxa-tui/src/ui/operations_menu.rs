@@ -145,12 +145,12 @@ impl Menu {
         use unicode_width::UnicodeWidthChar;
         let width = width.max(1);
         let mut lines = vec![if self.busy() && matches!(self.kind.as_str(), "login" | "logout") {
-            format!("{} · Esc cancel · PgUp/PgDn report", self.kind)
-        } else { format!("{} · ↑↓ choose · Enter apply · Esc close · PgUp/PgDn report", self.kind) }];
+            format!("{} · Esc cancel · PgUp/PgDn", self.kind)
+        } else { format!("{} · Enter · Esc · PgUp/PgDn", self.kind) }];
         if self.busy() { lines.push("Operation running…".into()); }
         else if self.requested { lines.push("Operation requested…".into()); }
         if let Some(editor) = &self.secret {
-            lines[0] = "API key · paste/type · Backspace delete · Enter save · Esc cancel".into();
+            lines[0] = "API key · Enter save · Esc cancel".into();
             lines.push(format!("{} API key: {}", credential_editor::label(editor.vendor), editor.mask()));
             lines.push(format!("{} Save API key", if self.selected == 0 { "›" } else { " " }));
             lines.push(format!("{} Cancel editing", if self.selected == 1 { "›" } else { " " }));

@@ -13,6 +13,11 @@ the stable 2.0 release has not been cut.
 - Include the new request, memory, tools and response headroom; respect configured native compaction thresholds and Router input caps. Keep fitting native sessions and reviewed API summaries intact.
 - Trim the oldest turns when the budget is exceeded; mark omissions and clipped text. Show the measurement and unknown model limits in the transcript; preserve original records, permissions and accounting.
 
+**Session menus**
+
+- Fix **`NewSession`** hiding or skipping **Start session**. Give every engine the same compact layout and an explicit, keyboard-accessible start action; scroll fields in small panes.
+- Shorten engine, model, effort, permission, settings and operations submenus. Remove repeated navigation explanations and duplicate choice lists; retain setting details and confirmation behavior.
+
 ## 2.0.0-beta.52 — 2026-10-13
 
 **Fleet recovery**

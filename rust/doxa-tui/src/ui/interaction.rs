@@ -2,7 +2,7 @@
 use super::{
     input_request_option_at, belief_buttons, belief_review_buttons, chooser_visible_start,
     prompt_height, raw_visual_rows, safe_label, tool_cards, transcript_tools, unsafe_input_char,
-    vendor_models, App, DragTarget, Focus, RailRow, Split, COMMANDS, ENGINE_CHOICES,
+    App, DragTarget, Focus, RailRow, Split, COMMANDS, ENGINE_CHOICES,
     MAX_ANSWER_BYTES, MAX_INPUT_BYTES, MAX_PENDING_PROMPTS, MAX_REJECT_REASON_BYTES,
     MIN_PANE_HEIGHT, MIN_PANE_WIDTH, MIN_RAIL_WIDTH, permission_choices, REVIEW_BODY_RESERVE,
 };
@@ -2029,7 +2029,7 @@ impl App {
                 return true;
             }
         } else if self.engine_picker {
-            let offset = if menu.height >= 10 { 4 } else { 2 };
+            let offset = 2;
             if row < menu.y + offset {
                 return false;
             }
@@ -2042,21 +2042,17 @@ impl App {
                 return true;
             }
         } else if let Some(form) = self.new_session.as_mut() {
-            let first = menu.y + if menu.height >= 8 { 4 } else { 2 };
-            let fields = if vendor_models(form.engine).is_empty() {
-                3
-            } else {
-                4
-            };
-            if row >= first && usize::from(row - first) <= fields {
-                let index = usize::from(row - first);
+            let (offset,visible,start)=form.field_rows(menu.height,&self.chooser_view_start);
+            let first=menu.y+offset;
+            if row >= first && usize::from(row - first) < visible {
+                let index = start+usize::from(row - first);
                 if form.field != index {
                     form.field = index;
                     return true;
                 }
             }
         } else if let Some((id, selected)) = self.permission_picker.as_mut() {
-            let offset = if menu.height >= 10 { 4 } else { 2 };
+            let offset = 2;
             if row < menu.y + offset {
                 return false;
             }
@@ -3215,7 +3211,7 @@ impl App {
                 return true;
             }
             if self.engine_picker {
-                let offset = if height >= 10 { 4 } else { 2 };
+                let offset = 2;
                 if mouse.row < y + offset {
                     return true;
                 }
@@ -3230,20 +3226,17 @@ impl App {
                 return true;
             }
             if self.new_session.as_ref().is_some_and(|form| form.isolation.docker()) {
-                let fields = if vendor_models(self.new_session.as_ref().unwrap().engine).is_empty() { 3 } else { 4 };
-                let first = y + if height >= 8 { 4 } else { 2 };
-                if mouse.row == first + fields + 2 { return self.open_docker_settings(); }
+                let form=self.new_session.as_ref().unwrap();
+                let (offset,visible,start)=form.field_rows(height,&self.chooser_view_start);
+                if start==0 && visible==form.field_count()
+                    && mouse.row == y+offset+form.field_count() as u16+1 { return self.open_docker_settings(); }
             }
             if let Some(form) = self.new_session.as_mut() {
-                let first = y + if height >= 8 { 4 } else { 2 };
-                let fields = if vendor_models(form.engine).is_empty() {
-                    3
-                } else {
-                    4
-                };
-                if mouse.row >= first && usize::from(mouse.row - first) <= fields {
-                    form.field = usize::from(mouse.row - first);
-                    if form.field == fields {
+                let (offset,visible,start)=form.field_rows(height,&self.chooser_view_start);
+                let first=y+offset;
+                if mouse.row >= first && usize::from(mouse.row - first) < visible {
+                    form.field = start+usize::from(mouse.row - first);
+                    if form.field == form.field_count()-1 {
                         self.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                     } else {
                         self.open_new_session_dropdown();
@@ -3264,7 +3257,7 @@ impl App {
             }
             if let Some((id, selected)) = &mut self.permission_picker {
                 let choices = permission_choices(self.session_identity.get(id).and_then(|identity| identity.0.as_deref()));
-                let offset = if height >= 10 { 4 } else { 2 };
+                let offset = 2;
                 if mouse.row >= y + offset {
                     let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
                     let start = chooser_visible_start(&self.chooser_view_start, *selected, visible);

@@ -274,7 +274,7 @@ use super::*;
         app.new_session_key(KeyEvent::new(KeyCode::Home,KeyModifiers::NONE));
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert_eq!(app.new_session.as_ref().unwrap().isolation,doxa_isolation::Profile::Native);
-        app.new_session.as_mut().unwrap().field=2;
+        app.new_session.as_mut().unwrap().field=3;
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         let (options,_,_)=app.pending_launches.pop().unwrap();
         assert_eq!(options.engine,launch::Engine::Router);
@@ -324,6 +324,7 @@ use super::*;
         assert_eq!(form.model,"glm");
         assert!(form.catalog_note.contains("1 unknown"));
         assert!(!form.catalog_pending);
+        app.new_session.as_mut().unwrap().field=3;
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert!(app.pending_launches.is_empty());
         assert!(app.notice.contains("catalog changed"));
@@ -657,8 +658,8 @@ use super::*;
             let label = crate::settings::find(key).unwrap().label;
             assert!(text.contains(&format!("{label}:")), "missing {key}: {text}");
         }
-        assert!(text.contains("Ctrl+P probe"), "{text}");
-        assert!(text.contains("no tools"), "{text}");
+        assert!(text.contains("Ctrl+P check"), "{text}");
+        assert!(text.contains("Ctrl+R reload"), "{text}");
         assert!(text.contains("Config snapshot"), "{text}");
         let menu = app.settings_menu.as_ref().unwrap();
         assert_eq!(menu.visible_indices(app.active_chooser_rect().unwrap().height).len(), 6);
@@ -2092,7 +2093,7 @@ for line in sys.stdin:
         app.open_permission_picker();
         let menu = app.active_chooser_rect().unwrap();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
-            column: menu.x + 2, row: menu.y + 6, modifiers: KeyModifiers::NONE }));
+            column: menu.x + 2, row: menu.y + 4, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.pending_permission_changes, vec![("s".into(), "plan".into())]);
         app.open_permission_picker();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
@@ -2327,7 +2328,7 @@ for line in sys.stdin:
         tx.send(Ok(json!({"models":["sonnet","opus"]}))).unwrap();
         assert!(app.poll_new_session_catalog());
         let form = app.active_chooser_rect().unwrap();
-        let first = form.y + if form.height >= 8 { 4 } else { 2 };
+        let first = form.y + app.new_session.as_ref().unwrap().field_rows(form.height,&app.chooser_view_start).0;
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: form.x + 2, row: first + 1, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.new_session.as_ref().unwrap().field, 1);
@@ -2382,7 +2383,7 @@ for line in sys.stdin:
         assert!(app.docker_setup.as_ref().unwrap().label().contains("Image digest missing"));
         let paint = painted_at(&app, 160, 36);
         assert!(paint.contains("Image digest missing") && paint.contains("Ctrl+O") && paint.contains("containers/session/README.md"));
-        app.new_session.as_mut().unwrap().field = 2;
+        app.new_session.as_mut().unwrap().field = 3;
         app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(!app.launching && app.pending_launches.is_empty());
         assert!(app.new_session.as_ref().unwrap().launch_error.as_ref().unwrap().starts_with("Docker setup:"));
@@ -2390,7 +2391,7 @@ for line in sys.stdin:
         // Click the actual action row, then return by Escape without losing input.
         let menu = app.active_chooser_rect().unwrap();
         app.handle(Event::Mouse(MouseEvent { kind:MouseEventKind::Down(MouseButton::Left),
-            column:menu.x+3, row:menu.y+9, modifiers:KeyModifiers::NONE }));
+            column:menu.x+3, row:menu.y+8, modifiers:KeyModifiers::NONE }));
         assert!(app.docker_settings_open);
         assert_eq!(app.settings_menu.as_ref().unwrap().rows[app.settings_menu.as_ref().unwrap().selected].setting.key, "docker_image");
         app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
@@ -2447,6 +2448,8 @@ for line in sys.stdin:
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
         }
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.pending_launches.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         let (options, prompt, group) = app.pending_launches.pop().unwrap();
         assert_eq!(options.engine, launch::Engine::DeepSeek);
         assert_eq!(options.model.as_deref(), Some("deepseek-flash"));
@@ -2455,6 +2458,32 @@ for line in sys.stdin:
         assert_eq!(group, 0);
         assert!(app.launching);
         assert!(app.new_session.is_some());
+    }
+
+    #[test]
+    fn every_engine_has_an_explicit_start_action_in_compact_and_full_panes() {
+        for engine in [launch::Engine::Claude,launch::Engine::Codex,launch::Engine::DeepSeek,launch::Engine::Glm,launch::Engine::Router] {
+            for (width,height) in [(100,28),(40,14)] {
+                let mut app=App::default();app.rail_visible=false;
+                app.handle(Event::Resize(width,height));
+                app.new_session=Some(NewSession {engine,isolation:doxa_isolation::Profile::Native,
+                    router_config:None,model:"test-model".into(),models:vec!["test-model".into()],
+                    model_efforts:HashMap::new(),catalog_note:"Catalog ready".into(),catalog_pending:false,
+                    launch_error:None,retry_allowed:true,effort:None,prompt:"Keep this prompt".into(),field:0});
+                let fields=app.new_session.as_ref().unwrap().field_count();
+                for _ in 0..fields-2 {app.new_session_key(KeyEvent::new(KeyCode::Tab,KeyModifiers::NONE));}
+                app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+                assert!(app.pending_launches.is_empty(),"prompt submission launched {engine:?}");
+                assert_eq!(app.new_session.as_ref().unwrap().field,fields-1);
+                let text=painted_at(&app,width,height);
+                assert!(text.contains("Start session"),"{engine:?} at {width}x{height}: {text}");
+                app.new_session_key(KeyEvent::new(KeyCode::Tab,KeyModifiers::NONE));
+                assert_eq!(app.new_session.as_ref().unwrap().field,0);
+                app.new_session_key(KeyEvent::new(KeyCode::BackTab,KeyModifiers::NONE));
+                assert_eq!(app.new_session.as_ref().unwrap().field,fields-1);
+                assert_eq!(app.new_session.as_ref().unwrap().prompt,"Keep this prompt");
+            }
+        }
     }
 
     #[test]
@@ -2467,11 +2496,11 @@ for line in sys.stdin:
         app.engine_selected = 1; // Claude
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
-        app.new_session.as_mut().unwrap().field = 2;
+        app.new_session.as_mut().unwrap().field = 3;
         app.new_session.as_mut().unwrap().prompt = "Private first prompt".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.launching && app.new_session.is_some());
-        assert!(painted_at(&app, 110, 36).contains("waiting for launch result"));
+        assert!(painted_at(&app, 110, 36).contains("Starting session"));
         app.apply_daemon_frame(&json!({"type":"launch_reply","ok":false,"message":"Claude dependency unavailable"}));
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"old","engine":"codex","model":"gpt-6-sol"}));
         let form = app.new_session.as_ref().unwrap();
@@ -2534,7 +2563,7 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT)));
         assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["none", "low", "high", "max"]);
         assert_eq!(app.effort_picker.as_ref().unwrap().selected, 2);
-        assert!(painted(&app).contains("this session"));
+        assert!(painted(&app).contains("Effort"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.pending_effort_changes, vec![("deep-1".into(), "max".into())]);
@@ -2744,7 +2773,7 @@ for line in sys.stdin:
         assert!(app.new_session.as_ref().unwrap().models.is_empty());
         assert!(app.new_session.as_ref().unwrap().model.is_empty());
         assert!(app.new_session.as_ref().unwrap().catalog_note.contains("choose another engine"));
-        app.new_session.as_mut().unwrap().field = 3;
+        app.new_session.as_mut().unwrap().field = 4;
         app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.pending_launches.is_empty());
         assert!(app.notice.contains("No verified models"));
@@ -3654,7 +3683,7 @@ for line in sys.stdin:
         assert_eq!(after.bottom(), before.bottom());
         assert!(app.mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left),
             column: before.x + 3, row: after.y, modifiers: KeyModifiers::NONE }));
-        let row = after.y + if after.height >= 10 { 5 } else { 3 };
+        let row = after.y + 3;
         assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
             column: after.x + 2, row, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.engine_selected, 1);
@@ -5041,7 +5070,7 @@ for line in sys.stdin:
         assert!(menu.y > pane.y + 2);
         let after = painted(&app);
         let lines: Vec<_> = after.lines().collect();
-        assert!(lines[usize::from(menu.y)].contains("New session"));
+        assert!(lines[usize::from(menu.y)].contains("Engine"));
         assert!(lines[usize::from(menu.bottom())].contains("Engine"));
         assert!(lines[usize::from(menu.bottom() + 1)].contains("Prompt"));
         let old_lines: Vec<_> = before.lines().collect();

@@ -420,6 +420,16 @@ struct NewSession {
     prompt: String,
     field: usize,
 }
+impl NewSession {
+    fn field_count(&self) -> usize { if vendor_models(self.engine).is_empty() {4} else {5} }
+    fn prompt_field(&self) -> usize { self.field_count()-2 }
+    fn field_rows(&self, height:u16, view_start:&Cell<usize>) -> (u16,usize,usize) {
+        let headers=height.saturating_sub(2).saturating_sub(self.field_count() as u16).min(2);
+        let offset=1+headers;
+        let visible=usize::from(height.saturating_sub(offset+1)).max(1).min(self.field_count());
+        (offset,visible,chooser_visible_start(view_start,self.field,visible))
+    }
+}
 
 #[derive(Debug)]
 struct ClearPending {
