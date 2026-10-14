@@ -633,6 +633,7 @@ impl AppServerDriver {
             .ok_or(AppServerError::Protocol("turn response lacks a valid ID"))?.to_owned();
         self.turn_id = Some(turn_id.clone());
         let mut automatic_compaction_reviewed = false;
+        let mut notified_error = None;
         loop {
             let frame = if let Some((frame, bytes)) = self.pending_notifications.pop_front() {
                 self.pending_bytes = self.pending_bytes.saturating_sub(bytes);
@@ -727,8 +728,8 @@ impl AppServerDriver {
                     continue;
                 }
                 let params = &frame["params"];
-                if method != "error" && params["threadId"].as_str() != Some(&thread_id) { continue; }
-                if method != "error" && method != "turn/completed"
+                if params["threadId"].as_str() != Some(&thread_id) { continue; }
+                if method != "turn/completed"
                     && params["turnId"].as_str() != Some(&turn_id) { continue; }
                 if method == "turn/completed" && params["turn"]["id"].as_str() != Some(&turn_id) {
                     continue;
@@ -838,9 +839,14 @@ impl AppServerDriver {
                         }
                     }
                     "turn/completed" => {
-                        let status = params["turn"]["status"].as_str().unwrap_or("failed");
+                        let status = params["turn"]["status"].as_str()
+                            .filter(|status| matches!(*status, "completed" | "failed" | "interrupted"))
+                            .ok_or(AppServerError::Protocol("invalid terminal turn status"))?;
                         let failed = status != "completed";
-                        let error = params["turn"]["error"]["message"].as_str().map(|s| (self.scrub)(s));
+                        let error = if failed {
+                            params["turn"]["error"]["message"].as_str().map(|s| (self.scrub)(s))
+                                .or(notified_error.take()).or_else(|| Some(format!("Codex turn {status}")))
+                        } else { None };
                         if !self.reasoning_buffer.is_empty() {
                             let text = if self.reasoning_truncated { "[Reasoning content withheld: display limit reached]".to_owned() }
                                 else { (self.scrub)(&self.reasoning_buffer) };
@@ -856,7 +862,7 @@ impl AppServerDriver {
                         let pct = used.zip(window).and_then(|(used, window)|
                             (window > 0 && used <= window).then_some(100.0 * used as f64 / window as f64));
                         emit(EngineEvent::new("turn_done", json!({
-                            "is_error":failed,"error":error,"usage_scope":"session",
+                            "is_error":failed,"error":error,"status":status,"usage_scope":"session",
                             "model":self.effective_model,
                             "model_consistent":self.effective_model.is_some() && self.effective_model == self.options.model,
                             "usage_complete":total.is_some_and(|u| u["inputTokens"].as_u64().is_some() && u["outputTokens"].as_u64().is_some()),
@@ -871,7 +877,15 @@ impl AppServerDriver {
                         self.turn_id = None;
                         return if failed { Err(AppServerError::Server(error.unwrap_or_else(|| format!("turn {status}")))) } else { Ok(()) };
                     }
-                    "error" => return Err(AppServerError::Server((self.scrub)(params["error"].as_str().unwrap_or("Codex app-server error")))),
+                    "error" => {
+                        // ErrorNotification is turn-scoped and is not a terminal
+                        // boundary. The server may retry; even a final error is
+                        // followed by turn/completed. Drain it before reuse or
+                        // checkpointing, keeping the existing timeout/cancel guards.
+                        let message = params["error"]["message"].as_str()
+                            .or_else(|| params["error"].as_str()).unwrap_or("Codex app-server error");
+                        notified_error = Some((self.scrub)(message));
+                    },
                     _ => {},
                 }
             }

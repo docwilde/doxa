@@ -90,6 +90,63 @@ async fn fake_appserver_resume_uses_the_recorded_thread() {
 }
 
 #[tokio::test]
+async fn turn_errors_are_scoped_and_drained_before_reusing_the_thread() {
+    for status in ["completed", "failed", "interrupted", "missing", "unknown"] {
+        let (_dir, options) = fake();
+        let original = std::fs::read_to_string(&options.executable).unwrap();
+        let setup = original.split("turn = read()").next().unwrap();
+        let body = r#"
+status = '__STATUS__'
+for index in range(2):
+    turn = read()
+    assert turn['method'] == 'turn/start'
+    turn_id = 'turn_' + str(index)
+    send({'id':turn['id'],'result':{'turn':{'id':turn_id}}})
+    def notice(method, **params):
+        send({'method':method,'params':{'threadId':'thread_1','turnId':turn_id,**params}})
+    if index == 0:
+        send({'method':'error','params':{'threadId':'other_thread','turnId':turn_id,
+              'error':{'message':'unrelated secret'},'willRetry':False}})
+        send({'method':'error','params':{'threadId':'thread_1','turnId':'old_turn',
+              'error':{'message':'stale secret'},'willRetry':False}})
+        notice('error', error={'message':'429 secret'}, willRetry=status == 'completed')
+        if status == 'missing':
+            break
+    notice('item/agentMessage/delta', itemId='answer_'+str(index), delta='public output')
+    final_status = status if index == 0 else 'completed'
+    # Omit the terminal error to exercise the ErrorNotification fallback.
+    notice('turn/completed', turn={'id':turn_id,'status':final_status,'error':None})
+    if status == 'unknown':
+        break
+"#.replace("__STATUS__", status);
+        std::fs::write(&options.executable, format!("{setup}{body}")).unwrap();
+        let mut driver = AppServerDriver::spawn(options, |text| text.replace("secret", "[redacted]")).await.unwrap();
+        let mut events = Vec::new();
+        let result = driver.run_turn("hello", &CancellationToken::new(), |event| events.push(event)).await;
+        if matches!(status, "missing" | "unknown") {
+            assert!(result.is_err());
+            assert!(!events.iter().any(|event| event.kind == "turn_done"));
+        } else {
+            let done = events.iter().find(|event| event.kind == "turn_done").unwrap();
+            assert_eq!(done.data["status"], status);
+            assert_eq!(done.data["is_error"], status != "completed");
+            if status == "completed" {
+                assert!(result.is_ok());
+                assert!(done.data["error"].is_null());
+            } else {
+                assert!(matches!(result, Err(doxa_engines::codex_appserver::AppServerError::Server(ref message)) if message == "429 [redacted]"));
+                assert_eq!(done.data["error"], "429 [redacted]");
+            }
+            assert!(events.iter().any(|event| event.kind == "text_delta" && event.data["text"] == "public output"));
+            assert!(!events.iter().any(|event| event.data.to_string().contains("secret")));
+            driver.run_turn("hello", &CancellationToken::new(), |_| {}).await.unwrap();
+            assert_eq!(driver.thread_id(), "thread_1");
+        }
+        driver.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn interactive_permissions_follow_the_selected_mode_on_each_turn() {
     let (_dir, mut options) = fake();
     std::fs::write(&options.executable, r#"#!/usr/bin/env python3

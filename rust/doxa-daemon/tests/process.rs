@@ -3918,6 +3918,76 @@ fn codex_auto_fixture(root: &Path, scenario: &str) -> PathBuf {
     codex
 }
 
+#[test]
+#[cfg(target_os = "linux")]
+fn codex_provider_errors_settle_without_poisoning_the_durable_session() {
+    for scenario in ["terminal-retry", "terminal-failure", "unsettled-error", "terminal-corrupt"] {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = codex_auto_fixture(dir.path(), scenario);
+        let mut process = Process::start_codex_appserver(dir.path(), &codex, Path::new("python3"), false);
+        let (mut reader, mut socket) = process.connect();
+        reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        send(&mut socket, json!({"type":"prompt","id":1,"text":"first request"}));
+        let checkpoint = native_transcript(dir.path(), "codex-session.codex.json");
+        let mut damaged = false;
+        let first = loop {
+            let row = receive(&mut reader);
+            if scenario == "terminal-corrupt" && row["event"]["type"] == "text_delta" {
+                fs::remove_file(&checkpoint).unwrap();
+                fs::create_dir(&checkpoint).unwrap();
+                damaged = true;
+                fs::write(dir.path().join("release"), "continue").unwrap();
+            }
+            if row["event"]["type"] == "turn_done" { break row["event"]["data"].clone(); }
+        };
+        assert_eq!(first["is_error"], scenario != "terminal-retry", "{scenario}: {first}");
+        let settled = matches!(scenario, "terminal-retry" | "terminal-failure");
+        if scenario == "terminal-failure" {
+            assert!(first["error"].as_str().unwrap().contains("429 Too Many Requests"), "{first}");
+            assert_eq!(first["status"], "failed");
+        }
+        if !damaged {
+            let saved: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+            assert_eq!(saved["turn_incomplete"], !settled, "{scenario}: {saved}");
+        }
+        let transcript = fs::read_to_string(native_transcript(dir.path(), "codex-session.jsonl")).unwrap();
+        if settled {
+            assert!(transcript.contains("public partial response"));
+            assert_eq!(transcript.contains("doxa_provider_error"), scenario == "terminal-failure");
+        }
+        send(&mut socket, json!({"type":"prompt","id":2,"text":"second request"}));
+        loop {
+            let row = receive(&mut reader);
+            if row["event"]["type"] == "turn_done" {
+                assert_eq!(row["event"]["data"]["is_error"], !settled, "{scenario}: {row}");
+                break;
+            }
+        }
+        let log: Vec<Value> = fs::read_to_string(dir.path().join("auto-rpcs.jsonl")).unwrap()
+            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(log.iter().filter(|row| row["method"] == "thread/start").count(), 1);
+        assert_eq!(log.iter().filter(|row| row["method"] == "turn/start").count(), if settled { 2 } else { 1 });
+        if settled {
+            send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+            while receive(&mut reader)["type"] != "reply" {}
+            wait_until(|| process.exited());
+            let mut resumed = Process::start_codex_appserver(dir.path(), &codex, Path::new("python3"), true);
+            let (mut reader, mut socket) = resumed.connect();
+            reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+            receive(&mut reader);
+            send(&mut socket, json!({"type":"attach","cursor":null}));
+            let mut frames = Vec::new();
+            let verified = codex_auto_rpc(&mut reader, &mut socket, 4, "verify_resume", json!({}), &mut frames);
+            assert_eq!(verified["ok"], true, "{scenario}: {verified}");
+            assert_eq!(verified["thread_id"], "thread-auto");
+            assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 5, "stop", json!({}), &mut frames)["ok"], true);
+            wait_until(|| resumed.exited());
+        }
+    }
+}
+
 fn codex_auto_pending(reader: &mut BufReader<UnixStream>, socket: &mut UnixStream) -> String {
     send(socket, json!({"type":"attach","cursor":null}));
     send(socket, json!({"type":"prompt","id":1,"text":"synthetic auto fixture"}));

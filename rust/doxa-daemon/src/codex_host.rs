@@ -729,6 +729,7 @@ impl CodexHost {
         let thread_write_failed = Cell::new(false);
         let compact_blocked = Cell::new(false);
         let compact_cancelled_before_submission = Cell::new(false);
+        let terminal_observed = Cell::new(false);
         let mut terminal_event = None;
         let mut handle_event = |event: doxa_engines::EngineEvent| {
             if self.scrub_failed.load(Ordering::Acquire)
@@ -749,6 +750,7 @@ impl CodexHost {
                 }
                 let frame = json!({"type":event.kind,"data":event.data});
                 if event.kind == "turn_done" {
+                    terminal_observed.set(true);
                     terminal_event = Some(frame);
                 } else if !thread_write_failed.get() {
                     if matches!(event.kind.as_str(), "tool_call" | "tool_result" | "tool_result_detail")
@@ -899,7 +901,8 @@ impl CodexHost {
                                 _ => "Codex app-server protocol or process failed".to_owned(),
                             });
                             if let Some(app) = active.as_ref() { self.remember_rollout(app); }
-                            if outcome.is_err() && (!compact_blocked.get() || compact_cancelled_before_submission.get()) {
+                            if outcome.is_err() && !terminal_observed.get()
+                                && (!compact_blocked.get() || compact_cancelled_before_submission.get()) {
                                 if let Some(app) = active.as_mut() { runtime.block_on(app.shutdown()); }
                                 *active = None;
                             }
@@ -943,24 +946,31 @@ impl CodexHost {
                 }
             }
         }
-        // A provider error or interrupted turn can leave the provider thread
-        // ahead of our durable transcript. Keep its restart guard armed.
+        // A verified terminal boundary settles failed provider turns too.
+        // Persist their partial public output and error before clearing the
+        // restart guard. Missing boundaries or failed writes still fail closed.
+        let turn_settled = terminal_observed.get() && !thread_write_failed.get();
         let turn_succeeded = result.is_ok()
             && terminal_event
                 .as_ref()
                 .and_then(|frame| frame["data"]["is_error"].as_bool())
                 == Some(false);
         if !self.scrub_failed.load(Ordering::Acquire) {
-            if turn_succeeded && !thread_write_failed.get()
+            if turn_settled
                 && !self.persistence_failed.load(Ordering::Acquire) && !assistant_text.is_empty() {
                 let _ = self.persist(json!({"type":"assistant","message":{"role":"assistant",
                     "content":[{"type":"text","text":assistant_text}]},
                     "sessionId":self.session_id,"timestamp":crate::iso_now()}));
             }
+            if turn_settled && !turn_succeeded && !self.persistence_failed.load(Ordering::Acquire) {
+                let _ = self.persist(json!({"type":"doxa_provider_error",
+                    "data":terminal_event.as_ref().map(|frame| &frame["data"]),
+                    "sessionId":self.session_id,"timestamp":crate::iso_now()}));
+            }
             if let Some(id) = self.driver.lock().unwrap().thread_id().map(str::to_owned) {
                 let _ = self.persist_thread(
                     &id,
-                    !turn_succeeded || self.persistence_failed.load(Ordering::Acquire),
+                    !turn_settled || self.persistence_failed.load(Ordering::Acquire),
                 );
             } else if result.is_ok() {
                 // A rejected startup has no provider thread to persist. Keep
@@ -981,13 +991,19 @@ impl CodexHost {
             emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex persistence failed; session cannot safely continue"}}));
             return;
         }
-        if !turn_succeeded {
+        if !turn_settled {
             self.persistence_failed.store(true, Ordering::Release);
             *self.active.lock().unwrap() = None;
             let reason = if self.transport == "app-server" {
                 result.as_ref().err().cloned().unwrap_or_else(|| "Codex turn incomplete; session cannot safely continue".to_owned())
             } else { "Codex turn incomplete; session cannot safely continue".to_owned() };
             emit(json!({"type":"turn_done","data":{"is_error":true,"error":reason}}));
+            return;
+        }
+        if !turn_succeeded {
+            self.index_transcript();
+            *self.active.lock().unwrap() = None;
+            emit(terminal_event.expect("settled turn has a terminal event"));
             return;
         }
         self.index_transcript();

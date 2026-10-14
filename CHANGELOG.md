@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.54 — 2026-10-14
+
+**Codex recovery**
+
+- Fix **`AppServerDriver::run_turn_controlled`** treating retry notifications as terminal errors. Drain the matching completion and preserve the provider's scrubbed error, including **HTTP 429**.
+- Fix **`CodexHost::prompt_impl`** blocking later requests after a settled provider failure. Persist partial public output and error, then checkpoint the same thread; retain guards for missing completion and failed writes.
+
 ## 2.0.0-beta.53 — 2026-10-14
 
 **Session continuation**

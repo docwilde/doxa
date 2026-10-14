@@ -12,6 +12,7 @@ log = Path('__LOG__')
 turn_number = 0
 pending = None
 partial_tail = None
+terminal_scenario = scenario in ('terminal-retry', 'terminal-failure', 'unsettled-error', 'terminal-corrupt')
 
 
 def send(value):
@@ -53,13 +54,28 @@ for line in sys.stdin:
     elif method in ('thread/start', 'thread/resume'):
         if method == 'thread/resume':
             assert request['params']['threadId'] == 'thread-auto'
-            assert request['params']['approvalPolicy'] == 'never'
+            assert request['params']['approvalPolicy'] == ('on-request' if terminal_scenario else 'never')
         send({'id': request['id'], 'result': {'thread': {'id': 'thread-auto'}, 'model': 'account-model'}})
     elif method == 'turn/start':
         turn_number += 1
         send({'id': request['id'], 'result': {'turn': {'id': 'turn-' + str(turn_number)}}})
+        if turn_number == 1 and terminal_scenario:
+            params = {'threadId': 'thread-auto', 'turnId': 'turn-1'}
+            send({'method': 'error', 'params': {**params, 'willRetry': scenario == 'terminal-retry',
+                  'error': {'message': 'exceeded retry limit, last status: 429 Too Many Requests'}}})
+            if scenario == 'unsettled-error':
+                break
+            send({'method': 'item/completed', 'params': {**params, 'item': {
+                  'type': 'agentMessage', 'id': 'partial', 'text': 'public partial response'}}})
+            if scenario == 'terminal-corrupt':
+                while not release.exists():
+                    time.sleep(.01)
+            send({'method': 'turn/completed', 'params': {'threadId': 'thread-auto', 'turn': {
+                  'id': 'turn-1', 'status': 'completed' if scenario == 'terminal-retry' else 'failed',
+                  'error': None if scenario == 'terminal-retry' else {'message': 'exceeded retry limit, last status: 429 Too Many Requests'}}}})
+            continue
         if turn_number > 1 or (request['params']['approvalPolicy'] == 'never' and scenario != 'fullaccess'):
-            assert request['params']['approvalPolicy'] == 'never'
+            assert request['params']['approvalPolicy'] == ('on-request' if terminal_scenario else 'never')
             assert request['params']['sandboxPolicy']['type'] == 'workspaceWrite'
             complete()
             continue
