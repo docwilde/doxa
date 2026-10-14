@@ -26,8 +26,10 @@ enum Command {
 }
 struct Shared {
     session: String,
-    provider_session: String,
+    provider_session: Mutex<String>,
     recovery_context: Mutex<Option<String>>,
+    recovery_memory: Mutex<Option<String>>,
+    resume_preflight: AtomicBool,
     cwd: String,
     lore: Mutex<LoreClient>,
     store: TranscriptStore,
@@ -117,7 +119,7 @@ impl Shared {
     }
     fn checkpoint(&self, incomplete: bool) -> Result<(), String> {
         let s = self.selection.lock().unwrap();
-        let fields = json!({"thread_id":self.provider_session,"session_id":self.session,"engine":"claude","transport":"stream-json","cwd":self.cwd,"model":s.0,"effort":s.1,"permission_mode":s.2,"lore_enabled":self.enabled,"lore_tools":self.agent.is_some(),"spawn_depth":self.depth,"parent_session_id":self.parent,"turn_incomplete":incomplete,"router_worker":self.routed,"recorded":crate::iso_now()});
+        let fields = json!({"thread_id":*self.provider_session.lock().unwrap(),"session_id":self.session,"engine":"claude","transport":"stream-json","cwd":self.cwd,"model":s.0,"effort":s.1,"permission_mode":s.2,"lore_enabled":self.enabled,"lore_tools":self.agent.is_some(),"spawn_depth":self.depth,"parent_session_id":self.parent,"turn_incomplete":incomplete,"router_worker":self.routed,"recorded":crate::iso_now()});
         self.store
             .try_write_thread(fields.as_object().unwrap().clone(), |s| {
                 self.scrub(s).map_err(io::Error::other)
@@ -384,9 +386,8 @@ impl ClaudeHost {
                 .unwrap_or("default")
                 .to_owned();
         }
-        let recovery_context = if resume { crate::recovery_context::restore(&store,"claude",requested_model.as_deref()).map_err(|_|"Claude saved context could not be verified")? } else {None};
-        let provider_resume = resume && recovery_context.is_none();
-        if recovery_context.is_some() {provider_session=uuid::Uuid::new_v4().to_string();}
+        // Preserve the verified CLI conversation; decide whether the first
+        // continued request needs a bounded replay after measuring its input.
         let home = doxa_claude::isolation::prepare()
             .map_err(|_| "Claude private configuration unavailable")?;
         let plugins = doxa_claude::isolation::adopted_plugins()
@@ -409,8 +410,10 @@ impl ClaudeHost {
             );
         let shared = Arc::new(Shared {
             session: session_id.into(),
-            provider_session: provider_session.clone(),
-            recovery_context: Mutex::new(recovery_context),
+            provider_session: Mutex::new(provider_session.clone()),
+            recovery_context: Mutex::new(None),
+            recovery_memory: Mutex::new(None),
+            resume_preflight: AtomicBool::new(resume),
             cwd: cwd.clone(),
             lore: Mutex::new(lore),
             store,
@@ -419,7 +422,7 @@ impl ClaudeHost {
             active: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
-            resume_identity_pending: AtomicBool::new(provider_resume),
+            resume_identity_pending: AtomicBool::new(resume),
             selection: Mutex::new((
                 requested_model.clone(),
                 requested_effort.clone(),
@@ -441,7 +444,7 @@ impl ClaudeHost {
             executable,
             cwd: &workspace,
             session_id: &provider_session,
-            resume: provider_resume,
+            resume,
             model: requested_model.as_deref(),
             effort: requested_effort.as_deref(),
             permission_mode: if mode == "default" { "manual" } else { &mode },
@@ -484,7 +487,8 @@ impl ClaudeHost {
         if shared.routed {shared.persist(json!({"type":"router_worker","session_id":session_id}))?;}
         let (tx, rx) = mpsc::channel();
         let owned = shared.clone();
-        let worker = thread::spawn(move || broker(cli, rx, owned));
+        let launch = ClaudeLaunch { executable:executable.to_owned(),cwd:workspace,config_dir:home,plugins };
+        let worker = thread::spawn(move || broker(cli, rx, owned, Some(launch)));
         Ok(Self {
             commands: tx,
             worker: Mutex::new(Some(worker)),
@@ -579,9 +583,10 @@ impl ClaudeHost {
                 return;
             }
         }
-        if !matches!(answer.recv_timeout(RPC_TIMEOUT), Ok(Ok(_))) {
-            emit(done("Claude refused prompt"));
-            return;
+        match answer.recv_timeout(RPC_TIMEOUT) {
+            Ok(Ok(_)) => {}
+            Ok(Err(reason)) => { emit(done(&reason)); return; }
+            Err(_) => { emit(done("Claude prompt admission timed out or closed")); return; }
         }
         while let Ok(event) = rx.recv() {
             let terminal = matches!(event["type"].as_str(), Some("turn_done" | "turn_refused"));
@@ -1187,7 +1192,58 @@ fn flush_streams(
     }
     ok
 }
-fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
+struct ClaudeLaunch {
+    executable: PathBuf,
+    cwd: PathBuf,
+    config_dir: PathBuf,
+    plugins: Vec<PathBuf>,
+}
+fn prepare_claude_resume(cli: &mut Cli, shared: &Shared, launch: &ClaudeLaunch,
+    text: &str) -> Result<crate::recovery_context::Plan,String> {
+    let checkpoint = shared.store.read_thread().map_err(|_| "Claude continuation checkpoint unavailable")?
+        .ok_or("Claude continuation checkpoint missing")?;
+    shared.store.verify_thread_checkpoint(&checkpoint).map_err(|_| "Claude saved transcript changed before continuation")?;
+    let selection = shared.selection.lock().unwrap().clone();
+    let context = startup_control(cli,json!({"subtype":"get_context_usage","detail":"summary"}),
+        shared,Instant::now()+Duration::from_secs(3),Some(&shared.cancelled)).unwrap_or(Value::Null);
+    let window = context["maxTokens"].as_u64();
+    let threshold = context["autoCompactThreshold"].as_f64().filter(|value| value.is_finite() && *value > 0.0)
+        .and_then(|value| if value <= 1.0 {window.map(|window| (window as f64 * value) as u64)}
+            else if value <= 100.0 {window.map(|window| (window as f64 * value / 100.0) as u64)}
+            else {Some(value as u64)});
+    let measured = context["totalTokens"].as_u64().filter(|tokens| *tokens > 0)
+        .and_then(|tokens| usize::try_from(tokens).ok()).map(|tokens| (tokens,"provider_tokens"));
+    let memory = if shared.enabled {shared.lore.lock().unwrap().snapshot(&shared.cwd,"all").unwrap_or_default()}
+        else {"[DOXA MEMORY OFF] This session has memory disabled. Do not use LORE memory tools.".into()};
+    let mut budget = crate::recovery_context::Budget::native(window,threshold);
+    budget.replay_overhead = budget.replay_overhead.saturating_add(
+        serde_json::to_vec(&shared.tools()).map_err(|_| "Native tool definitions cannot be measured")?.len());
+    let plan = crate::recovery_context::assess(&shared.store,budget,
+        text.len().saturating_add(memory.len()).saturating_add(128),measured).map_err(|error| error.to_string())?;
+    if plan.context.is_some() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut fresh = Cli::spawn(CliOptions {executable:&launch.executable,cwd:&launch.cwd,
+            session_id:&id,resume:false,model:selection.0.as_deref(),effort:selection.1.as_deref(),
+            permission_mode:if selection.2=="default" {"manual"} else {&selection.2},
+            config_dir:&launch.config_dir,plugins:&launch.plugins}).map_err(|_| "Claude bounded continuation could not start")?;
+        let deadline = Instant::now()+RPC_TIMEOUT;
+        let initial = startup_control(&mut fresh,init_request(),shared,deadline,Some(&shared.cancelled))?;
+        let effective = settings(&startup_control(&mut fresh,json!({"subtype":"get_settings"}),shared,deadline,Some(&shared.cancelled))?)?;
+        if selection.0.as_deref().is_some_and(|model| !model_applied(&initial,model,effective.0.as_deref()))
+            || selection.1.is_some() && selection.1 != effective.1 {
+            return Err("Claude bounded continuation changed the saved model or effort".into());
+        }
+        cli.terminate(); *cli = fresh;
+        *shared.provider_session.lock().unwrap() = id;
+        shared.resume_identity_pending.store(false,Ordering::Release);
+        *shared.recovery_context.lock().unwrap() = plan.context.clone();
+    }
+    *shared.recovery_memory.lock().unwrap() = Some(memory);
+    shared.resume_preflight.store(false,Ordering::Release);
+    Ok(plan)
+}
+
+fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch: Option<ClaudeLaunch>) {
     let mut streams: Vec<StreamOutput> = Vec::new();
     let mut reasoning_progress = ReasoningProgress::default();
     let mut durable = DurableTurn::default();
@@ -1230,12 +1286,17 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         if !ready {
                             return Err("Claude prompt cancelled before admission".into());
                         }
+                        if !compact_permit && shared.resume_preflight.load(Ordering::Acquire) {
+                            let launch = launch.as_ref().ok_or("Claude continuation launch identity unavailable")?;
+                            let plan = prepare_claude_resume(&mut cli,&shared,launch,&text)?;
+                            send_event(&events,plan.event());
+                        }
                         let record = json!({"type":"user","message":{"role":"user","content":text},"cwd":shared.cwd,"sessionId":shared.session,"timestamp":crate::iso_now()});
                         if let Some(origin) = &peer_origin { shared.persist_peer(record, origin)?; }
                         else { shared.persist(record)?; }
                         shared.checkpoint(true)?;
                         let public_prompt = shared.scrub(&text)?;
-                        cli.prompt(&text, &shared.provider_session)
+                        cli.prompt(&text, &shared.provider_session.lock().unwrap())
                             .map_err(|_| "Claude prompt write failed".to_owned())?;
                         Ok::<_, String>(public_prompt)
                     })();
@@ -1382,7 +1443,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
             }
         };
         if let Some(session) = frame["session_id"].as_str() {
-            if session != shared.provider_session {
+            if session != *shared.provider_session.lock().unwrap() {
                 send_event(
                     &events,
                     done("Claude provider session identity changed; turn terminated"),
@@ -1393,7 +1454,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
         if shared.resume_identity_pending.load(Ordering::Acquire) {
             if frame["type"] == "system"
                 && frame["subtype"] == "init"
-                && frame["session_id"] == shared.provider_session
+                && frame["session_id"] == *shared.provider_session.lock().unwrap()
             {
                 shared
                     .resume_identity_pending
@@ -1655,7 +1716,9 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                                 let _ = tx.send((id, value));
                             });
                         } else if request["callback_id"] == "doxa_prompt_context" {
-                            let mut context = if shared.enabled {
+                            let mut context = if let Some(memory)=shared.recovery_memory.lock().unwrap().take() {
+                                memory
+                            } else if shared.enabled {
                                 shared
                                     .lore
                                     .lock()
@@ -2080,8 +2143,10 @@ for line in sys.stdin:
         let store = TranscriptStore::new(dir.path(), "project", SESSION).unwrap();
         let shared = Arc::new(Shared {
             session: SESSION.into(),
-            provider_session: SESSION.into(),
+            provider_session: Mutex::new(SESSION.into()),
             recovery_context: Mutex::new(None),
+            recovery_memory: Mutex::new(None),
+            resume_preflight: AtomicBool::new(false),
             cwd: dir.path().to_string_lossy().into_owned(),
             lore: Mutex::new(LoreClient::open(Duration::from_secs(3)).unwrap()),
             store,
@@ -2130,7 +2195,7 @@ for line in sys.stdin:
         *shared.catalog.lock().unwrap() = initial;
         let (tx, rx) = mpsc::channel();
         let worker_shared = shared.clone();
-        let worker = thread::spawn(move || broker(cli, rx, worker_shared));
+        let worker = thread::spawn(move || broker(cli, rx, worker_shared, None));
         let host = Arc::new(ClaudeHost {
             commands: tx,
             worker: Mutex::new(Some(worker)),

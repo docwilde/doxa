@@ -296,7 +296,9 @@ mod tests {
         host.shutdown(); drop(host);
         let resumed=make_host(&env,cfg.clone(),&server,true,Some(2.0));
         resumed.call("set_model",&json!({"model":"thinking"})).unwrap();
-        let refused=prompt(&resumed,"thinking with foreign tools history");assert_eq!(refused[0]["type"],"turn_refused");
+        let refused=prompt(&resumed,"thinking with foreign tools history");
+        assert_eq!(refused.iter().filter(|event|event["type"]=="resume_context").count(),1);
+        assert_eq!(refused.last().unwrap()["type"],"turn_refused");
         assert_eq!(server.bodies().len(),6,"resume must not replay committed tools");
         resumed.call("set_model",&json!({"model":"auto"})).unwrap();
         assert_eq!(resumed.initial_model(),Some("auto".into()));
@@ -326,7 +328,9 @@ mod tests {
         assert_eq!(events[0]["data"]["fallback_reason"],"invalid_response");first.shutdown();drop(first);
         let resumed=make_host(&env,cfg,&server,true,Some(2.0));
         let events=prompt(&resumed,"next turn");assert_eq!(events.last().unwrap()["data"]["is_error"],false);
-        assert_eq!(events[0]["data"]["fallback_reason"],"budget");
+        assert_eq!(events.iter().filter(|event|event["type"]=="resume_context").count(),1);
+        let decision=events.iter().find(|event|event["data"].get("fallback_reason").is_some()).unwrap();
+        assert_eq!(decision["data"]["fallback_reason"],"budget");
         assert_eq!(env.state()["router"]["calls"],1);assert_eq!(server.bodies().iter().filter(|row|row["model"]==doxa_router::JEV_MODEL).count(),1);
         resumed.shutdown();
     }

@@ -94,6 +94,7 @@ pub struct VendorHost {
     scrub_failed: AtomicBool,
     history: Mutex<Vec<Value>>,
     compact_context: Mutex<Option<(usize, String)>>,
+    resume_preflight: AtomicBool,
     store: Arc<TranscriptStore>,
     cwd: String,
     workspace:PathBuf,
@@ -245,9 +246,10 @@ impl VendorHost {
         let mcp = crate::vendor_mcp::Service::configured(&workspace, session_id, storage_engine, resume, store.clone())?;
         let lore_enabled = doxa_state::lore_enabled_default();
         let agent_tools = crate::agent_tools::AgentTools::new(&cwd, session_id, storage_engine, lore_enabled);
+        // Only a reviewed durable compaction checkpoint may replace saved
+        // messages. Reopening a large transcript retains its original context.
         // Invalid optimization state falls back to complete durable originals.
-        let recovered = if resume {crate::recovery_context::restore(&store,storage_engine,Some(&model)).map_err(|_|"Saved vendor context could not be verified")?}else{None};
-        let compact_context = recovered.map(|context|(history.len(),context)).or_else(||store.read_vendor_context(storage_engine, &history).ok().flatten());
+        let compact_context = store.read_vendor_context(storage_engine, &history).ok().flatten();
         let restored_turns = if routed { history.len() as u64 / 2 } else { 0 };
         let host = Self {
             vendor: Mutex::new(vendor), routed, route: Mutex::new(None), limits: Mutex::new(None),
@@ -261,6 +263,7 @@ impl VendorHost {
             scrub_failed: AtomicBool::new(false),
             history: Mutex::new(history),
             compact_context: Mutex::new(compact_context),
+            resume_preflight: AtomicBool::new(resume),
             store,
             cwd: cwd.into_owned(),
             workspace,
@@ -412,6 +415,26 @@ impl VendorHost {
                 return Err("Router canonical source changed; further provider work withheld".into());
             }
         }
+        Ok(())
+    }
+
+    pub(super) fn resume_context_pending(&self) -> bool { self.resume_preflight.load(Ordering::Acquire) }
+
+    pub(super) fn prepare_router_resume(&self, text: &str, input_cap: usize,
+        emit: &mut dyn FnMut(Value)) -> Result<(),String> {
+        if !self.resume_context_pending() { return Ok(()); }
+        let (_,input_bound,_,_) = self.routing_view(text,0)?;
+        let history = self.history.lock().unwrap();
+        let history_bytes = serde_json::to_vec(&self.context_messages(&history)).map_err(|_| "Router history cannot be measured")?.len();
+        let request_bytes = usize::try_from(input_bound).map_err(|_| "Router input bound overflow")?.saturating_sub(history_bytes);
+        let budget = crate::recovery_context::Budget::api("router","router-conversation-v1",
+            Some(doxa_vendors::TurnLimits {input_bytes:input_cap,output_tokens:0}));
+        let plan = crate::recovery_context::assess(&self.store,budget,request_bytes,
+            Some((history_bytes,"serialized_router_request_byte_bound"))).map_err(|error| error.to_string())?;
+        if let Some(context) = &plan.context { *self.compact_context.lock().unwrap() = Some((history.len(),context.clone())); }
+        drop(history);
+        self.resume_preflight.store(false,Ordering::Release);
+        emit(plan.event());
         Ok(())
     }
 
@@ -863,6 +886,31 @@ impl VendorHost {
         if !definitions.is_empty(){gate=gate.with_agent(definitions,Arc::new(move|name,args|if name=="spawn_session"{session.as_ref().ok_or("Session tools unavailable".to_owned())?(name,args)}else{agent.as_ref().ok_or("LORE tools unavailable".to_owned())?(name,args)}));}
 
         let gate = if tools_enabled { Some(&mut gate as &mut dyn doxa_vendors::ToolGate) } else { None };
+        if self.resume_preflight.load(Ordering::Acquire) {
+            let measured = (|| {
+                let user = json!({"role":"user","content":prompt});
+                let mut full = history.clone(); full.push(user.clone());
+                let base = vec![self.system_message(),user];
+                let mut full = doxa_vendors::request_body(self.vendor(),&selected_model,&full,&effort).map_err(|_| "Continuation request cannot be measured")?;
+                let mut base = doxa_vendors::request_body(self.vendor(),&selected_model,&base,&effort).map_err(|_| "Continuation request cannot be measured")?;
+                if let Some(gate) = gate.as_ref() {
+                    let definitions = gate.definitions();
+                    if !definitions.is_empty() { full["tools"] = json!(definitions); base["tools"] = full["tools"].clone(); }
+                }
+                let request_bytes = serde_json::to_vec(&base).map_err(|_| "Continuation request cannot be measured")?.len();
+                let history_bytes = serde_json::to_vec(&full).map_err(|_| "Continuation request cannot be measured")?.len().saturating_sub(request_bytes);
+                crate::recovery_context::assess(&self.store,
+                    crate::recovery_context::Budget::api(self.vendor().engine_id(),&selected_model,limits),
+                    request_bytes,Some((history_bytes,"serialized_request_byte_bound"))).map_err(|error| error.to_string())
+            })();
+            let plan = match measured {Ok(plan) => plan,Err(reason) => { emit_tool(done(&reason)); return; }};
+            if let Some(context) = &plan.context {
+                *self.compact_context.lock().unwrap() = Some((saved_history.len(),context.clone()));
+                history = self.context_messages(&saved_history); history.insert(0,self.system_message());
+            }
+            self.resume_preflight.store(false,Ordering::Release);
+            emit_tool(plan.event());
+        }
         let mut reasoning_chars = 0u64;
         let mut reported_tokens = 0u64;
         let mut last_progress = Instant::now();

@@ -712,6 +712,18 @@ impl RouterHost {
             if text.trim() != "/compact" { return Err("Use /compact without arguments".into()); }
             return self.compact(false,emit);
         }
+        if self.inner.resume_context_pending() {
+            let target = {
+                let state = self.state.lock().unwrap();
+                if state.unknown() { return Err("Router accounting is incomplete or unknown; continuation withheld".into()); }
+                state.pinned.clone().or_else(||state.selection.as_ref().and_then(|row|row["target_id"].as_str().map(str::to_owned)))
+                    .unwrap_or_else(||self.config.fallback_id.clone())
+            };
+            let candidate = self.config.candidate(&target).ok_or("Saved continuation target is invalid")?;
+            let cap = candidate.context_tokens.checked_sub(candidate.max_output_tokens).ok_or("Continuation input cap is invalid")?;
+            let cap = self.config.auto_compact_percent.map_or(cap,|percent|cap.saturating_mul(percent as u64)/100);
+            self.inner.prepare_router_resume(text,usize::try_from(cap).map_err(|_| "Continuation input cap overflow")?,emit)?;
+        }
         let mut view = self.inner.routing_view(text, self.config.max_input_bytes / 2)?;
         if let Some(percent) = self.config.auto_compact_percent {
             let target = {

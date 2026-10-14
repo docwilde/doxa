@@ -205,7 +205,7 @@ for line in sys.stdin:
   elif sub=='set_model': model=request['model']
   elif sub=='apply_flag_settings': effort=request['settings']['effortLevel']
   elif sub=='set_permission_mode': response={{'mode':'default' if request['mode']=='manual' else request['mode']}}
-  elif sub=='get_context_usage': response={{'totalTokens':123,'maxTokens':1000,'percentage':12.3,'model':model,'categories':[]}}
+  elif sub=='get_context_usage': response=json.loads(root.joinpath('provider-context.json').read_text()) if root.joinpath('provider-context.json').exists() else {{'totalTokens':123,'maxTokens':1000,'percentage':12.3,'model':model,'categories':[]}}
   emit({{'type':'control_response','response':{{'subtype':'success','request_id':frame['request_id'],'response':response}}}})
   if sub=='interrupt': result(True)
  {body}
@@ -1841,6 +1841,7 @@ fn claude_reported_spend_blocks_next_prompt_over_daemon_socket() {
 fn claude_legacy_resume_requires_owned_provider_and_lore_source_then_verifies_live_identity() {
     let dir=tempfile::tempdir().unwrap();let script=dir.path().join("legacy-cli");
     fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(dir.path().join("provider-context.json"),json!({"totalTokens":123,"maxTokens":1_000_000,"model":"opus"}).to_string()).unwrap();
     claude_fixture(&script,"assert '--resume' in args",r#"if frame['type']=='user':
   emit({'type':'system','subtype':'init','session_id':session,'model':model});delta('restored');result()
 "#);
@@ -1855,7 +1856,7 @@ fn claude_legacy_resume_requires_owned_provider_and_lore_source_then_verifies_li
     let registry=dir.path().join("registry").join(format!("{CLAUDE_SESSION}.json"));let mut process=Process{child,registry,socket:PathBuf::new()};
     wait_until(||process.registry.exists()||process.exited());if process.exited(){let mut error=String::new();process.child.stderr.take().unwrap().read_to_string(&mut error).unwrap();panic!("legacy fixture failed: {error}");}process.socket=process.entry()["daemon_socket"].as_str().unwrap().into();
     let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));send(&mut socket,json!({"type":"prompt","id":1,"text":"continue"}));
-    let completed=claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");assert_eq!(completed["event"]["data"]["is_error"],false);
+    let completed=claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");assert_eq!(completed["event"]["data"]["is_error"],false,"{completed}");
     let metadata:Value=serde_json::from_slice(&fs::read(native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.codex.json"))).unwrap()).unwrap();assert_eq!(metadata["legacy_imported"],true);assert_eq!(metadata["thread_id"],CLAUDE_SESSION);
     assert!(fs::read_to_string(transcript).unwrap().starts_with(&source),"legacy source was rewritten");
     send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));claude_receive_until(&mut reader,|f|f["id"]==2);wait_until(||process.exited());
@@ -2195,7 +2196,7 @@ mod vendor_process {
                     chunks += 1;
                 }
                 Some("turn_done") => return (text, frame, chunks),
-                Some("reasoning_delta" | "reasoning_progress") => {},
+                Some("reasoning_delta" | "reasoning_progress" | "resume_context") => {},
                 _ => panic!("unexpected vendor event: {frame}"),
             }
         }
@@ -5081,7 +5082,14 @@ for line in sys.stdin:
 }
 
 #[test]
-fn long_claude_restore_keeps_logical_identity_original_turns_and_bounded_hook_context() {
+fn long_claude_restore_resumes_saved_provider_with_original_conversation() {
+    check_long_claude_restore(false);
+}
+#[test]
+fn long_claude_restore_trims_old_turns_before_exceeding_compaction_threshold() {
+    check_long_claude_restore(true);
+}
+fn check_long_claude_restore(trimmed: bool) {
     let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
     let slug:String=dir.path().to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();
     let store=doxa_transcript::TranscriptStore::new(&dir.path().join("native-projects"),&slug,CLAUDE_SESSION).unwrap();
@@ -5089,18 +5097,30 @@ fn long_claude_restore_keeps_logical_identity_original_turns_and_bounded_hook_co
         store.try_append(json!({"type":"user","message":{"role":"user","content":user}}),"claude",|s|Ok(s.into())).unwrap();
         store.try_append(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":answer},{"type":"thinking","thinking":"PRIVATE_REASONING_EXCLUDED"}]}}),"claude",|s|Ok(s.into())).unwrap();
     }
-    store.try_write_thread(json!({"thread_id":CLAUDE_SESSION,"session_id":CLAUDE_SESSION,"engine":"claude","cwd":dir.path(),"lore_enabled":true,"spawn_depth":0,"parent_session_id":null,"turn_incomplete":false,"model":"opus","effort":"high","permission_mode":"default"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
+    // A prior restoration may have a distinct provider ID. Resume that saved
+    // ID, rather than replacing either a long history or its current owner.
+    let provider_session="71273439-c8d9-47b8-80ee-78b3b084a418";
+    store.try_write_thread(json!({"thread_id":provider_session,"session_id":CLAUDE_SESSION,"engine":"claude","cwd":dir.path(),"lore_enabled":true,"spawn_depth":0,"parent_session_id":null,"turn_incomplete":false,"model":"opus","effort":"high","permission_mode":"default"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
     let original=fs::read(store.transcript_path()).unwrap();
     let script=dir.path().join("claude-recovery.py");
-    claude_fixture(&script,&format!("assert '--resume' not in args\nassert session != '{}'",CLAUDE_SESSION),r#"if frame['type']=='user':
+    assert!(original.len()>16_384);
+    fs::write(dir.path().join("provider-context.json"),json!({"totalTokens":96_000,"maxTokens":1_000_000,"autoCompactThreshold":if trimmed {80_000} else {900_000},"model":"opus"}).to_string()).unwrap();
+    claude_fixture(&script,&format!("trimmed={}\nif '--resume' in args: assert session == '{provider_session}'\nelse: assert trimmed and session != '{provider_session}'",if trimmed {"True"} else {"False"}),r#"if frame['type']=='user':
+  assert frame['message']['content']=='continue'
+  emit({'type':'system','subtype':'init','session_id':session,'model':model})
   emit({'type':'control_request','request_id':'recovery-context','request':{'subtype':'hook_callback','callback_id':'doxa_prompt_context','input':{}}})
  elif frame['type']=='control_response':
   context=frame['response']['response']['hookSpecificOutput']['additionalContext']
-  assert 'recent owner task' in context and 'recent complete answer' in context
   assert 'PRIVATE_REASONING_EXCLUDED' not in context
-  tail=context.split('[DOXA RESTORED CONVERSATION]\n')[1]
-  assert len(tail.encode()) <= 16384
-  Path(root/'recovery-proof.json').write_text(json.dumps({'provider_session':session,'context':tail}))
+  if trimmed:
+   assert '--resume' not in args
+   tail=context.split('[DOXA RESTORED CONVERSATION]\n')[1]
+   assert 'recent owner task' in tail and 'recent complete answer' in tail
+   assert 'older task' not in tail and len(tail.encode()) < 47_232
+   assert json.loads(tail)['omitted_turns']==1
+  else:
+   assert '--resume' in args and '[DOXA RESTORED CONVERSATION]' not in context
+  Path(root/'recovery-proof.json').write_text(json.dumps({'provider_session':session}))
   emit({'type':'assistant','session_id':session,'message':{'role':'assistant','content':[{'type':'text','text':'continued'}]}})
   result()"#);
     let mut child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id",CLAUDE_SESSION,"--engine","claude","--claude-bin",script.to_str().unwrap(),"--resume","true","--linger","10"]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
@@ -5113,7 +5133,8 @@ fn long_claude_restore_keeps_logical_identity_original_turns_and_bounded_hook_co
     let terminal=claude_receive_until(&mut reader,|frame|frame["event"]["type"]=="turn_done");assert_eq!(terminal["event"]["data"]["is_error"],false,"{terminal}");
     let proof:Value=serde_json::from_slice(&fs::read(dir.path().join("recovery-proof.json")).unwrap()).unwrap();
     let checkpoint=store.read_thread().unwrap().unwrap();
-    assert_eq!(checkpoint["session_id"],CLAUDE_SESSION);assert_eq!(checkpoint["thread_id"],proof["provider_session"]);assert_ne!(checkpoint["thread_id"],CLAUDE_SESSION);
+    assert_eq!(checkpoint["session_id"],CLAUDE_SESSION);assert_eq!(checkpoint["thread_id"],proof["provider_session"]);
+    assert_eq!(checkpoint["thread_id"]==provider_session,!trimmed);
     assert!(fs::read(store.transcript_path()).unwrap().starts_with(&original));
     assert_eq!(row["session_id"],CLAUDE_SESSION);
     send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));
@@ -5122,7 +5143,16 @@ fn long_claude_restore_keeps_logical_identity_original_turns_and_bounded_hook_co
 
 #[test]
 #[cfg(target_os = "linux")]
-fn long_codex_restore_creates_bounded_thread_without_replacing_logical_history() {
+fn long_codex_restore_resumes_saved_thread_before_first_request() {
+    check_long_codex_restore(false);
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn long_codex_restore_trims_old_turns_before_exceeding_compaction_threshold() {
+    check_long_codex_restore(true);
+}
+#[cfg(target_os = "linux")]
+fn check_long_codex_restore(trimmed: bool) {
     let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
     let slug:String=dir.path().to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();
     let store=doxa_transcript::TranscriptStore::new(&dir.path().join("native-projects"),&slug,"codex-session").unwrap();
@@ -5132,12 +5162,20 @@ fn long_codex_restore_creates_bounded_thread_without_replacing_logical_history()
     }
     store.try_write_thread(json!({"thread_id":"previous-thread","session_id":"codex-session","engine":"codex","transport":"app-server","cwd":dir.path(),"lore_enabled":true,"lore_tools":false,"peer_tools":false,"turn_incomplete":false,"model":"account-model","effort":"high","permission_mode":"on-request"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
     let original=fs::read(store.transcript_path()).unwrap();
+    assert!(original.len()>16_384);
     let codex=dir.path().join("codex-recovery");executable(&codex,include_str!("fixtures/codex_appserver.py"));
-    executable(&codex.with_extension("turn"),&format!(r#"#!/bin/sh
-cat > '{}'
-echo '{{"type":"thread.started","thread_id":"fresh-thread"}}'
-echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"continued"}}}}'
-"#,dir.path().join("provider-prompt.txt").display()));
+    fs::write(codex.with_extension("context"),json!({"model_context_window":1_000_000,"model_auto_compact_token_limit":if trimmed {80_000} else {900_000}}).to_string()).unwrap();
+    fs::write(codex.with_extension("fresh-thread"),"fresh-thread").unwrap();
+    executable(&codex.with_extension("turn"),&format!(r#"#!/usr/bin/env python3
+import json,sys
+from pathlib import Path
+identity={{'thread_id':'previous-thread'}}
+resumed=sys.argv[1:4]==['exec','resume',identity['thread_id']]
+assert resumed=={}
+Path('{}').write_text(sys.stdin.read())
+print(json.dumps({{'type':'thread.started','thread_id':identity['thread_id'] if resumed else 'fresh-thread'}}))
+print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'continued'}}}}))
+"#,if trimmed {"False"} else {"True"},dir.path().join("provider-prompt.txt").display()));
     let mut child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id","codex-session","--engine","codex","--codex-bin",codex.to_str().unwrap(),"--resume","true","--linger","10"]).env_remove("DOXA_CODEX_APPSERVER").stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
     let registry=dir.path().join("registry/codex-session.json");wait_for_registry(&mut child,&registry);
     let row:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
@@ -5147,9 +5185,20 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"continue
     send(&mut socket,json!({"type":"attach","cursor":null}));send(&mut socket,json!({"type":"prompt","id":1,"text":"continue"}));
     let terminal=claude_receive_until(&mut reader,|frame|frame["event"]["type"]=="turn_done");assert_eq!(terminal["event"]["data"]["is_error"],false,"{terminal}");
     let prompt=fs::read_to_string(dir.path().join("provider-prompt.txt")).unwrap();
-    let tail=prompt.split("[DOXA RESTORED CONVERSATION]\n").nth(1).unwrap().split("\n[CURRENT USER REQUEST]").next().unwrap();
-    assert!(tail.len()<=16384);assert!(tail.contains("recent owner task") && tail.contains("recent complete answer"));
-    let checkpoint=store.read_thread().unwrap().unwrap();assert_eq!(checkpoint["session_id"],"codex-session");assert_eq!(checkpoint["thread_id"],"fresh-thread");assert_eq!(checkpoint["permission_mode"],"on-request");
+    if trimmed {
+        let tail=prompt.split("[DOXA RESTORED CONVERSATION]\n").nth(1).unwrap().split("\n[CURRENT USER REQUEST]").next().unwrap();
+        assert!(tail.len()<47_232);assert!(tail.contains("recent owner task") && tail.contains("recent complete answer"));
+        assert!(!tail.contains("older task"));assert_eq!(serde_json::from_str::<Value>(tail).unwrap()["omitted_turns"],1);
+        assert!(prompt.ends_with("\n[CURRENT USER REQUEST]\ncontinue"));
+    } else {assert_eq!(prompt,"continue");}
+    let requests=fs::read_to_string(codex.with_extension("rpc")).unwrap();
+    let requests:Vec<Value>=requests.lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+    let resume=requests.iter().position(|row|row["method"]=="thread/resume").unwrap();
+    let first_turn=requests.iter().position(|row|row["method"]=="turn/start").unwrap();
+    assert!(resume<first_turn);assert_eq!(requests[resume]["params"]["threadId"],"previous-thread");
+    assert_eq!(requests.iter().any(|row|row["method"]=="thread/start"),trimmed);
+    assert!(!requests.iter().any(|row|row["method"]=="thread/compact/start"));
+    let checkpoint=store.read_thread().unwrap().unwrap();assert_eq!(checkpoint["session_id"],"codex-session");assert_eq!(checkpoint["thread_id"],if trimmed {"fresh-thread"} else {"previous-thread"});assert_eq!(checkpoint["permission_mode"],"on-request");
     assert!(fs::read(store.transcript_path()).unwrap().starts_with(&original));
     send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));claude_receive_until(&mut reader,|frame|frame["id"]==2);wait_until(||process.exited());
 }

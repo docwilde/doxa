@@ -162,6 +162,9 @@ pub struct AppServerDriver {
     assistant_bytes: usize,
     assistant_message_emitted: bool,
     usage: Option<Value>,
+    configured_context_window: Option<u64>,
+    configured_compact_limit: Option<u64>,
+    configured_post_compact_percent: Option<u64>,
     effective_model: Option<String>,
     pending_notifications: VecDeque<(Value, usize)>,
     pending_bytes: usize,
@@ -325,6 +328,7 @@ impl AppServerDriver {
             thread_id: None, rollout_path: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
             assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None, effective_model: None,
+            configured_context_window: None, configured_compact_limit: None, configured_post_compact_percent: None,
             pending_notifications: VecDeque::new(),
             pending_bytes: 0,
             tool_normalizer: CodexJsonlNormalizer::new(move |text| tool_scrub(text)),
@@ -357,6 +361,9 @@ impl AppServerDriver {
                     if config["config"]["features"]["token_budget"] != false {
                         return Err(AppServerError::Protocol("Codex unhooked token-budget reset path is not disabled"));
                     }
+                    driver.configured_context_window = config["config"]["model_context_window"].as_u64().filter(|value| *value > 0);
+                    driver.configured_compact_limit = config["config"]["model_auto_compact_token_limit"].as_u64().filter(|value| *value > 0);
+                    driver.configured_post_compact_percent = config["config"]["model_post_turn_compact_threshold_percent"].as_u64().filter(|value| (1..=100).contains(value));
                     let hooks = driver.request("hooks/list", json!({"cwds":[driver.options.cwd]})).await?;
                     driver.compact_gate.as_mut().unwrap().verify_hooks(&hooks)
                         .map_err(|_| AppServerError::Protocol("DOXA Codex compaction hook is not active with verified trust"))?;
@@ -537,6 +544,24 @@ impl AppServerDriver {
     /// Official thread/start, thread/resume or thread/read metadata. The path
     /// still needs a thread-bound owned read or ROOT snapshot before use.
     pub fn rollout_path(&self) -> Option<&Path> { self.rollout_path.as_deref() }
+
+    /// Effective operator overrides confirmed by this protected provider.
+    pub fn continuation_limits(&self) -> (Option<u64>, Option<u64>, Option<u64>) {
+        (self.configured_context_window, self.configured_compact_limit, self.configured_post_compact_percent)
+    }
+
+    /// Resume can publish its current allocation before the first turn. Keep
+    /// this receipt separate from stale UI caches and cumulative spend usage.
+    pub fn continuation_usage(&self) -> Option<(u64,u64)> {
+        self.pending_notifications.iter().rev().find_map(|(frame,_)| {
+            let params=&frame["params"];
+            if frame["method"]!="thread/tokenUsage/updated" || params["threadId"]!=self.thread_id() { return None; }
+            let usage=&params["tokenUsage"];
+            let window=usage["modelContextWindow"].as_u64().filter(|window|*window>0)?;
+            let used=usage["last"]["totalTokens"].as_u64()?;
+            Some((used,window))
+        })
+    }
 
     pub fn model(&self) -> Option<&str> { self.effective_model.as_deref() }
 
