@@ -4,6 +4,16 @@ use super::*;
 use doxa_fleet::owner_control::IsolationRequest;
 use doxa_isolation::Profile;
 
+// Backend migration keeps the session ID but starts a new daemon, whose
+// PID-derived socket differs. Registry paths remain hints until hello agrees.
+fn reconnect(runtime:&Path,id:&str)->io::Result<(discovery::Session,DaemonClient)>{
+    let session=discovery::sessions_in(runtime)?.into_iter().find(|session|session.id==id)
+        .ok_or_else(||invalid("replacement fleet session is not discoverable"))?;
+    let client=DaemonClient::connect_tail(&session.socket).map_err(io::Error::other)?;
+    if client.hello["session_id"]!=id{return Err(invalid("replacement fleet daemon identity changed"));}
+    Ok((session,client))
+}
+
 pub fn request_isolation(root:&Path,id:&str,index:usize,target:Profile,confirm_native:bool,allow_internet:bool)->io::Result<String>{
     submit(root,id,index,target,confirm_native,allow_internet,None)
 }
@@ -38,7 +48,7 @@ pub fn change_attached_isolation(client:&mut DaemonClient,target:Profile)->io::R
         match doxa_fleet::read_private::<Value>(&root.join(run).join("isolation-result.json"),8192){
             Ok(result) if result["id"]==request=>{
                 if result["ok"]!=true{return Err(invalid(result["error"].as_str().unwrap_or("fleet isolation change refused")));}
-                let resumed=DaemonClient::connect_tail(Path::new(owner["socket_path"].as_str().ok_or_else(||invalid("fleet socket unavailable"))?)).map_err(io::Error::other)?;
+                let (_,resumed)=reconnect(&root.join(run).join("rt"),client.hello["session_id"].as_str().ok_or_else(||invalid("fleet session identity unavailable"))?)?;
                 if resumed.hello["session_id"]!=client.hello["session_id"]||resumed.hello["isolation"]["profile"]!=target.key()||resumed.hello["isolation"]["state"]!="ready"{return Err(invalid("changed fleet isolation could not be verified"));}
                 let isolation=resumed.hello["isolation"].clone();return Ok(Some((resumed,isolation)));
             },
@@ -89,11 +99,15 @@ fn apply(store:&Store,value:&mut Value,slots:&mut [Slot],request:&IsolationReque
     });
     // Always reconnect and inspect the actual host, including a migration that
     // failed but restored the old provider under a fresh PID.
-    let resumed=DaemonClient::connect_tail(&slots[index].session.socket).map_err(io::Error::other)?;
+    let (session,resumed)=reconnect(&store.run.join("rt"),&request.session_id)?;
+    if session.scope_key!=slots[index].session.scope_key{return Err(invalid("replacement fleet project scope changed"));}
     if resumed.hello["session_id"]!=request.session_id||resumed.hello["isolation"]["state"]!="ready"{return Err(invalid("isolation transition lost its verified session; stopping fleet"));}
     let actual=Profile::parse(resumed.hello["isolation"]["profile"].as_str().ok_or_else(||invalid("isolation transition status unavailable"))?)?;
     if actual!=request.expected_profile&&actual!=request.target{return Err(invalid("isolation transition reached an unapproved profile; stopping fleet"));}
+    slots[index].session=session;
     slots[index].client=resumed;
+    value["slots"][index]["socket_path"]=json!(slots[index].session.socket);
+    store.save(value)?;
     let identity=rpc(&mut slots[index].client,"fleet_identity",json!({}))?;
     if let Some(context)=context {
         let updated=doxa_fleet::isolation_change::rebind(&context,&request.session_id,identity["pid"].as_i64().ok_or_else(||invalid("replacement PID unavailable"))? as i32,identity["cwd"].as_str().ok_or_else(||invalid("replacement cwd unavailable"))?)?;
@@ -142,6 +156,29 @@ pub(super) fn network_briefing(value:&Value,index:usize)->String {
 
 #[cfg(test)]mod tests{
     use super::*;
+    #[test]fn replacement_socket_is_rediscovered_and_hello_must_match_the_bound_session(){
+        use std::{io::{BufRead,BufReader,Write},os::unix::{fs::PermissionsExt,net::UnixListener}};
+        for reported in ["session","different-session"]{
+            let dir=tempfile::tempdir().unwrap();let runtime=fs::canonicalize(dir.path()).unwrap();fs::set_permissions(&runtime,fs::Permissions::from_mode(0o700)).unwrap();
+            let registry=runtime.join("registry");fs::create_dir(&registry).unwrap();fs::set_permissions(&registry,fs::Permissions::from_mode(0o700)).unwrap();
+            let old=runtime.join("daemon-session-0.sock");assert!(!old.exists());
+            let socket=runtime.join(format!("daemon-session-{}.sock",std::process::id()));
+            let listener=UnixListener::bind(&socket).unwrap();fs::set_permissions(&socket,fs::Permissions::from_mode(0o600)).unwrap();
+            let now=time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap();
+            doxa_fleet::save_private(&registry.join("session.json"),&json!({"session_id":"session","pid":std::process::id(),"cwd":"/source","repo_root":"/source","heartbeat_at":now,"started_at":now,"title":"replacement","daemon_socket":socket})).unwrap();
+            assert!(reconnect(&runtime,"missing-session").is_err(),"never attach an unrelated registry entry");
+            let server=std::thread::spawn(move||{
+                let (mut stream,_)=listener.accept().unwrap();
+                writeln!(stream,"{}",json!({"type":"hello","proto":1,"session_id":reported,"cwd":"/source","engine":"glm","next_seq":17})).unwrap();
+                let mut line=String::new();BufReader::new(stream).read_line(&mut line).unwrap();
+                assert_eq!(serde_json::from_str::<Value>(&line).unwrap(),json!({"type":"attach","cursor":17}));
+            });
+            let result=reconnect(&runtime,"session");
+            if reported=="session"{let (session,client)=result.unwrap();assert_eq!(session.socket,socket);assert_eq!(client.cursor,17);}
+            else{assert!(result.err().unwrap().to_string().contains("identity changed"));}
+            server.join().unwrap();
+        }
+    }
     #[test]fn supervisor_internet_never_authorizes_worker_research(){
         let value=json!({"mode":"supervisor","slots":[{"role":"supervisor","isolation":"docker-open"},{"role":"worker","isolation":"docker-offline"}]});
         let worker=network_briefing(&value,1);assert!(worker.contains("no direct internet or web search"));assert!(worker.contains("peer_send question"));
