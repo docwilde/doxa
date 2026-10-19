@@ -2,6 +2,7 @@
 //! never change a chip until the daemon verifies and reports the new policy.
 use super::{App, ChipInfo, PaneGroup, safe_label};
 use serde_json::{json, Value};
+use crossterm::event::{KeyCode,KeyEvent,KeyModifiers};
 pub(super) fn verified_status(value:&Value)->Option<Value>{
     let profile=doxa_isolation::Profile::parse(value["profile"].as_str()?).ok()?;
     let state=value["state"].as_str()?;
@@ -17,7 +18,7 @@ impl App {
         let Some(value)=value else{return "Isolation status unavailable".into();};
         let engine=value["engine"].as_str().unwrap_or("unknown");
         let network=value["network"].as_str().unwrap_or("unknown");
-        format!("{} · engine: {engine} · network: {network} · click for limits, mounts and idle change commands",
+        format!("{} · engine: {engine} · network: {network} · click for isolation menu and limits",
             value["label"].as_str().unwrap_or("unavailable")) +
             if value["disk_budget_error"].as_str().is_some()||value["disk_monitor_error"].as_str().is_some(){" · disk hold"}else{""}
     }
@@ -44,13 +45,40 @@ impl App {
         }
         lines.push(format!("Disk: {}",value["disk_limit"].as_str().unwrap_or("unknown")));
         lines.push(format!("Credentials: {}",value["credential_exposure"].as_str().unwrap_or("unknown")));
-        lines.extend([String::new(),"While idle, explicitly change isolation with:".into(),
+        lines.extend([String::new(),"Change while idle: 1 Docker offline · 2 Docker with internet · 3 Native (confirmation required)".into(),"Offline Claude/Codex CLI cannot reach its model provider; API-backed GLM/DeepSeek call models on the host.".into(),"While idle, explicitly change isolation with:".into(),
             "/isolation docker-offline --confirm".into(),"/isolation docker-open --confirm".into(),
             "/isolation native --confirm".into(),
             "Provider, approvals and conversation identity remain attached.".into(),
             "Backend changes checkpoint the stopped provider, copy the workspace and verify same-session resume.".into(),
-            "Native resume retains the private clone; failed migration restores the original profile.".into()]);
-        self.chip_info=Some(ChipInfo{kind:"isolation",label:String::new(),lines,scroll:0,owner:None});
+            "Native resume retains the private clone; failed migration restores the original profile.".into(),"Fleet changes hold admission across every slot; supervised fleets remain paused for owner review.".into()]);
+        self.chip_info=Some(ChipInfo{kind:"isolation",label:String::new(),lines,scroll:0,owner:Some((id,String::new()))});
+    }
+    fn review_isolation_change(&mut self,id:String,profile:doxa_isolation::Profile){
+        let mut lines=vec![format!("Change session {} to {}",safe_label(&id),profile.label()),
+            "Shift+Y confirms · Esc cancels. Applies only while the fleet is idle.".into(),
+            "The host checkpoints and verifies the conversation and workspace. Fleet admission is held during the change.".into()];
+        if profile==doxa_isolation::Profile::Native{lines.push("CONFIRM NATIVE EXECUTION: this agent receives owner host, filesystem and credential access outside Docker.".into());}
+        if crate::fleet_policy::task_internet(profile){lines.push("CONFIRM INTERNET OPT-IN: this agent may directly access the internet, including web searches.".into());}
+        else{lines.push("Direct internet and provider web-search tools are disabled. Ask an approved online supervisor for research evidence.".into());}
+        if profile==doxa_isolation::Profile::DockerOffline{lines.push("Ordinary Claude/Codex CLI cannot reach its model provider in offline Docker. API-backed engines keep model calls on the host.".into());}
+        lines.push("Supervised fleets stay paused after verification; review fleet status and explicitly continue.".into());
+        self.chip_info=Some(ChipInfo{kind:"isolation_change",label:profile.key().into(),lines,scroll:0,owner:Some((id,profile.key().into()))});
+    }
+    pub(super) fn isolation_control_key(&mut self,key:KeyEvent)->bool{
+        let Some(info)=self.chip_info.as_ref().filter(|info|matches!(info.kind,"isolation"|"isolation_change"))else{return false;};
+        let Some((id,profile))=info.owner.clone()else{return false;};
+        if key.code==KeyCode::Esc{self.chip_info=None;return true;}
+        if info.kind=="isolation" {
+            let target=match key.code{KeyCode::Char('1')=>Some(doxa_isolation::Profile::DockerOffline),KeyCode::Char('2')=>Some(doxa_isolation::Profile::DockerOpen),KeyCode::Char('3')=>Some(doxa_isolation::Profile::Native),_=>None};
+            if let Some(target)=target{self.review_isolation_change(id,target);return true;}return false;
+        }
+        if matches!(key.code,KeyCode::Char('Y')|KeyCode::Char('y'))&&key.modifiers.contains(KeyModifiers::SHIFT){
+            if self.active_remote(){self.notice="Change isolation on the session host".into();return true;}
+            if !self.session_activity.get(&id).is_some_and(|(busy,queued)|!*busy&&*queued==0){self.notice="Isolation changes require an idle session with no queued prompts".into();return true;}
+            self.pending_queue_commands.push(crate::bridge::WorkerCommand::SetIsolation(id,profile));self.chip_info=None;
+            self.notice="Applying reviewed isolation change; waiting for host verification…".into();
+        }
+        true
     }
     pub(super) fn dispatch_isolation_command(&mut self)->bool{
         let input=self.input.trim();
@@ -67,9 +95,8 @@ impl App {
         if !self.session_activity.get(&id).is_some_and(|(busy,queued)|!*busy&&*queued==0){
             self.notice="Isolation changes require an idle session with no queued prompts".into();return true;
         }
-        self.pending_queue_commands.push(crate::bridge::WorkerCommand::SetIsolation(id,profile.key().into()));
-        self.input.clear();self.chip_info=None;
-        self.notice=format!("Verifying isolation change to {}…",profile.label());true
+        self.review_isolation_change(id,profile);
+        self.input.clear();true
     }
     pub(super) fn apply_isolation_reply(&mut self,frame:&Value)->Option<bool>{
         if frame["type"]!="set_isolation_reply"{return None;}

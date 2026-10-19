@@ -302,6 +302,9 @@ impl AppServerDriver {
         let owner_fd = owner_peer.as_ref().map(AsRawFd::as_raw_fd);
         let mut provider_command = std::process::Command::new(&options.executable);
         provider_command.arg("app-server").arg("--stdio").current_dir(&options.cwd);
+        if !doxa_isolation::task_internet_allowed()? {
+            provider_command.arg("-c").arg("web_search=\"disabled\"");
+        }
         if let Some(gate) = &compact_gate {
             for value in gate.cli_overrides() { provider_command.arg("-c").arg(value); }
         }

@@ -522,6 +522,19 @@ fn worker_loop(
                     if frames.send(command_frame(id, reply)).is_err() { return; }
                 }
                 Ok(WorkerCommand::SetIsolation(id, profile)) => {
+                    if id==session_id {
+                        if let Ok(target)=doxa_isolation::Profile::parse(&profile){
+                            match crate::fleet_control::change_attached_isolation(&mut client,target){
+                                Ok(Some((resumed,isolation)))=>{
+                                    client=resumed;live_from_seq=client.hello["next_seq"].as_u64().unwrap_or(u64::MAX);cursor.store(client.cursor,Ordering::Relaxed);
+                                    if frames.send(WorkerFrame::Daemon{session_id:session_id.clone(),frame:client.hello.clone()}).is_err(){return;}
+                                    if frames.send(command_frame(id,CommandResult::SetIsolation{status:ReplyStatus{ok:true,error:None},isolation:Some(isolation)})).is_err(){return;}continue;
+                                },
+                                Ok(None)=>{},
+                                Err(error)=>{if frames.send(command_frame(id,CommandResult::SetIsolation{status:ReplyStatus::failed(error.to_string()),isolation:None})).is_err(){return;}continue;},
+                            }
+                        }
+                    }
                     let migration=doxa_isolation::Profile::parse(&profile).ok().filter(|target| {
                         client.hello["isolation"]["profile"].as_str().and_then(|profile|doxa_isolation::Profile::parse(profile).ok()).is_some_and(|current|current.docker()!=target.docker())
                     });

@@ -156,7 +156,8 @@ impl PeerHost {
             Ok(context) => {
                 context.validate()?;
                 let own=context.assignment(&session_id)?;
-                if own.pid!=std::process::id() as i32||own.cwd!=cwd.to_string_lossy(){return Err(doxa_fleet::invalid("persisted fleet host identity changed; stop and review a new run"));}
+                if (own.pid!=std::process::id() as i32||own.cwd!=cwd.to_string_lossy())
+                    && !doxa_fleet::isolation_change::authorized(&context,&session_id)? {return Err(doxa_fleet::invalid("persisted fleet host identity changed; stop and review a new run"));}
                 Some(context)
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -658,7 +659,10 @@ impl PeerHost {
     }
 
     fn execute_prompt(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
-        self.inner.prompt_with_peer_origin(text, origin, &mut |event| {
+        let current=if self.fleet_owner().ok().flatten().is_some(){
+            format!("Host runtime internet policy: {}. Offline workers request research via peer_send question from an owner-approved online coordinator; offline coordinators escalate to the owner. This policy does not change the frozen task or grant approval.\n\n{text}",if doxa_isolation::task_internet_allowed().unwrap_or(false){"direct internet is enabled by the owner"}else{"direct internet and web searches are disabled"})
+        }else{text.into()};
+        self.inner.prompt_with_peer_origin(&current, origin, &mut |event| {
             let terminal=matches!(event["type"].as_str(),Some("turn_done"|"turn_refused"));
             emit(event);
             if terminal{self.cancel_spawns(false);}
@@ -708,6 +712,14 @@ impl Host for PeerHost {
 
 impl PeerHost {
     fn prompt_with_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        if self.owner_isolation_active().map(|request|request.is_some()).unwrap_or(true){
+            emit(json!({"type":"turn_refused","data":{"error":"Owner isolation change holds prompt admission"}}));return;
+        }
+        if let Some(context)=self.fleet.lock().unwrap_or_else(|poison|poison.into_inner()).as_ref(){
+            if doxa_fleet::isolation_change::held(context).unwrap_or(true){
+                emit(json!({"type":"turn_refused","data":{"error":"Owner isolation change holds prompt admission"}}));return;
+            }
+        }
         let pending: Vec<Value> = self.pending.lock().unwrap_or_else(|poison| poison.into_inner())
             .drain(..).collect();
         if pending.is_empty() {
@@ -743,9 +755,27 @@ impl PeerHost {
 }
 
 impl PeerHost {
+    fn fleet_owner(&self)->io::Result<Option<Value>> {
+        let Some(run)=self.fleet_path.parent().and_then(Path::parent)else{return Ok(None);};
+        let manifest:Value=match doxa_fleet::read_private(&run.join("manifest.json"),1024*1024){
+            Ok(value)=>value,Err(error) if error.kind()==io::ErrorKind::NotFound=>return Ok(None),Err(error)=>return Err(error),
+        };
+        if manifest["native_version"]!=1{return Ok(None);}
+        let row=manifest["slots"].as_array().and_then(|rows|rows.iter().find(|row|row["session_id"]==self.session_id)).ok_or_else(||doxa_fleet::invalid("fleet slot identity unavailable"))?;
+        Ok(Some(json!({"root":run.parent(),"run_id":manifest["run_id"],"slot":row["index"],"socket_path":row["socket_path"]})))
+    }
+    fn owner_isolation_active(&self)->io::Result<Option<doxa_fleet::owner_control::IsolationRequest>> {
+        if self.fleet_owner()?.is_none(){return Ok(None);}
+        doxa_fleet::owner_control::active(self.fleet_path.parent().and_then(Path::parent).ok_or_else(||doxa_fleet::invalid("fleet root unavailable"))?)
+    }
     fn call_impl(&self, method: &str, params: &Value) -> Result<Value, String> {
+        if matches!(method,"set_isolation"|"isolation_migration_plan"|"isolation_migration_stop") && self.fleet_owner().map_err(|error|error.to_string())?.is_some(){
+            let approved=self.owner_isolation_active().map_err(|error|error.to_string())?.filter(|request|request.session_id==self.session_id)
+                .filter(|request|method!="set_isolation"||params["profile"]==request.target.key());
+            if approved.is_none(){return Err("Fleet isolation changes require the reviewed owner controller request".into());}
+        }
         if matches!(method,"isolation_migration_plan"|"isolation_migration_stop")
-            && self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.is_some() {
+            && self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.as_ref().is_some_and(|context|!doxa_fleet::isolation_change::authorized(context,&self.session_id).unwrap_or(false)) {
             return Err("Fleet assignments freeze daemon identity; stop and review a new run to migrate isolation".into());
         }
         if matches!(method,"interrupt"|"stop"){self.cancel_spawns(method=="stop");}
@@ -756,6 +786,7 @@ impl PeerHost {
         }
 
         match method {
+            "fleet_owner" => Ok(json!({"owner":self.fleet_owner().map_err(|error|error.to_string())?})),
             "fleet_identity" => Ok(json!({"session_id":self.session_id,"pid":std::process::id(),"cwd":self.cwd})),
             "fleet_configure" => {
                 let context:doxa_fleet::Context=serde_json::from_value(params.clone()).map_err(|_|"Invalid fleet context")?;
@@ -763,7 +794,7 @@ impl PeerHost {
                 let own=context.assignment(&self.session_id).map_err(|error|error.to_string())?;
                 if own.pid!=std::process::id() as i32 || own.cwd!=self.cwd.to_string_lossy() {return Err("Fleet host identity changed".into());}
                 let mut fleet=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?;
-                if fleet.as_ref().is_some_and(|old|old!=&context){return Err("Only the owner can replace an approved fleet charter; stop and review a new run".into());}
+                if let Some(old)=fleet.as_ref().filter(|old|*old!=&context){doxa_fleet::isolation_change::verify_reconfiguration(old,&context).map_err(|error|error.to_string())?;}
                 doxa_fleet::save_private(&self.fleet_path,&context).map_err(|error|error.to_string())?;
                 doxa_fleet::transaction(&context,|_|Ok(())).map_err(|error|error.to_string())?;
                 *fleet=Some(context.clone());Ok(json!({"charter_sha256":context.charter_sha256,"configured":true}))
@@ -786,7 +817,7 @@ impl PeerHost {
                 Ok(json!({"snapshot":clean}))
             },
             "spawn_session" => {
-                if self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.is_some(){return Err("Fleet charter forbids agent session spawning".into());}
+                if self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.is_some()||self.fleet_owner().map_err(|error|error.to_string())?.is_some(){return Err("Fleet charter forbids agent session spawning".into());}
  let manager=self.spawner.lock().map_err(|_|"Spawner unavailable")?.clone().ok_or("Spawner unavailable")?;manager.spawn(params,&*self.inner) },
             "peer_tools_status" => Ok(json!({"provider_peer_tools":self.peer_tools_ready(),"ledger_path":self.ledger_path})),
             "peers" => self.peers(params),

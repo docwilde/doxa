@@ -29,7 +29,7 @@ impl Fixture {
         command
     }
     fn start(&self, quiet: &str) -> Child {
-        self.command().args(["fleet", "start", "--pool", "fixture", "--prompt", "same bounded fixture task",
+        self.command().args(["fleet", "start", "--isolation", "native", "--confirm-native-workers", "--allow-worker-internet", "--pool", "fixture", "--prompt", "same bounded fixture task",
             "-n", "2", "--allow-unbudgeted", "--run-id", "run", "--quiescence-grace", quiet,
             "--root", self.root.to_str().unwrap()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap()
     }
@@ -78,7 +78,7 @@ fn native_symmetric_fleet_dispatches_all_slots_and_tears_down_isolated_runtime()
 #[test]
 fn reviewed_native_fleet_freezes_guard_context_budget_and_host_evidence_without_model_calls(){
     let fixture=Fixture::new();
-    let mut child=fixture.command().args(["fleet","start","--pool","fixture","--prompt","bounded fixture task","-n","2","--run-budget","4","--review-budget","1","--message-review","enforce","--message-judge","jev:jev-1.13.0","--run-id","run","--quiescence-grace","0.1","--root",fixture.root.to_str().unwrap()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
+    let mut child=fixture.command().args(["fleet","start","--isolation","native","--confirm-native-workers","--allow-worker-internet","--pool","fixture","--prompt","bounded fixture task","-n","2","--run-budget","4","--review-budget","1","--message-review","enforce","--message-judge","jev:jev-1.13.0","--run-id","run","--quiescence-grace","0.1","--root",fixture.root.to_str().unwrap()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
     finish(&mut child);let manifest=fixture.manifest();
     let context:doxa_fleet::Context=serde_json::from_value(manifest["supervision"]["context"].clone()).unwrap();context.validate().unwrap();
     assert_eq!(context.assignments.len(),2);assert_eq!(context.charter.task,"bounded fixture task");assert_eq!(context.review.message_mode,doxa_fleet::Mode::Enforce);
@@ -96,7 +96,7 @@ fn reviewed_native_fleet_freezes_guard_context_budget_and_host_evidence_without_
 #[test]
 fn reviewed_native_fleet_missing_git_evidence_holds_supervisor_without_model_calls(){
     let fixture=Fixture::new();
-    let mut child=fixture.command().args(["fleet","start","--pool","fixture","--prompt","bounded fixture task","-n","1","--run-budget","4","--review-budget","1","--alignment-supervisor","codex:fixture-no-live-model","--supervision-mode","enforce","--run-id","run","--quiescence-grace","0.1","--root",fixture.root.to_str().unwrap()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
+    let mut child=fixture.command().args(["fleet","start","--isolation","native","--confirm-native-workers","--allow-worker-internet","--pool","fixture","--prompt","bounded fixture task","-n","1","--run-budget","4","--review-budget","1","--alignment-supervisor","codex:fixture-no-live-model","--supervision-mode","enforce","--run-id","run","--quiescence-grace","0.1","--root",fixture.root.to_str().unwrap()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
     let manifest=fixture.wait_monitoring();assert_eq!(manifest["supervision"]["paused"],true);assert_eq!(manifest["supervision"]["status"],"uncertain");assert_eq!(manifest["supervision"]["calls"],0);assert!(manifest["supervision"]["reason"].as_str().unwrap().contains("Git evidence unavailable"));
     assert!(manifest["slots"].as_array().unwrap().iter().all(|slot|slot["phase"]!="dispatched"));
     let context:doxa_fleet::Context=serde_json::from_value(manifest["supervision"]["context"].clone()).unwrap();
@@ -164,7 +164,7 @@ fn ambiguous_dispatch_resume_never_creates_runtime_or_sends_a_prompt() {
 fn reviewed_prompt_digest_refuses_changed_input_before_launch() {
     let fixture = Fixture::new();
     let output = fixture.command().env("DOXA_FLEET_REVIEW_PROMPT_SHA256", "not-the-reviewed-digest")
-        .args(["fleet", "start", "--pool", "fixture", "--prompt", "changed task", "-n", "1", "--allow-unbudgeted", "--run-id", "run", "--root", fixture.root.to_str().unwrap()]).output().unwrap();
+        .args(["fleet", "start", "--isolation", "native", "--confirm-native-workers", "--allow-worker-internet", "--pool", "fixture", "--prompt", "changed task", "-n", "1", "--allow-unbudgeted", "--run-id", "run", "--root", fixture.root.to_str().unwrap()]).output().unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("prompt changed after review"));
     assert!(!fixture.root.exists()); assert!(!fixture.home.exists());
@@ -213,7 +213,7 @@ fn dead_controller_stop_cleans_verified_slots_and_persists_finished() {
 fn legacy_memory_off_and_quiet_dwell_reach_isolated_native_daemons() {
     let fixture = Fixture::new();
     let mut child = fixture.command().env("DOXA_LORE", "1")
-        .args(["fleet", "start", "--pool", "fixture", "--prompt", "same bounded fixture task",
+        .args(["fleet", "start", "--isolation", "native", "--confirm-native-workers", "--allow-worker-internet", "--pool", "fixture", "--prompt", "same bounded fixture task",
             "-n", "4", "--seed", "19", "--memory-off", "2", "--quiet-dwell", "30",
             "--allow-unbudgeted", "--run-id", "run", "--root", fixture.root.to_str().unwrap()])
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();

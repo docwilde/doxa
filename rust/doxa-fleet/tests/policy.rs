@@ -257,3 +257,45 @@ fn dependent_worker_waits_for_host_dispatch_and_human_released_handoff() {
     assert_eq!(accepted_handoff(&context,&resolved,"predecessor").unwrap().handoff_id,revised.message_id);
     assert!(!predecessor_released(&context,&resolved,"predecessor",2,&handoff_turn_hash),"old human release cannot authorize a later handoff");
 }
+
+#[test]
+fn owner_isolation_change_holds_every_message_and_rebinds_only_one_host_identity(){
+    let (_dir,context)=fixture();
+    transaction(&context,|state|{state.calls=3;state.reserved_usd=0.25;Ok(())}).unwrap();
+    assert!(!isolation_change::authorized(&context,"a").unwrap());
+    isolation_change::begin(&context,"a").unwrap();
+    assert!(isolation_change::authorized(&context,"a").unwrap());
+    assert!(!isolation_change::authorized(&context,"b").unwrap());
+    for kind in [Kind::Status,Kind::Question,Kind::Evidence,Kind::Proposal]{
+        assert!(!admit(&context,&envelope(&context,kind),"b",101,Some(Ok(safe()))).unwrap().delivered);
+    }
+    assert!(resume_review(&context,&context.charter_sha256).is_err());
+    let updated=isolation_change::rebind(&context,"a",201,"/private-clone").unwrap();
+    assert_eq!(updated.charter,context.charter);assert_eq!(updated.assignments[1],context.assignments[1]);
+    assert!(transaction(&context,|_|Ok(())).is_err(),"old hosts must fail closed after rebind");
+    isolation_change::verify_reconfiguration(&context,&updated).unwrap();
+    for mutation in ["task","role","budget","peer"]{
+        let mut forged=updated.clone();
+        match mutation {"task"=>forged.assignments[0].task="Different goal".into(),"role"=>forged.assignments[0].role="coordinator".into(),"budget"=>{forged.charter.run_budget_usd=Some(100.0);forged.charter_sha256=hash(&forged.charter).unwrap();},_=>forged.assignments[1].pid=301}
+        assert!(isolation_change::verify_reconfiguration(&context,&forged).is_err(),"accepted unauthorized {mutation} change");
+    }
+    assert!(isolation_change::held(&updated).unwrap());
+    isolation_change::finish(&updated).unwrap();
+    let state=transaction(&updated,|state|Ok(state.clone())).unwrap();
+    assert!(state.paused);assert!(state.isolation_change.is_none());
+    assert_eq!(state.calls,3);assert_eq!(state.reserved_usd,0.25);
+    resume_review(&updated,&updated.charter_sha256).unwrap();
+    assert!(isolation_change::verify_reconfiguration(&context,&updated).is_err(),"finished approval cannot be replayed");
+}
+
+#[test]
+fn internet_and_native_confirmations_are_independent_and_owner_control_files_stay_private(){
+    use owner_control::IsolationRequest;use doxa_isolation::Profile;
+    let mut request=IsolationRequest{id:uuid::Uuid::new_v4().to_string(),session_id:"worker".into(),expected_profile:Profile::DockerOffline,target:Profile::Native,confirm_native:false,allow_internet:false};
+    assert!(request.validate().is_err());request.confirm_native=true;
+    assert!(request.validate().is_err());request.allow_internet=true;request.validate().unwrap();
+    let (dir,_)=fixture();save_private(&dir.path().join("isolation-active.json"),&request).unwrap();
+    assert!(owner_control::active(dir.path()).unwrap().is_some());
+    std::fs::set_permissions(dir.path().join("isolation-active.json"),std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(owner_control::active(dir.path()).is_err());
+}

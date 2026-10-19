@@ -24,7 +24,7 @@ pub fn words(text:&str)->io::Result<Vec<String>>{
     if out.len()>512{return Err(invalid("Too many fleet arguments"));}Ok(out)
 }
 
-fn has_option(args:&[String],name:&str)->bool{let mut index=0;while index<args.len(){let key=args[index].as_str();if key==name{return true;}index+=if matches!(key,"--force"|"--allow-unbudgeted"|"--dry-run"|"--strict-unreviewed"|"--auto-test"){1}else{2};}false}
+fn has_option(args:&[String],name:&str)->bool{let mut index=0;while index<args.len(){let key=args[index].as_str();if key==name{return true;}index+=if matches!(key,"--force"|"--allow-unbudgeted"|"--dry-run"|"--strict-unreviewed"|"--auto-test"|"--confirm-native-workers"|"--confirm-native-supervisor"|"--allow-worker-internet"|"--allow-supervisor-internet"){1}else{2};}false}
 
 pub struct Prepared {
     pub root:PathBuf,pub id:String,pub lines:Vec<String>,args:Vec<String>,resume_snapshot:Option<Value>,
@@ -50,13 +50,17 @@ impl Prepared {
         let root=PathBuf::from(review["root"].as_str().ok_or_else(||invalid("Fleet review root unavailable"))?);
         let id=review["run_id"].as_str().filter(|id|doxa_state::valid_session_id(id)).ok_or_else(||invalid("Fleet review run ID unavailable"))?.to_owned();
         let lines=review_lines("Start native fleet",&review);
+        // These acknowledgements become effective only after the full human review.
+        if let Some(flags)=review["access"]["required_access_confirmations"].as_array(){
+            for flag in flags.iter().filter_map(Value::as_str){if !has_option(&args,flag){args.push(flag.into());}}
+        }
         let mut command=vec!["start".into()];command.extend(args);
         Ok(Self{root,id,lines,args:command,resume_snapshot:None,prompt_digest:review["prompt_sha256"].as_str().map(str::to_owned),assignment_digest:review["assignments_sha256"].as_str().map(str::to_owned),recipe_digest:review["test_recipe_sha256"].as_str().map(str::to_owned),lore_default:review["lore_enabled"].as_bool(),seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn resume(root:PathBuf,id:&str)->io::Result<Self>{
         let snapshot=crate::fleet_control::snapshot(&root,id)?;
         if snapshot["phase"]!="monitoring"||snapshot["live"]!=true{return Err(invalid("Only a native live monitoring run can resume"));}
-        let review=json!({"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"memory_off":snapshot["spec"]["memory_off"],"lore_enabled":snapshot["spec"]["lore_enabled"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"],"independent_review":snapshot["supervision"]["context"]["review"],"charter_sha256":snapshot["supervision"]["context"]["charter_sha256"],"auto_test":snapshot["spec"]["auto_test"],"test_recipe":snapshot["supervision"]["context"]["charter"]["test_recipe"]});
+        let review=json!({"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"access":snapshot["spec"]["access"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"memory_off":snapshot["spec"]["memory_off"],"lore_enabled":snapshot["spec"]["lore_enabled"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"],"independent_review":snapshot["supervision"]["context"]["review"],"charter_sha256":snapshot["supervision"]["context"]["charter_sha256"],"auto_test":snapshot["spec"]["auto_test"],"test_recipe":snapshot["supervision"]["context"]["charter"]["test_recipe"]});
         Ok(Self{lines:review_lines("Resume native fleet",&review),root:root.clone(),id:id.into(),args:vec!["resume".into(),id.into(),"--root".into(),root.to_string_lossy().into_owned()],resume_snapshot:Some(snapshot),prompt_digest:None,assignment_digest:None,recipe_digest:None,lore_default:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn launch(self,exe:&Path)->io::Result<Controller>{
@@ -92,6 +96,21 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
     let mut lines=vec![format!("{title} · read all rows, Shift+A arm, Shift+Y launch · Esc cancel")];
     for (label,key)in [("Run","run_id"),("Root","root"),("Directory","cwd"),("Mode","mode"),("Isolation","isolation"),("Workers","workers"),("Sessions","sessions"),("Seed","seed"),("Workers with memory off","memory_off"),("Memory default enabled","lore_enabled"),("Total budget USD","run_budget_usd"),("Allow unbudgeted","allow_unbudgeted"),("Approval policy","approval_policy"),("Approval grace seconds","approval_grace_s"),("Dry run","dry_run"),("Preflight","preflight"),("Task digest","prompt_sha256"),("Assignment plan digest","assignments_sha256"),("Quiescence deadline seconds","quiescence_timeout_s"),("Quiescence grace seconds","quiescence_grace_s")]{
         if !value[key].is_null(){lines.push(format!("{label}: {}",value[key].as_str().map(str::to_owned).unwrap_or_else(||value[key].to_string())));}
+    }
+    if value["access"].is_object(){
+        let access=&value["access"];
+        lines.push(format!("Workers: {} · direct task internet: {}",access["worker_isolation"],access["worker_task_internet"]));
+        if !access["supervisor_isolation"].is_null(){lines.push(format!("Coordinator: {} · task internet: {}",access["supervisor_isolation"],access["supervisor_task_internet"]));}
+        for flag in access["required_access_confirmations"].as_array().into_iter().flatten().filter_map(Value::as_str){
+            lines.push(match flag {
+                "--confirm-native-workers"=>"CONFIRM: workers run outside Docker with owner host and credential access.",
+                "--confirm-native-supervisor"=>"CONFIRM: coordinator runs outside Docker with owner host and credential access.",
+                "--allow-worker-internet"=>"CONFIRM: workers may access the internet directly, including web searches.",
+                "--allow-supervisor-internet"=>"CONFIRM: coordinator may use the internet and answer workers' research requests.",
+                _=>"Unknown access confirmation; cancel this launch.",
+            }.into());
+        }
+        lines.push("Offline workers request research via peer_send question to the coordinator; an online coordinator returns evidence. An offline coordinator escalates to the owner.".into());
     }
     if !value["auto_test"].is_null(){lines.push(format!("Automatic host tests after worker turns: {}",value["auto_test"]));}
     if let Some(hash)=value["router_config_sha256"].as_str(){

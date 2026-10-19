@@ -27,21 +27,22 @@ pub struct Menu {
     refreshed: Instant,
     verified:bool,
     fixture:bool,
+    alignment:bool,
 }
 impl Menu {
     pub fn new(root: PathBuf, run: Option<String>) -> Self {
-        let mut menu = Self {root,run,rows:Vec::new(),selected:0,lines:vec!["Loading fleet manifests…".into()],receiver:None,refreshed:Instant::now(),verified:false,fixture:false};
+        let mut menu = Self {root,run,rows:Vec::new(),selected:0,lines:vec!["Loading fleet manifests…".into()],receiver:None,refreshed:Instant::now(),verified:false,fixture:false,alignment:false};
         menu.refresh(); menu
     }
     /// A render-only status fixture. It cannot poll a filesystem or persist a fake run.
     #[doc(hidden)]
     pub fn from_fixture(root:PathBuf,id:&str,lines:Vec<String>)->Self{
-        Self{root,run:Some(id.into()),rows:Vec::new(),selected:0,lines,receiver:None,refreshed:Instant::now(),verified:false,fixture:true}
+        Self{root,run:Some(id.into()),rows:Vec::new(),selected:0,lines,receiver:None,refreshed:Instant::now(),verified:false,fixture:true,alignment:false}
     }
     fn refresh(&mut self) {
         if self.fixture{return;}
         if self.receiver.is_some() {return;}
-        let root=self.root.clone(); let run=self.run.clone(); let(tx,rx)=mpsc::channel();
+        let root=self.root.clone(); let run=self.run.clone(); let alignment=self.alignment; let(tx,rx)=mpsc::channel();
         self.receiver=Some(rx); self.refreshed=Instant::now();
         std::thread::spawn(move || {
             let result=(||->std::io::Result<Reply>{
@@ -50,7 +51,9 @@ impl Menu {
                     let exact:Vec<_>=ids.iter().filter(|id|**id==query).collect();
                     let matched:Vec<_>=if exact.is_empty(){ids.iter().filter(|id|id.starts_with(&query)).collect()}else{exact};
                     if matched.len()!=1{return Err(std::io::Error::new(std::io::ErrorKind::NotFound,"Fleet run missing or ambiguous"));}
-                    let id=matched[0].clone();let mut text=crate::fleet_view::status(&root,&id)?;
+                    let id=matched[0].clone();
+                    if alignment{return Ok(Reply{text:crate::fleet_alignment::inspect(&root,&id)?,ids:Vec::new(),run:Some(id)});}
+                    let mut text=crate::fleet_view::status(&root,&id)?;
                     if let Ok(snapshot)=crate::fleet_control::snapshot(&root,&id){
                         if snapshot["native_version"]==1{
                             let phase=snapshot["phase"].as_str().unwrap_or("unknown");
@@ -73,7 +76,7 @@ impl Menu {
             match result {
                 Ok(reply)=>{self.rows=reply.ids;self.run=reply.run;self.verified=self.run.is_some();
                     self.selected=self.selected.min(self.rows.len().saturating_sub(1));
-                    self.lines=vec!["Fleet · ↑/↓ select · Enter open · B runs · R refresh · Esc close".into()];
+                    self.lines=vec!["Fleet · ↑/↓ select · Enter open · N new fleet · M messages/alignment · B runs · R refresh · Esc close".into()];
                     self.lines.extend(reply.text.lines().map(str::to_owned));
                     if let Some(run)=&self.run {self.lines.push(format!("Attach a slot: /fleet attach {run} <index>"));}
                     else{self.lines.extend(self.rows.iter().cloned());if self.rows.is_empty(){self.lines.push("No recorded runs".into());}}
@@ -88,7 +91,8 @@ impl Menu {
         KeyCode::Up=>self.selected=self.selected.saturating_sub(1),
         KeyCode::Down=>self.selected=(self.selected+1).min(self.rows.len().saturating_sub(1)),
         KeyCode::Enter=>{if let Some(run)=self.rows.get(self.selected).cloned(){self.run=Some(run);self.verified=false;self.receiver=None;self.refresh();}},
-        KeyCode::Char('b')=>{self.run=None;self.verified=false;self.receiver=None;self.refresh();},
+        KeyCode::Char('m') if self.run.is_some()=>{self.alignment=!self.alignment;self.receiver=None;self.refresh();},
+        KeyCode::Char('b')=>{self.alignment=false;self.run=None;self.verified=false;self.receiver=None;self.refresh();},
         KeyCode::Char('r')=>self.refresh(),_=>{}}
     }
     pub fn verified_view(&self)->Option<SavedView>{self.run.as_ref().filter(|_|self.verified).map(|id|SavedView{kind:ViewKind::Fleet,root:self.root.clone(),run_id:id.clone()})}
@@ -101,7 +105,7 @@ mod tests {
     use super::*;
     #[test]
     fn hover_rejects_headers_and_rows_outside_real_run_choices() {
-        let mut menu=Menu {root:PathBuf::from("/unused"),run:None,rows:vec!["real-run".into()],selected:0,lines:Vec::new(),receiver:None,refreshed:Instant::now(),verified:false,fixture:false};
+        let mut menu=Menu {root:PathBuf::from("/unused"),run:None,rows:vec!["real-run".into()],selected:0,lines:Vec::new(),receiver:None,refreshed:Instant::now(),verified:false,fixture:false,alignment:false};
         assert!(!menu.hover(0));assert!(!menu.hover(2));assert!(menu.hover(3));assert!(!menu.hover(4));
         menu.run=Some("real-run".into());assert!(!menu.hover(3));
     }

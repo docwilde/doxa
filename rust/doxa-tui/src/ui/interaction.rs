@@ -751,6 +751,8 @@ impl App {
             self.should_quit = true;
             return true;
         }
+        if self.fleet_setup_key(key){return true;}
+        if self.isolation_control_key(key){return true;}
         if self.fleet_review.is_some() {
             return self.fleet_review_key(key);
         }
@@ -794,6 +796,7 @@ impl App {
         if self.choice_dropdown.is_some() { return self.choice_dropdown_key(key); }
         if self.chip_info.is_some() {
             if self.fleet_menu.is_some() {
+                if key.code==KeyCode::Char('n'){self.open_fleet_setup();return true;}
                 if key.code == KeyCode::Esc {
                     self.fleet_menu = None;
                     self.chip_info = None;
