@@ -8046,8 +8046,9 @@ import hashlib, json, sys
 print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','pending_review_v1','resolve_reviewed_v1']}), flush=True)
 for line in sys.stdin:
     req = json.loads(line)
-    raw = json.dumps({'kind':'memory','text':'x'*4000})
-    value = {'pid':req['pid'],'raw':raw,'sha256':hashlib.sha256(raw.encode()).hexdigest(),'inode':11,'complete':True}
+    raw = json.dumps({'kind':'skill','body':'x'*4000})
+    value = {'pid':req['pid'],'raw':raw,'sha256':hashlib.sha256(raw.encode()).hexdigest(),'inode':11,'complete':True,
+             'skill_evaluation':{'status':'passed','current':False,'advisory':True,'report_sha256':'a'*64}}
     print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
 "#).unwrap();
         let mut permissions = std::fs::metadata(&sidecar).unwrap().permissions();
@@ -8056,12 +8057,14 @@ for line in sys.stdin:
         let lore_picker::ResultPage::Review(review, can_resolve) = lore_picker::fetch_fixture(&sidecar,
             lore_picker::Query::Review("/repo".into(), "one".into())).unwrap() else { panic!("review") };
         assert!(can_resolve);
+        assert!(review.display_text().contains("Skill evaluation (advisory"));
+        assert_eq!(review.skill_evaluation().unwrap()["current"], false);
         let mut app = App::default();
         app.size = Rect::new(0, 0, 100, 40);
         app.lore_picker = Some(LorePicker {
             session_id: None,
             query: String::new(), filter_focused: false, rows: Vec::new(), selected: 0, offset: 0,
-            proposals: vec![lore_picker::Proposal { pid: "one".into(), kind: "memory".into(),
+            proposals: vec![lore_picker::Proposal { pid: "one".into(), kind: "skill".into(),
                 action: "add".into(), scope: "user".into(), summary: String::new(), source_session_id: None, source_project: None }],
             proposal_mode: true, cluster_mode: false, all_proposals: Vec::new(), review: Some(review), review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
@@ -8081,7 +8084,7 @@ for line in sys.stdin:
         app.chooser_height_override.set(None);
         for _ in 0..200 {
             if app.lore_picker.as_ref().unwrap().review_seen ==
-                raw_visual_rows(app.lore_picker.as_ref().unwrap().review.as_ref().unwrap().raw(),
+                raw_visual_rows(&app.lore_picker.as_ref().unwrap().review.as_ref().unwrap().display_text(),
                     app.lore_picker.as_ref().unwrap().review_width).len() { break; }
             app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         }
