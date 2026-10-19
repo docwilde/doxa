@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.60 — 2026-10-20
+
+**Claude follow-up turns**
+
+- Fix **`Operation::expire`** so a timed-out context/catalog query does not disable later Claude prompts. Unacknowledged setting changes still block admission.
+- Retain the first failure reason in **`Shared`** and report checkpoint failures on the completed turn. Later prompts name the blocked boundary instead of returning an unexplained unavailable message.
+
+**Error presentation**
+
+- Render failed turns and compaction failures in a distinct red **Error** block. Keep diagnostics bounded and escaped; display a fallback when the provider supplies no reason.
+
 ## 2.0.0-beta.59 — 2026-10-19
 
 **Offline provider connectivity**

@@ -6,6 +6,28 @@ use super::*;
     use serde_json::json;
 
     #[test]
+    fn failed_turns_render_as_error_blocks_with_wrapped_sanitized_reasons() {
+        for data in [json!({"is_error":true,"error":"Claude session unavailable: checkpoint failed"}),
+            json!({"is_error":true,"operation":"compact","error":"Rejected **markup**\n\u{1b}[31mreason"}),
+            json!({"is_error":true,"error":null})] {
+            let mut app = App::default();
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"claude-error","engine":"claude"}));
+            app.apply_daemon_frame(&json!({"type":"event","session_id":"claude-error",
+                "event":{"type":"turn_done","data":data}}));
+            assert_eq!(app.sessions[0].status, "Error");
+            let (lines, _) = transcript_tools::render(&app.sessions[0].transcript, 28, None, None);
+            assert!(lines.iter().any(|line| line.to_string() == " ! Error"));
+            assert!(lines.iter().filter(|line| !line.spans.is_empty())
+                .flat_map(|line| &line.spans).all(|span| span.style.fg == Some(theme::ERROR)));
+            assert!(lines.iter().all(|line| unicode_width::UnicodeWidthStr::width(line.to_string().as_str()) <= 28));
+            assert!(!lines.iter().any(|line| line.to_string().contains('\u{1b}')));
+            if data["error"].is_null() {
+                assert!(lines.iter().map(|line|line.to_string()).collect::<String>().contains("provider did not report"));
+            }
+        }
+    }
+
+    #[test]
     fn glm_account_usage_refresh_is_explicit_and_restores_unknown_and_reported_state() {
         use doxa_vendors::glm_billing::{account_report,Profile,QuotaSnapshot};
         let mut app=App::default();app.handle(Event::Resize(190,48));

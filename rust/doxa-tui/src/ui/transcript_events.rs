@@ -217,7 +217,10 @@ pub(super) fn structured_event(event_type: &str, data: &serde_json::Value) -> Op
                 .unwrap_or_else(|| "none".into())
         ),
         "turn_done" if data.get("is_error").and_then(|v| v.as_bool()) == Some(true) => {
-            format!("{} failed: {}",if data["operation"] == "compact" {"Compaction"} else {"Turn"},field("error"))
+            let reason = data["error"].as_str().filter(|text| !text.trim().is_empty())
+                .map(event_field).unwrap_or_else(|| "The provider did not report a reason".into());
+            let text = format!("{} failed: {reason}",if data["operation"] == "compact" {"Compaction"} else {"Turn"});
+            return Some(format!("\n\n{}{}\n\n", transcript_tools::ERROR_PREFIX, serde_json::to_string(&text).unwrap()));
         }
         _ => return None,
     };
