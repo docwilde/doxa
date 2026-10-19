@@ -1480,8 +1480,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
             send_event(
                 &events,
                 done(
-                    provider_failure
-                        .as_deref()
+                    shared.failure_reason().or(provider_failure.as_deref())
                         .unwrap_or("Claude cancellation deadline expired; provider terminated"),
                 ),
             );
@@ -1495,8 +1494,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                 send_event(
                     &events,
                     done(
-                        provider_failure
-                            .as_deref()
+                        shared.failure_reason().or(provider_failure.as_deref())
                             .unwrap_or("Claude CLI stream closed"),
                     ),
                 );

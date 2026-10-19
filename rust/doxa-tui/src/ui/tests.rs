@@ -22,9 +22,9 @@ use super::*;
             assert!(lines.iter().all(|line| unicode_width::UnicodeWidthStr::width(line.to_string().as_str()) <= 28));
             assert!(!lines.iter().any(|line| line.to_string().contains('\u{1b}')));
             if data["error"].is_null() {
-                let body = lines.iter().map(|line| line.to_string()).collect::<Vec<_>>()
-                    .iter().map(|line| line.strip_prefix("│ ").unwrap_or(line)).collect::<Vec<_>>().join(" ");
-                assert!(body.contains("provider did not report"));
+                let body = lines.iter().map(|line| line.to_string()).collect::<String>()
+                    .chars().filter(|ch| !ch.is_whitespace() && *ch != '│').collect::<String>();
+                assert!(body.contains("providerdidnotreport"), "{body:?}");
             }
         }
     }
