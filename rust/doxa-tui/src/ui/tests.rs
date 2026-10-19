@@ -6235,7 +6235,7 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(app.diff_pane);
         app.diff_text = "Base: HEAD\n@@ -1 +1 @@\n-old\n+new".into();
-        let view = painted(&app);
+        let view = painted_at(&app,180,28);
         assert!(view.contains("active transcript"));
         assert!(view.contains("Worktree diff"));
         assert!(view.contains("+new"));
@@ -6255,7 +6255,7 @@ for line in sys.stdin:
         assert!(app.notice.contains("activity is unknown") || app.notice.contains("Load the diff"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(!app.diff_pane);
-        assert!(painted(&app).contains("hidden transcript"));
+        assert!(painted_at(&app,180,28).contains("hidden transcript"));
     }
 
     #[test]
