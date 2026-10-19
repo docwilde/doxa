@@ -302,7 +302,8 @@ impl AppServerDriver {
         let owner_fd = owner_peer.as_ref().map(AsRawFd::as_raw_fd);
         let mut provider_command = std::process::Command::new(&options.executable);
         provider_command.arg("app-server").arg("--stdio").current_dir(&options.cwd);
-        if !doxa_isolation::task_internet_allowed()? {
+        let offline=!doxa_isolation::task_internet_allowed()?;
+        if offline {
             provider_command.arg("-c").arg("web_search=\"disabled\"");
             provider_command.arg("-c").arg("features.apps=false");
             provider_command.arg("-c").arg("features.remote_plugin=false");
@@ -349,6 +350,10 @@ impl AppServerDriver {
                 driver.live_auto_supported = initialized["userAgent"].as_str().is_some_and(|agent|
                     agent.starts_with(crate::codex_compact::PROTECTED_AGENT_PREFIX) && agent.contains("; doxa-midturn-auto-v1; "));
                 driver.send(json!({"method":"initialized"})).await?;
+                if offline {
+                    let config=driver.request("config/read",json!({"cwd":driver.options.cwd,"includeLayers":false})).await?;
+                    verify_offline_config(&config)?;
+                }
                 if driver.compact_gate.is_some() {
                     // The server's build version is authoritative. The client version
                     // in its suffix never becomes proof of the provider hook contract.
@@ -1057,6 +1062,12 @@ impl Drop for AppServerDriver {
     }
 }
 
+fn verify_offline_config(config:&Value)->Result<(),AppServerError>{
+    if config["config"]["web_search"]!="disabled" || config["config"]["features"]["apps"]!=false || config["config"]["features"]["remote_plugin"]!=false {
+        return Err(AppServerError::Protocol("Offline Codex did not verify disabled web search, apps and remote plugins"));
+    }Ok(())
+}
+
 fn sandbox_name(mode: SandboxMode) -> &'static str {
     match mode {
         SandboxMode::ReadOnly => "read-only",
@@ -1108,6 +1119,12 @@ fn normalize_tool_item(item: &Value) -> Option<Value> {
 mod web_item_tests {
     use super::*;
 
+    #[test]
+    fn offline_config_requires_provider_confirmation_of_every_network_tool_setting(){
+        let safe=json!({"config":{"web_search":"disabled","features":{"apps":false,"remote_plugin":false}}});
+        verify_offline_config(&safe).unwrap();
+        for value in [json!({}),json!({"config":{"web_search":"live","features":{"apps":false,"remote_plugin":false}}}),json!({"config":{"web_search":"disabled","features":{"apps":true,"remote_plugin":false}}}),json!({"config":{"web_search":"disabled","features":{"apps":false}}})]{assert!(verify_offline_config(&value).is_err());}
+    }
     #[test]
     fn official_rollout_path_is_bounded_metadata_without_filesystem_access() {
         let path = "/home/doxa/codex/sessions/2026/10/13/rollout-thread.jsonl";
