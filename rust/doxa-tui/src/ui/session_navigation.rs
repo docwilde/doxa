@@ -62,6 +62,9 @@ impl App {
             .filter(|session| !self.offline_ids.contains(&session.id)
                 && !crate::remote_client::valid_target(&session.id)
                 && !live.contains(&session.id)
+                // A fleet's own verified runtime owns its liveness. Absence
+                // from the ordinary registry is expected for those sessions.
+                && !self.verified_fleet_member(&session.id)
                 && !self.groups.iter().any(|group| group.tabs.contains(&session.id))
                 && (session.status == "Disconnected" || self.detached_this_run.contains(&session.id)))
             .map(|session| session.id.clone()).collect();

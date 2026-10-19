@@ -76,6 +76,7 @@ impl App {
             for group in &mut groups {
                 group.collapsed=self.fleet_rail.groups.iter().find(|old|old.root==group.root && old.id==group.id).is_some_and(|old|old.collapsed);
                 for id in &group.members {
+                    if !self.killed_this_run.contains(id) { self.offline_ids.remove(id); }
                     if self.sessions.iter().any(|session| &session.id==id) {continue;}
                     if self.sessions.len()>=panes::MAX_TABS || self.killed_this_run.contains(id) {continue;}
                     if let Some(row)=live.iter().find(|row|&row.id==id) {
@@ -128,6 +129,9 @@ impl App {
             Some(_)=>"    ↳ ".into(), None=>String::new(),
         }
     }
+    pub(super) fn verified_fleet_member(&self, id: &str) -> bool {
+        self.fleet_rail.groups.iter().any(|group|group.members.iter().any(|member|member==id))
+    }
     pub(super) fn collapse_fleet_group(&mut self, index: usize) -> bool {
         let Some(group)=self.fleet_rail.groups.get_mut(index) else {return false;};
         group.collapsed=!group.collapsed;
@@ -148,6 +152,31 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*; use serde_json::json;
+    #[test]
+    fn ordinary_registry_cannot_archive_members_verified_in_a_fleet_runtime() {
+        let mut app=App::default();
+        for id in ["boss","ordinary"] {
+            app.sessions.push(Session {id:id.into(),title:id.into(),collection:String::new(),
+                transcript:String::new(),status:"Disconnected".into()});
+        }
+        app.show_fleet_sidebar_fixture("run","boss",&[]);
+        assert!(app.mark_dead_detached(&HashSet::new()));
+        assert!(app.offline_ids.contains("ordinary")); assert!(!app.offline_ids.contains("boss"));
+        app.fleet_rail.groups.clear();
+        assert!(app.mark_dead_detached(&HashSet::new())); assert!(app.offline_ids.contains("boss"));
+        // A fresh, validated private-runtime snapshot repairs an earlier
+        // ordinary-roster result, but never revives an explicitly stopped ID.
+        app.fleet_rail.fixture=false;
+        let snapshot=|| Group {root:PathBuf::from("/owned/fleet"),id:"run".into(),
+            supervisor:Some("boss".into()),members:vec!["boss".into()],collapsed:false};
+        let (tx,rx)=mpsc::sync_channel(1);tx.send((vec![snapshot()],Vec::new())).unwrap();
+        app.fleet_rail.pending=Some(rx);assert!(app.poll_fleet_rail(Instant::now()));
+        assert!(!app.offline_ids.contains("boss"));
+        app.offline_ids.insert("boss".into());app.killed_this_run.insert("boss".into());
+        let (tx,rx)=mpsc::sync_channel(1);tx.send((vec![snapshot()],Vec::new())).unwrap();
+        app.fleet_rail.pending=Some(rx);app.poll_fleet_rail(Instant::now());
+        assert!(app.offline_ids.contains("boss"));
+    }
     #[test]
     fn live_membership_uses_each_verified_fleets_private_runtime() {
         use std::{fs,os::unix::{fs::PermissionsExt,net::UnixListener}};
