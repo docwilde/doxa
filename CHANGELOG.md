@@ -17,6 +17,11 @@ the stable 2.0 release has not been cut.
 
 - Read Claude's peer-tool opt-in in **`ClaudeHost`** from the owner configuration. Docker sessions and native sessions retaining a migrated private home keep the approved peer tools.
 
+**Session windows**
+
+- Fix **`App::open_diff`** to open a vertical split inside the active session window. Keep its prompt and neighboring windows visible through `/diff`, shortcuts and automatic diff opening.
+- List each window's tabs beneath its first tab in **`App::rail_groups`**. Indent child tabs and activate their existing window when selected.
+
 ## 2.0.0-beta.58 — 2026-10-19
 
 **Fleet migration**

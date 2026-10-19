@@ -72,12 +72,8 @@ impl App {
         if self.diff_pane || self.diff_modal {
             return false;
         }
-        if self.pane_tree.is_some() {
-            self.notice = "Worktree changed · /diff opens the live diff".into();
-            return true;
-        }
         self.diff_pane = true;
-        if self.layout(self.size).panes.is_none() {
+        if self.layout(self.size).diff.is_none() {
             self.diff_pane = false;
             self.notice = "Worktree changed; terminal too narrow to auto-open diff · /diff".into();
         } else {
@@ -88,16 +84,22 @@ impl App {
     }
 
     pub(super) fn open_diff(&mut self) {
-        if self.diff_modal {
+        if self.diff_pane || self.diff_modal {
             if self.rejections_for_target() > 0 {
                 self.notice = "Wait for queued hunk rejections before closing this diff".into();
             } else {
                 self.diff_modal = false;
+                self.diff_pane = false;
             }
             return;
         }
-        self.diff_modal = true;
-        self.load_diff();
+        self.diff_pane = true;
+        if self.layout(self.size).diff.is_none() {
+            self.diff_pane = false;
+            self.notice = "Widen this session window to open its vertical diff split".into();
+        } else {
+            self.load_diff();
+        }
     }
 
     pub(super) fn rejections_for_target(&self) -> usize {

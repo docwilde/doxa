@@ -112,16 +112,14 @@ impl App {
             self.draw_rail(frame, rail);
         }
         if let Some(panes) = layout.panes {
-            if self.diff_pane {
-                self.draw_group(frame, panes[self.active_group], self.active_group);
-                self.draw_diff_pane(frame, panes[(self.active_group + 1) % panes.len()]);
-            } else {
-                for (index, pane) in panes.iter().enumerate() {
-                    self.draw_group(frame, *pane, index);
-                }
+            for (index, pane) in panes.iter().enumerate() {
+                self.draw_group(frame, *pane, index);
             }
         } else {
             self.draw_group(frame, layout.body, self.active_group);
+        }
+        if let Some(diff) = layout.diff {
+            self.draw_diff_pane(frame, diff);
         }
         if self.active_chooser_rect().is_none() && self.active_request_index().is_none()
         {
@@ -2127,7 +2125,13 @@ impl App {
                     };
                     let badge = format!("{pane}{provenance}{queue}");
                     let fleet_prefix = self.fleet_rail_prefix(&session.id);
+                    let tab_prefix = if fleet_prefix.is_empty() {
+                        self.groups.iter().find_map(|group| group.tabs.iter().position(|id| id == &session.id)
+                            .filter(|position| *position > 0).map(|position|
+                                if position + 1 == group.tabs.len() { "  └ " } else { "  ├ " })).unwrap_or("")
+                    } else { "" };
                     let title_width = usize::from(area.width.saturating_sub(5)).saturating_sub(fleet_prefix.width())
+                        .saturating_sub(tab_prefix.width())
                         .saturating_sub(badge.width());
                     let title = clipped_title(&session.title, title_width).0;
                     let style = if offline {
@@ -2152,7 +2156,7 @@ impl App {
                     } else {
                         style
                     };
-                    lines.push(Line::styled(format!("{fleet_prefix}{mark} {title}{badge}"), style));
+                    lines.push(Line::styled(format!("{fleet_prefix}{tab_prefix}{mark} {title}{badge}"), style));
                 }
             }
         }

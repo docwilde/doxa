@@ -32,7 +32,9 @@ impl App {
     }
 
     pub(super) fn rail_groups(&self) -> Vec<(RailGroupKey, Vec<RailRow>, u8)> {
-        if self.preferences.value("rail_entries") == "panes" { return self.rail_pane_groups(); }
+        if self.preferences.value("rail_entries") == "panes" {
+            return self.with_rail_tabs(self.rail_pane_groups());
+        }
         let mut seen = HashSet::new();
         let mut groups = self.fleet_rail_groups(&mut seen);
         for (heading, item) in self.collections.iter().enumerate() {
@@ -63,11 +65,51 @@ impl App {
             rows.extend(sessions.into_iter().map(RailRow::Session));
             groups.push((RailGroupKey::Project(project), rows, urgency));
         }
+        self.with_rail_tabs(groups)
+    }
+
+    /// Keep a window's first tab stable in the rail and list its other tabs
+    /// immediately underneath it, including tabs from another project.
+    fn with_rail_tabs(&self, mut groups: Vec<(RailGroupKey, Vec<RailRow>, u8)>)
+        -> Vec<(RailGroupKey, Vec<RailRow>, u8)>
+    {
+        let parents: HashSet<usize> = groups.iter().filter(|(key, _, _)| !matches!(key, RailGroupKey::Fleet(..)))
+            .flat_map(|(_, rows, _)| rows).filter_map(|row| match row {
+                RailRow::Session(index) | RailRow::Pane { active: index, .. } => Some(*index), _ => None,
+            }).filter(|index| self.groups.iter().any(|group|
+                group.tabs.first().is_some_and(|id| *id == self.sessions[*index].id))).collect();
+        let children = |parent: usize| -> Vec<usize> {
+            self.groups.iter().find(|group| group.tabs.first()
+                .is_some_and(|id| *id == self.sessions[parent].id)).into_iter()
+                .flat_map(|group| group.tabs.iter().skip(1)).filter_map(|id|
+                    self.sessions.iter().position(|session| session.id == *id)
+                        .filter(|index| !self.offline_ids.contains(id) && self.rail_session_visible(*index)))
+                .collect()
+        };
+        let nested: HashSet<usize> = parents.iter().flat_map(|parent| children(*parent)).collect();
+        for (key, rows, urgency) in &mut groups {
+            if matches!(key, RailGroupKey::Fleet(..)) { continue; }
+            let mut expanded = Vec::new();
+            for row in std::mem::take(rows) {
+                let index = match &row {
+                    RailRow::Session(index) | RailRow::Pane { active: index, .. } => Some(*index), _ => None,
+                };
+                if index.is_some_and(|index| nested.contains(&index)) { continue; }
+                expanded.push(row);
+                if let Some(parent) = index.filter(|index| parents.contains(index)) {
+                    for child in children(parent) {
+                        *urgency = (*urgency).max(self.rail_urgency(child));
+                        expanded.push(RailRow::Session(child));
+                    }
+                }
+            }
+            *rows = expanded;
+        }
         groups
     }
 
-    /// Pane view has one navigable row per open pane. Detached live sessions
-    /// remain individual rows, and hidden tabs only contribute to their pane.
+    /// Pane view uses the first tab as the stable window row. Additional tabs
+    /// are expanded underneath it by with_rail_tabs.
     fn rail_pane_groups(&self) -> Vec<(RailGroupKey, Vec<RailRow>, u8)> {
         let mut placed = HashSet::new();
         let mut groups = self.fleet_rail_groups(&mut placed);
@@ -111,7 +153,7 @@ impl App {
         let id = &self.sessions[index].id;
         for (group, pane) in self.groups.iter().enumerate() {
             if pane.tabs.iter().any(|tab| tab == id) {
-                return (pane.active_id() == Some(id.as_str())).then_some(RailRow::Pane { group, active: index });
+                return (pane.tabs.first() == Some(id)).then_some(RailRow::Pane { group, active: index });
             }
         }
         Some(RailRow::Session(index))
@@ -430,18 +472,18 @@ impl App {
                 .iter()
                 .all(|rect| rect.width >= MIN_PANE_WIDTH && rect.height >= MIN_PANE_HEIGHT)
                 .then_some(regions);
-            return PaneLayout {
+            return self.with_session_diff(PaneLayout {
                 outer: area,
                 rail,
                 body,
                 panes,
-            };
+                diff: None,
+            });
         }
         let panes = (min_ok
             && (self.split_requested
                 || self.active_group == 1
-                || !self.groups[1].tabs.is_empty()
-                || self.diff_pane))
+                || !self.groups[1].tabs.is_empty()))
             .then(|| {
                 let desired = self.pane_rects(body, self.split_percent);
                 let minimum = if self.split == Split::Vertical {
@@ -467,12 +509,33 @@ impl App {
                         .to_vec()
                 }
             });
-        PaneLayout {
+        self.with_session_diff(PaneLayout {
             outer: area,
             rail,
             body,
             panes,
+            diff: None,
+        })
+    }
+
+    /// The diff belongs to the active session window, never to a neighboring
+    /// window. Keep the same vertical divider even in horizontally split trees.
+    fn with_session_diff(&self, mut layout: PaneLayout) -> PaneLayout {
+        if !self.diff_pane { return layout; }
+        let pane = layout.panes.as_ref()
+            .and_then(|panes| panes.get(self.active_group)).copied().unwrap_or(layout.body);
+        if pane.width < MIN_PANE_WIDTH * 2 || pane.height < MIN_PANE_HEIGHT {
+            return layout;
         }
+        let halves = Layout::default().direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)]).split(pane);
+        if let Some(panes) = &mut layout.panes {
+            panes[self.active_group] = halves[0];
+        } else {
+            layout.body = halves[0];
+        }
+        layout.diff = Some(halves[1]);
+        layout
     }
 
     pub(super) fn pane_rects(&self, body: Rect, percent: u16) -> [Rect; 2] {
@@ -1088,9 +1151,6 @@ impl App {
             .map(|panes| panes.into_iter().enumerate().collect::<Vec<_>>())
             .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
         for (group, pane) in panes {
-            if self.diff_pane && group != self.active_group {
-                continue;
-            }
             let strip = self.pane_regions(group, pane)[3];
             if row != strip.y || column < strip.x || column >= strip.right() {
                 continue;

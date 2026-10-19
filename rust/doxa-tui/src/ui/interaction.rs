@@ -1127,25 +1127,7 @@ impl App {
             return true;
         }
         if key.code == KeyCode::F(4) {
-            if self.pane_tree.is_some() {
-                self.open_diff();
-                return true;
-            }
-            if self.diff_pane {
-                if self.rejections_for_target() > 0 {
-                    self.notice = "Wait for queued hunk rejections before closing this diff".into();
-                    return true;
-                }
-                self.diff_pane = false;
-            } else {
-                self.diff_pane = true;
-                if self.layout(self.size).panes.is_none() {
-                    self.diff_pane = false;
-                    self.notice = "Enlarge terminal to open the diff pane".into();
-                } else {
-                    self.load_diff();
-                }
-            }
+            self.open_diff();
             return true;
         }
         if self.diff_pane {
@@ -2224,7 +2206,6 @@ impl App {
         let panes = layout.panes.map(|panes| panes.into_iter().enumerate().collect::<Vec<_>>())
             .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
         for (index, pane) in panes {
-            if self.diff_pane && index != self.active_group { continue; }
             if !self.pane_regions(index, pane)[1].contains(point)
                 || self.groups[index].active_id().is_none() { continue; }
             let old = self.groups[index].scroll;
@@ -2293,8 +2274,7 @@ impl App {
         }
         if self.diff_pane && (self.diff_comment_draft.is_some() || self.diff_reject_confirm.is_some())
             && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-            if let Some(panes) = self.layout(self.size).panes {
-                let pane = panes[(self.active_group + 1) % panes.len()];
+            if let Some(pane) = self.layout(self.size).diff {
                 if !pane.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
                     self.notice = "Finish or cancel the diff action before switching panes".into();
                     return true;
@@ -2302,8 +2282,7 @@ impl App {
             }
         }
         if self.diff_pane && mouse.kind == MouseEventKind::Moved && !self.link_interaction_blocked() {
-            if let Some(panes) = self.layout(self.size).panes {
-                let pane = panes[(self.active_group + 1) % panes.len()];
+            if let Some(pane) = self.layout(self.size).diff {
                 let changed = self.diff_mouse(pane, mouse);
                 if changed || pane.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
                     return changed;
@@ -3390,8 +3369,7 @@ impl App {
             }
         }
         if self.diff_pane {
-            if let Some(panes) = self.layout(self.size).panes {
-                let pane = panes[(self.active_group + 1) % panes.len()];
+            if let Some(pane) = self.layout(self.size).diff {
                 if pane.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
                     return self.diff_mouse(pane, mouse)
                         || mouse.kind == MouseEventKind::Down(MouseButton::Left);

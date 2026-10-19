@@ -1131,12 +1131,17 @@ impl App {
             .map(|session| session.id.clone())
         {
             if self.preferences.value("rail_entries") == "panes" {
-                if let Some(group) = self.groups.iter().position(|group| group.active_id() == Some(id.as_str())) {
+                if let Some(group) = self.groups.iter().position(|group| group.tabs.first() == Some(&id)) {
                     self.active_group = group;
                     self.groups[group].scroll = 0;
                     self.focus = Focus::Transcript;
                     return;
                 }
+            }
+            // A tab row activates its existing window instead of adding a
+            // second copy of the session to whichever window had focus.
+            if let Some(group) = self.groups.iter().position(|group| group.tabs.contains(&id)) {
+                self.active_group = group;
             }
             if !self.groups[self.active_group].tabs.contains(&id)
                 && !self.manual_tab_available_for(Some(&id))

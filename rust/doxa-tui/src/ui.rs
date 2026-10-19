@@ -933,6 +933,7 @@ struct PaneLayout {
     rail: Option<Rect>,
     body: Rect,
     panes: Option<Vec<Rect>>,
+    diff: Option<Rect>,
 }
 
 #[derive(Clone, Debug)]

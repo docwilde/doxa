@@ -5445,15 +5445,15 @@ for line in sys.stdin:
         }
         app.groups[0].tabs = vec!["a".into(), "b".into()]; app.groups[0].active = 0;
         app.groups[1].tabs = vec!["c".into()]; app.groups[1].active = 0;
-        assert_eq!(app.rail_order(), [0, 2]);
+        assert_eq!(app.rail_order(), [0, 1, 2]);
         assert!(app.rail_rows().iter().any(|row| matches!(row, RailRow::Pane { group:0, active:0 })));
-        assert!(!app.rail_rows().iter().any(|row| matches!(row, RailRow::Session(1))));
+        assert!(app.rail_rows().iter().any(|row| matches!(row, RailRow::Session(1))));
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"b",
             "event":{"type":"needs_input", "data":{"id":"req", "kind":"ask_user",
                 "title":"Choose", "questions":[{"question":"Choose","options":[]}]}}}));
         assert_eq!(app.rail_groups()[0].2, 4);
         assert!(app.pane_signal("a").unwrap().badge().contains("!#2:Beta"));
-        app.focus = Focus::Rail; app.rail_selected = 1;
+        app.focus = Focus::Rail; app.rail_selected = 2;
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.active_group, 1);
         assert_eq!(app.groups[0].tabs, ["a", "b"]);
@@ -5466,8 +5466,8 @@ for line in sys.stdin:
         app.focus = Focus::Tabs;
         app.handle(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
         assert_eq!(app.groups[0].active_id(), Some("b"));
-        assert_eq!(app.rail_order(), [1, 2]);
-        assert_eq!(app.rail_selected, 0); // Selection follows the pane, not the old tab.
+        assert_eq!(app.rail_order(), [0, 1, 2]);
+        assert_eq!(app.rail_selected, 1); // Selection follows the active child tab.
     }
 
     #[test]
@@ -5500,7 +5500,7 @@ for line in sys.stdin:
         assert!(matches!(app.rail_rows()[0], RailRow::Heading(1)));
         assert!(app.tick_rail_sort(start + Duration::from_secs(5)));
         assert!(matches!(app.rail_rows()[0], RailRow::Heading(0)));
-        assert_eq!(app.rail_order(), [0, 2]);
+        assert_eq!(app.rail_order(), [0, 1, 2]);
         assert_eq!(app.groups[0].tabs, ["a", "b"]);
     }
 
@@ -6223,7 +6223,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn diff_pane_keeps_the_active_prompt_and_restores_the_other_session() {
+    fn diff_split_keeps_the_active_prompt_and_neighboring_session() {
         let mut app = App::default();
         app.apply_update(DaemonUpdate::Upsert(Session { id: "first".into(), title: "First".into(),
             collection: "repo".into(), transcript: "active transcript".into(), status: "Ready".into() }));
@@ -6238,8 +6238,11 @@ for line in sys.stdin:
         assert!(view.contains("active transcript"));
         assert!(view.contains("Worktree diff"));
         assert!(view.contains("+new"));
-        assert!(!view.contains("hidden transcript"));
-        let diff_area = app.layout(app.size).panes.unwrap()[1];
+        assert!(view.contains("hidden transcript"));
+        let layout = app.layout(app.size);
+        let diff_area = layout.diff.unwrap();
+        assert_eq!(layout.panes.as_ref().unwrap()[0].right(), diff_area.x);
+        assert_eq!(layout.panes.as_ref().unwrap()[0].y, diff_area.y);
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown,
             column: diff_area.x + 2, row: diff_area.y + 2, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.active_group, 0);
