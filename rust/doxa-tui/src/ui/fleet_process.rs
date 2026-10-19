@@ -60,7 +60,7 @@ impl Prepared {
     pub fn resume(root:PathBuf,id:&str)->io::Result<Self>{
         let snapshot=crate::fleet_control::snapshot(&root,id)?;
         if snapshot["phase"]!="monitoring"||snapshot["live"]!=true{return Err(invalid("Only a native live monitoring run can resume"));}
-        let review=json!({"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"access":snapshot["spec"]["access"],"isolation":snapshot["spec"]["isolation"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"memory_off":snapshot["spec"]["memory_off"],"lore_enabled":snapshot["spec"]["lore_enabled"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"],"independent_review":snapshot["supervision"]["context"]["review"],"charter_sha256":snapshot["supervision"]["context"]["charter_sha256"],"auto_test":snapshot["spec"]["auto_test"],"test_recipe":snapshot["supervision"]["context"]["charter"]["test_recipe"]});
+        let review=json!({"resume":true,"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"access":snapshot["spec"]["access"],"isolation":snapshot["spec"]["isolation"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"memory_off":snapshot["spec"]["memory_off"],"lore_enabled":snapshot["spec"]["lore_enabled"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"],"independent_review":snapshot["supervision"]["context"]["review"],"charter_sha256":snapshot["supervision"]["context"]["charter_sha256"],"auto_test":snapshot["spec"]["auto_test"],"test_recipe":snapshot["supervision"]["context"]["charter"]["test_recipe"]});
         Ok(Self{lines:review_lines("Resume fleet",&review),root:root.clone(),id:id.into(),args:vec!["resume".into(),id.into(),"--root".into(),root.to_string_lossy().into_owned()],resume_snapshot:Some(snapshot),prompt_digest:None,assignment_digest:None,recipe_digest:None,lore_default:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn launch(self,exe:&Path)->io::Result<Controller>{
@@ -99,8 +99,8 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
     }
     if value["access"].is_object(){
         let access=&value["access"];
-        lines.push(format!("Workers: {} · direct task internet: {}",access["worker_isolation"],access["worker_task_internet"]));
-        if !access["supervisor_isolation"].is_null(){lines.push(format!("Coordinator: {} · task internet: {}",access["supervisor_isolation"],access["supervisor_task_internet"]));}
+        lines.push(format!("Launch policy — workers: {} · direct task internet: {}",access["worker_isolation"],access["worker_task_internet"]));
+        if !access["supervisor_isolation"].is_null(){lines.push(format!("Launch policy — coordinator: {} · task internet: {}",access["supervisor_isolation"],access["supervisor_task_internet"]));}
         for flag in access["required_access_confirmations"].as_array().into_iter().flatten().filter_map(Value::as_str){
             lines.push(match flag {
                 "--confirm-native-workers"=>"CONFIRM: workers run outside Docker with owner host and credential access.",
@@ -125,9 +125,12 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
     }
     if value["independent_review"].is_object(){let review=&value["independent_review"];for(label,key)in [("Independent supervisor model","supervisor"),("Supervisor action","supervisor_mode"),("Fast message judge","message_judge"),("Message review mode","message_mode"),("Review allocation USD","budget_usd"),("Maximum review calls","max_calls"),("Checkpoint interval seconds","interval_s"),("Input rate USD/Mtok","input_usd_per_million"),("Output rate USD/Mtok","output_usd_per_million"),("Message risk threshold","risk_threshold")]{lines.push(format!("{label}: {}",review[key]));}if review["supervisor"]["provider"]=="jev" {lines.push(format!("Jev supervisor minimum Choice confidence: {}",review["risk_threshold"]));lines.push("Pinned Jev input rate: $0.042/M; output free. Verdicts cannot grant approval or dependency release.".into());}lines.push("Independent models use API credentials; review data is LORE-scrubbed, stateless and has no tools.".into());}
     if let Some(hash)=value["charter_sha256"].as_str(){lines.push(format!("Approved charter SHA256: {hash}"));}
-    let mut counts:BTreeMap<(String,String,String,String),usize>=BTreeMap::new();
-    for slot in value["slots"].as_array().into_iter().flatten(){let key=(slot["role"].as_str().unwrap_or("worker").into(),slot["engine"].as_str().unwrap_or("unknown").into(),slot["model"].as_str().unwrap_or("provider default").into(),match slot["lore"].as_bool(){Some(true)=>"on",Some(false)=>"off",None=>"unknown"}.into());*counts.entry(key).or_default()+=1;}
-    for ((role,engine,model,lore),count)in counts{lines.push(format!("Planned {count} × {role}: {engine}:{model} · memory {lore}"));}
+    let mut counts:BTreeMap<(String,String,String,String,String),usize>=BTreeMap::new();
+    for slot in value["slots"].as_array().into_iter().flatten(){let key=(slot["role"].as_str().unwrap_or("worker").into(),slot["engine"].as_str().unwrap_or("unknown").into(),slot["model"].as_str().unwrap_or("provider default").into(),match slot["lore"].as_bool(){Some(true)=>"on",Some(false)=>"off",None=>"unknown"}.into(),slot["isolation"].as_str().or_else(||value["isolation"].as_str()).unwrap_or("unknown").into());*counts.entry(key).or_default()+=1;}
+    for ((role,engine,model,lore,profile),count)in counts{let label=if value["resume"]==true{"Recorded"}else{"Planned"};lines.push(format!("{label} {count} × {role}: {engine}:{model} · memory {lore} · isolation {profile}"));}
+    if value["resume"]==true&&value["slots"].as_array().is_some_and(|slots|slots.iter().any(|slot|slot["isolation"]=="native")){
+        lines.push("Recorded native slots have host and credential access. Existing owner grants remain active during observation resume.".into());
+    }
     for slot in value["slots"].as_array().into_iter().flatten(){if let Some(digest)=slot["task_sha256"].as_str(){lines.push(format!("Worker {} task SHA256: {digest}; paths: {}; predecessors: {}",slot["index"],slot["allowed_paths"],slot["depends_on"]));}}
     if value["slots"].as_array().is_some_and(|slots|slots.iter().any(|slot|slot["depends_on"].as_array().is_some_and(|rows|!rows.is_empty()))){
         lines.push("Dependent workers wait for coordinator-accepted host evidence and explicit human release. Automatic host tests can collect receipts but never release dependencies.".into());
@@ -165,6 +168,14 @@ mod tests{
     fn literal_tokenizer_never_expands_shell_code(){assert_eq!(words("start --prompt '$(touch nope) `$HOME`' --cwd \"a b\"").unwrap(),vec!["start","--prompt","$(touch nope) `$HOME`","--cwd","a b"]);assert!(words("'unfinished").is_err());assert!(words("x\n--force").is_err());}
     #[test]
     fn public_review_omits_prompt_and_private_slot_requests(){let lines=review_lines("Review",&json!({"prompt":"secret","slots":[{"role":"worker","engine":"fixture","model":"fixture-v1","pending_asks":[{"input_summary":"PRIVATE-SLOT-SENTINEL"}]}]})).join("\n");assert!(!lines.contains("secret"));assert!(!lines.contains("PRIVATE-SLOT-SENTINEL"));assert!(lines.contains("1 × worker: fixture:fixture-v1"));}
+    #[test]
+    fn resume_review_shows_changed_slot_isolation_beside_original_launch_policy(){
+        let text=review_lines("Resume fleet",&json!({"resume":true,"isolation":"docker-offline","access":{"worker_isolation":"docker-offline","worker_task_internet":false},"slots":[{"role":"worker","engine":"glm","model":"model","lore":true,"isolation":"native"},{"role":"worker","engine":"glm","model":"model","lore":true,"isolation":"docker-offline"}]})).join("\n");
+        assert!(text.contains("Launch policy — workers"));
+        assert!(text.contains("Recorded 1 × worker: glm:model · memory on · isolation native"));
+        assert!(text.contains("Recorded 1 × worker: glm:model · memory on · isolation docker-offline"));
+        assert!(text.contains("Existing owner grants remain active"));
+    }
     fn fixture_child()->Child{
         Command::new("python3").args(["-c","import signal,time,sys; signal.signal(signal.SIGINT,lambda *_:sys.exit(0)); time.sleep(10)"])
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn().unwrap()
