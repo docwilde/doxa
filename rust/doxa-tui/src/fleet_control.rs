@@ -202,7 +202,7 @@ impl Spec {
         };
         let cwd = fs::canonicalize(cwd)?;
         if !cwd.is_dir() { return Err(invalid("fleet cwd must be a directory")); }
-        if test_recipe.is_some() && (access.workers!=doxa_isolation::Profile::DockerOffline || !review.enabled()) {return Err(invalid("host test evidence requires a supervised docker-offline fleet"));}
+        if test_recipe.is_some() && (access.workers!=doxa_isolation::Profile::DockerOffline || (preflight.supervisor.is_some()&&!access.supervisor.docker()) || !review.enabled()) {return Err(invalid("host test evidence requires a supervised docker-offline fleet"));}
         if auto_test && test_recipe.is_none() {return Err(invalid("automatic host tests require an owner-frozen --test-recipe"));}
         review.validate()?;
         if review.enabled() && (preflight.sessions>64 || prompt.len()>16*1024){return Err(invalid("independent review supports up to 64 workers and a 16 KiB approved task"));}

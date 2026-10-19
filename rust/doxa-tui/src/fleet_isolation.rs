@@ -69,7 +69,7 @@ fn apply(store:&Store,value:&mut Value,slots:&mut [Slot],request:&IsolationReque
     let index=slots.iter().position(|slot|slot.session.id==request.session_id).ok_or_else(||invalid("isolation target is not a fleet slot"))?;
     let row=&value["slots"][index];
     if row["isolation"].as_str().or_else(||value["spec"]["isolation"].as_str())!=Some(request.expected_profile.key()){return Err(invalid("isolation changed since owner review; review it again"));}
-    if request.target==Profile::Native && (value["spec"]["auto_test"]==true || value["slots"].as_array().is_some_and(|rows|rows.iter().any(|row|row["depends_on"].as_array().is_some_and(|deps|!deps.is_empty())))){
+    if request.target==Profile::Native && (value["spec"]["auto_test"]==true || value["supervision"]["context"]["charter"]["test_recipe"].is_object() || value["slots"].as_array().is_some_and(|rows|rows.iter().any(|row|row["depends_on"].as_array().is_some_and(|deps|!deps.is_empty())))){
         return Err(invalid("dependency and host-test fleets must retain Docker isolation"));
     }
     if row["role"]=="worker" && value["supervision"]["context"]["charter"]["test_recipe"].is_object()&&request.target!=Profile::DockerOffline{return Err(invalid("frozen host test recipe requires offline workers"));}

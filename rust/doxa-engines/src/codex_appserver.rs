@@ -304,6 +304,8 @@ impl AppServerDriver {
         provider_command.arg("app-server").arg("--stdio").current_dir(&options.cwd);
         if !doxa_isolation::task_internet_allowed()? {
             provider_command.arg("-c").arg("web_search=\"disabled\"");
+            provider_command.arg("-c").arg("features.apps=false");
+            provider_command.arg("-c").arg("features.remote_plugin=false");
         }
         if let Some(gate) = &compact_gate {
             for value in gate.cli_overrides() { provider_command.arg("-c").arg(value); }

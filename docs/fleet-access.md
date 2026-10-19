@@ -36,7 +36,7 @@ inherently exposes host networking; it cannot provide an offline guarantee.
 Legacy `--isolation PROFILE` sets both roles and retains these confirmations.
 `--dry-run` reports required acknowledgements without launching anything.
 
-Offline provider processes additionally disable Claude WebSearch/WebFetch and
+Offline provider processes additionally disable Codex apps/remote plugins, Claude WebSearch/WebFetch and
 [Codex built-in web search](https://learn.chatgpt.com/docs/config-file/config-basic).
 **Ordinary Claude/Codex CLI cannot reach their model provider inside offline
 Docker.** Such launches are refused before creating a run. Use API-backed
@@ -55,7 +55,7 @@ migrates and verifies the original session/conversation/workspace. Only the
 selected host PID and working directory may change in the frozen assignments.
 Every host must accept the exact replacement; stale contexts fail closed.
 Supervised fleets stay paused until the owner reviews and continues them.
-Dependency fleets retain Docker; frozen offline test recipes retain offline
+Dependency and host-test fleets retain Docker; frozen test recipes retain offline
 workers. Existing ROOT migration restrictions still apply.
 
 The CLI equivalent queues a request for the running controller:
