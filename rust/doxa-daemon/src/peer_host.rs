@@ -117,7 +117,7 @@ impl PeerHost {
             self.inner.set_session_tool_handler(Arc::new(move|name,args|{
                 if !matches!(name,"spawn_session"|doxa_engines::session_tools::SPAWN){return Err("Unsupported session operator".into());}
                 let peer=weak.upgrade().ok_or("Parent session closed")?;
-                if peer.fleet.lock().map_err(|_|"Fleet guard unavailable")?.is_some(){return Err("Fleet charter forbids agent session spawning".into());}
+                if peer.fleet.lock().map_err(|_|"Fleet guard unavailable")?.is_some()||peer.fleet_owner().map_err(|error|error.to_string())?.is_some(){return Err("Fleet charter forbids agent session spawning".into());}
                 let manager=peer.spawner.lock().map_err(|_|"Spawner unavailable")?.clone().ok_or("Spawner unavailable")?;
                 manager.spawn(args,&*peer.inner)
             }));
@@ -157,7 +157,7 @@ impl PeerHost {
                 context.validate()?;
                 let own=context.assignment(&session_id)?;
                 if (own.pid!=std::process::id() as i32||own.cwd!=cwd.to_string_lossy())
-                    && !doxa_fleet::isolation_change::authorized(&context,&session_id)? {return Err(doxa_fleet::invalid("persisted fleet host identity changed; stop and review a new run"));}
+                    && !doxa_fleet::isolation_change::authorized(&context,&session_id).unwrap_or(false) {return Err(doxa_fleet::invalid("persisted fleet host identity changed; stop and review a new run"));}
                 Some(context)
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -935,6 +935,25 @@ mod provider_target_tests {
         assert!(PeerHost::new(inner.clone(),dir.path().into(),dir.path(),"session".into(),"session".into(),tx).err().unwrap().to_string().contains("persisted fleet host identity changed"));
         persisted.assignments[0].pid=std::process::id() as i32;persisted.assignments[0].cwd=dir.path().join("replacement-cwd").display().to_string();doxa_fleet::save_private(&peer.fleet_path,&persisted).unwrap();let(tx,_)=std::sync::mpsc::sync_channel(1);
         assert!(PeerHost::new(inner,dir.path().into(),dir.path(),"session".into(),"session".into(),tx).err().unwrap().to_string().contains("persisted fleet host identity changed"));
+    }
+    #[test]
+    fn unreviewed_fleet_changes_still_require_a_matching_private_owner_request(){
+        use super::*;use std::os::unix::fs::PermissionsExt;
+        struct Recorder;impl Host for Recorder{fn prompt(&self,_:&str,_:&mut dyn FnMut(Value)){}fn call(&self,_:&str,_:&Value)->Result<Value,String>{Ok(json!({"forwarded":true}))}}
+        let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
+        let run=dir.path().join("run");let runtime=run.join("rt");std::fs::create_dir(&run).unwrap();std::fs::set_permissions(&run,std::fs::Permissions::from_mode(0o700)).unwrap();std::fs::create_dir(&runtime).unwrap();
+        doxa_fleet::save_private(&run.join("manifest.json"),&json!({"native_version":1,"run_id":"run","slots":[{"index":0,"session_id":"session","socket_path":runtime.join("session.sock")}]})).unwrap();
+        let(tx,_)=std::sync::mpsc::sync_channel(1);let peer=PeerHost::new(Arc::new(Recorder),dir.path().into(),&runtime,"session".into(),"session".into(),tx).unwrap();
+        assert_eq!(peer.call("fleet_owner",&json!({})).unwrap()["owner"]["slot"],0);
+        assert!(peer.call("set_isolation",&json!({"profile":"docker-open","confirmed":true})).is_err());
+        assert!(peer.call("spawn_session",&json!({})).unwrap_err().contains("forbids"));
+        let mut request=doxa_fleet::owner_control::IsolationRequest{id:uuid::Uuid::new_v4().to_string(),session_id:"session".into(),expected_profile:doxa_isolation::Profile::DockerOffline,target:doxa_isolation::Profile::DockerOpen,confirm_native:false,allow_internet:true};
+        doxa_fleet::save_private(&run.join("isolation-active.json"),&request).unwrap();
+        assert_eq!(peer.call("set_isolation",&json!({"profile":"docker-open","confirmed":true})).unwrap()["forwarded"],true);
+        assert!(peer.call("set_isolation",&json!({"profile":"native","confirmed":true})).is_err());
+        let mut events=Vec::new();peer.prompt("start new work",&mut |event|events.push(event));assert_eq!(events[0]["type"],"turn_refused");
+        request.session_id="other".into();doxa_fleet::save_private(&run.join("isolation-active.json"),&request).unwrap();
+        assert!(peer.call("set_isolation",&json!({"profile":"docker-open","confirmed":true})).is_err());
     }
     #[test]
     fn model_peer_tools_are_off_by_default_and_freeze_the_host_setting() {
