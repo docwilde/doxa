@@ -13,6 +13,10 @@ the stable 2.0 release has not been cut.
 - Bind gateways to the session lifetime and adapters to each transport. Deny other hosts and direct fallback; retain owner internet opt-ins and disable Claude account connectors/artifacts alongside web tools.
 - Reset idle CLI transports in **`IsolationHost::call`** when Docker network policy changes. Preserve conversation/model selection; hold failed restarts. Provider-host access does not conceal CLI credentials or inspect encrypted paths.
 
+**Docker tools**
+
+- Fix **`AppServerDriver`** command/file tools in Docker with Codex's **`externalSandbox`** policy. Docker enforces isolation without nested `bwrap`; keep approval policy and explicit read-only restrictions.
+
 **Peer tools**
 
 - Read Claude's peer-tool opt-in in **`ClaudeHost`** from the owner configuration. Docker sessions and native sessions retaining a migrated private home keep the approved peer tools.

@@ -76,6 +76,13 @@ and contact allowed provider services. It does not establish protection against
 misuse of those credentials or provider-side capabilities. The stronger ROOT
 authority and credential-separation work remains separate.
 
+Codex command and file tools use its `externalSandbox` turn policy inside legacy
+Docker sessions: Docker owns the execution boundary, so the CLI does not require
+a second `bwrap` sandbox in the worker image. Offline network access stays
+restricted; Docker-open reports enabled access. Provider approval settings and
+explicit Codex read-only restrictions remain in effect. Native and ROOT sessions
+keep their existing Codex sandbox policy.
+
 ## Configure the local Engine
 
 Configure a reviewed worker image with docker_image = "sha256:CONTENT_ID" or
