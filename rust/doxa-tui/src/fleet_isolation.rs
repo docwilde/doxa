@@ -159,7 +159,7 @@ pub(super) fn network_briefing(value:&Value,index:usize)->String {
     #[test]fn replacement_socket_is_rediscovered_and_hello_must_match_the_bound_session(){
         use std::{io::{BufRead,BufReader,Write},os::unix::{fs::PermissionsExt,net::UnixListener}};
         for reported in ["session","different-session"]{
-            let dir=tempfile::tempdir().unwrap();let runtime=fs::canonicalize(dir.path()).unwrap();
+            let dir=tempfile::tempdir().unwrap();let runtime=fs::canonicalize(dir.path()).unwrap();fs::set_permissions(&runtime,fs::Permissions::from_mode(0o700)).unwrap();
             let registry=runtime.join("registry");fs::create_dir(&registry).unwrap();fs::set_permissions(&registry,fs::Permissions::from_mode(0o700)).unwrap();
             let old=runtime.join("daemon-session-0.sock");assert!(!old.exists());
             let socket=runtime.join(format!("daemon-session-{}.sock",std::process::id()));
