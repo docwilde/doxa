@@ -943,7 +943,7 @@ mod provider_target_tests {
         let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
         let run=dir.path().join("run");let runtime=run.join("rt");std::fs::create_dir(&run).unwrap();std::fs::set_permissions(&run,std::fs::Permissions::from_mode(0o700)).unwrap();std::fs::create_dir(&runtime).unwrap();
         doxa_fleet::save_private(&run.join("manifest.json"),&json!({"native_version":1,"run_id":"run","slots":[{"index":0,"session_id":"session","socket_path":runtime.join("session.sock")}]})).unwrap();
-        let(tx,_)=std::sync::mpsc::sync_channel(1);let peer=PeerHost::new(Arc::new(Recorder),dir.path().into(),&runtime,"session".into(),"session".into(),tx).unwrap();
+        let(tx,_)=std::sync::mpsc::sync_channel(1);let peer=PeerHost::new(Arc::new(Recorder),runtime.clone(),dir.path(),"session".into(),"session".into(),tx).unwrap();
         assert_eq!(peer.call("fleet_owner",&json!({})).unwrap()["owner"]["slot"],0);
         assert!(peer.call("set_isolation",&json!({"profile":"docker-open","confirmed":true})).is_err());
         assert!(peer.call("spawn_session",&json!({})).unwrap_err().contains("forbids"));
