@@ -4584,6 +4584,9 @@ def next_peer_call():
 "#), r#"if frame['type']=='user':
   turn+=1;step=0;responses=[]
   prompt=frame['message']['content']
+  if turn==3:
+   assert prompt=='normal follow-up after peer exchange'
+   delta('FOLLOWUP_OK');result();continue
   if turn==2:
    assert prompt.startswith('[PEER-STARTED TURN]')
    assert '('+peer+')' in prompt and '('+peer[:8]+')' not in prompt
@@ -4655,6 +4658,9 @@ def next_peer_call():
     });
     assert_eq!(done["event"]["data"]["is_error"], false, "{done}");
     assert!(dir.path().join("mcp-run-2.json").exists());
+    send(&mut socket, json!({"type":"prompt","id":30,"text":"normal follow-up after peer exchange"}));
+    let done = claude_receive_until(&mut reader, |row|row["event"]["type"]=="turn_done");
+    assert_eq!(done["event"]["data"]["is_error"], false, "{done}");
     for frame in delivered.join().unwrap() {assert_eq!(frame["from_id"], CLAUDE_SESSION);assert_eq!(frame["body"], "[REDACTED:api-key] hello");}
     for (path, before) in originals {assert_eq!(fs::read(path).unwrap(), before, "tool query changed another registry owner");}
     for listener in [other, foreign] {
