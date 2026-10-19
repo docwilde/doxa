@@ -757,6 +757,9 @@ impl PeerHost {
 impl PeerHost {
     fn fleet_owner(&self)->io::Result<Option<Value>> {
         let Some(run)=self.fleet_path.parent().and_then(Path::parent)else{return Ok(None);};
+        // Ordinary runtimes may sit beside an unrelated manifest.json. Only
+        // the host-issued private fleet ledger identifies a fleet namespace.
+        if self.ledger_path!=run.join("home/peers/messages.jsonl"){return Ok(None);}
         let manifest:Value=match doxa_fleet::read_private(&run.join("manifest.json"),1024*1024){
             Ok(value)=>value,Err(error) if error.kind()==io::ErrorKind::NotFound=>return Ok(None),Err(error)=>return Err(error),
         };
@@ -943,7 +946,8 @@ mod provider_target_tests {
         let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
         let run=dir.path().join("run");let runtime=run.join("rt");std::fs::create_dir(&run).unwrap();std::fs::set_permissions(&run,std::fs::Permissions::from_mode(0o700)).unwrap();std::fs::create_dir(&runtime).unwrap();
         doxa_fleet::save_private(&run.join("manifest.json"),&json!({"native_version":1,"run_id":"run","slots":[{"index":0,"session_id":"session","socket_path":runtime.join("session.sock")}]})).unwrap();
-        let(tx,_)=std::sync::mpsc::sync_channel(1);let peer=PeerHost::new(Arc::new(Recorder),runtime.clone(),dir.path(),"session".into(),"session".into(),tx).unwrap();
+        let(tx,_)=std::sync::mpsc::sync_channel(1);let mut peer=PeerHost::new(Arc::new(Recorder),runtime.clone(),dir.path(),"session".into(),"session".into(),tx).unwrap();
+        peer.ledger_path=run.join("home/peers/messages.jsonl");
         assert_eq!(peer.call("fleet_owner",&json!({})).unwrap()["owner"]["slot"],0);
         assert!(peer.call("set_isolation",&json!({"profile":"docker-open","confirmed":true})).is_err());
         assert!(peer.call("spawn_session",&json!({})).unwrap_err().contains("forbids"));
