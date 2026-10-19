@@ -38,7 +38,7 @@ pub fn change_attached_isolation(client:&mut DaemonClient,target:Profile)->io::R
         match doxa_fleet::read_private::<Value>(&root.join(run).join("isolation-result.json"),8192){
             Ok(result) if result["id"]==request=>{
                 if result["ok"]!=true{return Err(invalid(result["error"].as_str().unwrap_or("fleet isolation change refused")));}
-                let resumed=DaemonClient::connect(Path::new(owner["socket_path"].as_str().ok_or_else(||invalid("fleet socket unavailable"))?),None).map_err(io::Error::other)?;
+                let resumed=DaemonClient::connect_tail(Path::new(owner["socket_path"].as_str().ok_or_else(||invalid("fleet socket unavailable"))?)).map_err(io::Error::other)?;
                 if resumed.hello["session_id"]!=client.hello["session_id"]||resumed.hello["isolation"]["profile"]!=target.key()||resumed.hello["isolation"]["state"]!="ready"{return Err(invalid("changed fleet isolation could not be verified"));}
                 let isolation=resumed.hello["isolation"].clone();return Ok(Some((resumed,isolation)));
             },
@@ -52,7 +52,9 @@ pub fn change_attached_isolation(client:&mut DaemonClient,target:Profile)->io::R
 fn idle(slots:&mut [Slot])->io::Result<()> {
     for slot in slots {
         let state=rpc(&mut slot.client,"get_state",json!({}))?;
-        if state["running"]!=false||state["queued"].as_u64()!=Some(0)||!slot.pending.is_empty(){return Err(invalid("all fleet sessions must be idle with no queued prompts or pending approvals"));}
+        if slot.busy||state["running"]!=false||state["queued"].as_u64()!=Some(0)||!slot.pending.is_empty(){return Err(invalid("all fleet sessions must be idle with no queued prompts or pending approvals"));}
+        let observed=DaemonClient::connect_tail(&slot.session.socket).map_err(io::Error::other)?;
+        if observed.hello["session_id"]!=slot.session.id || slot.client.has_buffered_frames() || observed.hello["next_seq"].as_u64().is_none_or(|seq|slot.client.cursor<seq){return Err(invalid("controller still has pending session events; wait for its next checkpoint"));}
     }
     Ok(())
 }
@@ -87,7 +89,7 @@ fn apply(store:&Store,value:&mut Value,slots:&mut [Slot],request:&IsolationReque
     });
     // Always reconnect and inspect the actual host, including a migration that
     // failed but restored the old provider under a fresh PID.
-    let resumed=DaemonClient::connect(&slots[index].session.socket,None).map_err(io::Error::other)?;
+    let resumed=DaemonClient::connect_tail(&slots[index].session.socket).map_err(io::Error::other)?;
     if resumed.hello["session_id"]!=request.session_id||resumed.hello["isolation"]["state"]!="ready"{return Err(invalid("isolation transition lost its verified session; stopping fleet"));}
     let actual=Profile::parse(resumed.hello["isolation"]["profile"].as_str().ok_or_else(||invalid("isolation transition status unavailable"))?)?;
     if actual!=request.expected_profile&&actual!=request.target{return Err(invalid("isolation transition reached an unapproved profile; stopping fleet"));}
