@@ -815,6 +815,7 @@ impl App {
                 }
                 let menu = self.fleet_menu.as_mut().unwrap();
                 menu.key(key);
+                if matches!(key.code,KeyCode::Char('m'|'b')|KeyCode::Enter){self.chip_info.as_mut().unwrap().scroll=0;}
                 self.chip_info.as_mut().unwrap().lines = menu.display();
                 return true;
             }

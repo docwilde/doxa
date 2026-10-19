@@ -37,7 +37,7 @@ impl Prepared {
     pub fn from_fixture_review(review:&Value)->io::Result<Self>{
         let root=PathBuf::from(review["root"].as_str().ok_or_else(||invalid("Fixture root missing"))?);
         let id=review["run_id"].as_str().filter(|id|doxa_state::valid_session_id(id)).ok_or_else(||invalid("Fixture run ID missing"))?.to_owned();
-        Ok(Self{root,id,lines:review_lines("Start native fleet",review),args:Vec::new(),resume_snapshot:None,prompt_digest:None,assignment_digest:None,recipe_digest:None,lore_default:review["lore_enabled"].as_bool(),seen:Cell::new(0),complete:Cell::new(false),armed:false})
+        Ok(Self{root,id,lines:review_lines("Start fleet",review),args:Vec::new(),resume_snapshot:None,prompt_digest:None,assignment_digest:None,recipe_digest:None,lore_default:review["lore_enabled"].as_bool(),seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn start(mut args:Vec<String>,cwd:Option<&Path>)->io::Result<Self>{
         if !has_option(&args,"--run-id"){
@@ -49,7 +49,7 @@ impl Prepared {
         if review["review_version"]!=1||["prompt_sha256","assignments_sha256","test_recipe_sha256"].iter().any(|key|review[*key].as_str().is_none_or(|digest|digest.len()!=64||!digest.bytes().all(|byte|byte.is_ascii_hexdigit()))){return Err(invalid("Fleet review contract unavailable"));}
         let root=PathBuf::from(review["root"].as_str().ok_or_else(||invalid("Fleet review root unavailable"))?);
         let id=review["run_id"].as_str().filter(|id|doxa_state::valid_session_id(id)).ok_or_else(||invalid("Fleet review run ID unavailable"))?.to_owned();
-        let lines=review_lines("Start native fleet",&review);
+        let lines=review_lines("Start fleet",&review);
         // These acknowledgements become effective only after the full human review.
         if let Some(flags)=review["access"]["required_access_confirmations"].as_array(){
             for flag in flags.iter().filter_map(Value::as_str){if !has_option(&args,flag){args.push(flag.into());}}
@@ -61,7 +61,7 @@ impl Prepared {
         let snapshot=crate::fleet_control::snapshot(&root,id)?;
         if snapshot["phase"]!="monitoring"||snapshot["live"]!=true{return Err(invalid("Only a native live monitoring run can resume"));}
         let review=json!({"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"access":snapshot["spec"]["access"],"isolation":snapshot["spec"]["isolation"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"memory_off":snapshot["spec"]["memory_off"],"lore_enabled":snapshot["spec"]["lore_enabled"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"],"independent_review":snapshot["supervision"]["context"]["review"],"charter_sha256":snapshot["supervision"]["context"]["charter_sha256"],"auto_test":snapshot["spec"]["auto_test"],"test_recipe":snapshot["supervision"]["context"]["charter"]["test_recipe"]});
-        Ok(Self{lines:review_lines("Resume native fleet",&review),root:root.clone(),id:id.into(),args:vec!["resume".into(),id.into(),"--root".into(),root.to_string_lossy().into_owned()],resume_snapshot:Some(snapshot),prompt_digest:None,assignment_digest:None,recipe_digest:None,lore_default:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
+        Ok(Self{lines:review_lines("Resume fleet",&review),root:root.clone(),id:id.into(),args:vec!["resume".into(),id.into(),"--root".into(),root.to_string_lossy().into_owned()],resume_snapshot:Some(snapshot),prompt_digest:None,assignment_digest:None,recipe_digest:None,lore_default:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn launch(self,exe:&Path)->io::Result<Controller>{
         if self.args.is_empty(){return Err(invalid("Gallery fixture cannot launch a controller"));}

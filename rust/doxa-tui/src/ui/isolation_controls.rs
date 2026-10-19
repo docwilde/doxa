@@ -3,6 +3,8 @@
 use super::{App, ChipInfo, PaneGroup, safe_label};
 use serde_json::{json, Value};
 use crossterm::event::{KeyCode,KeyEvent,KeyModifiers};
+#[derive(Debug)]
+pub(super) struct Confirmation{pub id:String,pub profile:String,pub seen:std::cell::Cell<usize>,pub complete:std::cell::Cell<bool>}
 pub(super) fn verified_status(value:&Value)->Option<Value>{
     let profile=doxa_isolation::Profile::parse(value["profile"].as_str()?).ok()?;
     let state=value["state"].as_str()?;
@@ -62,20 +64,27 @@ impl App {
         else{lines.push("Direct internet and provider web-search tools are disabled. Ask an approved online supervisor for research evidence.".into());}
         if profile==doxa_isolation::Profile::DockerOffline{lines.push("Ordinary Claude/Codex CLI cannot reach its model provider in offline Docker. API-backed engines keep model calls on the host.".into());}
         lines.push("Supervised fleets stay paused after verification; review fleet status and explicitly continue.".into());
+        self.isolation_confirmation=Some(Confirmation{id:id.clone(),profile:profile.key().into(),seen:std::cell::Cell::new(0),complete:std::cell::Cell::new(false)});
         self.chip_info=Some(ChipInfo{kind:"isolation_change",label:profile.key().into(),lines,scroll:0,owner:Some((id,profile.key().into()))});
     }
     pub(super) fn isolation_control_key(&mut self,key:KeyEvent)->bool{
         let Some(info)=self.chip_info.as_ref().filter(|info|matches!(info.kind,"isolation"|"isolation_change"))else{return false;};
-        let Some((id,profile))=info.owner.clone()else{return false;};
-        if key.code==KeyCode::Esc{self.chip_info=None;return true;}
+        let Some((id,_))=info.owner.clone()else{return false;};
+        if key.code==KeyCode::Esc{self.isolation_confirmation=None;self.chip_info=None;return true;}
+        if self.groups[self.active_group].active_id()!=Some(id.as_str()){self.notice="Session changed; reopen isolation controls".into();return true;}
         if info.kind=="isolation" {
             let target=match key.code{KeyCode::Char('1')=>Some(doxa_isolation::Profile::DockerOffline),KeyCode::Char('2')=>Some(doxa_isolation::Profile::DockerOpen),KeyCode::Char('3')=>Some(doxa_isolation::Profile::Native),_=>None};
             if let Some(target)=target{self.review_isolation_change(id,target);return true;}return false;
         }
+        if matches!(key.code,KeyCode::Up|KeyCode::Down|KeyCode::PageUp|KeyCode::PageDown){
+            let info=self.chip_info.as_mut().unwrap();info.scroll=match key.code{KeyCode::Up=>info.scroll.saturating_sub(1),KeyCode::PageUp=>info.scroll.saturating_sub(8),KeyCode::Down=>info.scroll.saturating_add(1),_=>info.scroll.saturating_add(8)};return true;
+        }
         if matches!(key.code,KeyCode::Char('Y')|KeyCode::Char('y'))&&key.modifiers.contains(KeyModifiers::SHIFT){
+            let Some(review)=self.isolation_confirmation.as_ref().filter(|review|review.id==id&&review.complete.get())else{self.notice="Read the complete isolation and internet confirmation before applying".into();return true;};
+            let profile=review.profile.clone();
             if self.active_remote(){self.notice="Change isolation on the session host".into();return true;}
             if !self.session_activity.get(&id).is_some_and(|(busy,queued)|!*busy&&*queued==0){self.notice="Isolation changes require an idle session with no queued prompts".into();return true;}
-            self.pending_queue_commands.push(crate::bridge::WorkerCommand::SetIsolation(id,profile));self.chip_info=None;
+            self.pending_queue_commands.push(crate::bridge::WorkerCommand::SetIsolation(id,profile));self.isolation_confirmation=None;self.chip_info=None;
             self.notice="Applying reviewed isolation change; waiting for host verification…".into();
         }
         true

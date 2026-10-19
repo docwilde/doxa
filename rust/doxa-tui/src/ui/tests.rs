@@ -8684,6 +8684,9 @@ fn isolation_menu_requires_explicit_confirmation_for_bound_idle_session(){
     app.session_activity.insert("isolated".into(),(true,0));
     app.isolation_control_key(KeyEvent::new(KeyCode::Char('Y'),KeyModifiers::SHIFT));assert!(app.pending_queue_commands.is_empty());
     app.session_activity.insert("isolated".into(),(false,0));
+    let view=painted_at(&app,150,42);assert!(view.contains("CONFIRM NATIVE EXECUTION"));assert!(view.contains("CONFIRM INTERNET OPT-IN"));
+    // Reading is required even for an explicit uppercase confirmation.
+    while !app.isolation_confirmation.as_ref().unwrap().complete.get(){app.isolation_control_key(KeyEvent::new(KeyCode::PageDown,KeyModifiers::NONE));let _=painted_at(&app,150,42);}
     app.isolation_control_key(KeyEvent::new(KeyCode::Char('Y'),KeyModifiers::SHIFT));
     assert!(matches!(app.pending_queue_commands.as_slice(),[crate::bridge::WorkerCommand::SetIsolation(id,profile)] if id=="isolated"&&profile=="native"));
 }

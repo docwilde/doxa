@@ -566,6 +566,8 @@ impl App {
                         | "sessions"
                         | "about"
                         | "fleet"
+                        | "fleet_setup"
+                        | "isolation_change"
                         | "fleet_review"
                         | "fleet_dependency_review"
                         | "isolation"

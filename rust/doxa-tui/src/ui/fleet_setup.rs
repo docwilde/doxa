@@ -6,13 +6,13 @@ const LABELS:[&str;14]=["Task","Directory","Worker engine","Worker model (blank 
 #[derive(Debug)]
 pub(super) struct Wizard{values:[String;14],selected:usize,editing:bool}
 impl Wizard{
-    fn new(cwd:PathBuf)->Self{Self{values:[String::new(),cwd.to_string_lossy().into_owned(),"glm".into(),String::new(),"3".into(),"glm".into(),String::new(),"docker-offline".into(),"docker-offline".into(),"5".into(),"off".into(),"off".into(),String::new(),"0.5".into()],selected:0,editing:false}}
+    fn new(cwd:PathBuf)->Self{Self{values:[String::new(),cwd.to_string_lossy().into_owned(),"glm".into(),String::new(),"3".into(),"glm".into(),String::new(),"docker-offline".into(),"docker-offline".into(),"5".into(),"off".into(),"off".into(),"jev:jev-1.13.0".into(),"0.5".into()],selected:0,editing:false}}
     fn choices(&self)->Option<&'static [&'static str]>{match self.selected{2=>Some(&["glm","deepseek","claude","codex"]),5=>Some(&["off","glm","deepseek","claude","codex"]),7|8=>Some(&["docker-offline","docker-open","native"]),10=>Some(&["off","jev:jev-1.13.0","subq:subq-snap-preview"]),11=>Some(&["off","shadow","enforce"]),_=>None}}
     fn cycle(&mut self,back:bool){if let Some(options)=self.choices(){let i=options.iter().position(|row|*row==self.values[self.selected]).unwrap_or(0);self.values[self.selected]=options[(i+if back{options.len()-1}else{1})%options.len()].into();}}
     fn lines(&self)->Vec<String>{
-        let mut lines=vec!["New fleet · ↑/↓ select · ←/→ change choices · Enter edit · F10 review · Esc cancel".into(),
-            "Workers and coordinator start in Docker without internet. Online and native choices require owner confirmation in the launch review.".into(),
-            "Offline GLM/DeepSeek keep model API calls on the host. Ordinary offline Claude/Codex CLI cannot reach its model provider.".into()];
+        let mut lines=vec!["New fleet · ↑↓ field · ←→ choice · Enter edit · F10 review · Esc".into(),
+            "Defaults: Docker offline. Native and internet require owner confirmation.".into(),
+            "Offline GLM/DeepSeek work. Offline Claude/Codex CLI needs a provider gateway.".into()];
         for (index,label) in LABELS.iter().enumerate(){lines.push(format!("{} {label}: {}{}",if self.selected==index{"▸"}else{" "},safe_label(&self.values[index]),if self.selected==index&&self.editing{" ▏"}else{""}));}
         lines.push("An online coordinator can answer offline workers' research questions. Alignment reviewers are separate read-only API calls with no tools.".into());lines
     }
@@ -49,7 +49,10 @@ impl App{
                 return true;
             },_=>{}
         }}
-        if let Some(wizard)=&self.fleet_setup{if let Some(info)=self.chip_info.as_mut(){info.lines=wizard.lines();info.scroll=wizard.selected.saturating_sub(5);}}true
+        if let Some(wizard)=&self.fleet_setup{
+            let lines=wizard.lines();let selected=wizard.selected;let area=self.active_chooser_rect();
+            if let Some(info)=self.chip_info.as_mut(){info.lines=lines;if let Some(area)=area{let row=info.lines.iter().take(3+selected).flat_map(|line|crate::memory_menu::wrap_review(line,usize::from(area.width.saturating_sub(3)).max(1))).count();info.scroll=row.saturating_sub(usize::from(area.height.saturating_sub(2))/2);}}
+        }true
     }
 }
 #[cfg(test)]mod tests{
