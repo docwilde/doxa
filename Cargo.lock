@@ -1554,7 +1554,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 [[package]]
 name = "lore-core"
 version = "0.62.24"
-source = "git+https://github.com/docwilde/LORE?rev=2d4fdfd41e50b453906039cb3753de6187febfcd#2d4fdfd41e50b453906039cb3753de6187febfcd"
+source = "git+https://github.com/docwilde/LORE?rev=d0dcbcc9a06690a1c340c858c5590d23fe814b77#d0dcbcc9a06690a1c340c858c5590d23fe814b77"
 dependencies = [
  "fancy-regex",
  "hmac 0.12.1",

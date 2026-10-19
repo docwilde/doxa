@@ -1994,7 +1994,7 @@ train, replay, validation and one-use final-test fixtures. This is opt-in;
 DOXA does not launch experiments from the proposal screen. Automatic native
 diagnostic capture is also opt-in through `LORE_DIAGNOSTIC_TRACES=1`.
 
-See the [LORE evaluation workflow](https://github.com/docwilde/LORE/blob/2d4fdfd41e50b453906039cb3753de6187febfcd/docs/skill-evaluation.md)
+See the [LORE evaluation workflow](https://github.com/docwilde/LORE/blob/v0.62.24/docs/skill-evaluation.md)
 for the corpus format, immutable evidence, answer/growth checks and limits.
 The included deterministic fixture validates the mechanism; a real task
 corpus and model adapter are needed to measure skill quality.
