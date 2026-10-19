@@ -52,7 +52,7 @@ pub fn change_attached_isolation(client:&mut DaemonClient,target:Profile)->io::R
 fn idle(slots:&mut [Slot])->io::Result<()> {
     for slot in slots {
         let state=rpc(&mut slot.client,"get_state",json!({}))?;
-        if slot.busy||state["running"]!=false||state["queued"].as_u64()!=Some(0)||!slot.pending.is_empty(){return Err(invalid("all fleet sessions must be idle with no queued prompts or pending approvals"));}
+        if slot.busy||state["running"]!=false||state["queued"].as_u64()!=Some(0)||state["pending_inputs_complete"]!=true||state["pending_inputs"].as_array().is_none_or(|rows|!rows.is_empty())||!slot.pending.is_empty(){return Err(invalid("all fleet sessions must be idle with no queued prompts or pending approvals"));}
         let observed=DaemonClient::connect_tail(&slot.session.socket).map_err(io::Error::other)?;
         if observed.hello["session_id"]!=slot.session.id || slot.client.has_buffered_frames() || observed.hello["next_seq"].as_u64().is_none_or(|seq|slot.client.cursor<seq){return Err(invalid("controller still has pending session events; wait for its next checkpoint"));}
     }

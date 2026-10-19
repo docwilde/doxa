@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.57 — 2026-10-19
+
+**Fleet access**
+
+- Default **`Spec::parse`** workers and coordinators to **docker-offline**, independently of ordinary sessions. Require separate owner opt-ins for internet and confirmations for native host access.
+- Add owner isolation changes at idle checkpoints, hold admission and rebind only the selected daemon identity. Preserve the charter, conversation and budgets; supervised fleets require owner continuation.
+- Refuse ordinary offline Claude/Codex CLI launches before creating a run. API-backed GLM/DeepSeek remain available; provider-only fleet connectivity and automatic ROOT provisioning remain unimplemented.
+
+**Fleet menus and review**
+
+- Add **Start Fleet** and **N** creation forms with models, coordinator, budgets, review settings and role isolation. Require reading the launch review and runtime isolation confirmations before execution.
+- Add **M** messages/alignment inspection with five semantic scores, admission outcomes, supervisor reasons and evidence IDs. Label unavailable verdicts and bounded retained history.
+- Disable and verify Codex web search/apps/remote plugins offline; disable Claude WebSearch/WebFetch. Live Docker migration smoke tests remain opt-in; classifiers do not establish alignment.
+
 ## 2.0.0-beta.56 — 2026-10-19
 
 **Skill evaluation review**
