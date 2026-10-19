@@ -784,6 +784,32 @@ mod tests {
         }
         for family in ["router", "https://api.openai.com", "../claude", ""] { assert!(AllowedHosts::provider(family).is_err()); }
     }
+    #[test]
+    fn provider_sockets_have_independent_locks_and_lifetimes() {
+        let root = fixture_dir();
+        let start = |family| EgressGateway::start_configured(root.path(), AllowedHosts::provider(family).unwrap(),
+            Arc::new(|_| panic!("denied host reached DNS")), Arc::new(|_| panic!("denied host reached connector")),
+            None, None, Some(family), || {});
+        let claude = start("claude").unwrap();
+        let codex = start("codex").unwrap();
+        assert!(start("claude").is_err());
+        for (gateway, denied) in [(&claude, "api.openai.com"), (&codex, "api.anthropic.com")] {
+            let bytes = format!("CONNECT {denied}:443 HTTP/1.1\r\nHost: {denied}:443\r\n\r\n");
+            assert!(request(gateway.socket(), bytes.as_bytes()).starts_with(b"HTTP/1.1 403"));
+        }
+        let claude_path = claude.socket().to_owned();
+        drop(claude);
+        assert!(!claude_path.exists()); assert!(codex.socket().exists());
+        // A fork from another parallel test can retain a CLOEXEC lock briefly.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match start("claude") {
+                Ok(restarted) => { drop(restarted); break; },
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                Err(error) => panic!("provider socket did not restart: {error}"),
+            }
+        }
+    }
     // Other tests spawn children while libtest runs cases in parallel. A child
     // can retain a CLOEXEC listener or flock between fork and exec, after the
     // fixture's owner has dropped it. That is a genuinely live descriptor:

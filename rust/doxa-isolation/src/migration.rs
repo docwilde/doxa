@@ -99,7 +99,7 @@ impl Migration {
     /// private clone/context remain available for inspection and recovery.
     pub fn rollback(&mut self)->io::Result<()> {
         if let Some(manifest)=self.installed.take().filter(|m|m.profile.docker()){
-            let mut runtime=Runtime{path:self.path.clone(),manifest,migration_stop:false};
+            let mut runtime=Runtime{path:self.path.clone(),manifest,migration_stop:false,providers:Default::default()};
             runtime.stop()?;
             if let (Some(policy),Some(id))=(&runtime.manifest.policy,&runtime.manifest.container_id){docker_run(policy,&["rm",id])?;}
         }
