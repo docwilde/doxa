@@ -5250,7 +5250,12 @@ print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text
     let registry=dir.path().join("registry/codex-session.json");wait_for_registry(&mut child,&registry);
     let row:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
     let mut process=Process {child,registry,socket:PathBuf::from(row["daemon_socket"].as_str().unwrap())};
-    let (mut reader,mut socket)=process.connect();reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();assert_eq!(receive(&mut reader)["session_id"],"codex-session");
+    // Trimming first verifies the saved thread, then replaces its provider
+    // with a fresh protected startup. Each startup attests the debug daemon
+    // twice; CI measured 17s for one, so this two-startup path needs both
+    // preparation budgets. Cancellation assertions retain their own limits.
+    let preparation=CODEX_PREPARATION_TIMEOUT * if trimmed {2} else {1};
+    let (mut reader,mut socket)=process.connect();reader.get_ref().set_read_timeout(Some(preparation)).unwrap();assert_eq!(receive(&mut reader)["session_id"],"codex-session");
     assert_eq!(fs::read(store.transcript_path()).unwrap(),original);
     send(&mut socket,json!({"type":"attach","cursor":null}));send(&mut socket,json!({"type":"prompt","id":1,"text":"continue"}));
     let terminal=claude_receive_until(&mut reader,|frame|frame["event"]["type"]=="turn_done");assert_eq!(terminal["event"]["data"]["is_error"],false,"{terminal}");
