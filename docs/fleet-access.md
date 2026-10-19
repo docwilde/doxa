@@ -55,6 +55,8 @@ queued prompts or pending approvals. Admission is held while the host checkpoint
 migrates and verifies the original session/conversation/workspace. Only the
 selected host PID and working directory may change in the frozen assignments.
 Every host must accept the exact replacement; stale contexts fail closed.
+The controller and attached frontend rediscover the replacement daemon's socket
+and verify the same session ID after a backend change.
 Supervised fleets stay paused until the owner reviews and continues them.
 Dependency and host-test fleets retain Docker; frozen test recipes retain offline
 workers. Existing ROOT migration restrictions still apply.

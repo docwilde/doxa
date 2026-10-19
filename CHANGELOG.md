@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.58 — 2026-10-19
+
+**Fleet migration**
+
+- Fix **`fleet_isolation::reconnect`** rediscovery after a backend change. Rebind the controller and attached frontend to the replacement daemon socket, verify its session ID, and save the current socket for attach and teardown.
+- Preserve project scope, frozen assignments, budgets and the owner continuation gate. Refuse a replacement with a different session identity.
+
 ## 2.0.0-beta.57 — 2026-10-19
 
 **Fleet access**
