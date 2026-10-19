@@ -5,9 +5,13 @@ use doxa_fleet::owner_control::IsolationRequest;
 use doxa_isolation::Profile;
 
 pub fn request_isolation(root:&Path,id:&str,index:usize,target:Profile,confirm_native:bool,allow_internet:bool)->io::Result<String>{
+    submit(root,id,index,target,confirm_native,allow_internet,None)
+}
+fn submit(root:&Path,id:&str,index:usize,target:Profile,confirm_native:bool,allow_internet:bool,expected_session:Option<&str>)->io::Result<String>{
     let value=control::snapshot(root,id)?;
     if value["phase"]!="monitoring"||value["live"]!=true{return Err(invalid("isolation changes require a live fleet controller"));}
     let row=value["slots"].get(index).ok_or_else(||invalid("fleet slot unavailable"))?;
+    if expected_session.is_some_and(|session|row["session_id"].as_str()!=Some(session)){return Err(invalid("fleet slot changed since owner confirmation"));}
     let expected=Profile::parse(row["isolation"].as_str().or_else(||value["spec"]["isolation"].as_str()).ok_or_else(||invalid("fleet profile unavailable"))?)?;
     let request=IsolationRequest{id:uuid::Uuid::new_v4().to_string(),session_id:row["session_id"].as_str().ok_or_else(||invalid("fleet session unavailable"))?.into(),expected_profile:expected,target,confirm_native,allow_internet};
     request.validate()?;
@@ -28,7 +32,7 @@ pub fn change_attached_isolation(client:&mut DaemonClient,target:Profile)->io::R
     let root=Path::new(owner["root"].as_str().ok_or_else(||invalid("fleet root unavailable"))?);
     let run=owner["run_id"].as_str().ok_or_else(||invalid("fleet identity unavailable"))?;
     let index=owner["slot"].as_u64().ok_or_else(||invalid("fleet slot unavailable"))? as usize;
-    let request=request_isolation(root,run,index,target,true,true)?;
+    let request=submit(root,run,index,target,true,true,client.hello["session_id"].as_str())?;
     let deadline=Instant::now()+Duration::from_secs(120);
     loop {
         match doxa_fleet::read_private::<Value>(&root.join(run).join("isolation-result.json"),8192){
