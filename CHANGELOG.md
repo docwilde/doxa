@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.59 — 2026-10-19
+
+**Offline provider connectivity**
+
+- Connect offline Claude/Codex and Router CLI candidates through **`EgressGateway::start_provider`**. Keep Docker networking at **none**; allow only fixed provider HTTPS hosts with checked TLS SNI and public DNS addresses.
+- Bind gateways to the session lifetime and adapters to each transport. Deny other hosts and direct fallback; retain owner internet opt-ins and disable Claude account connectors/artifacts alongside web tools.
+- Reset idle CLI transports in **`IsolationHost::call`** when Docker network policy changes. Preserve conversation/model selection; hold failed restarts. Provider-host access does not conceal CLI credentials or inspect encrypted paths.
+
 ## 2.0.0-beta.58 — 2026-10-19
 
 **Fleet migration**

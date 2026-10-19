@@ -2152,10 +2152,17 @@ mod tests {
     fn fixture_with_startup(
         body: &str, startup: &str, initial_billing: Option<Value>,
     ) -> (tempfile::TempDir, Arc<ClaudeHost>) {
+        fixture_with_launch(body, startup, initial_billing, false)
+    }
+    fn fixture_with_launch(
+        body: &str, startup: &str, initial_billing: Option<Value>, restartable: bool,
+    ) -> (tempfile::TempDir, Arc<ClaudeHost>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("claude");
         fs::write(&path,format!(r#"#!/usr/bin/env python3
 import sys,json,os,time
+with open(os.path.join(os.path.dirname(__file__),'launches.jsonl'),'a') as launches:
+ launches.write(json.dumps({{'pid':os.getpid(),'args':sys.argv[1:]}})+'\n')
 model='claude-opus-5-5';effort='high'
 def emit(row): print(json.dumps(row),flush=True)
 for line in sys.stdin:
@@ -2229,7 +2236,9 @@ for line in sys.stdin:
         *shared.catalog.lock().unwrap() = initial;
         let (tx, rx) = mpsc::channel();
         let worker_shared = shared.clone();
-        let worker = thread::spawn(move || broker(cli, rx, worker_shared, None));
+        let launch = restartable.then(|| ClaudeLaunch { executable:path.clone(), cwd:dir.path().to_owned(),
+            config_dir:dir.path().to_owned(), plugins:Vec::new() });
+        let worker = thread::spawn(move || broker(cli, rx, worker_shared, launch));
         let host = Arc::new(ClaudeHost {
             commands: tx,
             worker: Mutex::new(Some(worker)),
@@ -2237,6 +2246,33 @@ for line in sys.stdin:
             admission: Mutex::new(()),
         });
         (dir, host)
+    }
+    #[test]
+    fn isolation_restart_retires_old_transport_and_preserves_selection_and_session() {
+        let (dir, host) = fixture_with_launch("pass", "pass", None, true);
+        assert_eq!(host.call("isolation_transport_reset", &json!({})).unwrap()["reset"], true);
+        let launches: Vec<Value> = fs::read_to_string(dir.path().join("launches.jsonl")).unwrap()
+            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(launches.len(), 2);
+        assert_ne!(launches[0]["pid"], launches[1]["pid"]);
+        let old_pid = launches[0]["pid"].as_i64().unwrap() as i32;
+        assert_eq!(unsafe { libc::kill(old_pid, 0) }, -1);
+        assert_eq!(*host.shared.provider_session.lock().unwrap(), SESSION);
+        assert_eq!(host.initial_model().as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(host.initial_effort().as_deref(), Some("high"));
+        assert!(!host.shared.failed.load(Ordering::Acquire));
+        host.shutdown();
+    }
+    #[test]
+    fn isolation_restart_failure_holds_future_prompts() {
+        let (dir, host) = fixture_with_launch("pass", "pass", None, true);
+        fs::remove_file(dir.path().join("claude")).unwrap();
+        assert!(host.call("isolation_transport_reset", &json!({})).is_err());
+        assert!(host.shared.failed.load(Ordering::Acquire));
+        let mut events = Vec::new();
+        host.prompt("must not run", &mut |event| events.push(event));
+        assert!(!events.iter().any(|event| event["type"] == "turn_started"));
+        host.shutdown();
     }
     #[test]
     fn expired_cli_auth_reports_scrubbed_login_guidance() {
