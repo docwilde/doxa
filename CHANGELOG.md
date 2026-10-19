@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.55 — 2026-10-19
+
+**Background review history**
+
+- Pin native **LORE 0.62.23** so Deriver and Dreamer calls disable session persistence, including OAuth retries; background reviews no longer create resumable Claude conversations for Desktop to import.
+- Existing saved worker conversations and Desktop imports require separate archival.
+
 ## 2.0.0-beta.54 — 2026-10-14
 
 **Codex recovery**
