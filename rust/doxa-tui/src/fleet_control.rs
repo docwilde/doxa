@@ -1894,7 +1894,12 @@ mod tests {
         let review=spec.review().unwrap();
         assert_eq!(review["slots"][0]["task_sha256"],format!("{:x}",Sha256::digest(b"Implement parser")));
         assert_eq!(review["slots"][1]["task_sha256"],format!("{:x}",Sha256::digest(b"Test parser")));
-        assert_eq!(review["assignments_sha256"],doxa_fleet::hash(&(&spec.worker_tasks,&spec.worker_paths)).unwrap());
+        // Owner review now binds access policy as well as assignments.
+        assert_ne!(review["assignments_sha256"],doxa_fleet::hash(&(&spec.worker_tasks,&spec.worker_paths)).unwrap());
+        let mut changed=Spec::parse(&args).unwrap();changed.worker_tasks[0].push_str(" with another objective");
+        assert_ne!(review["assignments_sha256"],changed.review().unwrap()["assignments_sha256"]);
+        let mut changed=Spec::parse(&args).unwrap();changed.worker_paths[0]=vec!["src/other".into()];
+        assert_ne!(review["assignments_sha256"],changed.review().unwrap()["assignments_sha256"]);
         assert_eq!(review["slots"][0]["allowed_paths"],json!(["src/parser"]));
         assert_eq!(review["slots"][1]["allowed_paths"],json!(["src/tests"]));
         let mut missing=args.clone();missing.retain(|value|value!="2:Test parser");
@@ -2151,7 +2156,9 @@ mod tests {
                 let mut line = String::new(); reader.read_line(&mut line).unwrap();
                 line.clear(); reader.read_line(&mut line).unwrap();
                 let prompt: Value = serde_json::from_str(&line).unwrap();
-                assert_eq!(prompt["text"], "same task for every worker");
+                let text=prompt["text"].as_str().unwrap();
+                assert!(text.starts_with("Host internet policy: offline worker, no direct internet or web search."));
+                assert!(text.ends_with("\n\nsame task for every worker"));
                 let persisted: Value = serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
                 assert_eq!(persisted["phase"], "dispatching");
                 assert!(persisted["slots"].as_array().unwrap().iter().all(|slot| slot["phase"] == "dispatch_pending"));
