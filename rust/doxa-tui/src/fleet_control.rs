@@ -674,7 +674,7 @@ pub fn start(args: &[String]) -> io::Result<()> {
     spec.access.require_confirmations(spec.preflight.supervisor.is_some())?;
     for (index,row) in assigned.iter().enumerate(){
         if spec.access.slot(spec.preflight.supervisor.is_some()&&index==0)==doxa_isolation::Profile::DockerOffline&&matches!(row.engine,launch::Engine::Claude|launch::Engine::Codex){
-            return Err(invalid("Offline Claude/Codex CLI cannot reach its model provider. Choose API-backed GLM/DeepSeek workers, provision docker-hardened, or explicitly approve task internet; no native/network fallback is applied."));
+            return Err(invalid("Offline Claude/Codex CLI cannot reach its model provider. Choose API-backed GLM/DeepSeek workers or explicitly approve task internet. A provider-only fleet gateway and automatic ROOT provisioning are not implemented; no native/network fallback is applied."));
         }
     }
     let _signals = Signals::install()?;

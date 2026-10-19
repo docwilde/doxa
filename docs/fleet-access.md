@@ -40,9 +40,10 @@ Offline provider processes additionally disable Codex apps/remote plugins, Claud
 [Codex built-in web search](https://learn.chatgpt.com/docs/config-file/config-basic).
 **Ordinary Claude/Codex CLI cannot reach their model provider inside offline
 Docker.** Such launches are refused before creating a run. Use API-backed
-GLM/DeepSeek (model requests run on the host; workspace tools run in Docker), or
-explicitly provision the existing ROOT/docker-hardened provider boundary. Router
-CLI candidates have the same connectivity limitation. DOXA never silently opens
+GLM/DeepSeek (model requests run on the host; workspace tools run in Docker).
+The existing ROOT/docker-hardened boundary requires separately reserved session
+IDs; fleet launch does not provision it or a provider-only legacy gateway.
+Router CLI candidates have the same connectivity limitation. DOXA never silently opens
 worker egress to fix provider connectivity. Built-in web tools disabled when a
 provider process starts stay disabled until that provider is restarted; an online
 coordinator can still research through its approved network tools.
