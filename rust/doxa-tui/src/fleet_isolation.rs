@@ -159,7 +159,7 @@ pub(super) fn network_briefing(value:&Value,index:usize)->String {
     }
     #[test]fn unconfirmed_native_start_is_refused_before_creating_any_run(){
         let dir=tempfile::tempdir().unwrap();let root=dir.path().join("fleet");
-        let args=["--pool","fixture","--prompt","task","--run-budget","1","--isolation","native","--force","--root",root.to_str().unwrap()].map(str::to_owned).to_vec();
-        let error=control::start(&args).unwrap_err();assert_eq!(error.kind(),io::ErrorKind::PermissionDenied);assert!(!root.exists());
+        let args=["--pool","fixture","--prompt","task","--run-budget","1","--isolation","native","--force","--run-id","r","--root",root.to_str().unwrap()].map(str::to_owned).to_vec();
+        let error=control::start(&args).unwrap_err();assert_eq!(error.kind(),io::ErrorKind::PermissionDenied,"{error}");assert!(error.to_string().contains("--confirm-native-workers"));assert!(!root.exists());
     }
 }
