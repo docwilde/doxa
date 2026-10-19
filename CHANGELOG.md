@@ -25,7 +25,7 @@ the stable 2.0 release has not been cut.
 
 - Fix **`App::open_diff`** to open a vertical split inside the active session window. Keep its prompt and neighboring windows visible through `/diff`, shortcuts and automatic diff opening.
 - List each window's tabs beneath its first tab in **`App::rail_groups`**. Indent child tabs and activate their existing window when selected.
-- Distinguish windows, supervisors and fleet groups in **`App::draw_rail`** with separate Nerd Font icons and plain-text fallbacks; give every fleet a collapsible heading.
+- Distinguish windows, supervisors and fleet groups in **`App::draw_rail`** with Nerd Font icons and text fallbacks. Discover fleet members in their own private run registry; retain a collapsible fleet heading.
 
 ## 2.0.0-beta.58 — 2026-10-19
 

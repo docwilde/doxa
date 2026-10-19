@@ -2129,7 +2129,9 @@ impl App {
                     };
                     let queued = self.session_activity.get(&session.id).map(|activity| activity.1).unwrap_or(0)
                         + self.pending_prompts.iter().filter(|(id, _)| id == &session.id).count();
-                    let pane = self.pane_signal(&session.id).map(|signal| signal.badge()).unwrap_or_default();
+                    let pane = self.groups.iter().find(|group|group.tabs.first()==Some(&session.id))
+                        .and_then(|group|group.active_id()).and_then(|id|self.pane_signal(id))
+                        .map(|signal|signal.badge()).unwrap_or_default();
                     let queue = if queued > 0 { format!(" [q{queued}]") } else { String::new() };
                     let provenance = match row {
                         RailRow::Pane { group, .. } => self.pane_project_marker(*group),

@@ -38,6 +38,24 @@ fn group(root: PathBuf, id: String, value: &Value, live: &HashSet<String>) -> Op
     supervisor=supervisor.filter(|id|members.contains(id));
     Some(Group {root,id,supervisor,members,collapsed:false})
 }
+
+fn live_groups(sources: &[(PathBuf,String)]) -> (Vec<Group>,Vec<discovery::Session>) {
+    let mut groups=Vec::new(); let mut live=HashMap::new();
+    for (root,id) in sources {
+        let Ok(value)=fleet_control::snapshot(root,id) else {continue;};
+        // Fleet daemons live in their own reviewed run runtime, not the
+        // operator's ordinary session registry. Never guess across runtimes.
+        let Ok(sessions)=discovery::sessions_in(&root.join(id).join("rt")) else {continue;};
+        let ids=sessions.iter().map(|session|session.id.clone()).collect();
+        if let Some(group)=group(root.clone(),id.clone(),&value,&ids) {
+            for session in sessions.into_iter().filter(|session|group.members.contains(&session.id)) {
+                live.entry(session.id.clone()).or_insert(session);
+            }
+            groups.push(group);
+        }
+    }
+    (groups,live.into_values().collect())
+}
 impl App {
     /// Render-only illustrative membership; never reads or persists a run.
     #[doc(hidden)]
@@ -78,10 +96,7 @@ impl App {
         if cfg!(test) {return false;}
         let (tx,rx)=mpsc::sync_channel(1);
         if std::thread::Builder::new().name("fleet-sidebar".into()).spawn(move|| {
-            let Ok(live)=discovery::sessions() else {let _=tx.send((Vec::new(),Vec::new()));return;};
-            let ids=live.iter().map(|row|row.id.clone()).collect();
-            let groups=sources.into_iter().filter_map(|(root,id)|fleet_control::snapshot(&root,&id).ok().and_then(|value|group(root,id,&value,&ids))).collect();
-            let _=tx.send((groups,live));
+            let _=tx.send(live_groups(&sources));
         }).is_ok() {self.fleet_rail.pending=Some(rx);}
         false
     }
@@ -133,6 +148,37 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*; use serde_json::json;
+    #[test]
+    fn live_membership_uses_each_verified_fleets_private_runtime() {
+        use std::{fs,os::unix::{fs::PermissionsExt,net::UnixListener}};
+        let dir=tempfile::tempdir().unwrap(); let root=dir.path();
+        fs::set_permissions(root,fs::Permissions::from_mode(0o700)).unwrap();
+        let mut listeners=Vec::new();
+        for (run,id) in [("one","boss"),("two","outside")] {
+            let runtime=root.join(run).join("rt");
+            fs::create_dir_all(runtime.join("registry")).unwrap();
+            for path in [root.join(run),runtime.clone(),runtime.join("registry")] {
+                fs::set_permissions(path,fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let manifest=json!({"native_version":1,"run_id":run,"slots":[{"role":"supervisor","session_id":"boss"}]});
+            let path=root.join(run).join("manifest.json");fs::write(&path,manifest.to_string()).unwrap();
+            fs::set_permissions(path,fs::Permissions::from_mode(0o600)).unwrap();
+            let socket=runtime.join(format!("daemon-{id}-{}.sock",std::process::id()));
+            listeners.push(UnixListener::bind(&socket).unwrap());
+            fs::set_permissions(&socket,fs::Permissions::from_mode(0o600)).unwrap();
+            let path=runtime.join("registry").join(format!("{id}.json"));
+            fs::write(&path,json!({"session_id":id,"pid":std::process::id(),"cwd":root,
+                "heartbeat_at":time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap(),
+                "started_at":"2026-10-19T00:00:00Z","title":id,"daemon_socket":socket}).to_string()).unwrap();
+            fs::set_permissions(path,fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let (groups,live)=live_groups(&[(root.to_path_buf(),"one".into()),(root.to_path_buf(),"two".into())]);
+        assert_eq!(groups.len(),1); assert_eq!(groups[0].id,"one");
+        assert_eq!(groups[0].members,["boss"]); assert_eq!(live.len(),1); assert_eq!(live[0].id,"boss");
+        // The same live ID in another run must not make a dead slot visible.
+        fs::remove_file(root.join("one/rt/registry/boss.json")).unwrap();
+        assert!(live_groups(&[(root.to_path_buf(),"two".into())]).0.is_empty());
+    }
     #[test]
     fn membership_requires_manifest_identity_roles_and_current_live_ids() {
         let live=HashSet::from(["boss".into(),"worker".into()]);
