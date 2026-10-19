@@ -67,7 +67,7 @@ fn run() -> io::Result<()> {
             }
             Ok(())
         },
-        Some("exec") if args.len() >= 2 => {
+        Some("exec" | "exec-offline") if args.len() >= 2 => {
             // A helper lives for exactly one provider transport. Losing the
             // host stdio channel kills the provider process group, so resume
             // never adopts an orphan CLI writer after a supervisor crash.
@@ -77,6 +77,21 @@ fn run() -> io::Result<()> {
             } else { (None, None) };
             let fd = peer.as_ref().map(AsRawFd::as_raw_fd);
             let mut command = Command::new(&args[1]);
+            if args[0] == "exec-offline" {
+                let family = if args[1] == "/usr/local/bin/claude" { "claude" } else { "codex" };
+                let proxy = doxa_isolation::egress::provider_adapter(family)?;
+                for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] {
+                    command.env(key, &proxy);
+                }
+                command.env("NO_PROXY", "").env("no_proxy", "");
+                // Keep DNS at the host gateway; no optional account connectors,
+                // telemetry, updates, browser bridges or artifact fetches.
+                command.env("CLAUDE_CODE_PROXY_RESOLVES_HOSTS", "1")
+                    .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+                    .env("ENABLE_CLAUDEAI_MCP_SERVERS", "false")
+                    .env("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
+                    .env("DISABLE_AUTOUPDATER", "1");
+            }
             command.args(&args[2..]).process_group(0).stdin(Stdio::piped()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
             if let Some(fd) = fd {
                 command.env("DOXA_CODEX_OWNER_FD", fd.to_string());

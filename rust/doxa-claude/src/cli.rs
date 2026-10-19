@@ -50,6 +50,9 @@ impl Cli {
         let mut command = Command::new(o.executable);
         if !doxa_isolation::task_internet_allowed().map_err(|_|Error::Protocol)? {
             command.args(["--disallowedTools","WebSearch,WebFetch"]);
+            command.env("ENABLE_CLAUDEAI_MCP_SERVERS", "false")
+                .env("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
+                .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
         }
         // `host` alone still denies tool calls that need approval; `stdio`
         // registers the callback that emits can_use_tool control requests.

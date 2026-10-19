@@ -681,6 +681,13 @@ impl Host for ClaudeHost {
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "isolation_transport_reset" => {
+                let _guard = self.admission.lock().unwrap();
+                if self.has_active_work() || self.shared.closing.load(Ordering::Acquire) {
+                    return Err("Claude isolation changes require an idle provider".into());
+                }
+                self.rpc(method, json!({}))
+            }
             "set_model" | "set_effort" | "set_permission_mode" => {
                 let _guard = self.admission.lock().unwrap();
                 if (method != "set_permission_mode" && self.has_active_work())
@@ -1314,6 +1321,33 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                     }
                 }
                 Command::Rpc(method, params, reply) => {
+                    if method == "isolation_transport_reset" {
+                        let result = (|| {
+                            if events.is_some() { return Err("Claude isolation changes require an idle provider".into()); }
+                            let launch = launch.as_ref().ok_or("Claude launch identity unavailable")?;
+                            let selection = shared.selection.lock().unwrap().clone();
+                            let id = shared.provider_session.lock().unwrap().clone();
+                            let resume = shared.store.transcript_snapshot().map_err(|_| "Claude checkpoint unavailable")?
+                                .is_some_and(|(_, bytes)| bytes > 0);
+                            cli.terminate();
+                            let mut fresh = Cli::spawn(CliOptions { executable:&launch.executable, cwd:&launch.cwd,
+                                session_id:&id, resume, model:selection.0.as_deref(), effort:selection.1.as_deref(),
+                                permission_mode:if selection.2=="default" {"manual"} else {&selection.2},
+                                config_dir:&launch.config_dir, plugins:&launch.plugins }).map_err(|_| "Claude isolation transport could not restart")?;
+                            let deadline = Instant::now() + RPC_TIMEOUT;
+                            let initial = startup_control(&mut fresh, init_request(), &shared, deadline, None)?;
+                            let effective = settings(&startup_control(&mut fresh, json!({"subtype":"get_settings"}), &shared, deadline, None)?)?;
+                            if selection.0.as_deref().is_some_and(|model| !model_applied(&initial, model, effective.0.as_deref()))
+                                || selection.1.is_some() && selection.1 != effective.1 {
+                                return Err("Claude isolation restart changed model or effort".into());
+                            }
+                            cli = fresh;
+                            Ok(json!({"reset":true}))
+                        })();
+                        if result.is_err() { shared.failed.store(true, Ordering::Release); }
+                        let _ = reply.send(result);
+                        continue;
+                    }
                     if method == "answer_needs_input" {
                         let id = params["id"].as_str().unwrap_or("");
                         let mut applied = false;

@@ -1080,6 +1080,23 @@ impl Host for CodexHost {
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "isolation_transport_reset" => {
+                if self.has_active_work() || self.closing.load(Ordering::Acquire) {
+                    return Err("Codex isolation changes require an idle provider".into());
+                }
+                let runtime = self.runtime.lock().unwrap();
+                let mut driver = self.driver.lock().unwrap();
+                let CodexTransport::AppServer { options, active, resume_thread } = &mut *driver else {
+                    return Err(LEGACY_READ_ONLY.into());
+                };
+                if let Some(mut app) = active.take() {
+                    *resume_thread = Some(app.thread_id().into());
+                    options.resume_thread = resume_thread.clone();
+                    self.remember_rollout(&app);
+                    runtime.block_on(app.shutdown());
+                }
+                Ok(json!({"reset":true}))
+            }
             "verify_resume" => {
                 if self.transport != "app-server" { return Err(LEGACY_READ_ONLY.into()); }
                 if self.active.lock().unwrap().is_some() || self.closing.load(Ordering::Acquire) {

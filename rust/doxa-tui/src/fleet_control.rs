@@ -672,11 +672,6 @@ pub fn start(args: &[String]) -> io::Result<()> {
     for (index, row) in assigned.iter().enumerate() { println!("slot {index}: {}:{} · memory {}", engine_name(row.engine), row.model.as_deref().unwrap_or("default"), if row.lore == Some(false) { "off" } else { "on" }); }
     if spec.dry_run { println!("Access review: {}",spec.access.review(spec.preflight.supervisor.is_some())); return Ok(()); }
     spec.access.require_confirmations(spec.preflight.supervisor.is_some())?;
-    for (index,row) in assigned.iter().enumerate(){
-        if spec.access.slot(spec.preflight.supervisor.is_some()&&index==0)==doxa_isolation::Profile::DockerOffline&&matches!(row.engine,launch::Engine::Claude|launch::Engine::Codex){
-            return Err(invalid("Offline Claude/Codex CLI cannot reach its model provider. Choose API-backed GLM/DeepSeek workers or explicitly approve task internet. A provider-only fleet gateway and automatic ROOT provisioning are not implemented; no native/network fallback is applied."));
-        }
-    }
     let _signals = Signals::install()?;
     let store = Store::create(&spec.preflight.root, &spec.preflight.run_id)?;
     let runtime = store.run.join("rt"); fs::DirBuilder::new().mode(0o700).create(&runtime)?;

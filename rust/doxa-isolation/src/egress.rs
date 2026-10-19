@@ -1,7 +1,4 @@
-//! Host-owned CONNECT gateway for a network-none session. Production wiring
-//! remains gated on rootless and provider-flow integration smokes.
-//!
-//! This is deliberately not selected by any production isolation profile.
+//! Host-owned CONNECT gateway for a network-none session.
 //! The worker can reach only its mounted Unix socket; the host resolves an
 //! exact owner allowlist entry and connects to that resolved address itself.
 use crate::{error, inspect_network, preflight, private_directory, read_manifest, Profile};
@@ -42,6 +39,17 @@ pub(crate) type OriginGuard = dyn Fn(&UnixStream) -> io::Result<()> + Send + Syn
 #[derive(Clone)]
 pub struct AllowedHosts(Arc<HashSet<String>>);
 impl AllowedHosts {
+    /// Fixed provider destinations, never populated from a worker, environment,
+    /// project config, redirect, plugin or model response. Login is performed on
+    /// the host; the worker can refresh its private credential snapshot.
+    pub fn provider(family: &str) -> io::Result<Self> {
+        let hosts: &[&str] = match family {
+            "claude" => &["api.anthropic.com", "platform.claude.com"],
+            "codex" => &["api.openai.com", "chatgpt.com", "auth.openai.com"],
+            _ => return Err(error("unsupported offline provider family")),
+        };
+        Self::new(&hosts.iter().map(|host| (*host).to_owned()).collect::<Vec<_>>())
+    }
     pub fn new(hosts: &[String]) -> io::Result<Self> {
         if hosts.is_empty() || hosts.len() > 32 { return Err(error("egress needs 1..32 exact hostnames")); }
         let mut names = HashSet::new();
@@ -472,7 +480,7 @@ impl EgressGateway {
         });
         let connector = Arc::new(|address| TcpStream::connect_timeout(&address, CONNECT_TIMEOUT));
         Self::start_configured(broker_dir, hosts, resolver, connector, Some(origin),
-            Some((family.to_owned(), engine_uid, engine_gid)), || {})
+            Some((family.to_owned(), engine_uid, engine_gid)), Some(family), || {})
     }
     /// Reserved production entry point. It cannot open a socket until quota
     /// enforcement is verified on this exact session after restart. A fixture
@@ -486,6 +494,14 @@ impl EgressGateway {
     /// worker network, an unverified rootless Engine, or an altered container.
     /// The caller must retain this handle for the complete session lifetime.
     pub fn start_for_session(manifest_path: &Path, hosts: AllowedHosts) -> io::Result<Self> {
+        Self::start_session(manifest_path, hosts, None)
+    }
+    /// Runtime-owned provider gateway. Separate fixed sockets keep a Router's
+    /// Claude destination set from granting Codex destinations (and vice versa).
+    pub fn start_provider(manifest_path: &Path, family: &str) -> io::Result<Self> {
+        Self::start_session(manifest_path, AllowedHosts::provider(family)?, Some(family))
+    }
+    fn start_session(manifest_path: &Path, hosts: AllowedHosts, family: Option<&str>) -> io::Result<Self> {
         let manifest = read_manifest(manifest_path)?;
         if manifest.profile != Profile::DockerOffline || manifest.state != "ready" {
             return Err(error("restricted egress requires a ready network-none Docker session"));
@@ -508,7 +524,11 @@ impl EgressGateway {
         #[cfg(not(target_os = "linux"))]
         let gateway: Self = return Err(error("restricted egress origin verification requires Linux"));
         #[cfg(target_os = "linux")]
-        let gateway = Self::start_with_origin(&manifest.broker, hosts, Some(origin))?;
+        let gateway = {
+            let resolver = Arc::new(|host: &str| format!("{host}.:443").to_socket_addrs().map(|rows| rows.collect()));
+            let connector = Arc::new(|address| TcpStream::connect_timeout(&address, CONNECT_TIMEOUT));
+            Self::start_configured(&manifest.broker, hosts, resolver, connector, Some(origin), None, family, || {})?
+        };
         // A failed post-bind check drops the new socket instead of advertising
         // a gateway for a container whose network changed meanwhile.
         inspect_network(&manifest)?;
@@ -535,10 +555,13 @@ impl EgressGateway {
         Self::start_with_after_lock_and_origin(broker_dir, hosts, resolver, connector, None, after_lock)
     }
     fn start_with_after_lock_and_origin(broker_dir: &Path, hosts: AllowedHosts, resolver: Arc<Resolver>, connector: Arc<Connector>, origin: Option<Arc<OriginGuard>>, after_lock: impl FnOnce()) -> io::Result<Self> {
-        Self::start_configured(broker_dir, hosts, resolver, connector, origin, None, after_lock)
+        Self::start_configured(broker_dir, hosts, resolver, connector, origin, None, None, after_lock)
     }
     fn start_configured(broker_dir: &Path, hosts: AllowedHosts, resolver: Arc<Resolver>, connector: Arc<Connector>,
-        origin: Option<Arc<OriginGuard>>, root: Option<(String, u32, u32)>, after_lock: impl FnOnce()) -> io::Result<Self> {
+        origin: Option<Arc<OriginGuard>>, root: Option<(String, u32, u32)>, family: Option<&str>, after_lock: impl FnOnce()) -> io::Result<Self> {
+        if family.is_some_and(|family| !matches!(family, "claude" | "codex")) {
+            return Err(error("invalid provider socket family"));
+        }
         let (lock, socket, sender_uid, socket_mode) = if let Some((family, uid, gid)) = &root {
             #[cfg(not(target_os = "linux"))]
             return Err(error("ROOT egress requires Linux"));
@@ -556,7 +579,12 @@ impl EgressGateway {
             }
         } else {
             private_directory(broker_dir, false)?;
-            (gateway_lock(broker_dir)?, broker_dir.join("egress.sock"), unsafe { libc::geteuid() }, 0o600)
+            let (lock, socket) = if let Some(family) = family {
+                let parent = broker_dir.parent().ok_or_else(|| error("egress broker has no parent"))?;
+                private_directory(parent, false)?;
+                (open_gateway_lock(&parent.join(format!(".egress-{family}.lock")))?, broker_dir.join(format!("egress-{family}.sock")))
+            } else { (gateway_lock(broker_dir)?, broker_dir.join("egress.sock")) };
+            (lock, socket, unsafe { libc::geteuid() }, 0o600)
         };
         after_lock();
         if let Ok(meta) = fs::symlink_metadata(&socket) {
@@ -667,9 +695,26 @@ pub fn serve_family_loopback_adapter(family: &str) -> io::Result<()> {
     serve_adapter(port, Path::new(socket))
 }
 
+/// Bind before spawning the CLI. An ephemeral port avoids stale detached
+/// adapters and port races on resume; this thread dies with the worker exec.
+pub fn provider_adapter(family: &str) -> io::Result<String> {
+    let socket = match family {
+        "claude" => "/run/doxa/session/egress-claude.sock",
+        "codex" => "/run/doxa/session/egress-codex.sock",
+        _ => return Err(error("unsupported offline provider adapter")),
+    };
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let port = listener.local_addr()?.port();
+    thread::spawn(move || { let _ = serve_listener(listener, Path::new(socket)); });
+    Ok(format!("http://127.0.0.1:{port}"))
+}
+
 fn serve_adapter(port: u16, socket: &Path) -> io::Result<()> {
     if port < 1024 { return Err(error("fixture proxy port must be unprivileged")); }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
+    serve_listener(listener, socket)
+}
+fn serve_listener(listener: TcpListener, socket: &Path) -> io::Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
     for connection in listener.incoming() {
         let mut client = connection?;
@@ -728,6 +773,17 @@ mod tests {
         FixtureDir { _root: root, broker }
     }
     fn hosts() -> AllowedHosts { AllowedHosts::new(&["api.example.test".to_owned()]).unwrap() }
+    #[test]
+    fn provider_policy_excludes_other_families_web_connectors_and_suffixes() {
+        let claude = AllowedHosts::provider("claude").unwrap();
+        let codex = AllowedHosts::provider("codex").unwrap();
+        for host in ["api.anthropic.com", "platform.claude.com"] { assert!(claude.contains(host)); assert!(!codex.contains(host)); }
+        for host in ["api.openai.com", "chatgpt.com", "auth.openai.com"] { assert!(codex.contains(host)); assert!(!claude.contains(host)); }
+        for host in ["example.com", "mcp-proxy.anthropic.com", "claude.ai", "github.com", "api.openai.com.evil.test", "127.0.0.1"] {
+            assert!(!claude.contains(host)); assert!(!codex.contains(host));
+        }
+        for family in ["router", "https://api.openai.com", "../claude", ""] { assert!(AllowedHosts::provider(family).is_err()); }
+    }
     // Other tests spawn children while libtest runs cases in parallel. A child
     // can retain a CLOEXEC listener or flock between fork and exec, after the
     // fixture's owner has dropped it. That is a genuinely live descriptor:

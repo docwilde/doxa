@@ -416,7 +416,10 @@ pub fn create_args(manifest: &Manifest) -> io::Result<Vec<OsString>> {
     Ok(args)
 }
 
-pub struct Runtime { path: PathBuf, manifest: Manifest, migration_stop: bool }
+pub struct Runtime {
+    path: PathBuf, manifest: Manifest, migration_stop: bool,
+    providers: std::sync::Mutex<std::collections::BTreeMap<String, Option<egress::EgressGateway>>>,
+}
 impl Runtime {
     pub fn prepare(home: &Path, id: &str, source: &Path, requested: Option<Profile>, resume: bool, base: Option<&str>) -> io::Result<Self> {
         let path = manifest_path(home, id)?;
@@ -430,7 +433,7 @@ impl Runtime {
             } else if manifest.profile.docker() { preflight(manifest.policy.as_ref().unwrap())?; check_disk_budget(&manifest)?; reconcile(&mut manifest, true)?; }
             else {manifest.state="ready".into();}
             write_manifest(&path,&manifest)?;
-            return Ok(Self { path, manifest, migration_stop:false });
+            return Ok(Self { path, manifest, migration_stop:false, providers: Default::default() });
         }
         let profile = requested.unwrap_or(configured_profile(home)?);
         if resume && profile.docker() { return Err(error("saved native session has no Docker manifest; automatic backend migration is forbidden")); }
@@ -485,11 +488,19 @@ impl Runtime {
             }
         } else { manifest.state = "ready".into(); }
         write_manifest(&path, &manifest)?;
-        Ok(Self { path, manifest, migration_stop:false })
+        Ok(Self { path, manifest, migration_stop:false, providers: Default::default() })
     }
     pub fn checkout(&self) -> &Path { &self.manifest.checkout }
     pub fn profile(&self) -> Profile { self.manifest.profile }
-    pub fn status(&self) -> Value { self.manifest.status() }
+    pub fn status(&self) -> Value {
+        let mut status = self.manifest.status();
+        if self.profile() == Profile::DockerOffline {
+            status["provider_egress"] = json!(self.providers.lock().unwrap().iter()
+                .filter(|(_, gateway)| gateway.is_some()).map(|(family, _)| family).collect::<Vec<_>>());
+            status["task_internet"] = json!(false);
+        }
+        status
+    }
     pub fn manifest(&self) -> &Manifest { &self.manifest }
     pub fn mark_migration_stop(&mut self) { self.migration_stop=true; }
     pub fn preserves_native_checkout(&self) -> bool { self.migration_stop }
@@ -498,6 +509,15 @@ impl Runtime {
         self.manifest.checkout = checkout.to_owned(); write_manifest(&self.path, &self.manifest)
     }
     pub fn prepare_provider(&self, engine: &str) -> io::Result<()> {
+        if self.profile().docker() && self.profile() != Profile::DockerHardened && matches!(engine, "claude" | "codex") {
+            let mut providers = self.providers.lock().unwrap();
+            if !providers.contains_key(engine) {
+                let gateway = if self.profile() == Profile::DockerOffline {
+                    Some(egress::EgressGateway::start_provider(&self.path, engine)?)
+                } else { None };
+                providers.insert(engine.to_owned(), gateway);
+            }
+        }
         if !self.profile().docker() || engine != "codex" { return Ok(()); }
         let destination = self.manifest.private_home.join("codex");
         private_directory(&destination, true)?;
@@ -575,9 +595,25 @@ impl Runtime {
                 else { ["network", "disconnect", "bridge", id] };
             let _ = docker_run(policy, &rollback); self.manifest = previous; return Err(e);
         }
+        let mut providers = self.providers.lock().unwrap();
+        for (family, gateway) in providers.iter_mut() {
+            *gateway = None; // Close all tunnels before changing their authority.
+            if profile == Profile::DockerOffline {
+                match egress::EgressGateway::start_provider(&self.path, family) {
+                    Ok(started) => *gateway = Some(started),
+                    Err(error) => {
+                        self.manifest.state = "failed".into();
+                        let _ = write_manifest(&self.path, &self.manifest);
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        drop(providers);
         Ok(self.status())
     }
     pub fn stop(&mut self) -> io::Result<()> {
+        self.providers.lock().unwrap().clear();
         if self.profile()==Profile::DockerHardened {
             self.manifest.state="stopping".into();write_manifest(&self.path,&self.manifest)?;
             let reply=root_client::control(&self.manifest.session_id,"stop")?;
@@ -815,7 +851,8 @@ pub fn isolate_command(command: Command, provider: &str) -> io::Result<Command> 
     // environment name keeps the secret out of Docker client argv/diagnostics.
     let credential=if provider=="claude"{"ANTHROPIC_API_KEY"}else{"OPENAI_API_KEY"};
     if std::env::var_os(credential).is_some_and(|value|!value.is_empty()){isolated.arg("--env").arg(credential);}
-    isolated.arg(manifest.container_id.as_deref().unwrap()).arg("/usr/local/bin/doxa-isolation-worker").arg("exec")
+    isolated.arg(manifest.container_id.as_deref().unwrap()).arg("/usr/local/bin/doxa-isolation-worker")
+        .arg(if manifest.profile == Profile::DockerOffline { "exec-offline" } else { "exec" })
         .arg(format!("/usr/local/bin/{provider}"));
     for arg in command.get_args() {
         let value = arg.to_string_lossy();

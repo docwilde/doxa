@@ -65,10 +65,12 @@ official CLI login/help remains on the host. Provider credentials copied to
 a session-private home are visible to tools in that session.
 
 Docker with open egress permits worker network access. Docker without
-networking also prevents Claude/Codex from reaching their provider until
-networking is re-enabled. CPU, memory and PID limits are enforced separately;
-disk use is monitored and is not a filesystem quota. These profiles do not
-claim a provider-only egress gateway or full credential secrecy.
+networking uses a session-bound proxy for the selected Claude/Codex provider's
+fixed HTTPS hosts. General web access remains disabled. Rebuild the worker after
+upgrading DOXA. See [provider connectivity](../../docs/session-isolation.md#provider-connectivity)
+for the exact list and limits. CPU, memory and PID limits are enforced separately;
+disk use is monitored and is not a filesystem quota. CLI credentials remain
+visible to tools inside that session.
 
 ## Configure and return to New Session
 

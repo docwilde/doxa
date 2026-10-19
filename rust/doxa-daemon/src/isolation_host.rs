@@ -69,7 +69,14 @@ impl Host for IsolationHost {
         if method == "set_isolation" {
             let profile = Profile::parse(params["profile"].as_str().ok_or("missing isolation profile")?).map_err(|e|e.to_string())?;
             if self.inner.has_active_work() { return Err("isolation changes require an idle provider".into()); }
-            let status = self.runtime.lock().unwrap().set_profile(profile,params["confirmed"]==true).map_err(|e|e.to_string())?;
+            let mut runtime = self.runtime.lock().unwrap();
+            let changed = runtime.profile() != profile;
+            let status = runtime.set_profile(profile,params["confirmed"]==true).map_err(|e|e.to_string())?;
+            // Network changes also change built-in provider tools. Recreate the
+            // idle transport under the new policy before accepting another turn.
+            if changed && matches!(self.launch["engine"].as_str(), Some("claude" | "codex")) {
+                self.inner.call("isolation_transport_reset", &json!({}))?;
+            }
             return Ok(json!({"isolation":status}));
         }
         self.inner.call(method,params)
