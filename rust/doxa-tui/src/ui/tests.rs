@@ -3068,7 +3068,7 @@ for line in sys.stdin:
         app.open_engine_picker();
         assert!(!app.engine_picker); assert!(app.notice.contains("256 retained session records"));
         app.attach_selected("slot-0");
-        assert_eq!(app.pending_attaches,[("slot-0".into(),0)]);
+        assert_eq!(app.pending_attaches,[("slot-0".into(),0,None)]);
         app.apply_daemon_frame(&json!({"type":"attach_reply","ok":true,"session_id":"slot-0","group":0}));
         assert_eq!(app.groups[0].tabs.len(),panes::MAX_TABS);
         // A confirmed killed ID releases its retained-record reservation.
@@ -4576,7 +4576,7 @@ for line in sys.stdin:
         app.history_query = "second".into();
         assert_eq!(app.history_matches().iter().map(|index| app.sessions[*index].id.as_str()).collect::<Vec<_>>(), ["second"]);
         app.attach_selected("second");
-        assert_eq!(app.pending_attaches, [("second".into(), 0)]);
+        assert_eq!(app.pending_attaches, [("second".into(), 0, None)]);
     }
 
     #[test]
@@ -4874,7 +4874,8 @@ for line in sys.stdin:
         assert!(app.layout(app.size).panes.is_none());
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(app.diff_pane);
-        assert!(app.layout(app.size).panes.is_some());
+        assert!(app.layout(app.size).diff.is_some());
+        assert!(app.layout(app.size).panes.is_none());
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(!app.diff_pane);
         assert!(app.layout(app.size).panes.is_none());
@@ -5445,15 +5446,15 @@ for line in sys.stdin:
         }
         app.groups[0].tabs = vec!["a".into(), "b".into()]; app.groups[0].active = 0;
         app.groups[1].tabs = vec!["c".into()]; app.groups[1].active = 0;
-        assert_eq!(app.rail_order(), [0, 2]);
+        assert_eq!(app.rail_order(), [0, 1, 2]);
         assert!(app.rail_rows().iter().any(|row| matches!(row, RailRow::Pane { group:0, active:0 })));
-        assert!(!app.rail_rows().iter().any(|row| matches!(row, RailRow::Session(1))));
+        assert!(app.rail_rows().iter().any(|row| matches!(row, RailRow::Session(1))));
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"b",
             "event":{"type":"needs_input", "data":{"id":"req", "kind":"ask_user",
                 "title":"Choose", "questions":[{"question":"Choose","options":[]}]}}}));
         assert_eq!(app.rail_groups()[0].2, 4);
         assert!(app.pane_signal("a").unwrap().badge().contains("!#2:Beta"));
-        app.focus = Focus::Rail; app.rail_selected = 1;
+        app.focus = Focus::Rail; app.rail_selected = 2;
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.active_group, 1);
         assert_eq!(app.groups[0].tabs, ["a", "b"]);
@@ -5466,8 +5467,8 @@ for line in sys.stdin:
         app.focus = Focus::Tabs;
         app.handle(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
         assert_eq!(app.groups[0].active_id(), Some("b"));
-        assert_eq!(app.rail_order(), [1, 2]);
-        assert_eq!(app.rail_selected, 0); // Selection follows the pane, not the old tab.
+        assert_eq!(app.rail_order(), [0, 1, 2]);
+        assert_eq!(app.rail_selected, 1); // Selection follows the active child tab.
     }
 
     #[test]
@@ -5500,7 +5501,7 @@ for line in sys.stdin:
         assert!(matches!(app.rail_rows()[0], RailRow::Heading(1)));
         assert!(app.tick_rail_sort(start + Duration::from_secs(5)));
         assert!(matches!(app.rail_rows()[0], RailRow::Heading(0)));
-        assert_eq!(app.rail_order(), [0, 2]);
+        assert_eq!(app.rail_order(), [0, 1, 2]);
         assert_eq!(app.groups[0].tabs, ["a", "b"]);
     }
 
@@ -5730,7 +5731,7 @@ for line in sys.stdin:
         assert_ne!(before, crate::ui_state::LayoutSignature::capture(&app));
         assert!(app.input.is_empty());
         assert_eq!(app.collections[0].sessions, ["two"]);
-        assert_eq!(app.rail_order(), [1, 0]);
+        assert_eq!(app.rail_order(), [0, 1]); // Tabs remain under their window's first tab.
         app.input = "/collection remove".into();
         assert!(app.submit_local_command());
         assert!(app.collections[0].sessions.is_empty());
@@ -6223,23 +6224,26 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn diff_pane_keeps_the_active_prompt_and_restores_the_other_session() {
+    fn diff_split_keeps_the_active_prompt_and_neighboring_session() {
         let mut app = App::default();
         app.apply_update(DaemonUpdate::Upsert(Session { id: "first".into(), title: "First".into(),
             collection: "repo".into(), transcript: "active transcript".into(), status: "Ready".into() }));
         app.apply_update(DaemonUpdate::Upsert(Session { id: "second".into(), title: "Second".into(),
             collection: "repo".into(), transcript: "hidden transcript".into(), status: "Ready".into() }));
         app.groups[1].tabs.push("second".into());
-        app.handle(Event::Resize(100, 28));
+        app.handle(Event::Resize(180, 28));
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(app.diff_pane);
         app.diff_text = "Base: HEAD\n@@ -1 +1 @@\n-old\n+new".into();
-        let view = painted(&app);
+        let view = painted_at(&app,180,28);
         assert!(view.contains("active transcript"));
         assert!(view.contains("Worktree diff"));
         assert!(view.contains("+new"));
-        assert!(!view.contains("hidden transcript"));
-        let diff_area = app.layout(app.size).panes.unwrap()[1];
+        assert!(view.contains("hidden transcript"));
+        let layout = app.layout(app.size);
+        let diff_area = layout.diff.unwrap();
+        assert_eq!(layout.panes.as_ref().unwrap()[0].right(), diff_area.x);
+        assert_eq!(layout.panes.as_ref().unwrap()[0].y, diff_area.y);
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown,
             column: diff_area.x + 2, row: diff_area.y + 2, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.active_group, 0);
@@ -6251,7 +6255,7 @@ for line in sys.stdin:
         assert!(app.notice.contains("activity is unknown") || app.notice.contains("Load the diff"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(!app.diff_pane);
-        assert!(painted(&app).contains("hidden transcript"));
+        assert!(painted_at(&app,180,28).contains("hidden transcript"));
     }
 
     #[test]
@@ -6379,7 +6383,7 @@ for line in sys.stdin:
         app.diff_snapshot = Some(diff_view::DiffSnapshot::test_patch(patch, dir.path().to_path_buf(),
             vec![1, 7], vec![4, 10]));
         app.diff_text = patch.into();
-        let pane = app.layout(app.size).panes.unwrap()[(app.active_group + 1) % 2];
+        let pane = app.layout(app.size).diff.unwrap();
         let pointer = |kind, row| Event::Mouse(MouseEvent { kind, column: pane.x + 5,
             row: pane.y + 1 + row, modifiers: KeyModifiers::NONE });
         app.handle(pointer(MouseEventKind::Moved, 6));
@@ -8200,7 +8204,7 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"current", "model":"model"}));
         app.input = "/attach detached".into();
         app.attach_selected("detached");
-        assert_eq!(app.pending_attaches, [("detached".into(), 0)]);
+        assert_eq!(app.pending_attaches, [("detached".into(), 0, None)]);
         assert_eq!(app.groups[0].active_id(), Some("current"));
         assert!(app.pending_prompts.is_empty());
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"detached", "model":"other"}));

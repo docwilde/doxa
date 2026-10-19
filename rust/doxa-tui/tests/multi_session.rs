@@ -220,3 +220,34 @@ fn dynamic_attach_rechecks_live_registry_before_routing() {
     initial.join().unwrap();
     attached.join().unwrap();
 }
+
+#[test]
+fn private_runtime_attach_rechecks_ownership_socket_boundary_and_identity() {
+    let dir=tempfile::tempdir().unwrap();
+    let runtime=dir.path().join("fleet-rt");let registry=runtime.join("registry");
+    std::fs::create_dir_all(&registry).unwrap();
+    for path in [&runtime,&registry] {std::fs::set_permissions(path,std::fs::Permissions::from_mode(0o700)).unwrap();}
+    let initial_path=dir.path().join("initial.sock");let initial_listener=UnixListener::bind(&initial_path).unwrap();
+    let attached_path=runtime.join(format!("daemon-attached-{}.sock",std::process::id()));
+    let attached_listener=UnixListener::bind(&attached_path).unwrap();
+    std::fs::set_permissions(&attached_path,std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (release_initial,wait_initial)=mpsc::channel();let(release_attached,wait_attached)=mpsc::channel();
+    let initial=thread::spawn(move||{let socket=accept(&initial_listener,"initial",0,None);wait_initial.recv_timeout(Duration::from_secs(10)).unwrap();drop(socket);});
+    let attached=thread::spawn(move||{let socket=accept(&attached_listener,"attached",0,None);wait_attached.recv_timeout(Duration::from_secs(10)).unwrap();drop(socket);});
+    let bridge=connect_sessions(&[session("initial",initial_path.clone())]).unwrap();
+    until(&bridge.frames,|f|f["type"]=="hello");
+    let request=||WorkerCommand::AttachRuntime("attached".into(),1,runtime.clone());
+    bridge.commands.send(request()).unwrap();assert_eq!(until(&bridge.frames,|f|f["type"]=="attach_reply")["ok"],false);
+    let path=registry.join("attached.json");
+    let mut entry=json!({"session_id":"attached","pid":std::process::id(),"cwd":runtime,"repo_root":null,"title":"attached",
+        "heartbeat_at":time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap(),
+        "started_at":"2026-10-19T00:00:00Z","daemon_socket":initial_path});
+    let write=|entry:&serde_json::Value|{std::fs::write(&path,entry.to_string()).unwrap();std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();};
+    write(&entry);bridge.commands.send(request()).unwrap();assert_eq!(until(&bridge.frames,|f|f["type"]=="attach_reply")["ok"],false);
+    entry["daemon_socket"]=json!(attached_path);write(&entry);
+    bridge.commands.send(request()).unwrap();let reply=until(&bridge.frames,|f|f["type"]=="attach_reply");
+    assert_eq!(reply["ok"],true);assert_eq!(reply["group"],1);
+    until(&bridge.frames,|f|f["type"]=="hello"&&f["session_id"]=="attached");
+    release_initial.send(()).unwrap();release_attached.send(()).unwrap();bridge.shutdown();
+    initial.join().unwrap();attached.join().unwrap();
+}

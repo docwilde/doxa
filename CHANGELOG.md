@@ -5,6 +5,32 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.59 — 2026-10-19
+
+**Offline provider connectivity**
+
+- Connect offline Claude/Codex and Router CLI candidates through **`EgressGateway::start_provider`**. Keep Docker networking at **none**; allow only fixed provider HTTPS hosts with checked TLS SNI and public DNS addresses.
+- Bind gateways to the session lifetime and adapters to each transport. Deny other hosts and direct fallback; retain owner internet opt-ins and disable Claude account connectors/artifacts alongside web tools.
+- Reset idle CLI transports in **`IsolationHost::call`** when Docker network policy changes. Preserve conversation/model selection; hold failed restarts. Provider-host access does not conceal CLI credentials or inspect encrypted paths.
+
+**Docker tools**
+
+- Fix **`AppServerDriver`** command/file tools in Docker with Codex's **`externalSandbox`** policy. Docker enforces isolation without nested `bwrap`; keep approval policy and explicit read-only restrictions.
+
+**Peer tools**
+
+- Read Claude's peer-tool opt-in in **`ClaudeHost`** from the owner configuration. Docker sessions and native sessions retaining a migrated private home keep the approved peer tools.
+
+**Session windows**
+
+- Fix **`App::open_diff`** to open a vertical split inside the active session window. Keep its prompt and neighboring windows visible through `/diff`, shortcuts and automatic diff opening.
+- List each window's tabs beneath its first tab in **`App::rail_groups`**. Indent child tabs and activate their existing window when selected.
+- Distinguish windows, supervisors and fleet groups in **`App::draw_rail`** with Nerd Font icons and text fallbacks. Discover fleet members in their own private run registry; retain a collapsible fleet heading.
+
+**Fleet attachment**
+
+- Fix **`dispatch_attaches`** to retain the selected private runtime for fleet menu/sidebar attachment. Recheck its owned live registry and exact daemon identity; ordinary roster sweeps no longer archive verified fleet members.
+
 ## 2.0.0-beta.58 — 2026-10-19
 
 **Fleet migration**

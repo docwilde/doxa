@@ -1,6 +1,6 @@
 //! Explicit rootless fixture for the restricted-egress transport boundary.
-//! No provider credentials or production profile are used. This does not
-//! establish provider compatibility or a hardened production egress policy.
+//! No provider credentials are used. These transport probes do not establish
+//! authenticated CLI compatibility or a hardened production authority.
 use doxa_isolation::{egress::{AllowedHosts, EgressGateway}, manifest_path, Profile, Runtime};
 use std::{fs, io, os::unix::fs::PermissionsExt, path::Path, process::{Command, Output},
     sync::atomic::{AtomicUsize, Ordering}};
@@ -268,4 +268,74 @@ fn upstream_probe_receipt_requires_verified_tls_and_bounded_http_status() {
         br#"{"tls_verified":true,"http_status":200"#,
     ] { assert!(verified_probe_reply(invalid).is_err()); }
     assert!(verified_probe_reply(&vec![b'x'; 129]).is_err());
+}
+
+#[test]
+#[ignore = "requires explicit pinned image with Python and task-local rootless Engine; sends credential-free HTTPS to provider hosts"]
+fn selected_provider_gateways_rebind_after_policy_change_and_refuse_bypasses() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    let mut fixture = fixture();
+    assert!(!fixture.runtime.manifest().broker.join("egress-claude.sock").exists());
+    for (family, port, allowed, denied) in [
+        ("claude", "3128", "api.anthropic.com", "api.openai.com"),
+        ("codex", "3129", "api.openai.com", "api.anthropic.com"),
+    ] {
+        fixture.runtime.prepare_provider(family).unwrap();
+        let path = fixture.runtime.manifest().broker.join(format!("egress-{family}.sock"));
+        assert!(path.exists());
+        let mut outside = UnixStream::connect(&path).unwrap();
+        outside.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        let _ = outside.write_all(b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n");
+        let mut reply = [0; 64];
+        assert!(!matches!(outside.read(&mut reply), Ok(n) if n > 0), "host connector obtained gateway bytes");
+        let started = docker(&fixture.container.host, &["exec", "-d", &fixture.container.id,
+            "/usr/local/bin/doxa-isolation-worker", "egress-proxy", family]).unwrap();
+        assert!(started.status.success());
+        let script = r#"
+import json,socket,ssl,sys,time
+port,allowed,denied=int(sys.argv[1]),sys.argv[2],sys.argv[3]
+def connect(host):
+    for i in range(40):
+        try: s=socket.create_connection(('127.0.0.1',port),timeout=1);break
+        except OSError: time.sleep(.05)
+    else: raise AssertionError('adapter did not bind')
+    s.settimeout(15)
+    s.sendall(('CONNECT '+host+':443 HTTP/1.1\r\nHost: '+host+':443\r\n\r\n').encode())
+    header=b''
+    while not header.endswith(b'\r\n\r\n') and len(header)<8192:
+        part=s.recv(1)
+        if not part: break
+        header+=part
+    return s,header
+for host in (denied,'example.com','127.0.0.1'):
+    s,h=connect(host);assert h.startswith((b'HTTP/1.1 403',b'HTTP/1.1 400'));s.close()
+s,h=connect(allowed);assert h.startswith(b'HTTP/1.1 200')
+with ssl.create_default_context().wrap_socket(s,server_hostname=allowed) as tls:
+    tls.sendall(('GET /v1/models HTTP/1.1\r\nHost: '+allowed+'\r\nConnection: close\r\n\r\n').encode())
+    first=tls.recv(512);assert first.startswith(b'HTTP/1.')
+    chunks=1
+    for i in range(3):
+        if not tls.recv(128): break
+        chunks+=1
+for address in ('1.1.1.1',allowed):
+    try: socket.create_connection((address,443),timeout=1)
+    except OSError: pass
+    else: raise AssertionError('direct fallback reached internet')
+print(json.dumps({'verified_tls':True,'stream_chunks':chunks,'denied_other_family':True,'denied_web':True,'denied_direct':True}))
+"#;
+        let output = docker(&fixture.container.host, &["exec", &fixture.container.id,
+            "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "python3", "-c", script, port, allowed, denied]).unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let proof: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(proof["verified_tls"], true); assert_eq!(proof["denied_direct"], true);
+        fixture.runtime.set_profile(Profile::DockerOpen, true).unwrap();
+        assert!(!path.exists());
+        fixture.runtime.set_profile(Profile::DockerOffline, true).unwrap();
+        assert!(path.exists());
+    }
+    fixture.runtime.stop().unwrap();
+    for family in ["claude", "codex"] {
+        assert!(!fixture.runtime.manifest().broker.join(format!("egress-{family}.sock")).exists());
+    }
 }

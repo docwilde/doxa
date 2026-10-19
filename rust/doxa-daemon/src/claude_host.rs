@@ -392,12 +392,11 @@ impl ClaudeHost {
             .map_err(|_| "Claude private configuration unavailable")?;
         let plugins = doxa_claude::isolation::adopted_plugins()
             .map_err(|_| "Claude plugin adoption unavailable")?;
-        let config = doxa_state::load_config(
-            &doxa_claude::isolation::config_dir()
-                .parent()
-                .unwrap()
-                .join("config.toml"),
-        );
+        // The provider's private home contains credentials/artifacts, never
+        // owner policy. This also applies after migrating back to native with
+        // a retained private home. A worker-written config cannot grant tools.
+        let config = doxa_state::load_config(&doxa_isolation::home()
+            .map_err(|_| "Owner configuration unavailable")?.join("config.toml"));
         let raw = doxa_state::raw_setting(
             std::env::var("DOXA_AGENT_PEER_SEND").ok().as_deref(),
             &config,
@@ -681,6 +680,13 @@ impl Host for ClaudeHost {
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "isolation_transport_reset" => {
+                let _guard = self.admission.lock().unwrap();
+                if self.has_active_work() || self.shared.closing.load(Ordering::Acquire) {
+                    return Err("Claude isolation changes require an idle provider".into());
+                }
+                self.rpc(method, json!({}))
+            }
             "set_model" | "set_effort" | "set_permission_mode" => {
                 let _guard = self.admission.lock().unwrap();
                 if (method != "set_permission_mode" && self.has_active_work())
@@ -1314,6 +1320,33 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                     }
                 }
                 Command::Rpc(method, params, reply) => {
+                    if method == "isolation_transport_reset" {
+                        let result = (|| {
+                            if events.is_some() { return Err("Claude isolation changes require an idle provider".into()); }
+                            let launch = launch.as_ref().ok_or("Claude launch identity unavailable")?;
+                            let selection = shared.selection.lock().unwrap().clone();
+                            let id = shared.provider_session.lock().unwrap().clone();
+                            let resume = shared.store.transcript_snapshot().map_err(|_| "Claude checkpoint unavailable")?
+                                .is_some_and(|(_, bytes)| bytes > 0);
+                            cli.terminate();
+                            let mut fresh = Cli::spawn(CliOptions { executable:&launch.executable, cwd:&launch.cwd,
+                                session_id:&id, resume, model:selection.0.as_deref(), effort:selection.1.as_deref(),
+                                permission_mode:if selection.2=="default" {"manual"} else {&selection.2},
+                                config_dir:&launch.config_dir, plugins:&launch.plugins }).map_err(|_| "Claude isolation transport could not restart")?;
+                            let deadline = Instant::now() + RPC_TIMEOUT;
+                            let initial = startup_control(&mut fresh, init_request(), &shared, deadline, None)?;
+                            let effective = settings(&startup_control(&mut fresh, json!({"subtype":"get_settings"}), &shared, deadline, None)?)?;
+                            if selection.0.as_deref().is_some_and(|model| !model_applied(&initial, model, effective.0.as_deref()))
+                                || selection.1.is_some() && selection.1 != effective.1 {
+                                return Err("Claude isolation restart changed model or effort".into());
+                            }
+                            cli = fresh;
+                            Ok(json!({"reset":true}))
+                        })();
+                        if result.is_err() { shared.failed.store(true, Ordering::Release); }
+                        let _ = reply.send(result);
+                        continue;
+                    }
                     if method == "answer_needs_input" {
                         let id = params["id"].as_str().unwrap_or("");
                         let mut applied = false;
@@ -2118,10 +2151,17 @@ mod tests {
     fn fixture_with_startup(
         body: &str, startup: &str, initial_billing: Option<Value>,
     ) -> (tempfile::TempDir, Arc<ClaudeHost>) {
+        fixture_with_launch(body, startup, initial_billing, false)
+    }
+    fn fixture_with_launch(
+        body: &str, startup: &str, initial_billing: Option<Value>, restartable: bool,
+    ) -> (tempfile::TempDir, Arc<ClaudeHost>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("claude");
         fs::write(&path,format!(r#"#!/usr/bin/env python3
 import sys,json,os,time
+with open(os.path.join(os.path.dirname(__file__),'launches.jsonl'),'a') as launches:
+ launches.write(json.dumps({{'pid':os.getpid(),'args':sys.argv[1:]}})+'\n')
 model='claude-opus-5-5';effort='high'
 def emit(row): print(json.dumps(row),flush=True)
 for line in sys.stdin:
@@ -2195,7 +2235,9 @@ for line in sys.stdin:
         *shared.catalog.lock().unwrap() = initial;
         let (tx, rx) = mpsc::channel();
         let worker_shared = shared.clone();
-        let worker = thread::spawn(move || broker(cli, rx, worker_shared, None));
+        let launch = restartable.then(|| ClaudeLaunch { executable:path.clone(), cwd:dir.path().to_owned(),
+            config_dir:dir.path().to_owned(), plugins:Vec::new() });
+        let worker = thread::spawn(move || broker(cli, rx, worker_shared, launch));
         let host = Arc::new(ClaudeHost {
             commands: tx,
             worker: Mutex::new(Some(worker)),
@@ -2203,6 +2245,33 @@ for line in sys.stdin:
             admission: Mutex::new(()),
         });
         (dir, host)
+    }
+    #[test]
+    fn isolation_restart_retires_old_transport_and_preserves_selection_and_session() {
+        let (dir, host) = fixture_with_launch("pass", "pass", None, true);
+        assert_eq!(host.call("isolation_transport_reset", &json!({})).unwrap()["reset"], true);
+        let launches: Vec<Value> = fs::read_to_string(dir.path().join("launches.jsonl")).unwrap()
+            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(launches.len(), 2);
+        assert_ne!(launches[0]["pid"], launches[1]["pid"]);
+        let old_pid = launches[0]["pid"].as_i64().unwrap() as i32;
+        assert_eq!(unsafe { libc::kill(old_pid, 0) }, -1);
+        assert_eq!(*host.shared.provider_session.lock().unwrap(), SESSION);
+        assert_eq!(host.initial_model().as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(host.initial_effort().as_deref(), Some("high"));
+        assert!(!host.shared.failed.load(Ordering::Acquire));
+        host.shutdown();
+    }
+    #[test]
+    fn isolation_restart_failure_holds_future_prompts() {
+        let (dir, host) = fixture_with_launch("pass", "pass", None, true);
+        fs::remove_file(dir.path().join("claude")).unwrap();
+        assert!(host.call("isolation_transport_reset", &json!({})).is_err());
+        assert!(host.shared.failed.load(Ordering::Acquire));
+        let mut events = Vec::new();
+        host.prompt("must not run", &mut |event| events.push(event));
+        assert!(!events.iter().any(|event| event["type"] == "turn_started"));
+        host.shutdown();
     }
     #[test]
     fn expired_cli_auth_reports_scrubbed_login_guidance() {

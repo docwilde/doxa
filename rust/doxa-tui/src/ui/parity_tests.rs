@@ -436,6 +436,100 @@ use super::*;
     }
 
     #[test]
+    fn diff_commands_split_only_the_current_window_vertically() {
+        let mut app = App::default();
+        app.sidebar_auto = false; app.rail_visible = false;
+        app.handle(Event::Resize(200, 70));
+        for id in ["a", "b", "c"] {
+            app.sessions.push(Session { id:id.into(), title:id.into(), collection:String::new(),
+                transcript:format!("{id} transcript"), status:"Ready".into() });
+        }
+        app.groups[0].tabs = vec!["a".into()]; app.groups[1].tabs = vec!["b".into()];
+        app.split_active_pane(Split::Horizontal);
+        app.groups[2].tabs = vec!["c".into()]; app.active_group = 2;
+        let before = app.layout(app.size).panes.unwrap();
+        app.input = "/diff".into(); app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.diff_pane); assert!(!app.diff_modal);
+        app.diff_text = "+window change".into();
+        let layout = app.layout(app.size);
+        let diff = layout.diff.unwrap(); let panes = layout.panes.unwrap();
+        assert_eq!(panes[0], before[0]); assert_eq!(panes[1], before[1]);
+        assert_eq!(panes[2].right(), diff.x); assert_eq!(panes[2].y, diff.y);
+        assert_eq!(panes[2].height, diff.height); assert_eq!(diff.right(), before[2].right());
+        let view = paint(&app);
+        for text in ["a transcript", "b transcript", "c transcript", "+window change"] { assert!(view.contains(text)); }
+        let prompt = app.pane_regions(2, panes[2])[4];
+        click(&mut app, prompt.x+2, prompt.y+1);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        assert_eq!(app.input, "x"); assert_eq!(app.active_group, 2);
+        let neighbor_prompt=app.pane_regions(1, panes[1])[4];
+        click(&mut app, neighbor_prompt.x+2, neighbor_prompt.y+1);
+        assert_eq!(app.active_group,1); assert_eq!(app.layout(app.size).diff,Some(diff));
+        assert_eq!(app.diff_target.as_deref(),Some("c")); assert!(!app.poll_diff());
+        app.active_group=2;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
+        assert!(!app.diff_pane); assert_eq!(app.layout(app.size).panes.unwrap(), before);
+    }
+
+    #[test]
+    fn diff_refuses_a_narrow_window_and_resize_never_creates_an_overlay() {
+        let mut app = App::default(); app.sidebar_auto=false; app.rail_visible=false;
+        app.groups[0].tabs=vec!["a".into()];
+        app.handle(Event::Resize(50, 30)); app.open_diff();
+        assert!(!app.diff_pane); assert!(!app.diff_modal); assert!(app.notice.contains("Widen"));
+        app.handle(Event::Resize(100, 30)); app.open_diff();
+        assert!(app.layout(app.size).diff.is_some()); assert!(!app.diff_modal);
+        app.handle(Event::Resize(50, 30));
+        assert!(app.layout(app.size).diff.is_none()); assert_eq!(app.layout(app.size).body.width, 50);
+        app.handle(Event::Resize(100, 30)); assert!(app.layout(app.size).diff.is_some());
+    }
+
+    #[test]
+    fn rail_tabs_stay_under_the_first_tab_and_activate_their_existing_window() {
+        let mut app = App::default(); app.sidebar_auto=false; app.rail_visible=true;
+        app.handle(Event::Resize(180, 40));
+        for (id,title) in [("a","First"),("b","Second"),("c","Neighbor"),("d","Third")] {
+            app.sessions.push(Session {id:id.into(),title:title.into(),collection:"Project".into(),
+                transcript:String::new(),status:"Ready".into()});
+        }
+        app.groups[0].tabs=vec!["a".into(),"b".into(),"d".into()]; app.groups[0].active=1;
+        app.groups[1].tabs=vec!["c".into()]; app.active_group=1;
+        assert_eq!(app.rail_order(), [0,1,3,2]);
+        let view=paint(&app); assert!(view.contains("├")); assert!(view.contains("└"));
+        let rail=app.layout(app.size).rail.unwrap();
+        let row=app.rail_rows().iter().position(|row| matches!(row,RailRow::Session(3))).unwrap();
+        click(&mut app,rail.x+5,rail.y+1+row as u16);
+        assert_eq!(app.active_group,0); assert_eq!(app.groups[0].active_id(),Some("d"));
+        assert_eq!(app.groups[1].tabs,["c"]); assert_eq!(app.rail_order(),[0,1,3,2]);
+    }
+
+    #[test]
+    fn fleet_heading_supervisor_and_normal_tabs_have_distinct_icons_and_fallbacks() {
+        let mut app=App::default(); app.sidebar_auto=false; app.rail_visible=true; app.rail_width=48;
+        app.handle(Event::Resize(200,50));
+        for id in ["normal","tab","boss","worker"] {
+            app.sessions.push(Session {id:id.into(),title:id.into(),collection:"Project".into(),
+                transcript:String::new(),status:"Ready".into()});
+        }
+        app.groups[0].tabs=vec!["normal".into(),"tab".into()];
+        app.groups[1].tabs=vec!["boss".into(),"worker".into()];
+        app.show_fleet_sidebar_fixture("audit","boss",&["worker"]);
+        app.preferences.set_for_test("nerd_font","1");
+        let view=paint(&app);
+        for text in ["\u{f0e8} Fleet","\u{f508}","\u{f2d0}","└","normal","tab","boss","worker"] {assert!(view.contains(text),"missing {text}");}
+        app.preferences.set_for_test("nerd_font","0");
+        let view=paint(&app); for text in ["[F] Fleet","[S]","▣"] {assert!(view.contains(text));}
+        let rail=app.layout(app.size).rail.unwrap();
+        click(&mut app,rail.x+2,rail.y+1);
+        assert!(app.fleet_rail.groups[0].collapsed);
+        assert_eq!(app.rail_order(),[2,0,1]);
+        click(&mut app,rail.x+2,rail.y+1);
+        assert!(!app.fleet_rail.groups[0].collapsed);
+        assert_eq!(app.rail_order(),[2,3,0,1]);
+    }
+
+    #[test]
     fn recursive_panes_focus_and_resize_preserve_tree_and_tabs() {
         let mut app = App::default(); app.rail_visible = false;
         app.handle(Event::Resize(180, 70));

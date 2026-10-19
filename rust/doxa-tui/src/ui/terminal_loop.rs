@@ -76,7 +76,7 @@ fn command_target(command:&crate::bridge::WorkerCommand)->Option<&str>{
     use crate::bridge::WorkerCommand::*;
     match command {
         Launch(..)=>None,
-        Attach(id,..)|Prompt(id,..)|Answer(id,..)|Peers(id)|Message(id,..)|Models(id)
+        Attach(id,..)|AttachRuntime(id,..)|Prompt(id,..)|Answer(id,..)|Peers(id)|Message(id,..)|Models(id)
         |SetModel(id,..)|SetEffort(id,..)|SetPermissionMode(id,..)|SetIsolation(id,..)|Branch(id,..)
         |QueueList(id)|ContextDetail(id)|RemoteHistory(id,..)|QueueCancel(id,..)|Status(id)|RefreshBilling(id)|Stop(id)
         |FinalizeForClear(id)=>Some(id),
@@ -888,12 +888,20 @@ pub(super) fn dispatch_attaches(
     sender: &SyncSender<crate::bridge::WorkerCommand>,
 ) -> bool {
     let mut attaches = std::mem::take(&mut app.pending_attaches).into_iter();
-    while let Some((id, group)) = attaches.next() {
-        match sender.try_send(crate::bridge::WorkerCommand::Attach(id, group)) {
+    while let Some((id, group, runtime)) = attaches.next() {
+        let command=match runtime {
+            Some(runtime)=>crate::bridge::WorkerCommand::AttachRuntime(id,group,runtime),
+            None=>crate::bridge::WorkerCommand::Attach(id,group),
+        };
+        match sender.try_send(command) {
             Ok(()) => {}
-            Err(TrySendError::Full(crate::bridge::WorkerCommand::Attach(id, group))) => {
-                app.pending_attaches
-                    .extend(std::iter::once((id, group)).chain(attaches));
+            Err(TrySendError::Full(command)) => {
+                let pending=match command {
+                    crate::bridge::WorkerCommand::Attach(id,group)=>(id,group,None),
+                    crate::bridge::WorkerCommand::AttachRuntime(id,group,runtime)=>(id,group,Some(runtime)),
+                    _=>unreachable!(),
+                };
+                app.pending_attaches.extend(std::iter::once(pending).chain(attaches));
                 return false;
             }
             Err(TrySendError::Disconnected(_)) => {
@@ -901,7 +909,6 @@ pub(super) fn dispatch_attaches(
                 app.notice = "Session attach unavailable".into();
                 return true;
             }
-            Err(_) => unreachable!(),
         }
     }
     false

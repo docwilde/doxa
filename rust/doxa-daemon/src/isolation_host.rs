@@ -5,9 +5,9 @@ use doxa_runtime::{Host, PeerToolHandler, PeerTurnOrigin};
 use serde_json::{json, Value};
 use std::{io, path::PathBuf, sync::{Arc, Mutex}};
 
-pub struct IsolationHost { inner: Arc<dyn Host>, runtime: Arc<Mutex<Runtime>>, launch:Value }
+pub struct IsolationHost { inner: Arc<dyn Host>, runtime: Arc<Mutex<Runtime>>, launch:Value, admission:Mutex<()> }
 impl IsolationHost {
-    pub fn new(inner: Arc<dyn Host>, runtime: Arc<Mutex<Runtime>>, launch:Value) -> Self { Self { inner, runtime, launch } }
+    pub fn new(inner: Arc<dyn Host>, runtime: Arc<Mutex<Runtime>>, launch:Value) -> Self { Self { inner, runtime, launch, admission:Mutex::new(()) } }
     fn migration_plan(&self)->Result<Value,String>{
         if self.inner.has_active_work(){return Err("isolation migration requires an idle provider".into());}
         let snapshot=self.inner.transcript_snapshot().map_err(|e|e.to_string())?;
@@ -67,9 +67,17 @@ impl Host for IsolationHost {
             return Ok(json!({"migration_plan":plan}));
         }
         if method == "set_isolation" {
+            let _admission = self.admission.try_lock().map_err(|_|"isolation changes require an idle provider")?;
             let profile = Profile::parse(params["profile"].as_str().ok_or("missing isolation profile")?).map_err(|e|e.to_string())?;
             if self.inner.has_active_work() { return Err("isolation changes require an idle provider".into()); }
-            let status = self.runtime.lock().unwrap().set_profile(profile,params["confirmed"]==true).map_err(|e|e.to_string())?;
+            let mut runtime = self.runtime.lock().unwrap();
+            let changed = runtime.profile() != profile;
+            let status = runtime.set_profile(profile,params["confirmed"]==true).map_err(|e|e.to_string())?;
+            // Network changes also change built-in provider tools. Recreate the
+            // idle transport under the new policy before accepting another turn.
+            if changed && matches!(self.launch["engine"].as_str(), Some("claude" | "codex")) {
+                self.inner.call("isolation_transport_reset", &json!({}))?;
+            }
             return Ok(json!({"isolation":status}));
         }
         self.inner.call(method,params)
@@ -98,12 +106,18 @@ impl Host for IsolationHost {
 
 impl IsolationHost {
     fn prompt_with_origin(&self,text:&str,origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)) {
+        let Ok(_admission) = self.admission.try_lock() else {
+            emit(json!({"type":"turn_refused","data":{"message":"Isolation policy change or another turn holds admission"}})); return;
+        };
         if self.runtime.lock().unwrap().profile().docker() {
             // Gate each turn even when a provider transport stays connected;
             // the transport launch independently checks the actual container.
             if let Err(error) = doxa_isolation::active().and_then(|manifest|
                 manifest.ok_or_else(||doxa_isolation::error("Docker session manifest unavailable"))
-                    .and_then(|manifest|doxa_isolation::check_turn_budget(&manifest))) {
+                    .and_then(|manifest| {
+                        if manifest.state != "ready" {return Err(doxa_isolation::error("Docker session is not ready; resume it explicitly"));}
+                        doxa_isolation::check_turn_budget(&manifest)
+                    })) {
                 emit(json!({"type":"turn_refused","data":{"message":error.to_string()}})); return;
             }
         }

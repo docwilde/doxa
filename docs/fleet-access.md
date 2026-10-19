@@ -36,17 +36,17 @@ inherently exposes host networking; it cannot provide an offline guarantee.
 Legacy `--isolation PROFILE` sets both roles and retains these confirmations.
 `--dry-run` reports required acknowledgements without launching anything.
 
-Offline provider processes additionally disable Codex apps/remote plugins, Claude WebSearch/WebFetch and
+Offline provider processes additionally disable Codex apps/remote plugins, Claude WebSearch/WebFetch/account connectors and
 [Codex built-in web search](https://learn.chatgpt.com/docs/config-file/config-basic).
-**Ordinary Claude/Codex CLI cannot reach their model provider inside offline
-Docker.** Such launches are refused before creating a run. Use API-backed
-GLM/DeepSeek (model requests run on the host; workspace tools run in Docker).
-The existing ROOT/docker-hardened boundary requires separately reserved session
-IDs; fleet launch does not provision it or a provider-only legacy gateway.
-Router CLI candidates have the same connectivity limitation. DOXA never silently opens
-worker egress to fix provider connectivity. Built-in web tools disabled when a
-provider process starts stay disabled until that provider is restarted; an online
-coordinator can still research through its approved network tools.
+Claude/Codex CLI can reach their fixed provider hosts through a session-bound
+HTTPS proxy while Docker networking stays `none`. General web access still
+requires owner opt-in. Router CLI candidates receive the same policy. See the
+[provider host list and boundary](session-isolation.md#provider-connectivity).
+GLM/DeepSeek continue to make model requests on the host with workspace tools in
+Docker. The existing ROOT/docker-hardened boundary requires separately reserved
+session IDs; fleet launch does not provision it. Switching Docker network policy
+resets idle CLI transports so web-tool settings follow the new policy. An online
+coordinator can research through its approved network tools.
 
 During a run, attach a slot, click its isolation chip, choose **1** offline Docker,
 **2** Docker with internet, or **3** native, and confirm with Shift+Y. The displayed

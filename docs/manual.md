@@ -1942,7 +1942,7 @@ older sent records without a body explicitly say that the body was not recorded.
 | `image_mode` | `DOXA_IMAGE_MODE` | text | `probe` to detect support, or force a rung (`kgp`/`sixel`/`halfblock`/`text`) |
 | `boot_banner` | `DOXA_BOOT_BANNER` | on | draw the DOXA mark above the opening identity block |
 | `sidebar` | `DOXA_SIDEBAR` | *auto* | the session rail: empty = appear once there is a collection or a second session, `1` = always, `0` = never. `f3` writes `1`/`0`, so the first toggle ends the guessing |
-| `rail_entries` | `DOXA_RAIL_ENTRIES` | `sessions` | `panes` shows one navigable row per open pane; hidden tabs contribute urgency, and unknown/mixed project roots get no hue |
+| `rail_entries` | `DOXA_RAIL_ENTRIES` | `sessions` | Window tabs sit under their first tab. In `panes` view the first row focuses the window; child rows select its tabs. Fleet groups and supervisors have separate icons. |
 | `sidebar_width` | `DOXA_SIDEBAR_WIDTH` | 25 | columns the rail occupies; clamped to 22–41 rather than rejected. Written by a drag of the rail's edge and by `alt+shift+←/→` |
 | `key_notice` | `DOXA_KEY_NOTICE` | on | one-line startup notice naming any bound keys this terminal can't deliver and the slash command that reaches them instead; silent on a kitty-protocol terminal or one whose protocol was never measured |
 | `context_grid` | `DOXA_CONTEXT_GRID` | `glyphs` | cell style for `/context`'s grid: `glyphs` (⛀⛁⛶) or `ascii` (`[#]`/`[ ]`) for a font that tofu's them |

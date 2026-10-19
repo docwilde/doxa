@@ -633,9 +633,11 @@ impl AppServerDriver {
         let thread_id = self.thread_id().to_owned();
         let permission = self.options.permission;
         let sandbox = permission.sandbox(self.options.sandbox);
+        let isolation = doxa_isolation::active().map_err(AppServerError::Io)?;
+        let sandbox_policy = turn_sandbox_policy(sandbox, isolation.as_ref().map(|manifest| manifest.profile));
         let request_id = self.send_request_bounded("turn/start", json!({"threadId":thread_id,"model":self.options.model,"effort":self.effort,
             "approvalPolicy":if self.interactive { permission.approval_policy() } else { "never" },
-            "sandboxPolicy":{"type":sandbox_policy_type(sandbox)},
+            "sandboxPolicy":sandbox_policy,
             "input":[{"type":"text","text":prompt,"text_elements":[]}]}), Some(cancel), deadline).await?;
         let response = self.wait_response(request_id, Some(cancel), deadline, true).await?;
         let turn_id = response.pointer("/turn/id").and_then(Value::as_str)
@@ -1084,6 +1086,19 @@ fn sandbox_policy_type(mode: SandboxMode) -> &'static str {
     }
 }
 
+fn turn_sandbox_policy(mode: SandboxMode, profile: Option<doxa_isolation::Profile>) -> Value {
+    use doxa_isolation::Profile;
+    // Legacy Docker owns the filesystem, process and network boundary. Codex's
+    // externalSandbox policy avoids nesting bwrap/user namespaces inside it.
+    // Keep explicit read-only restrictions and native/ROOT policies intact.
+    if mode != SandboxMode::ReadOnly && matches!(profile, Some(Profile::DockerOffline | Profile::DockerOpen)) {
+        json!({"type":"externalSandbox","networkAccess":
+            if profile == Some(Profile::DockerOpen) {"enabled"} else {"restricted"}})
+    } else {
+        json!({"type":sandbox_policy_type(mode)})
+    }
+}
+
 /// Adapt only tool items to the existing scrubbed and bounded Codex tool
 /// normalizer. Message and reasoning items arrive as live deltas and must not
 /// be replayed from their final snapshots.
@@ -1118,6 +1133,23 @@ fn normalize_tool_item(item: &Value) -> Option<Value> {
 #[cfg(test)]
 mod web_item_tests {
     use super::*;
+
+    #[test]
+    fn external_sandbox_requires_docker_and_preserves_read_only_and_approval_policy() {
+        use doxa_isolation::Profile;
+        assert_eq!(turn_sandbox_policy(SandboxMode::WorkspaceWrite,Some(Profile::DockerOffline)),
+            json!({"type":"externalSandbox","networkAccess":"restricted"}));
+        assert_eq!(turn_sandbox_policy(SandboxMode::WorkspaceWrite,Some(Profile::DockerOpen)),
+            json!({"type":"externalSandbox","networkAccess":"enabled"}));
+        for profile in [None,Some(Profile::Native),Some(Profile::DockerHardened)] {
+            assert_eq!(turn_sandbox_policy(SandboxMode::WorkspaceWrite,profile),json!({"type":"workspaceWrite"}));
+        }
+        for profile in [None,Some(Profile::DockerOffline),Some(Profile::DockerOpen)] {
+            assert_eq!(turn_sandbox_policy(SandboxMode::ReadOnly,profile),json!({"type":"readOnly"}));
+        }
+        assert_eq!(CodexPermission::OnRequest.approval_policy(),"on-request");
+        assert_eq!(CodexPermission::Auto.approval_policy(),"never");
+    }
 
     #[test]
     fn offline_config_requires_provider_confirmation_of_every_network_tool_setting(){

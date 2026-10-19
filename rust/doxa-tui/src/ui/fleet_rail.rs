@@ -38,6 +38,24 @@ fn group(root: PathBuf, id: String, value: &Value, live: &HashSet<String>) -> Op
     supervisor=supervisor.filter(|id|members.contains(id));
     Some(Group {root,id,supervisor,members,collapsed:false})
 }
+
+fn live_groups(sources: &[(PathBuf,String)]) -> (Vec<Group>,Vec<discovery::Session>) {
+    let mut groups=Vec::new(); let mut live=HashMap::new();
+    for (root,id) in sources {
+        let Ok(value)=fleet_control::snapshot(root,id) else {continue;};
+        // Fleet daemons live in their own reviewed run runtime, not the
+        // operator's ordinary session registry. Never guess across runtimes.
+        let Ok(sessions)=discovery::sessions_in(&root.join(id).join("rt")) else {continue;};
+        let ids=sessions.iter().map(|session|session.id.clone()).collect();
+        if let Some(group)=group(root.clone(),id.clone(),&value,&ids) {
+            for session in sessions.into_iter().filter(|session|group.members.contains(&session.id)) {
+                live.entry(session.id.clone()).or_insert(session);
+            }
+            groups.push(group);
+        }
+    }
+    (groups,live.into_values().collect())
+}
 impl App {
     /// Render-only illustrative membership; never reads or persists a run.
     #[doc(hidden)]
@@ -58,6 +76,7 @@ impl App {
             for group in &mut groups {
                 group.collapsed=self.fleet_rail.groups.iter().find(|old|old.root==group.root && old.id==group.id).is_some_and(|old|old.collapsed);
                 for id in &group.members {
+                    if !self.killed_this_run.contains(id) { self.offline_ids.remove(id); }
                     if self.sessions.iter().any(|session| &session.id==id) {continue;}
                     if self.sessions.len()>=panes::MAX_TABS || self.killed_this_run.contains(id) {continue;}
                     if let Some(row)=live.iter().find(|row|&row.id==id) {
@@ -78,24 +97,26 @@ impl App {
         if cfg!(test) {return false;}
         let (tx,rx)=mpsc::sync_channel(1);
         if std::thread::Builder::new().name("fleet-sidebar".into()).spawn(move|| {
-            let Ok(live)=discovery::sessions() else {let _=tx.send((Vec::new(),Vec::new()));return;};
-            let ids=live.iter().map(|row|row.id.clone()).collect();
-            let groups=sources.into_iter().filter_map(|(root,id)|fleet_control::snapshot(&root,&id).ok().and_then(|value|group(root,id,&value,&ids))).collect();
-            let _=tx.send((groups,live));
+            let _=tx.send(live_groups(&sources));
         }).is_ok() {self.fleet_rail.pending=Some(rx);}
         false
     }
     pub(super) fn fleet_rail_groups(&self, seen: &mut HashSet<usize>) -> Vec<(RailGroupKey,Vec<RailRow>,u8)> {
         let mut result=Vec::new();
         let indices=self.sessions.iter().enumerate().map(|(index,session)|(session.id.as_str(),index)).collect::<HashMap<_,_>>();
-        for group in &self.fleet_rail.groups {
+        for (fleet_index, group) in self.fleet_rail.groups.iter().enumerate() {
             let members=group.members.iter().filter_map(|id|indices.get(id.as_str()).copied())
                 .filter(|index|!self.offline_ids.contains(&self.sessions[*index].id) && self.rail_session_visible(*index) && !seen.contains(index)).collect::<Vec<_>>();
             if members.is_empty() {continue;}
             seen.extend(&members);
             let parent=group.supervisor.as_ref().and_then(|id|members.iter().find(|index|&self.sessions[**index].id==id)).copied();
-            let mut rows=match parent {Some(index)=>vec![RailRow::Session(index)],None=>vec![RailRow::ProjectHeading(group.heading())]};
-            if !group.collapsed {rows.extend(members.iter().copied().filter(|index|Some(*index)!=parent).map(RailRow::Session));}
+            let mut rows=vec![RailRow::FleetHeading(fleet_index)];
+            // Retain the supervisor as the keyboard anchor while workers are
+            // folded, so Left/Right can collapse and expand the same group.
+            if let Some(parent)=parent { rows.push(RailRow::Session(parent)); }
+            if !group.collapsed {
+                rows.extend(members.iter().copied().filter(|index|Some(*index)!=parent).map(RailRow::Session));
+            }
             let rank=members.iter().map(|index|self.rail_urgency(*index)).max().unwrap_or(0);
             result.push((RailGroupKey::Fleet(group.root.clone(),group.id.clone()),rows,rank));
         }
@@ -103,9 +124,19 @@ impl App {
     }
     pub(super) fn fleet_rail_prefix(&self, id: &str) -> String {
         match self.fleet_rail.groups.iter().find(|group|group.members.iter().any(|member|member==id)) {
-            Some(group) if group.supervisor.as_deref()==Some(id)=>format!("{} ",if group.collapsed{"▸"}else{"▾"}),
-            Some(_)=>"  ↳ ".into(), None=>String::new(),
+            Some(group) if group.supervisor.as_deref()==Some(id)=>
+                if self.preferences.on("nerd_font") {"  \u{f508} ".into()} else {"  [S] ".into()},
+            Some(_)=>"    ↳ ".into(), None=>String::new(),
         }
+    }
+    pub(super) fn verified_fleet_member(&self, id: &str) -> bool {
+        self.fleet_rail.groups.iter().any(|group|group.members.iter().any(|member|member==id))
+    }
+    pub(super) fn collapse_fleet_group(&mut self, index: usize) -> bool {
+        let Some(group)=self.fleet_rail.groups.get_mut(index) else {return false;};
+        group.collapsed=!group.collapsed;
+        self.rail_selected=self.rail_selected.min(self.rail_order().len().saturating_sub(1));
+        true
     }
     pub(super) fn collapse_fleet_parent(&mut self, id: &str, collapsed: Option<bool>) -> bool {
         let Some(group)=self.fleet_rail.groups.iter_mut().find(|group|group.supervisor.as_deref()==Some(id)) else{return false;};
@@ -122,6 +153,76 @@ impl App {
 mod tests {
     use super::*; use serde_json::json;
     #[test]
+    fn ordinary_registry_cannot_archive_members_verified_in_a_fleet_runtime() {
+        let mut app=App::default();
+        for id in ["boss","ordinary"] {
+            app.sessions.push(Session {id:id.into(),title:id.into(),collection:String::new(),
+                transcript:String::new(),status:"Disconnected".into()});
+        }
+        app.show_fleet_sidebar_fixture("run","boss",&[]);
+        assert!(app.mark_dead_detached(&HashSet::new()));
+        assert!(app.offline_ids.contains("ordinary")); assert!(!app.offline_ids.contains("boss"));
+        app.fleet_rail.groups.clear();
+        assert!(app.mark_dead_detached(&HashSet::new())); assert!(app.offline_ids.contains("boss"));
+        // A fresh, validated private-runtime snapshot repairs an earlier
+        // ordinary-roster result, but never revives an explicitly stopped ID.
+        app.fleet_rail.fixture=false;
+        let snapshot=|| Group {root:PathBuf::from("/owned/fleet"),id:"run".into(),
+            supervisor:Some("boss".into()),members:vec!["boss".into()],collapsed:false};
+        let (tx,rx)=mpsc::sync_channel(1);tx.send((vec![snapshot()],Vec::new())).unwrap();
+        app.fleet_rail.pending=Some(rx);assert!(app.poll_fleet_rail(Instant::now()));
+        assert!(!app.offline_ids.contains("boss"));
+        app.offline_ids.insert("boss".into());app.killed_this_run.insert("boss".into());
+        let (tx,rx)=mpsc::sync_channel(1);tx.send((vec![snapshot()],Vec::new())).unwrap();
+        app.fleet_rail.pending=Some(rx);app.poll_fleet_rail(Instant::now());
+        assert!(app.offline_ids.contains("boss"));
+    }
+    #[test]
+    fn selecting_a_fleet_row_queues_its_private_runtime_without_a_blank_tab() {
+        let mut app=App::default();
+        app.sessions.push(Session {id:"boss".into(),title:"Supervisor".into(),collection:String::new(),
+            transcript:String::new(),status:"Disconnected".into()});
+        app.show_fleet_sidebar_fixture("run","boss",&[]);
+        app.rail_selected=0;app.open_selected();
+        assert!(app.groups.iter().all(|group|group.tabs.is_empty()));
+        assert_eq!(app.pending_attaches,[("boss".into(),0,Some(PathBuf::from("/demo/fleet/run/rt")))]);
+        let (tx,rx)=std::sync::mpsc::sync_channel(1);
+        super::super::terminal_loop::dispatch_attaches(&mut app,&tx);
+        assert!(matches!(rx.recv().unwrap(),crate::bridge::WorkerCommand::AttachRuntime(id,0,path)
+            if id=="boss" && path==PathBuf::from("/demo/fleet/run/rt")));
+    }
+    #[test]
+    fn live_membership_uses_each_verified_fleets_private_runtime() {
+        use std::{fs,os::unix::{fs::PermissionsExt,net::UnixListener}};
+        let dir=tempfile::tempdir().unwrap(); let root=dir.path();
+        fs::set_permissions(root,fs::Permissions::from_mode(0o700)).unwrap();
+        let mut listeners=Vec::new();
+        for (run,id) in [("one","boss"),("two","outside")] {
+            let runtime=root.join(run).join("rt");
+            fs::create_dir_all(runtime.join("registry")).unwrap();
+            for path in [root.join(run),runtime.clone(),runtime.join("registry")] {
+                fs::set_permissions(path,fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let manifest=json!({"native_version":1,"run_id":run,"slots":[{"role":"supervisor","session_id":"boss"}]});
+            let path=root.join(run).join("manifest.json");fs::write(&path,manifest.to_string()).unwrap();
+            fs::set_permissions(path,fs::Permissions::from_mode(0o600)).unwrap();
+            let socket=runtime.join(format!("daemon-{id}-{}.sock",std::process::id()));
+            listeners.push(UnixListener::bind(&socket).unwrap());
+            fs::set_permissions(&socket,fs::Permissions::from_mode(0o600)).unwrap();
+            let path=runtime.join("registry").join(format!("{id}.json"));
+            fs::write(&path,json!({"session_id":id,"pid":std::process::id(),"cwd":root,
+                "heartbeat_at":time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap(),
+                "started_at":"2026-10-19T00:00:00Z","title":id,"daemon_socket":socket}).to_string()).unwrap();
+            fs::set_permissions(path,fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let (groups,live)=live_groups(&[(root.to_path_buf(),"one".into()),(root.to_path_buf(),"two".into())]);
+        assert_eq!(groups.len(),1); assert_eq!(groups[0].id,"one");
+        assert_eq!(groups[0].members,["boss"]); assert_eq!(live.len(),1); assert_eq!(live[0].id,"boss");
+        // The same live ID in another run must not make a dead slot visible.
+        fs::remove_file(root.join("one/rt/registry/boss.json")).unwrap();
+        assert!(live_groups(&[(root.to_path_buf(),"two".into())]).0.is_empty());
+    }
+    #[test]
     fn membership_requires_manifest_identity_roles_and_current_live_ids() {
         let live=HashSet::from(["boss".into(),"worker".into()]);
         let manifest=json!({"native_version":1,"run_id":"run","slots":[{"role":"worker","session_id":"dead"},{"role":"worker","session_id":"worker"},{"role":"supervisor","session_id":"boss"}]});
@@ -131,7 +232,7 @@ mod tests {
         let mut wrong=manifest;wrong["slots"][0]["session_id"]=json!("worker");assert!(group(PathBuf::from("/private"),"run".into(),&wrong,&live).is_none());
         let mut app=App::default();app.sessions=vec![Session {id:"worker".into(),title:"worker".into(),collection:"repo".into(),transcript:String::new(),status:String::new()},Session {id:"boss".into(),title:"boss".into(),collection:"repo".into(),transcript:String::new(),status:String::new()}];
         app.fleet_rail.groups=vec![fleet];
-        assert_eq!(app.rail_order(),[1,0]);assert_eq!(app.fleet_rail_prefix("worker"),"  ↳ ");
+        assert_eq!(app.rail_order(),[1,0]);assert_eq!(app.fleet_rail_prefix("worker"),"    ↳ ");
         assert!(app.collapse_fleet_parent("boss",Some(true)));assert_eq!(app.rail_order(),[1]);
         assert!(app.collapse_fleet_parent("boss",Some(false)));assert_eq!(app.rail_order(),[1,0]);
     }

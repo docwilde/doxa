@@ -37,11 +37,51 @@ effective cgroup limits and the pinned image's local availability.
 The owner default is
 configured with doxa settings set session_isolation PROFILE, selecting native,
 docker-open or docker-offline. Open egress permits worker Internet access.
-Docker offline has no worker network: ordinary online Claude and Codex turns
-cannot contact their providers in that profile. API-vendor requests are
+Docker offline has no direct worker network. Claude and Codex contact their
+fixed provider hosts through the host-owned gateway described below. API-vendor requests are
 performed by the host using the selected provider API; their bounded workspace
-tool remains confined to the independent checkout. Neither Docker profile
-claims an outbound allowlist.
+tool remains confined to the independent checkout.
+
+## Provider connectivity
+
+`docker-offline` keeps Docker networking at `none`. Preparing a Claude/Codex
+provider opens its own host-owned Unix gateway in the read-only broker mount.
+Each provider transport starts a loopback proxy, overrides upper/lower-case
+proxy variables and clears proxy exclusions. The adapter dies with that transport;
+the host gateway closes its tunnels on session stop or policy change. A missing
+gateway fails closed. There is no bridge, direct DNS/IP or open-network fallback.
+
+| CLI | Exact HTTPS hosts (port 443 only) |
+| --- | --- |
+| Claude | `api.anthropic.com`, `platform.claude.com` |
+| Codex | `api.openai.com`, `chatgpt.com`, `auth.openai.com` |
+
+These fixed lists cover inference and credential refresh for existing API-key or
+account authentication. Sign in on the host before launch; each private session
+keeps its refreshed credential snapshot. Custom gateways, Bedrock/Vertex, registry
+downloads, telemetry and arbitrary redirect destinations are not added to these
+lists. Rebuild the reviewed worker image after upgrading DOXA.
+
+The gateway checks exact CONNECT authority and TLS SNI, resolves on the host and
+connects only to that checked public address. Other hosts, private/reserved IPs,
+IP literals, ECH and TLS early data are refused. Claude WebSearch/WebFetch,
+account MCP connectors and artifacts are disabled; Codex web search, apps and
+remote plugins are disabled and their effective config is verified. Idle CLI
+transports reset when Docker network policy changes. Provider access does not
+authorize research; offline workers ask an approved online coordinator.
+
+This is a **provider-host allowlist**, not HTTP path inspection or a credential
+broker: TLS stays end-to-end and worker tools can read the selected credentials
+and contact allowed provider services. It does not establish protection against
+misuse of those credentials or provider-side capabilities. The stronger ROOT
+authority and credential-separation work remains separate.
+
+Codex command and file tools use its `externalSandbox` turn policy inside legacy
+Docker sessions: Docker owns the execution boundary, so the CLI does not require
+a second `bwrap` sandbox in the worker image. Offline network access stays
+restricted; Docker-open reports enabled access. Provider approval settings and
+explicit Codex read-only restrictions remain in effect. Native and ROOT sessions
+keep their existing Codex sandbox policy.
 
 ## Configure the local Engine
 
@@ -311,9 +351,10 @@ the connector's observed container scope before forwarding each relay chunk
 and closes both tunnel directions on a rejected writer. These are sequential
 observations; process movement between send, inspection and forwarding and
 exact Engine/container identity remain unproven.
-The gateway is not wired into a production profile. Provider streaming, login, refresh and
-bypass tests in a rootless container remain the gate. There is no hard disk quota
-or CLI credential secrecy.
+The legacy offline profile uses this gateway with fixed provider host lists.
+There is no hard disk quota or CLI credential secrecy. Gateway failure, expired
+auth or changed provider endpoints refuse the operation; sign in or update the
+reviewed integration on the host rather than granting worker internet implicitly.
 macOS Docker Desktop, remote Engines and nested privileged Docker are refused.
 
 ## Integration smoke

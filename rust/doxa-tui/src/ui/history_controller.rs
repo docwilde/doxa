@@ -672,7 +672,7 @@ impl App {
                         && self.manual_tab_available_for(Some(&id))
                     {
                         self.attaching_ids.insert(id.clone());
-                        self.pending_attaches.push((id.clone(), group));
+                        self.pending_attaches.push((id.clone(), group, None));
                         self.notice = format!("Attaching · {}", safe_label(&id));
                     } else {
                         self.finish_archive_resume(group, Some(&id), false);

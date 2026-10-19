@@ -112,16 +112,14 @@ impl App {
             self.draw_rail(frame, rail);
         }
         if let Some(panes) = layout.panes {
-            if self.diff_pane {
-                self.draw_group(frame, panes[self.active_group], self.active_group);
-                self.draw_diff_pane(frame, panes[(self.active_group + 1) % panes.len()]);
-            } else {
-                for (index, pane) in panes.iter().enumerate() {
-                    self.draw_group(frame, *pane, index);
-                }
+            for (index, pane) in panes.iter().enumerate() {
+                self.draw_group(frame, *pane, index);
             }
         } else {
             self.draw_group(frame, layout.body, self.active_group);
+        }
+        if let Some(diff) = layout.diff {
+            self.draw_diff_pane(frame, diff);
         }
         if self.active_chooser_rect().is_none() && self.active_request_index().is_none()
         {
@@ -2066,6 +2064,18 @@ impl App {
         let mut lines = Vec::new();
         for row in rows.iter().skip(start).take(visible) {
             match row {
+                RailRow::FleetHeading(index) => {
+                    let group=&self.fleet_rail.groups[*index];
+                    let caret=if group.collapsed {"▸"} else {"▾"};
+                    let icon=if self.preferences.on("nerd_font") {"\u{f0e8}"} else {"[F]"};
+                    let urgency=badge(&RailGroupKey::Fleet(group.root.clone(),group.id.clone()));
+                    let prefix=format!(" {caret} {icon} Fleet{} · ",
+                        if urgency.is_empty() {String::new()} else {format!(" {urgency}")});
+                    let label=clipped_title(&safe_label(&group.id),
+                        usize::from(area.width.saturating_sub(2)).saturating_sub(prefix.width())).0;
+                    lines.push(Line::styled(format!("{prefix}{label}"),
+                        Style::default().fg(theme::PEER).add_modifier(Modifier::BOLD)));
+                }
                 RailRow::Heading(index) => {
                     let item = &self.collections[*index];
                     let mark = if item.collapsed { "▸" } else { "▾" };
@@ -2119,7 +2129,9 @@ impl App {
                     };
                     let queued = self.session_activity.get(&session.id).map(|activity| activity.1).unwrap_or(0)
                         + self.pending_prompts.iter().filter(|(id, _)| id == &session.id).count();
-                    let pane = self.pane_signal(&session.id).map(|signal| signal.badge()).unwrap_or_default();
+                    let pane = self.groups.iter().find(|group|group.tabs.first()==Some(&session.id))
+                        .and_then(|group|group.active_id()).and_then(|id|self.pane_signal(id))
+                        .map(|signal|signal.badge()).unwrap_or_default();
                     let queue = if queued > 0 { format!(" [q{queued}]") } else { String::new() };
                     let provenance = match row {
                         RailRow::Pane { group, .. } => self.pane_project_marker(*group),
@@ -2127,7 +2139,14 @@ impl App {
                     };
                     let badge = format!("{pane}{provenance}{queue}");
                     let fleet_prefix = self.fleet_rail_prefix(&session.id);
+                    let tab_prefix = if fleet_prefix.is_empty() {
+                        self.groups.iter().find_map(|group| group.tabs.iter().position(|id| id == &session.id)
+                            .map(|position| if position == 0 {
+                                if self.preferences.on("nerd_font") { "\u{f2d0} " } else { "▣ " }
+                            } else if position + 1 == group.tabs.len() { "  └ " } else { "  ├ " })).unwrap_or("")
+                    } else { "" };
                     let title_width = usize::from(area.width.saturating_sub(5)).saturating_sub(fleet_prefix.width())
+                        .saturating_sub(tab_prefix.width())
                         .saturating_sub(badge.width());
                     let title = clipped_title(&session.title, title_width).0;
                     let style = if offline {
@@ -2152,7 +2171,7 @@ impl App {
                     } else {
                         style
                     };
-                    lines.push(Line::styled(format!("{fleet_prefix}{mark} {title}{badge}"), style));
+                    lines.push(Line::styled(format!("{fleet_prefix}{tab_prefix}{mark} {title}{badge}"), style));
                 }
             }
         }

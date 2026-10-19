@@ -47,7 +47,7 @@ impl App {
         }
         lines.push(format!("Disk: {}",value["disk_limit"].as_str().unwrap_or("unknown")));
         lines.push(format!("Credentials: {}",value["credential_exposure"].as_str().unwrap_or("unknown")));
-        lines.extend([String::new(),"Change while idle: 1 Docker offline · 2 Docker with internet · 3 Native (confirmation required)".into(),"Offline Claude/Codex CLI cannot reach its model provider; API-backed GLM/DeepSeek call models on the host.".into(),"While idle, explicitly change isolation with:".into(),
+        lines.extend([String::new(),"Change while idle: 1 Docker offline · 2 Docker with internet · 3 Native (confirmation required)".into(),"Offline Claude/Codex use fixed provider HTTPS hosts; general web access stays disabled.".into(),"While idle, explicitly change isolation with:".into(),
             "/isolation docker-offline --confirm".into(),"/isolation docker-open --confirm".into(),
             "/isolation native --confirm".into(),
             "Provider, approvals and conversation identity remain attached.".into(),
@@ -62,7 +62,7 @@ impl App {
         if profile==doxa_isolation::Profile::Native{lines.push("CONFIRM NATIVE EXECUTION: this agent receives owner host, filesystem and credential access outside Docker.".into());}
         if crate::fleet_policy::task_internet(profile){lines.push("CONFIRM INTERNET OPT-IN: this agent may directly access the internet, including web searches.".into());}
         else{lines.push("Direct internet and provider web-search tools are disabled. Ask an approved online supervisor for research evidence.".into());}
-        if profile==doxa_isolation::Profile::DockerOffline{lines.push("Ordinary Claude/Codex CLI cannot reach its model provider in offline Docker. API-backed engines keep model calls on the host.".into());}
+        if profile==doxa_isolation::Profile::DockerOffline{lines.push("Claude/Codex keep provider HTTPS access through a session-bound proxy. Docker networking remains none.".into());}
         lines.push("Supervised fleets stay paused after verification; review fleet status and explicitly continue.".into());
         self.isolation_confirmation=Some(Confirmation{id:id.clone(),profile:profile.key().into(),seen:std::cell::Cell::new(0),complete:std::cell::Cell::new(false)});
         self.chip_info=Some(ChipInfo{kind:"isolation_change",label:profile.key().into(),lines,scroll:0,owner:Some((id,profile.key().into()))});

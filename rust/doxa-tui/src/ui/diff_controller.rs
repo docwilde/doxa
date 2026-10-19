@@ -68,16 +68,13 @@ impl App {
             return false;
         };
         self.auto_diff_ready.remove(&id);
-        self.auto_diff_seen.insert(id);
+        self.auto_diff_seen.insert(id.clone());
         if self.diff_pane || self.diff_modal {
             return false;
         }
-        if self.pane_tree.is_some() {
-            self.notice = "Worktree changed · /diff opens the live diff".into();
-            return true;
-        }
         self.diff_pane = true;
-        if self.layout(self.size).panes.is_none() {
+        self.diff_target = Some(id.clone());
+        if self.layout(self.size).diff.is_none() {
             self.diff_pane = false;
             self.notice = "Worktree changed; terminal too narrow to auto-open diff · /diff".into();
         } else {
@@ -88,16 +85,28 @@ impl App {
     }
 
     pub(super) fn open_diff(&mut self) {
-        if self.diff_modal {
+        let same_session = self.diff_target.as_deref() == self.groups[self.active_group].active_id();
+        if self.diff_modal || self.diff_pane && same_session {
             if self.rejections_for_target() > 0 {
                 self.notice = "Wait for queued hunk rejections before closing this diff".into();
             } else {
                 self.diff_modal = false;
+                self.diff_pane = false;
             }
             return;
         }
-        self.diff_modal = true;
-        self.load_diff();
+        if self.rejections_for_target() > 0 {
+            self.notice = "Wait for queued hunk rejections before switching this diff".into();
+            return;
+        }
+        self.diff_pane = true;
+        self.diff_target = self.groups[self.active_group].active_id().map(str::to_owned);
+        if self.layout(self.size).diff.is_none() {
+            self.diff_pane = false;
+            self.notice = "Widen this session window to open its vertical diff split".into();
+        } else {
+            self.load_diff();
+        }
     }
 
     pub(super) fn rejections_for_target(&self) -> usize {
@@ -144,9 +153,8 @@ impl App {
         self.diff_selected = None;
         self.diff_reject_confirm = None;
         self.diff_comment_draft = None;
-        let Some(id) = self.groups[self.active_group]
-            .active_id()
-            .map(str::to_owned)
+        let Some(id) = (if self.diff_pane { self.diff_target.clone() } else { None })
+            .or_else(|| self.groups[self.active_group].active_id().map(str::to_owned))
         else {
             self.diff_target = None;
             self.diff_text = "Select a session to inspect its worktree.".into();
@@ -211,7 +219,7 @@ impl App {
         if self.start_next_rejection() {
             return true;
         }
-        if (self.diff_pane || self.diff_modal)
+        if self.diff_modal
             && self.diff_target.as_deref() != self.groups[self.active_group].active_id()
         {
             self.load_diff();
@@ -245,7 +253,7 @@ impl App {
                 let id = id.clone();
                 let cwd = cwd.clone();
                 self.diff_pending = None;
-                if self.groups[self.active_group].active_id() == Some(id.as_str())
+                if self.diff_target.as_deref() == Some(id.as_str())
                     && self.session_cwds.get(&id) == Some(&cwd) {
                     self.diff_refresh_due = Some(Instant::now() + DIFF_REFRESH_INTERVAL);
                     if self.diff_snapshot.as_ref().is_some_and(|old| old.text == snapshot.text) {

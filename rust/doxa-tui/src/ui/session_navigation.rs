@@ -62,6 +62,9 @@ impl App {
             .filter(|session| !self.offline_ids.contains(&session.id)
                 && !crate::remote_client::valid_target(&session.id)
                 && !live.contains(&session.id)
+                // A fleet's own verified runtime owns its liveness. Absence
+                // from the ordinary registry is expected for those sessions.
+                && !self.verified_fleet_member(&session.id)
                 && !self.groups.iter().any(|group| group.tabs.contains(&session.id))
                 && (session.status == "Disconnected" || self.detached_this_run.contains(&session.id)))
             .map(|session| session.id.clone()).collect();
@@ -469,6 +472,12 @@ impl App {
     }
 
     pub(super) fn attach_selected(&mut self, id: &str) {
+        let runtime=self.fleet_rail.groups.iter().find(|group|group.members.iter().any(|member|member==id))
+            .map(|group|group.root.join(&group.id).join("rt"));
+        self.attach_selected_in_runtime(id,runtime);
+    }
+
+    pub(super) fn attach_selected_in_runtime(&mut self,id:&str,runtime:Option<PathBuf>) {
         if self.offline_ids.contains(id) && self.history_entries.contains_key(id) {
             let group=self.groups.iter().position(|group|group.tabs.iter().any(|tab|tab==id)).unwrap_or(self.active_group);
             self.resume_archive(id,group,None);
@@ -493,7 +502,7 @@ impl App {
         }
         self.attaching_ids.insert(id.to_owned());
         self.pending_attaches
-            .push((id.to_owned(), self.active_group));
+            .push((id.to_owned(), self.active_group, runtime));
         self.input.clear();
         self.input_cursor = 0;
         self.notice = format!("Attaching · {}", safe_label(id));
@@ -1130,13 +1139,22 @@ impl App {
             .and_then(|index| self.sessions.get(index))
             .map(|session| session.id.clone())
         {
+            if self.verified_fleet_member(&id) && !self.groups.iter().any(|group|group.tabs.contains(&id)) {
+                self.attach_selected(&id);
+                return;
+            }
             if self.preferences.value("rail_entries") == "panes" {
-                if let Some(group) = self.groups.iter().position(|group| group.active_id() == Some(id.as_str())) {
+                if let Some(group) = self.groups.iter().position(|group| group.tabs.first() == Some(&id)) {
                     self.active_group = group;
                     self.groups[group].scroll = 0;
                     self.focus = Focus::Transcript;
                     return;
                 }
+            }
+            // A tab row activates its existing window instead of adding a
+            // second copy of the session to whichever window had focus.
+            if let Some(group) = self.groups.iter().position(|group| group.tabs.contains(&id)) {
+                self.active_group = group;
             }
             if !self.groups[self.active_group].tabs.contains(&id)
                 && !self.manual_tab_available_for(Some(&id))
