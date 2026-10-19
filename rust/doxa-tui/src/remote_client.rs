@@ -393,6 +393,10 @@ async fn command_worker(command: WorkerCommand, http: Client, base: Url,
             let _ = frames.send(WorkerFrame::Attach { session_id:id, group,
                 result:if known { Ok(()) } else { Err("Remote session is no longer live".into()) } }).await;
         }
+        WorkerCommand::AttachRuntime(id,group,_) => {
+            let _=frames.send(WorkerFrame::Attach {session_id:id,group,
+                result:Err("Private native runtime attachment is local-only".into())}).await;
+        }
         WorkerCommand::RemoteHistory(id,before) if valid_target(&id) && available.lock().unwrap_or_else(|poison|poison.into_inner()).contains_key(&id) => {
             let result=command_result(&http,&base,&id,"transcript",json!({"before":before}),crypto_key.as_ref()).await;
             let page=match result {

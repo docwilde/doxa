@@ -3068,7 +3068,7 @@ for line in sys.stdin:
         app.open_engine_picker();
         assert!(!app.engine_picker); assert!(app.notice.contains("256 retained session records"));
         app.attach_selected("slot-0");
-        assert_eq!(app.pending_attaches,[("slot-0".into(),0)]);
+        assert_eq!(app.pending_attaches,[("slot-0".into(),0,None)]);
         app.apply_daemon_frame(&json!({"type":"attach_reply","ok":true,"session_id":"slot-0","group":0}));
         assert_eq!(app.groups[0].tabs.len(),panes::MAX_TABS);
         // A confirmed killed ID releases its retained-record reservation.
@@ -4576,7 +4576,7 @@ for line in sys.stdin:
         app.history_query = "second".into();
         assert_eq!(app.history_matches().iter().map(|index| app.sessions[*index].id.as_str()).collect::<Vec<_>>(), ["second"]);
         app.attach_selected("second");
-        assert_eq!(app.pending_attaches, [("second".into(), 0)]);
+        assert_eq!(app.pending_attaches, [("second".into(), 0, None)]);
     }
 
     #[test]
@@ -8204,7 +8204,7 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"current", "model":"model"}));
         app.input = "/attach detached".into();
         app.attach_selected("detached");
-        assert_eq!(app.pending_attaches, [("detached".into(), 0)]);
+        assert_eq!(app.pending_attaches, [("detached".into(), 0, None)]);
         assert_eq!(app.groups[0].active_id(), Some("current"));
         assert!(app.pending_prompts.is_empty());
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"detached", "model":"other"}));

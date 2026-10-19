@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -26,6 +26,7 @@ use crate::launch::{self, LaunchOptions};
 pub enum WorkerCommand {
     Launch(LaunchOptions, Option<String>, usize),
     Attach(String, usize),
+    AttachRuntime(String, usize, PathBuf),
     Prompt(String, String),
     Answer(String, String, Value),
     Peers(String),
@@ -214,7 +215,12 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
             let command = match command {
-                WorkerCommand::Attach(id, group) => {
+                WorkerCommand::Attach(_, _) | WorkerCommand::AttachRuntime(_, _, _) => {
+                    let (id,group,runtime)=match command {
+                        WorkerCommand::Attach(id,group)=>(id,group,None),
+                        WorkerCommand::AttachRuntime(id,group,runtime)=>(id,group,Some(runtime)),
+                        _=>unreachable!(),
+                    };
                     if let Some((_, connected)) = routes.get(&id) {
                         let result=if connected.load(Ordering::Acquire) {Ok(())} else {Err("Daemon reconnecting; draft retained, retry after connection restores".into())};
                         let _ = router_frames.send(WorkerFrame::Attach { session_id: id, group, result });
@@ -226,7 +232,10 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
                     }
                     // Re-read the trusted registry at dispatch time. The UI's earlier
                     // discovery result is only a selection hint, never a socket path.
-                    let live = crate::discovery::sessions();
+                    let live = match runtime {
+                        Some(runtime)=>crate::discovery::sessions_in(&runtime),
+                        None=>crate::discovery::sessions(),
+                    };
                     let session = live.as_ref().ok().and_then(|rows| rows.iter().find(|s| s.id == id));
                     let result = session.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound,
                         "session is no longer live")).and_then(|s| attach_worker(s, &router_frames, &router_guard));
@@ -260,7 +269,7 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
                 | WorkerCommand::QueueCancel(id, _) | WorkerCommand::RemoteHistory(id,_) => id,
                 WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id)
                 | WorkerCommand::FinalizeForClear(id) => id,
-                WorkerCommand::Launch(_, _, _) | WorkerCommand::Attach(_, _) => unreachable!(),
+                WorkerCommand::Launch(_, _, _) | WorkerCommand::Attach(_, _) | WorkerCommand::AttachRuntime(_,_,_) => unreachable!(),
             };
             let Some((route, connected)) = routes.get(id) else {
                 let _ = router_frames.send(rejection_frame(command, "Session is not attached"));
@@ -296,7 +305,7 @@ pub(crate) fn rejection_frame(command: WorkerCommand, message: &str) -> WorkerFr
     match command {
         WorkerCommand::Launch(_, _, group) => WorkerFrame::Launch { group,
             result: LaunchResult::Failed { message: message.into(), started_session: None } },
-        WorkerCommand::Attach(session_id, group) => WorkerFrame::Attach { session_id, group, result: Err(message.into()) },
+        WorkerCommand::Attach(session_id, group) | WorkerCommand::AttachRuntime(session_id,group,_) => WorkerFrame::Attach { session_id, group, result: Err(message.into()) },
         WorkerCommand::Prompt(session_id, text) => WorkerFrame::PromptFailed { session_id, text,
             message: message.into(), delivery: PromptDelivery::Rejected },
         WorkerCommand::Answer(session_id, request_id, _) => command_frame(session_id,
@@ -477,7 +486,7 @@ fn worker_loop(
                 Ok(WorkerCommand::Launch(_, _, group)) => {
                     let _ = frames.send(WorkerFrame::Launch { group, result: LaunchResult::Failed { message: "Session launch is unavailable on this connection".into(), started_session: None } });
                 }
-                Ok(WorkerCommand::Attach(id, group)) => {
+                Ok(WorkerCommand::Attach(id, group) | WorkerCommand::AttachRuntime(id,group,_)) => {
                     let _ = frames.send(WorkerFrame::Attach { session_id: id, group, result: Err("Session attach is unavailable on this connection".into()) });
                 }
                 Ok(WorkerCommand::Models(id)) => {

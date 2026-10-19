@@ -199,7 +199,7 @@ impl App {
                     if let Ok((_, session)) =
                         crate::fleet_view::slot_socket(&root, &id, slot.parse().unwrap())
                     {
-                        self.attach_selected(&session);
+                        self.attach_selected_in_runtime(&session,Some(root.join(&id).join("rt")));
                     } else {
                         self.notice =
                             "Fleet slot attachment refused; verify run and live slot".into();
@@ -332,7 +332,7 @@ impl App {
             []|["runs"]=>self.open_fleet(root,None),
             ["status",id]if doxa_state::valid_session_id(id)=>self.open_fleet(root,Some((*id).into())),
             ["attach",id,index]=>match index.parse::<usize>().ok().and_then(|index|crate::fleet_view::slot_socket(&root,id,index).ok()){
-                Some((_,session))=>self.attach_selected(&session),None=>self.notice="Fleet slot attachment refused; verify run and live slot".into()},
+                Some((_,session))=>self.attach_selected_in_runtime(&session,Some(root.join(id).join("rt"))),None=>self.notice="Fleet slot attachment refused; verify run and live slot".into()},
             _=>self.notice="Usage: /fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|dependency-review [RUN] SLOT|mesh [RUN]|start OPTIONS|resume RUN]".into()
         }
     }

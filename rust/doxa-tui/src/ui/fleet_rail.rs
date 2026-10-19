@@ -178,6 +178,20 @@ mod tests {
         assert!(app.offline_ids.contains("boss"));
     }
     #[test]
+    fn selecting_a_fleet_row_queues_its_private_runtime_without_a_blank_tab() {
+        let mut app=App::default();
+        app.sessions.push(Session {id:"boss".into(),title:"Supervisor".into(),collection:String::new(),
+            transcript:String::new(),status:"Disconnected".into()});
+        app.show_fleet_sidebar_fixture("run","boss",&[]);
+        app.rail_selected=0;app.open_selected();
+        assert!(app.groups.iter().all(|group|group.tabs.is_empty()));
+        assert_eq!(app.pending_attaches,[("boss".into(),0,Some(PathBuf::from("/demo/fleet/run/rt")))]);
+        let (tx,rx)=std::sync::mpsc::sync_channel(1);
+        super::super::terminal_loop::dispatch_attaches(&mut app,&tx);
+        assert!(matches!(rx.recv().unwrap(),crate::bridge::WorkerCommand::AttachRuntime(id,0,path)
+            if id=="boss" && path==PathBuf::from("/demo/fleet/run/rt")));
+    }
+    #[test]
     fn live_membership_uses_each_verified_fleets_private_runtime() {
         use std::{fs,os::unix::{fs::PermissionsExt,net::UnixListener}};
         let dir=tempfile::tempdir().unwrap(); let root=dir.path();

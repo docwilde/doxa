@@ -1722,7 +1722,7 @@ pub struct App {
         Receiver<Option<Vec<doxa_vendors::ModelCapability>>>,
     )>,
     pending_launches: Vec<(launch::LaunchOptions, Option<String>, usize)>,
-    pending_attaches: Vec<(String, usize)>,
+    pending_attaches: Vec<(String, usize, Option<PathBuf>)>,
     attaching_ids: HashSet<String>,
     pub(crate) detached_this_run: Vec<String>,
     launching: bool,

@@ -472,6 +472,12 @@ impl App {
     }
 
     pub(super) fn attach_selected(&mut self, id: &str) {
+        let runtime=self.fleet_rail.groups.iter().find(|group|group.members.iter().any(|member|member==id))
+            .map(|group|group.root.join(&group.id).join("rt"));
+        self.attach_selected_in_runtime(id,runtime);
+    }
+
+    pub(super) fn attach_selected_in_runtime(&mut self,id:&str,runtime:Option<PathBuf>) {
         if self.offline_ids.contains(id) && self.history_entries.contains_key(id) {
             let group=self.groups.iter().position(|group|group.tabs.iter().any(|tab|tab==id)).unwrap_or(self.active_group);
             self.resume_archive(id,group,None);
@@ -496,7 +502,7 @@ impl App {
         }
         self.attaching_ids.insert(id.to_owned());
         self.pending_attaches
-            .push((id.to_owned(), self.active_group));
+            .push((id.to_owned(), self.active_group, runtime));
         self.input.clear();
         self.input_cursor = 0;
         self.notice = format!("Attaching · {}", safe_label(id));
@@ -1133,6 +1139,10 @@ impl App {
             .and_then(|index| self.sessions.get(index))
             .map(|session| session.id.clone())
         {
+            if self.verified_fleet_member(&id) && !self.groups.iter().any(|group|group.tabs.contains(&id)) {
+                self.attach_selected(&id);
+                return;
+            }
             if self.preferences.value("rail_entries") == "panes" {
                 if let Some(group) = self.groups.iter().position(|group| group.tabs.first() == Some(&id)) {
                     self.active_group = group;
