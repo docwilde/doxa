@@ -523,7 +523,7 @@ use super::*;
         let rail=app.layout(app.size).rail.unwrap();
         click(&mut app,rail.x+2,rail.y+1);
         assert!(app.fleet_rail.groups[0].collapsed);
-        assert_eq!(app.rail_order(),[0,1]);
+        assert_eq!(app.rail_order(),[2,0,1]);
         click(&mut app,rail.x+2,rail.y+1);
         assert!(!app.fleet_rail.groups[0].collapsed);
         assert_eq!(app.rail_order(),[2,3,0,1]);

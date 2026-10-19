@@ -95,8 +95,10 @@ impl App {
             seen.extend(&members);
             let parent=group.supervisor.as_ref().and_then(|id|members.iter().find(|index|&self.sessions[**index].id==id)).copied();
             let mut rows=vec![RailRow::FleetHeading(fleet_index)];
+            // Retain the supervisor as the keyboard anchor while workers are
+            // folded, so Left/Right can collapse and expand the same group.
+            if let Some(parent)=parent { rows.push(RailRow::Session(parent)); }
             if !group.collapsed {
-                if let Some(parent)=parent { rows.push(RailRow::Session(parent)); }
                 rows.extend(members.iter().copied().filter(|index|Some(*index)!=parent).map(RailRow::Session));
             }
             let rank=members.iter().map(|index|self.rail_urgency(*index)).max().unwrap_or(0);
@@ -142,7 +144,7 @@ mod tests {
         let mut app=App::default();app.sessions=vec![Session {id:"worker".into(),title:"worker".into(),collection:"repo".into(),transcript:String::new(),status:String::new()},Session {id:"boss".into(),title:"boss".into(),collection:"repo".into(),transcript:String::new(),status:String::new()}];
         app.fleet_rail.groups=vec![fleet];
         assert_eq!(app.rail_order(),[1,0]);assert_eq!(app.fleet_rail_prefix("worker"),"    ↳ ");
-        assert!(app.collapse_fleet_parent("boss",Some(true)));assert!(app.rail_order().is_empty());
+        assert!(app.collapse_fleet_parent("boss",Some(true)));assert_eq!(app.rail_order(),[1]);
         assert!(app.collapse_fleet_parent("boss",Some(false)));assert_eq!(app.rail_order(),[1,0]);
     }
 }
