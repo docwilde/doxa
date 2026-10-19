@@ -5300,3 +5300,54 @@ fn native_peer_discovery_hides_retained_idle_daemons_until_a_client_attaches() {
     assert!(recipient.child.try_wait().unwrap().is_none(),"Hidden idle daemon should remain available for reattachment");
     send(&mut socket,json!({"type":"call","id":4,"method":"stop","params":{}}));claude_receive_until(&mut reader,|frame|frame["id"]==4);wait_until(||observer.exited());
 }
+
+#[test]
+fn claude_private_home_cannot_hide_or_grant_owner_peer_tools() {
+    for enabled in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = dir.path().join("home"); fs::create_dir(&owner).unwrap();
+        let runtime = doxa_isolation::Runtime::prepare(&owner, CLAUDE_SESSION, dir.path(),
+            Some(doxa_isolation::Profile::Native), false, None).unwrap();
+        let mut manifest = runtime.manifest().clone();
+        let root = owner.join("isolation").join(CLAUDE_SESSION);
+        manifest.checkout = root.join("checkout"); manifest.context_cwd = Some(dir.path().to_owned());
+        for path in [&manifest.checkout, &manifest.private_home, &manifest.cache, &manifest.broker] {
+            fs::create_dir(path).unwrap(); fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let meta = fs::metadata(&manifest.checkout).unwrap();
+        manifest.checkout_device = meta.dev(); manifest.checkout_inode = meta.ino();
+        fs::write(doxa_isolation::manifest_path(&owner, CLAUDE_SESSION).unwrap(), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let private = manifest.private_home.clone();
+        for (root, allowed) in [(&owner, enabled), (&private, !enabled)] {
+            fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(root.join("config.toml"), format!("agent_peer_send = {allowed}\n")).unwrap();
+            fs::set_permissions(root.join("config.toml"), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let script = dir.path().join("claude-private-policy.py");
+        claude_fixture(&script, "", "if frame['type']=='user': result()");
+        let slug:String = dir.path().to_string_lossy().chars().map(|ch|if ch.is_ascii_alphanumeric(){ch}else{'-'}).collect();
+        let store = doxa_transcript::TranscriptStore::new(&dir.path().join("native-projects"), &slug, CLAUDE_SESSION).unwrap();
+        store.try_append(json!({"type":"user","message":{"role":"user","content":"prior task"}}), "claude", |s|Ok(s.into())).unwrap();
+        store.try_append(json!({"type":"assistant","message":{"role":"assistant","content":"prior answer"}}), "claude", |s|Ok(s.into())).unwrap();
+        store.try_write_thread(json!({"thread_id":CLAUDE_SESSION,"session_id":CLAUDE_SESSION,"engine":"claude",
+            "cwd":dir.path(),"lore_enabled":false,"spawn_depth":0,"parent_session_id":null,"turn_incomplete":false,
+            "model":"opus","effort":"high","permission_mode":"default"}).as_object().unwrap().clone(), |s|Ok(s.into())).unwrap();
+        let mut child = daemon_command().args(["--runtime-dir", dir.path().to_str().unwrap(),
+            "--cwd", manifest.checkout.to_str().unwrap(), "--session-id", CLAUDE_SESSION,
+            "--engine", "claude", "--claude-bin", script.to_str().unwrap(), "--isolation", "native", "--resume", "true"])
+            .env("DOXA_HOME", &owner).env("DOXA_ISOLATION_HOME", &private)
+            .env("DOXA_LORE", "0")
+            .env_remove("DOXA_AGENT_PEER_SEND").stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+        let registry = dir.path().join("registry").join(format!("{CLAUDE_SESSION}.json"));
+        wait_for_registry(&mut child, &registry);
+        let row:Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+        let mut process = Process { child, registry, socket:row["daemon_socket"].as_str().unwrap().into() };
+        let (mut reader, mut socket) = process.connect();
+        assert_eq!(receive(&mut reader)["peer_tools_ready"], enabled,
+            "private provider config replaced owner policy");
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        send(&mut socket, json!({"type":"call","id":1,"method":"stop","params":{}}));
+        assert_eq!(claude_receive_until(&mut reader, |frame|frame["id"]==1)["ok"], true);
+        wait_until(||process.exited());
+    }
+}

@@ -392,12 +392,11 @@ impl ClaudeHost {
             .map_err(|_| "Claude private configuration unavailable")?;
         let plugins = doxa_claude::isolation::adopted_plugins()
             .map_err(|_| "Claude plugin adoption unavailable")?;
-        let config = doxa_state::load_config(
-            &doxa_claude::isolation::config_dir()
-                .parent()
-                .unwrap()
-                .join("config.toml"),
-        );
+        // The provider's private home contains credentials/artifacts, never
+        // owner policy. This also applies after migrating back to native with
+        // a retained private home. A worker-written config cannot grant tools.
+        let config = doxa_state::load_config(&doxa_isolation::home()
+            .map_err(|_| "Owner configuration unavailable")?.join("config.toml"));
         let raw = doxa_state::raw_setting(
             std::env::var("DOXA_AGENT_PEER_SEND").ok().as_deref(),
             &config,
