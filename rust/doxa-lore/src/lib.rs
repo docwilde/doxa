@@ -515,6 +515,7 @@ pub struct PendingReview {
     raw: String,
     sha256: String,
     inode: u64,
+    skill_evaluation: Option<Value>,
 }
 
 /// One exact active belief selected for review. The sidecar checks the raw
@@ -602,6 +603,25 @@ impl PendingReview {
     }
     pub fn inode(&self) -> u64 {
         self.inode
+    }
+    pub fn skill_evaluation(&self) -> Option<&Value> {
+        self.skill_evaluation.as_ref()
+    }
+    /// Evaluation evidence is advisory and separate from the proposal bytes
+    /// whose digest authorizes resolution. Older carriers omit this section.
+    pub fn display_text(&self) -> String {
+        match &self.skill_evaluation {
+            Some(evidence) => {
+                let freshness = match evidence["current"].as_bool() {
+                    Some(false) => "Stale: the proposal or installed baseline changed.\n",
+                    Some(true) => "Matches this proposal and installed baseline.\n",
+                    None => "",
+                };
+                format!("{}\n\nSkill evaluation (advisory; human approval required)\n{}{}",
+                    self.raw, freshness, serde_json::to_string_pretty(evidence).unwrap_or_default())
+            },
+            None => self.raw.clone(),
+        }
     }
 }
 
@@ -1171,11 +1191,21 @@ impl LoreClient {
         if previous.is_some_and(|old| old.sha256() != sha256 || old.inode() != inode) {
             return Err(LoreError::Remote("pending_changed"));
         }
+        let skill_evaluation = match value.get("skill_evaluation") {
+            None => None,
+            Some(evidence) if evidence.is_object()
+                && serde_json::to_vec(evidence).is_ok_and(|b| b.len() <= 8192)
+                && evidence["status"].as_str().is_some_and(|s| matches!(s,
+                    "not_evaluated" | "evidence_unavailable" | "quality_failed" |
+                    "performance_failed" | "validation_passed" | "passed" | "final_test_failed")) => Some(evidence.clone()),
+            _ => return Err(LoreError::InvalidFrame),
+        };
         Ok(PendingReview {
             pid: pid.to_owned(),
             raw: raw.to_owned(),
             sha256: sha256.to_owned(),
             inode,
+            skill_evaluation,
         })
     }
 

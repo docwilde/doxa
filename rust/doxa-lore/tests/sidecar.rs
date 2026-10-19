@@ -352,6 +352,8 @@ for line in sys.stdin:
     if req['pid'] == 'partial': value['complete'] = False
     if req['pid'] == 'swapped': value['pid'] = 'other'
     if req['pid'] == 'invalid': value['raw'] = '{"kind":'
+    if req['pid'] == 'evaluated': value['skill_evaluation'] = {'status':'passed','current':False,'advisory':True}
+    if req['pid'] == 'fake_evaluation': value['skill_evaluation'] = {'status':'model_says_perfect'}
     print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
 "#,
     );
@@ -360,6 +362,14 @@ for line in sys.stdin:
     assert_eq!(review.pid(), "one");
     assert_eq!(review.inode(), 87);
     assert!(review.raw().contains("entire signed op bytes"));
+    assert_eq!(review.skill_evaluation(), None, "older carriers remain compatible");
+    let evaluated = client.pending_review("/repo", "evaluated").unwrap();
+    assert_eq!(evaluated.raw(), review.raw(), "advisory evidence must not change reviewed bytes");
+    assert_eq!(evaluated.sha256(), review.sha256());
+    assert_eq!(evaluated.skill_evaluation().unwrap()["current"], false);
+    assert!(evaluated.display_text().contains("Skill evaluation (advisory"));
+    assert!(evaluated.display_text().contains("Stale: the proposal or installed baseline changed."));
+    assert!(client.pending_review("/repo", "fake_evaluation").is_err());
     assert_eq!(review.sha256().len(), 64);
     assert_eq!(
         client

@@ -1178,7 +1178,7 @@ impl App {
                 };
                 let width = usize::from(area.width.saturating_sub(3)).max(1);
                 let visible = usize::from(area.height.saturating_sub(REVIEW_BODY_RESERVE));
-                let total = raw_visual_rows(review.raw(), width).len();
+                let total = raw_visual_rows(&review.display_text(), width).len();
                 if picker.review_width != width {
                     picker.review_width = width;
                     picker.review_scroll = 0;

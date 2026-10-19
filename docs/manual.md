@@ -1979,3 +1979,22 @@ daemon sockets and the peer registry, kept out of the home directory
 because home directories can be network-mounted (Unix sockets misbehave
 there). The LORE store is neither — it stays `lore_core`'s own path,
 shared with the Claude Code LORE plugin on purpose.
+
+### Evaluating pending coding skills
+
+The LORE proposal review includes advisory skill-evaluation evidence when
+provided by the native carrier. Changed proposal or installed baseline bytes
+are labeled stale; unavailable evidence is shown explicitly. Read the full
+proposal and evidence section before arming approval. The evidence does not
+authorize installation; the existing exact-byte human approval applies.
+
+Run `lore skills evaluate PROPOSAL_ID --suite /absolute/corpus/suite.json`
+from a human terminal to compare frozen baseline/candidate skills on separate
+train, replay, validation and one-use final-test fixtures. This is opt-in;
+DOXA does not launch experiments from the proposal screen. Automatic native
+diagnostic capture is also opt-in through `LORE_DIAGNOSTIC_TRACES=1`.
+
+See the [LORE evaluation workflow](https://github.com/docwilde/LORE/blob/2d4fdfd41e50b453906039cb3753de6187febfcd/docs/skill-evaluation.md)
+for the corpus format, immutable evidence, answer/growth checks and limits.
+The included deterministic fixture validates the mechanism; a real task
+corpus and model adapter are needed to measure skill quality.

@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.56 — 2026-10-19
+
+**Skill evaluation review**
+
+- Pin **LORE 0.62.24** with opt-in diagnostic traces and human-run coding-skill experiments against frozen task fixtures, separate verifier checks and one-use final tests.
+- Display advisory results in **`PendingReview::display_text`**, including explicit stale evidence; require reading the evidence section before arming proposal approval.
+- Preserve exact raw proposal hashes and human approval. No automatic skill installation, factual-memory scoring or model experiment runs are added.
+
 ## 2.0.0-beta.55 — 2026-10-19
 
 **Background review history**

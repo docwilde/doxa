@@ -1356,7 +1356,7 @@ impl App {
                 let width = usize::from(area.width.saturating_sub(3)).max(1);
                 // Preserve all raw content across visual rows; terminal controls
                 // are shown with visible escapes, and no field is summarized.
-                let visual_rows = raw_visual_rows(review.raw(), width);
+                let visual_rows = raw_visual_rows(&review.display_text(), width);
                 let start = picker.review_scroll.min(visual_rows.len().saturating_sub(visible));
                 scrollbar = (visual_rows.len(), visible, start);
                 for line in visual_rows.iter().skip(start).take(visible) {

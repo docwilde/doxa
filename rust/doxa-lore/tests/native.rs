@@ -4,6 +4,25 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 #[test]
+fn native_skill_review_keeps_evaluation_separate_from_exact_proposal_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = lore_core::config::Config::for_root(dir.path().join("store"));
+    let cwd = dir.path().join("project");
+    let authority = lore_core::gate::Authority::Derived { agent: "fixture".into(), engine: "codex".into() };
+    let pid = lore_core::gate::stage(&cfg, &serde_json::json!({
+        "kind":"skill", "name":"fixture-skill", "body":"Run the fixed task checks.",
+        "project":lore_core::config::project_slug(&cwd)
+    }), &authority).unwrap();
+    let mut client = LoreClient::open_config(cfg.clone(), Duration::from_secs(2)).unwrap();
+    let review = client.pending_review(cwd.to_str().unwrap(), &pid).unwrap();
+    assert_eq!(review.skill_evaluation().unwrap()["status"], "not_evaluated");
+    assert!(review.display_text().contains("Skill evaluation (advisory"));
+    let raw = std::fs::read_to_string(cfg.root.join("pending").join(format!("{pid}.json"))).unwrap();
+    assert_eq!(review.raw(), raw);
+    assert_eq!(review.sha256(), format!("{:x}", Sha256::digest(raw.as_bytes())));
+}
+
+#[test]
 fn reviewed_codegraph_read_is_scoped_and_rejects_stale_source() {
     let owned = tempfile::tempdir().unwrap();
     let source = owned.path().join("worktree");
