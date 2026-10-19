@@ -251,7 +251,7 @@ fn actual_router_fleet_start_and_controller_resume_keep_disjoint_limits_without_
             let args=vec!["--pool".into(),"router:ds".into(),"--router-config".into(),root.join("router.json").to_str().unwrap().into(),
                 "--prompt".into(),"Complete the bounded dummy task".into(),"--sessions".into(),"2".into(),"--run-budget".into(),"4".into(),
                 "--root".into(),root.join("fleets").to_str().unwrap().into(),"--run-id".into(),"router-fleet".into(),
-                "--cwd".into(),root.join("workspace").to_str().unwrap().into(),"--isolation".into(),"native".into(),"--quiet-dwell".into(),"3".into(),
+                "--cwd".into(),root.join("workspace").to_str().unwrap().into(),"--isolation".into(),"native".into(),"--confirm-native-workers".into(),"--allow-worker-internet".into(),"--quiet-dwell".into(),"3".into(),
                 "--quiescence-timeout".into(),"20".into(),"--force".into(),"--memory-off".into(),"2".into()];
             doxa_tui::fleet_control::start(&args).unwrap();
         } else {doxa_tui::fleet_control::resume(&root.join("fleets"),"router-fleet").unwrap();}

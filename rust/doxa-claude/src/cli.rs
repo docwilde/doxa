@@ -48,6 +48,9 @@ impl Cli {
             return Err(Error::Protocol);
         }
         let mut command = Command::new(o.executable);
+        if !doxa_isolation::task_internet_allowed().map_err(|_|Error::Protocol)? {
+            command.args(["--disallowedTools","WebSearch,WebFetch"]);
+        }
         // `host` alone still denies tool calls that need approval; `stdio`
         // registers the callback that emits can_use_tool control requests.
         command.args([

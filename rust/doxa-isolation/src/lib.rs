@@ -724,6 +724,11 @@ fn reconcile(manifest: &mut Manifest, start: bool) -> io::Result<()> {
 pub fn active() -> io::Result<Option<Manifest>> {
     std::env::var_os(ACTIVE_MANIFEST).map(|path| read_manifest(Path::new(&path))).transpose()
 }
+/// Internet policy for built-in provider tools as well as shell egress.
+/// Ordinary non-Docker sessions keep their existing owner policy.
+pub fn task_internet_allowed()->io::Result<bool>{
+    Ok(session_manifest()?.is_none_or(|manifest|matches!(manifest.profile,Profile::Native|Profile::DockerOpen)))
+}
 /// A trusted host-only identity, separate from the provider's physical cwd.
 pub fn session_manifest() -> io::Result<Option<Manifest>> {
     std::env::var_os(SESSION_MANIFEST).map(|path|read_manifest(Path::new(&path))).transpose()

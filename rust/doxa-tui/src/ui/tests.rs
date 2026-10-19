@@ -8661,3 +8661,32 @@ fn failed_archive_restore_preserves_prompt_and_never_sends_to_changed_target() {
         assert!(app.resume_launch_prompt.is_none());
     }
 }
+
+#[test]
+fn fleet_setup_menu_opens_without_creating_sessions_or_prompt_drafts(){
+    let mut app=App::default();app.handle(Event::Resize(150,42));app.input="Existing private draft".into();
+    app.open_fleet_setup();
+    assert!(app.fleet_setup.is_some());assert_eq!(app.chip_info.as_ref().unwrap().kind,"fleet_setup");
+    let view=painted_at(&app,150,42);assert!(view.contains("Worker isolation: docker-offline"));assert!(view.contains("Coordinator isolation: docker-offline"));
+    assert!(app.pending_prompts.is_empty());assert!(app.pending_queue_commands.is_empty());assert_eq!(app.input,"Existing private draft");
+    app.fleet_setup_key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE));assert!(app.fleet_setup.is_none());assert!(app.chip_info.is_none());
+}
+
+#[test]
+fn isolation_menu_requires_explicit_confirmation_for_bound_idle_session(){
+    let mut app=App::default();app.handle(Event::Resize(150,42));
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"isolated","cwd":"/fixture","isolation":{"profile":"docker-offline","state":"ready"}}));
+    app.session_activity.insert("isolated".into(),(false,0));app.open_isolation_info(0);
+    assert!(app.isolation_control_key(KeyEvent::new(KeyCode::Char('3'),KeyModifiers::NONE)));
+    let lines=app.chip_info.as_ref().unwrap().lines.join("\n");assert!(lines.contains("CONFIRM NATIVE EXECUTION"));assert!(lines.contains("CONFIRM INTERNET OPT-IN"));
+    assert!(app.pending_queue_commands.is_empty());
+    app.isolation_control_key(KeyEvent::new(KeyCode::Char('y'),KeyModifiers::NONE));assert!(app.pending_queue_commands.is_empty());
+    app.session_activity.insert("isolated".into(),(true,0));
+    app.isolation_control_key(KeyEvent::new(KeyCode::Char('Y'),KeyModifiers::SHIFT));assert!(app.pending_queue_commands.is_empty());
+    app.session_activity.insert("isolated".into(),(false,0));
+    let view=painted_at(&app,150,42);assert!(view.contains("CONFIRM NATIVE EXECUTION"));assert!(view.contains("CONFIRM INTERNET OPT-IN"));
+    // Reading is required even for an explicit uppercase confirmation.
+    while !app.isolation_confirmation.as_ref().unwrap().complete.get(){app.isolation_control_key(KeyEvent::new(KeyCode::PageDown,KeyModifiers::NONE));let _=painted_at(&app,150,42);}
+    app.isolation_control_key(KeyEvent::new(KeyCode::Char('Y'),KeyModifiers::SHIFT));
+    assert!(matches!(app.pending_queue_commands.as_slice(),[crate::bridge::WorkerCommand::SetIsolation(id,profile)] if id=="isolated"&&profile=="native"));
+}

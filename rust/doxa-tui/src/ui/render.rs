@@ -764,6 +764,17 @@ impl App {
         let Some(info) = &self.chip_info else {
             return;
         };
+        if matches!(info.kind,"fleet_setup"|"isolation_change"){
+            let lines=info.lines.iter().flat_map(|line|crate::memory_menu::wrap_review(line,usize::from(area.width.saturating_sub(3)).max(1))).collect::<Vec<_>>();
+            let visible=usize::from(area.height.saturating_sub(2));let start=info.scroll.min(lines.len().saturating_sub(visible));let end=(start+visible).min(lines.len());
+            let owner_matches=info.owner.as_ref().is_none_or(|(id,_)|self.groups[self.active_group].active_id()==Some(id.as_str()));
+            if info.kind=="isolation_change"&&owner_matches{
+                if let Some(review)=self.isolation_confirmation.as_ref(){if visible>0&&start<=review.seen.get(){review.seen.set(review.seen.get().max(end));review.complete.set(review.complete.get()||end>=lines.len());}}
+            }
+            let body=if owner_matches{lines.join("\n")}else{"Session changed; reopen isolation controls".into()};
+            frame.render_widget(Paragraph::new(body).scroll((start.min(u16::MAX as usize) as u16,0)).block(Block::default().title(if info.kind=="fleet_setup"{" New fleet "}else{" Confirm isolation and internet · ↑↓ scroll "}).borders(Borders::ALL)).style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),area);
+            draw_menu_scrollbar(frame,area,lines.len(),visible,start);return;
+        }
         if let Some(review) = &self.fleet_review {
             let lines = info
                 .lines
@@ -787,7 +798,7 @@ impl App {
                     .scroll((start.min(u16::MAX as usize) as u16, 0))
                     .block(
                         Block::default()
-                            .title(" Native fleet launch review ")
+                            .title(" Fleet launch review ")
                             .borders(Borders::ALL),
                     )
                     .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),

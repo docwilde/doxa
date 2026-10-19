@@ -135,12 +135,22 @@ impl DaemonClient {
         Self::connect_inner(path, cursor, false).map(|(client, _)| client)
     }
 
+    /// Attach after the sampled hello sequence. Used only after a verified
+    /// idle fleet checkpoint so old completion events cannot run twice.
+    pub(crate) fn connect_tail(path:&Path)->Result<Self,TransportError>{
+        let deadline=Instant::now()+HELLO_TIMEOUT;let stream=unix_connect_until(path,deadline)?;
+        Self::handshake(stream,None,false,true,Some(deadline)).map(|(client,_)|client)
+    }
+    pub(crate) fn has_buffered_frames(&self)->bool{
+        !self.queued.is_empty()||!self.pending_bytes.is_empty()||!self.reader.buffer().is_empty()
+    }
+
     /// Deadline bounds socket connect, hello and attach together. Used by
     /// fleet teardown so a blocked listener cannot escape the shared deadline.
     pub(crate) fn connect_until(path: &Path, cursor: Option<u64>, deadline: Instant) -> Result<Self, TransportError> {
         let deadline = deadline.min(Instant::now() + HELLO_TIMEOUT);
         let stream = unix_connect_until(path, deadline)?;
-        Self::handshake(stream, cursor, false, Some(deadline)).map(|(client, _)| client)
+        Self::handshake(stream, cursor, false, false, Some(deadline)).map(|(client, _)| client)
     }
 
     /// Restore the durable local transcript before attaching at the hello
@@ -152,9 +162,9 @@ impl DaemonClient {
     fn connect_inner(path: impl AsRef<Path>, cursor: Option<u64>, restore: bool) -> Result<(Self, Option<TranscriptSnapshot>), TransportError> {
         let deadline = Instant::now() + HELLO_TIMEOUT;
         let stream = unix_connect_until(path.as_ref(), deadline)?;
-        Self::handshake(stream, cursor, restore, Some(deadline))
+        Self::handshake(stream, cursor, restore, false, Some(deadline))
     }
-    fn handshake(stream: UnixStream, cursor: Option<u64>, restore: bool, deadline: Option<Instant>) -> Result<(Self, Option<TranscriptSnapshot>), TransportError> {
+    fn handshake(stream: UnixStream, cursor: Option<u64>, restore: bool, tail: bool, deadline: Option<Instant>) -> Result<(Self, Option<TranscriptSnapshot>), TransportError> {
         let remaining = || -> Result<Duration, TransportError> {
             deadline.map(|at| at.checked_duration_since(Instant::now()).filter(|time| !time.is_zero()).ok_or(TransportError::Timeout)).unwrap_or(Ok(HELLO_TIMEOUT))
         };
@@ -167,7 +177,9 @@ impl DaemonClient {
         let snapshot = if restore { read_snapshot(&hello) } else { None };
         // The host samples this cursor before reading either durable file.
         // Events published during the bounded file reads must replay afterward.
-        let attach_cursor = if snapshot.is_some() {
+        let attach_cursor = if tail {
+            Some(hello["next_seq"].as_u64().ok_or(TransportError::Malformed("daemon tail cursor missing"))?)
+        } else if snapshot.is_some() {
             hello["transcript_seq"].as_u64().or_else(|| hello["next_seq"].as_u64())
         } else { cursor };
         let mut client = Self {
@@ -408,6 +420,20 @@ mod deadline_tests {
     use super::*;
     use std::os::unix::net::UnixListener;
 
+    #[test]
+    fn tail_connection_uses_hello_cursor_and_keeps_new_events(){
+        use std::os::unix::net::UnixListener;
+        let dir=tempfile::tempdir().unwrap();let socket=dir.path().join("tail.sock");let listener=UnixListener::bind(&socket).unwrap();
+        let server=std::thread::spawn(move||{
+            let (mut stream,_)=listener.accept().unwrap();
+            writeln!(stream,"{}",json!({"type":"hello","proto":1,"session_id":"tail","engine":"fixture","cwd":"/repo","next_seq":7})).unwrap();
+            let mut reader=BufReader::new(stream.try_clone().unwrap());let mut line=String::new();reader.read_line(&mut line).unwrap();
+            let attach:Value=serde_json::from_str(&line).unwrap();assert_eq!(attach["cursor"],7);
+            writeln!(stream,"{}",json!({"type":"event","seq":7,"event":{"type":"turn_done","data":{}}})).unwrap();
+        });
+        let mut client=DaemonClient::connect_tail(&socket).unwrap();assert_eq!(client.cursor,7);
+        assert_eq!(client.next_frame().unwrap()["seq"],7);assert_eq!(client.cursor,8);server.join().unwrap();
+    }
     #[test]
     fn peer_restore_reads_only_the_private_hello_bound_snapshot() {
         use std::os::unix::fs::PermissionsExt;

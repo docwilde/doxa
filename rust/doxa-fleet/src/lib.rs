@@ -5,6 +5,8 @@ pub mod calibration;
 pub mod message_eval;
 pub mod message_gate;
 pub mod evidence;
+pub mod isolation_change;
+pub mod owner_control;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -150,6 +152,7 @@ impl Envelope {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
+    #[serde(default,skip_serializing_if="Option::is_none")] pub isolation_change:Option<isolation_change::Change>,
     pub charter_sha256:String,#[serde(default)] pub assignments_sha256:String,pub paused:bool,pub reason:String,pub supervisor_status:String,
     pub reserved_usd:f64,pub actual_estimated_usd:f64,pub calls:u64,pub accounting_unknown:bool,
     pub received:BTreeMap<String,u64>,pub minute:u64,pub message_count:u64,pub total_bytes:u64,
@@ -274,6 +277,7 @@ pub fn cached_semantic(context:&Context,envelope:&Envelope)->io::Result<Option<R
 }
 
 fn deterministic(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,state:&mut State)->io::Result<()> {
+    if state.isolation_change.is_some(){return Err(invalid("owner isolation change holds all peer admission"));}
     let from=context.assignment(&envelope.from_session)?;let target=context.assignment(recipient)?;
     if !target.depends_on.is_empty()&&!state.dispatched_assignments.get(&target.id).copied().unwrap_or(false){return Err(invalid("dependent worker awaits host dispatch"));}
     if envelope.v!=1||envelope.fleet_id!=context.charter.fleet_id||envelope.charter_sha256!=context.charter_sha256||envelope.to_session!=recipient||from.pid!=pid||envelope.assignment_id!=from.id||envelope.from_session==recipient||uuid::Uuid::parse_str(&envelope.message_id).is_err(){return Err(invalid("fleet sender, assignment or scope is not verified"));}
@@ -361,5 +365,5 @@ pub fn apply_supervisor(context:&Context,result:Result<SupervisorVerdict,String>
 }
 pub fn resume_review(context:&Context,expected_hash:&str)->io::Result<State>{
     context.validate()?;if expected_hash!=context.charter_sha256{return Err(invalid("human resume requires the reviewed charter hash"));}
-    transaction(context,|state|{if state.accounting_unknown{return Err(invalid("review spend is unknown; reconcile before resume"));}if state.reserved_usd>=context.review.budget_usd||state.calls>=context.review.max_calls{return Err(invalid("review budget exhausted"));}state.paused=false;state.reason.clear();record(state,json!({"event":"human_resume","charter_sha256":expected_hash,"at":unix_now()}));Ok(state.clone())})
+    transaction(context,|state|{if state.isolation_change.is_some(){return Err(invalid("isolation change is incomplete; resume withheld"));}if state.accounting_unknown{return Err(invalid("review spend is unknown; reconcile before resume"));}if state.reserved_usd>=context.review.budget_usd||state.calls>=context.review.max_calls{return Err(invalid("review budget exhausted"));}state.paused=false;state.reason.clear();record(state,json!({"event":"human_resume","charter_sha256":expected_hash,"at":unix_now()}));Ok(state.clone())})
 }

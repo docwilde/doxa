@@ -1,5 +1,7 @@
 # Session isolation
 
+Fleet-specific defaults, owner confirmations and runtime menus: [Fleet access and isolation](fleet-access.md).
+
 ## Contents
 
 - [Choose a profile](#choose-a-profile)

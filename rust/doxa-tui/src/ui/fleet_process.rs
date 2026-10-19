@@ -24,7 +24,7 @@ pub fn words(text:&str)->io::Result<Vec<String>>{
     if out.len()>512{return Err(invalid("Too many fleet arguments"));}Ok(out)
 }
 
-fn has_option(args:&[String],name:&str)->bool{let mut index=0;while index<args.len(){let key=args[index].as_str();if key==name{return true;}index+=if matches!(key,"--force"|"--allow-unbudgeted"|"--dry-run"|"--strict-unreviewed"|"--auto-test"){1}else{2};}false}
+fn has_option(args:&[String],name:&str)->bool{let mut index=0;while index<args.len(){let key=args[index].as_str();if key==name{return true;}index+=if matches!(key,"--force"|"--allow-unbudgeted"|"--dry-run"|"--strict-unreviewed"|"--auto-test"|"--confirm-native-workers"|"--confirm-native-supervisor"|"--allow-worker-internet"|"--allow-supervisor-internet"){1}else{2};}false}
 
 pub struct Prepared {
     pub root:PathBuf,pub id:String,pub lines:Vec<String>,args:Vec<String>,resume_snapshot:Option<Value>,
@@ -37,7 +37,7 @@ impl Prepared {
     pub fn from_fixture_review(review:&Value)->io::Result<Self>{
         let root=PathBuf::from(review["root"].as_str().ok_or_else(||invalid("Fixture root missing"))?);
         let id=review["run_id"].as_str().filter(|id|doxa_state::valid_session_id(id)).ok_or_else(||invalid("Fixture run ID missing"))?.to_owned();
-        Ok(Self{root,id,lines:review_lines("Start native fleet",review),args:Vec::new(),resume_snapshot:None,prompt_digest:None,assignment_digest:None,recipe_digest:None,lore_default:review["lore_enabled"].as_bool(),seen:Cell::new(0),complete:Cell::new(false),armed:false})
+        Ok(Self{root,id,lines:review_lines("Start fleet",review),args:Vec::new(),resume_snapshot:None,prompt_digest:None,assignment_digest:None,recipe_digest:None,lore_default:review["lore_enabled"].as_bool(),seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn start(mut args:Vec<String>,cwd:Option<&Path>)->io::Result<Self>{
         if !has_option(&args,"--run-id"){
@@ -49,15 +49,19 @@ impl Prepared {
         if review["review_version"]!=1||["prompt_sha256","assignments_sha256","test_recipe_sha256"].iter().any(|key|review[*key].as_str().is_none_or(|digest|digest.len()!=64||!digest.bytes().all(|byte|byte.is_ascii_hexdigit()))){return Err(invalid("Fleet review contract unavailable"));}
         let root=PathBuf::from(review["root"].as_str().ok_or_else(||invalid("Fleet review root unavailable"))?);
         let id=review["run_id"].as_str().filter(|id|doxa_state::valid_session_id(id)).ok_or_else(||invalid("Fleet review run ID unavailable"))?.to_owned();
-        let lines=review_lines("Start native fleet",&review);
+        let lines=review_lines("Start fleet",&review);
+        // These acknowledgements become effective only after the full human review.
+        if let Some(flags)=review["access"]["required_access_confirmations"].as_array(){
+            for flag in flags.iter().filter_map(Value::as_str){if !has_option(&args,flag){args.push(flag.into());}}
+        }
         let mut command=vec!["start".into()];command.extend(args);
         Ok(Self{root,id,lines,args:command,resume_snapshot:None,prompt_digest:review["prompt_sha256"].as_str().map(str::to_owned),assignment_digest:review["assignments_sha256"].as_str().map(str::to_owned),recipe_digest:review["test_recipe_sha256"].as_str().map(str::to_owned),lore_default:review["lore_enabled"].as_bool(),seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn resume(root:PathBuf,id:&str)->io::Result<Self>{
         let snapshot=crate::fleet_control::snapshot(&root,id)?;
         if snapshot["phase"]!="monitoring"||snapshot["live"]!=true{return Err(invalid("Only a native live monitoring run can resume"));}
-        let review=json!({"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"memory_off":snapshot["spec"]["memory_off"],"lore_enabled":snapshot["spec"]["lore_enabled"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"],"independent_review":snapshot["supervision"]["context"]["review"],"charter_sha256":snapshot["supervision"]["context"]["charter_sha256"],"auto_test":snapshot["spec"]["auto_test"],"test_recipe":snapshot["supervision"]["context"]["charter"]["test_recipe"]});
-        Ok(Self{lines:review_lines("Resume native fleet",&review),root:root.clone(),id:id.into(),args:vec!["resume".into(),id.into(),"--root".into(),root.to_string_lossy().into_owned()],resume_snapshot:Some(snapshot),prompt_digest:None,assignment_digest:None,recipe_digest:None,lore_default:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
+        let review=json!({"resume":true,"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"access":snapshot["spec"]["access"],"isolation":snapshot["spec"]["isolation"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"memory_off":snapshot["spec"]["memory_off"],"lore_enabled":snapshot["spec"]["lore_enabled"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"],"independent_review":snapshot["supervision"]["context"]["review"],"charter_sha256":snapshot["supervision"]["context"]["charter_sha256"],"auto_test":snapshot["spec"]["auto_test"],"test_recipe":snapshot["supervision"]["context"]["charter"]["test_recipe"]});
+        Ok(Self{lines:review_lines("Resume fleet",&review),root:root.clone(),id:id.into(),args:vec!["resume".into(),id.into(),"--root".into(),root.to_string_lossy().into_owned()],resume_snapshot:Some(snapshot),prompt_digest:None,assignment_digest:None,recipe_digest:None,lore_default:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn launch(self,exe:&Path)->io::Result<Controller>{
         if self.args.is_empty(){return Err(invalid("Gallery fixture cannot launch a controller"));}
@@ -93,6 +97,21 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
     for (label,key)in [("Run","run_id"),("Root","root"),("Directory","cwd"),("Mode","mode"),("Isolation","isolation"),("Workers","workers"),("Sessions","sessions"),("Seed","seed"),("Workers with memory off","memory_off"),("Memory default enabled","lore_enabled"),("Total budget USD","run_budget_usd"),("Allow unbudgeted","allow_unbudgeted"),("Approval policy","approval_policy"),("Approval grace seconds","approval_grace_s"),("Dry run","dry_run"),("Preflight","preflight"),("Task digest","prompt_sha256"),("Assignment plan digest","assignments_sha256"),("Quiescence deadline seconds","quiescence_timeout_s"),("Quiescence grace seconds","quiescence_grace_s")]{
         if !value[key].is_null(){lines.push(format!("{label}: {}",value[key].as_str().map(str::to_owned).unwrap_or_else(||value[key].to_string())));}
     }
+    if value["access"].is_object(){
+        let access=&value["access"];
+        lines.push(format!("Launch policy — workers: {} · direct task internet: {}",access["worker_isolation"],access["worker_task_internet"]));
+        if !access["supervisor_isolation"].is_null(){lines.push(format!("Launch policy — coordinator: {} · task internet: {}",access["supervisor_isolation"],access["supervisor_task_internet"]));}
+        for flag in access["required_access_confirmations"].as_array().into_iter().flatten().filter_map(Value::as_str){
+            lines.push(match flag {
+                "--confirm-native-workers"=>"CONFIRM: workers run outside Docker with owner host and credential access.",
+                "--confirm-native-supervisor"=>"CONFIRM: coordinator runs outside Docker with owner host and credential access.",
+                "--allow-worker-internet"=>"CONFIRM: workers may access the internet directly, including web searches.",
+                "--allow-supervisor-internet"=>"CONFIRM: coordinator may use the internet and answer workers' research requests.",
+                _=>"Unknown access confirmation; cancel this launch.",
+            }.into());
+        }
+        lines.push("Offline workers request research via peer_send question to the coordinator; an online coordinator returns evidence. An offline coordinator escalates to the owner.".into());
+    }
     if !value["auto_test"].is_null(){lines.push(format!("Automatic host tests after worker turns: {}",value["auto_test"]));}
     if let Some(hash)=value["router_config_sha256"].as_str(){
         lines.push(format!("Reviewed Router config SHA256: {hash}"));
@@ -106,9 +125,12 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
     }
     if value["independent_review"].is_object(){let review=&value["independent_review"];for(label,key)in [("Independent supervisor model","supervisor"),("Supervisor action","supervisor_mode"),("Fast message judge","message_judge"),("Message review mode","message_mode"),("Review allocation USD","budget_usd"),("Maximum review calls","max_calls"),("Checkpoint interval seconds","interval_s"),("Input rate USD/Mtok","input_usd_per_million"),("Output rate USD/Mtok","output_usd_per_million"),("Message risk threshold","risk_threshold")]{lines.push(format!("{label}: {}",review[key]));}if review["supervisor"]["provider"]=="jev" {lines.push(format!("Jev supervisor minimum Choice confidence: {}",review["risk_threshold"]));lines.push("Pinned Jev input rate: $0.042/M; output free. Verdicts cannot grant approval or dependency release.".into());}lines.push("Independent models use API credentials; review data is LORE-scrubbed, stateless and has no tools.".into());}
     if let Some(hash)=value["charter_sha256"].as_str(){lines.push(format!("Approved charter SHA256: {hash}"));}
-    let mut counts:BTreeMap<(String,String,String,String),usize>=BTreeMap::new();
-    for slot in value["slots"].as_array().into_iter().flatten(){let key=(slot["role"].as_str().unwrap_or("worker").into(),slot["engine"].as_str().unwrap_or("unknown").into(),slot["model"].as_str().unwrap_or("provider default").into(),match slot["lore"].as_bool(){Some(true)=>"on",Some(false)=>"off",None=>"unknown"}.into());*counts.entry(key).or_default()+=1;}
-    for ((role,engine,model,lore),count)in counts{lines.push(format!("Planned {count} × {role}: {engine}:{model} · memory {lore}"));}
+    let mut counts:BTreeMap<(String,String,String,String,String),usize>=BTreeMap::new();
+    for slot in value["slots"].as_array().into_iter().flatten(){let key=(slot["role"].as_str().unwrap_or("worker").into(),slot["engine"].as_str().unwrap_or("unknown").into(),slot["model"].as_str().unwrap_or("provider default").into(),match slot["lore"].as_bool(){Some(true)=>"on",Some(false)=>"off",None=>"unknown"}.into(),slot["isolation"].as_str().or_else(||value["isolation"].as_str()).unwrap_or("unknown").into());*counts.entry(key).or_default()+=1;}
+    for ((role,engine,model,lore,profile),count)in counts{let label=if value["resume"]==true{"Recorded"}else{"Planned"};lines.push(format!("{label} {count} × {role}: {engine}:{model} · memory {lore} · isolation {profile}"));}
+    if value["resume"]==true&&value["slots"].as_array().is_some_and(|slots|slots.iter().any(|slot|slot["isolation"]=="native")){
+        lines.push("Recorded native slots have host and credential access. Existing owner grants remain active during observation resume.".into());
+    }
     for slot in value["slots"].as_array().into_iter().flatten(){if let Some(digest)=slot["task_sha256"].as_str(){lines.push(format!("Worker {} task SHA256: {digest}; paths: {}; predecessors: {}",slot["index"],slot["allowed_paths"],slot["depends_on"]));}}
     if value["slots"].as_array().is_some_and(|slots|slots.iter().any(|slot|slot["depends_on"].as_array().is_some_and(|rows|!rows.is_empty()))){
         lines.push("Dependent workers wait for coordinator-accepted host evidence and explicit human release. Automatic host tests can collect receipts but never release dependencies.".into());
@@ -146,6 +168,14 @@ mod tests{
     fn literal_tokenizer_never_expands_shell_code(){assert_eq!(words("start --prompt '$(touch nope) `$HOME`' --cwd \"a b\"").unwrap(),vec!["start","--prompt","$(touch nope) `$HOME`","--cwd","a b"]);assert!(words("'unfinished").is_err());assert!(words("x\n--force").is_err());}
     #[test]
     fn public_review_omits_prompt_and_private_slot_requests(){let lines=review_lines("Review",&json!({"prompt":"secret","slots":[{"role":"worker","engine":"fixture","model":"fixture-v1","pending_asks":[{"input_summary":"PRIVATE-SLOT-SENTINEL"}]}]})).join("\n");assert!(!lines.contains("secret"));assert!(!lines.contains("PRIVATE-SLOT-SENTINEL"));assert!(lines.contains("1 × worker: fixture:fixture-v1"));}
+    #[test]
+    fn resume_review_shows_changed_slot_isolation_beside_original_launch_policy(){
+        let text=review_lines("Resume fleet",&json!({"resume":true,"isolation":"docker-offline","access":{"worker_isolation":"docker-offline","worker_task_internet":false},"slots":[{"role":"worker","engine":"glm","model":"model","lore":true,"isolation":"native"},{"role":"worker","engine":"glm","model":"model","lore":true,"isolation":"docker-offline"}]})).join("\n");
+        assert!(text.contains("Launch policy — workers"));
+        assert!(text.contains("Recorded 1 × worker: glm:model · memory on · isolation native"));
+        assert!(text.contains("Recorded 1 × worker: glm:model · memory on · isolation docker-offline"));
+        assert!(text.contains("Existing owner grants remain active"));
+    }
     fn fixture_child()->Child{
         Command::new("python3").args(["-c","import signal,time,sys; signal.signal(signal.SIGINT,lambda *_:sys.exit(0)); time.sleep(10)"])
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn().unwrap()

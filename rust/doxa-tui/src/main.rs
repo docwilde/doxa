@@ -763,9 +763,17 @@ fn fleet(args: &[String]) -> io::Result<()> {
     }
     let root = match root { Some(root) => root, None => fleet_view::default_root()? };
     match words.as_slice() {
+        ["isolation",run,slot,profile,flags @ ..]=>{
+            if flags.iter().any(|flag|!matches!(*flag,"--confirm-native"|"--allow-internet")){return Err(invalid("isolation accepts --confirm-native and --allow-internet owner acknowledgements"));}
+            let slot=slot.parse().map_err(|_|invalid("fleet slot must be a number"))?;
+            let target=doxa_isolation::Profile::parse(profile)?;
+            let request=fleet_control::request_isolation(&root,run,slot,target,flags.contains(&"--confirm-native"),flags.contains(&"--allow-internet"))?;
+            println!("Owner isolation request {request} queued; inspect fleet status for its verified result");
+        },
         ["mesh", run] => return mesh_control::serve(&mesh_control::run_ledger(&root, run)?),
         ["runs"] => println!("{}", fleet_view::runs(&root)?),
         ["status", run] => println!("{}", fleet_view::status(&root, run)?),
+        ["alignment",run]=>println!("{}",doxa_tui::fleet_alignment::inspect(&root,run)?),
         ["debrief", run] => println!("{}", doxa_tui::fleet_debrief::read(&root, run)?),
         ["resume", run] => return fleet_control::resume(&root, run),
         ["continue", run, charter_hash] => println!("{}", fleet_control::continue_run(&root,run,charter_hash)?),

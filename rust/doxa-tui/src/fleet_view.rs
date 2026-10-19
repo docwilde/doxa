@@ -201,6 +201,8 @@ pub fn status(root: &Path, prefix: &str) -> io::Result<String> {
             }
         }
     }
+    if value["last_isolation_request"].is_object(){lines.push(format!("Last owner isolation request: {}",value["last_isolation_request"]));}
+    if value["isolation_change"].is_object(){lines.push(format!("Isolation transition: {}",value["isolation_change"]));}
     if let Some(slots) = value["slots"].as_array() {
         for slot in slots.iter().take(32) {
             let index = slot["index"].as_u64().map_or("?".into(), |n| n.to_string());
@@ -208,6 +210,7 @@ pub fn status(root: &Path, prefix: &str) -> io::Result<String> {
                 short(slot["role"].as_str().unwrap_or("worker")),
                 short(slot["phase"].as_str().unwrap_or("?")),
                 short(slot["session_id"].as_str().unwrap_or("?"))));
+            if let Some(profile)=slot["isolation"].as_str(){lines.push(format!("    isolation {} · direct task internet {}",short(profile),slot["task_internet"]));}
             if let Some(enabled) = slot["lore"].as_bool() { lines.push(format!("    memory {}", if enabled { "on" } else { "off" })); }
             if let Some(state)=slot["auto_test"]["state"].as_str() {
                 let mut line=format!("    host test {} · turn {}",short(state),slot["auto_test"]["turn_serial"].as_u64().unwrap_or(0));

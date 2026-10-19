@@ -1112,6 +1112,7 @@ impl App {
                             };
                         self.focus = Focus::Prompt;
                     }
+                    actions::Action::Command("/fleet start") => self.open_fleet_setup(),
                     actions::Action::Command(command) => {
                         // Argument-bearing operations prepare the user's prompt
                         // for editing; bare forms use the same local dispatcher.
@@ -1121,7 +1122,6 @@ impl App {
                                 | "/collection"
                                 | "/cd"
                                 | "/fleet"
-                                | "/fleet start"
                                 | "/fleet attach"
                                 | "/remote-connect"
                                 | "/remote-control"
