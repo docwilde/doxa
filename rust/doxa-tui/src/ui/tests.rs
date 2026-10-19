@@ -17,12 +17,14 @@ use super::*;
             assert_eq!(app.sessions[0].status, "Error");
             let (lines, _) = transcript_tools::render(&app.sessions[0].transcript, 28, None, None);
             assert!(lines.iter().any(|line| line.to_string() == " ! Error"));
-            assert!(lines.iter().filter(|line| !line.spans.is_empty())
-                .flat_map(|line| &line.spans).all(|span| span.style.fg == Some(theme::ERROR)));
+            assert!(lines.iter().all(|line| line.spans.iter()
+                .all(|span| line.style.patch(span.style).fg == Some(theme::ERROR))));
             assert!(lines.iter().all(|line| unicode_width::UnicodeWidthStr::width(line.to_string().as_str()) <= 28));
             assert!(!lines.iter().any(|line| line.to_string().contains('\u{1b}')));
             if data["error"].is_null() {
-                assert!(lines.iter().map(|line|line.to_string()).collect::<String>().contains("provider did not report"));
+                let body = lines.iter().map(|line| line.to_string()).collect::<Vec<_>>()
+                    .iter().map(|line| line.strip_prefix("│ ").unwrap_or(line)).collect::<Vec<_>>().join(" ");
+                assert!(body.contains("provider did not report"));
             }
         }
     }
