@@ -16,6 +16,10 @@ the stable 2.0 release has not been cut.
 
 - Render failed turns and compaction failures in a distinct red **Error** block. Keep diagnostics bounded and escaped; display a fallback when the provider supplies no reason.
 
+**Validation**
+
+- Allow **30 seconds** for the hardened executable-view test to hash its debug binary on slow runners. Retain its digest and syscall checks; production authority deadlines are unchanged.
+
 ## 2.0.0-beta.59 — 2026-10-19
 
 **Offline provider connectivity**
