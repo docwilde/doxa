@@ -3434,6 +3434,16 @@ impl App {
                                 }
                                 return true;
                             }
+                            Some(RailRow::FleetHeading(index)) => {
+                                if mouse.column <= rail.x + 3 {
+                                    self.collapse_fleet_group(*index);
+                                } else {
+                                    let group=self.fleet_rail.groups[*index].clone();
+                                    self.open_fleet(group.root,Some(group.id));
+                                }
+                                self.focus=Focus::Rail;
+                                return true;
+                            }
                             Some(RailRow::ProjectHeading(heading)) => {
                                 self.open_fleet_heading(heading);
                                 self.focus = Focus::Rail;

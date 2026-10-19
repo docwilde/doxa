@@ -463,6 +463,11 @@ use super::*;
         click(&mut app, prompt.x+2, prompt.y+1);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
         assert_eq!(app.input, "x"); assert_eq!(app.active_group, 2);
+        let neighbor_prompt=app.pane_regions(1, panes[1])[4];
+        click(&mut app, neighbor_prompt.x+2, neighbor_prompt.y+1);
+        assert_eq!(app.active_group,1); assert_eq!(app.layout(app.size).diff,Some(diff));
+        assert_eq!(app.diff_target.as_deref(),Some("c")); assert!(!app.poll_diff());
+        app.active_group=2;
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(!app.diff_pane); assert_eq!(app.layout(app.size).panes.unwrap(), before);
     }
@@ -497,6 +502,31 @@ use super::*;
         click(&mut app,rail.x+5,rail.y+1+row as u16);
         assert_eq!(app.active_group,0); assert_eq!(app.groups[0].active_id(),Some("d"));
         assert_eq!(app.groups[1].tabs,["c"]); assert_eq!(app.rail_order(),[0,1,3,2]);
+    }
+
+    #[test]
+    fn fleet_heading_supervisor_and_normal_tabs_have_distinct_icons_and_fallbacks() {
+        let mut app=App::default(); app.sidebar_auto=false; app.rail_visible=true; app.rail_width=48;
+        app.handle(Event::Resize(200,50));
+        for id in ["normal","tab","boss","worker"] {
+            app.sessions.push(Session {id:id.into(),title:id.into(),collection:"Project".into(),
+                transcript:String::new(),status:"Ready".into()});
+        }
+        app.groups[0].tabs=vec!["normal".into(),"tab".into()];
+        app.groups[1].tabs=vec!["boss".into(),"worker".into()];
+        app.show_fleet_sidebar_fixture("audit","boss",&["worker"]);
+        app.preferences.set_for_test("nerd_font","1");
+        let view=paint(&app);
+        for text in ["\u{f0e8} Fleet","\u{f508}","\u{f2d0}","└","normal","tab","boss","worker"] {assert!(view.contains(text),"missing {text}");}
+        app.preferences.set_for_test("nerd_font","0");
+        let view=paint(&app); for text in ["[F] Fleet","[S]","▣"] {assert!(view.contains(text));}
+        let rail=app.layout(app.size).rail.unwrap();
+        click(&mut app,rail.x+2,rail.y+1);
+        assert!(app.fleet_rail.groups[0].collapsed);
+        assert_eq!(app.rail_order(),[0,1]);
+        click(&mut app,rail.x+2,rail.y+1);
+        assert!(!app.fleet_rail.groups[0].collapsed);
+        assert_eq!(app.rail_order(),[2,3,0,1]);
     }
 
     #[test]

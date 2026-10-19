@@ -83,7 +83,8 @@ impl App {
                 .is_some_and(|id| *id == self.sessions[parent].id)).into_iter()
                 .flat_map(|group| group.tabs.iter().skip(1)).filter_map(|id|
                     self.sessions.iter().position(|session| session.id == *id)
-                        .filter(|index| !self.offline_ids.contains(id) && self.rail_session_visible(*index)))
+                        .filter(|index| !self.offline_ids.contains(id) && self.rail_session_visible(*index)
+                            && self.fleet_rail_prefix(id).is_empty()))
                 .collect()
         };
         let nested: HashSet<usize> = parents.iter().flat_map(|parent| children(*parent)).collect();
@@ -522,15 +523,24 @@ impl App {
     /// window. Keep the same vertical divider even in horizontally split trees.
     fn with_session_diff(&self, mut layout: PaneLayout) -> PaneLayout {
         if !self.diff_pane { return layout; }
+        let group = match self.diff_target.as_deref() {
+            Some(id) => match self.groups.iter().position(|group| group.active_id() == Some(id)) {
+                Some(group) => group, None => return layout,
+            },
+            None => self.active_group,
+        };
+        // When a small terminal collapses the tree, only the focused window
+        // is drawn. Never attach another session's diff to that fallback.
+        if layout.panes.is_none() && group != self.active_group { return layout; }
         let pane = layout.panes.as_ref()
-            .and_then(|panes| panes.get(self.active_group)).copied().unwrap_or(layout.body);
+            .and_then(|panes| panes.get(group)).copied().unwrap_or(layout.body);
         if pane.width < MIN_PANE_WIDTH * 2 || pane.height < MIN_PANE_HEIGHT {
             return layout;
         }
         let halves = Layout::default().direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)]).split(pane);
         if let Some(panes) = &mut layout.panes {
-            panes[self.active_group] = halves[0];
+            panes[group] = halves[0];
         } else {
             layout.body = halves[0];
         }

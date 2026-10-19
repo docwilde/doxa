@@ -2064,6 +2064,18 @@ impl App {
         let mut lines = Vec::new();
         for row in rows.iter().skip(start).take(visible) {
             match row {
+                RailRow::FleetHeading(index) => {
+                    let group=&self.fleet_rail.groups[*index];
+                    let caret=if group.collapsed {"▸"} else {"▾"};
+                    let icon=if self.preferences.on("nerd_font") {"\u{f0e8}"} else {"[F]"};
+                    let urgency=badge(&RailGroupKey::Fleet(group.root.clone(),group.id.clone()));
+                    let prefix=format!(" {caret} {icon} Fleet{} · ",
+                        if urgency.is_empty() {String::new()} else {format!(" {urgency}")});
+                    let label=clipped_title(&safe_label(&group.id),
+                        usize::from(area.width.saturating_sub(2)).saturating_sub(prefix.width())).0;
+                    lines.push(Line::styled(format!("{prefix}{label}"),
+                        Style::default().fg(theme::PEER).add_modifier(Modifier::BOLD)));
+                }
                 RailRow::Heading(index) => {
                     let item = &self.collections[*index];
                     let mark = if item.collapsed { "▸" } else { "▾" };
@@ -2127,8 +2139,9 @@ impl App {
                     let fleet_prefix = self.fleet_rail_prefix(&session.id);
                     let tab_prefix = if fleet_prefix.is_empty() {
                         self.groups.iter().find_map(|group| group.tabs.iter().position(|id| id == &session.id)
-                            .filter(|position| *position > 0).map(|position|
-                                if position + 1 == group.tabs.len() { "  └ " } else { "  ├ " })).unwrap_or("")
+                            .map(|position| if position == 0 {
+                                if self.preferences.on("nerd_font") { "\u{f2d0} " } else { "▣ " }
+                            } else if position + 1 == group.tabs.len() { "  └ " } else { "  ├ " })).unwrap_or("")
                     } else { "" };
                     let title_width = usize::from(area.width.saturating_sub(5)).saturating_sub(fleet_prefix.width())
                         .saturating_sub(tab_prefix.width())

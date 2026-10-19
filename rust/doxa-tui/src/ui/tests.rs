@@ -4874,7 +4874,8 @@ for line in sys.stdin:
         assert!(app.layout(app.size).panes.is_none());
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(app.diff_pane);
-        assert!(app.layout(app.size).panes.is_some());
+        assert!(app.layout(app.size).diff.is_some());
+        assert!(app.layout(app.size).panes.is_none());
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(!app.diff_pane);
         assert!(app.layout(app.size).panes.is_none());
@@ -5730,7 +5731,7 @@ for line in sys.stdin:
         assert_ne!(before, crate::ui_state::LayoutSignature::capture(&app));
         assert!(app.input.is_empty());
         assert_eq!(app.collections[0].sessions, ["two"]);
-        assert_eq!(app.rail_order(), [1, 0]);
+        assert_eq!(app.rail_order(), [0, 1]); // Tabs remain under their window's first tab.
         app.input = "/collection remove".into();
         assert!(app.submit_local_command());
         assert!(app.collections[0].sessions.is_empty());
@@ -6230,7 +6231,7 @@ for line in sys.stdin:
         app.apply_update(DaemonUpdate::Upsert(Session { id: "second".into(), title: "Second".into(),
             collection: "repo".into(), transcript: "hidden transcript".into(), status: "Ready".into() }));
         app.groups[1].tabs.push("second".into());
-        app.handle(Event::Resize(100, 28));
+        app.handle(Event::Resize(180, 28));
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(app.diff_pane);
         app.diff_text = "Base: HEAD\n@@ -1 +1 @@\n-old\n+new".into();
@@ -6382,7 +6383,7 @@ for line in sys.stdin:
         app.diff_snapshot = Some(diff_view::DiffSnapshot::test_patch(patch, dir.path().to_path_buf(),
             vec![1, 7], vec![4, 10]));
         app.diff_text = patch.into();
-        let pane = app.layout(app.size).panes.unwrap()[(app.active_group + 1) % 2];
+        let pane = app.layout(app.size).diff.unwrap();
         let pointer = |kind, row| Event::Mouse(MouseEvent { kind, column: pane.x + 5,
             row: pane.y + 1 + row, modifiers: KeyModifiers::NONE });
         app.handle(pointer(MouseEventKind::Moved, 6));

@@ -88,14 +88,17 @@ impl App {
     pub(super) fn fleet_rail_groups(&self, seen: &mut HashSet<usize>) -> Vec<(RailGroupKey,Vec<RailRow>,u8)> {
         let mut result=Vec::new();
         let indices=self.sessions.iter().enumerate().map(|(index,session)|(session.id.as_str(),index)).collect::<HashMap<_,_>>();
-        for group in &self.fleet_rail.groups {
+        for (fleet_index, group) in self.fleet_rail.groups.iter().enumerate() {
             let members=group.members.iter().filter_map(|id|indices.get(id.as_str()).copied())
                 .filter(|index|!self.offline_ids.contains(&self.sessions[*index].id) && self.rail_session_visible(*index) && !seen.contains(index)).collect::<Vec<_>>();
             if members.is_empty() {continue;}
             seen.extend(&members);
             let parent=group.supervisor.as_ref().and_then(|id|members.iter().find(|index|&self.sessions[**index].id==id)).copied();
-            let mut rows=match parent {Some(index)=>vec![RailRow::Session(index)],None=>vec![RailRow::ProjectHeading(group.heading())]};
-            if !group.collapsed {rows.extend(members.iter().copied().filter(|index|Some(*index)!=parent).map(RailRow::Session));}
+            let mut rows=vec![RailRow::FleetHeading(fleet_index)];
+            if !group.collapsed {
+                if let Some(parent)=parent { rows.push(RailRow::Session(parent)); }
+                rows.extend(members.iter().copied().filter(|index|Some(*index)!=parent).map(RailRow::Session));
+            }
             let rank=members.iter().map(|index|self.rail_urgency(*index)).max().unwrap_or(0);
             result.push((RailGroupKey::Fleet(group.root.clone(),group.id.clone()),rows,rank));
         }
@@ -103,9 +106,16 @@ impl App {
     }
     pub(super) fn fleet_rail_prefix(&self, id: &str) -> String {
         match self.fleet_rail.groups.iter().find(|group|group.members.iter().any(|member|member==id)) {
-            Some(group) if group.supervisor.as_deref()==Some(id)=>format!("{} ",if group.collapsed{"▸"}else{"▾"}),
-            Some(_)=>"  ↳ ".into(), None=>String::new(),
+            Some(group) if group.supervisor.as_deref()==Some(id)=>
+                if self.preferences.on("nerd_font") {"  \u{f508} ".into()} else {"  [S] ".into()},
+            Some(_)=>"    ↳ ".into(), None=>String::new(),
         }
+    }
+    pub(super) fn collapse_fleet_group(&mut self, index: usize) -> bool {
+        let Some(group)=self.fleet_rail.groups.get_mut(index) else {return false;};
+        group.collapsed=!group.collapsed;
+        self.rail_selected=self.rail_selected.min(self.rail_order().len().saturating_sub(1));
+        true
     }
     pub(super) fn collapse_fleet_parent(&mut self, id: &str, collapsed: Option<bool>) -> bool {
         let Some(group)=self.fleet_rail.groups.iter_mut().find(|group|group.supervisor.as_deref()==Some(id)) else{return false;};
@@ -131,8 +141,8 @@ mod tests {
         let mut wrong=manifest;wrong["slots"][0]["session_id"]=json!("worker");assert!(group(PathBuf::from("/private"),"run".into(),&wrong,&live).is_none());
         let mut app=App::default();app.sessions=vec![Session {id:"worker".into(),title:"worker".into(),collection:"repo".into(),transcript:String::new(),status:String::new()},Session {id:"boss".into(),title:"boss".into(),collection:"repo".into(),transcript:String::new(),status:String::new()}];
         app.fleet_rail.groups=vec![fleet];
-        assert_eq!(app.rail_order(),[1,0]);assert_eq!(app.fleet_rail_prefix("worker"),"  ↳ ");
-        assert!(app.collapse_fleet_parent("boss",Some(true)));assert_eq!(app.rail_order(),[1]);
+        assert_eq!(app.rail_order(),[1,0]);assert_eq!(app.fleet_rail_prefix("worker"),"    ↳ ");
+        assert!(app.collapse_fleet_parent("boss",Some(true)));assert!(app.rail_order().is_empty());
         assert!(app.collapse_fleet_parent("boss",Some(false)));assert_eq!(app.rail_order(),[1,0]);
     }
 }

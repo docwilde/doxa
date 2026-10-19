@@ -1479,6 +1479,7 @@ enum RailRow {
     Heading(usize),
     Session(usize),
     Pane { group: usize, active: usize },
+    FleetHeading(usize),
     ProjectHeading(String),
     PastHeading,
 }
