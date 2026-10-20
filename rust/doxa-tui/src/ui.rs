@@ -596,6 +596,7 @@ struct ChipInfo {
 
 fn chip_hint(kind: &str) -> &'static str {
     match kind {
+        "attachments" => "Attach images and UTF-8 files · Alt+A",
         "remote" => "Session is controlled through a private DOXA hub",
         "remote_engine" => "Engine reported by the remote session host",
         "remote_model" => "Model reported by the remote session host",

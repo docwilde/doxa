@@ -3797,6 +3797,7 @@ for line in sys.stdin:
             assert!(app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
                 column: inside, row: strip.y, modifiers: KeyModifiers::NONE })));
             match kind {
+                "attachments" => assert!(app.attachment_picker.is_some()),
                 "permission" => assert!(app.permission_picker.is_some()),
                 "engine" => assert!(app.engine_picker),
                 "model" => assert!(app.model_picker.is_some()),
