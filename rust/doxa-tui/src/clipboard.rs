@@ -1,5 +1,5 @@
 //! Clipboard actions only follow explicit keyboard input. No shell, auto-read or auto-submit.
-use std::{io::{self,Read,Write}, os::{fd::OwnedFd,unix::{net::UnixStream,process::CommandExt}}, path::Path,
+use std::{io::{self,Read,Write}, os::{fd::OwnedFd,unix::{net::UnixStream,process::CommandExt}}, path::{Path,PathBuf},
     process::{Command,Stdio},sync::{Arc,atomic::{AtomicBool,Ordering},mpsc},thread::JoinHandle,time::{Duration,Instant}};
 pub const LIMIT:usize=64*1024;
 pub fn osc52(text:&str)->Vec<u8> {
@@ -39,14 +39,18 @@ impl Drop for CopyJob {
 fn bounded_text(text:&str)->&str {
     let mut end=text.len().min(LIMIT);while !text.is_char_boundary(end){end-=1;} &text[..end]
 }
+// User-local helpers support desktop installs without a system package write.
+// Only these fixed basenames and directories are searched, never shell/PATH.
+fn helper_path(name:&str)->Option<PathBuf>{
+    let system=Path::new("/usr/bin").join(name);if system.is_file(){return Some(system);}
+    std::env::var_os("HOME").map(PathBuf::from).map(|home|home.join(".local/bin").join(name)).filter(|path|path.is_file())
+}
 fn writer_command()->io::Result<Command> {
-    let candidates:[(&str,&[&str]);3]=[("/usr/bin/wl-copy",&["--type","text/plain;charset=utf-8"]),("/usr/bin/xclip",&["-selection","clipboard","-in"]),("/usr/bin/pbcopy",&[])];
-    for(path,args)in candidates {
-        let usable=match path {"/usr/bin/wl-copy"=>std::env::var_os("WAYLAND_DISPLAY").is_some(),"/usr/bin/xclip"=>std::env::var_os("DISPLAY").is_some(),_=>cfg!(target_os="macos")};
-        if usable&&Path::new(path).is_file(){let mut command=Command::new(path);command.args(args);return Ok(command);}
-    }
+    let candidates:[(&str,&[&str],bool);3]=[("wl-copy",&["--type","text/plain;charset=utf-8"],std::env::var_os("WAYLAND_DISPLAY").is_some()),("xclip",&["-selection","clipboard","-in"],std::env::var_os("DISPLAY").is_some()),("pbcopy",&[],cfg!(target_os="macos"))];
+    for(name,args,usable)in candidates{if let Some(path)=usable.then(||helper_path(name)).flatten(){let mut command=Command::new(path);command.args(args);return Ok(command);}}
     Err(io::Error::new(io::ErrorKind::NotFound,"desktop clipboard helper unavailable"))
 }
+
 fn write_command(command:&mut Command,text:&str,cancel:&AtomicBool,timeout:Duration)->io::Result<()> {
     let(mut writer,reader)=UnixStream::pair()?;writer.set_nonblocking(true)?;
     let mut child=command.stdin(Stdio::from(OwnedFd::from(reader))).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn()?;
@@ -92,10 +96,11 @@ impl Job {
 }
 impl Drop for Job {fn drop(&mut self){self.cancel.store(true,Ordering::Release);if let Some(thread)=self.thread.take(){let _=thread.join();}}}
 fn reader_command()->io::Result<Command>{
-    let candidates:[(&str,&[&str]);3]=[("/usr/bin/wl-paste",&["--no-newline"]),("/usr/bin/xclip",&["-selection","clipboard","-o"]),("/usr/bin/pbpaste",&[])];
-    for(path,args)in candidates {let usable=match path {"/usr/bin/wl-paste"=>std::env::var_os("WAYLAND_DISPLAY").is_some(),"/usr/bin/xclip"=>std::env::var_os("DISPLAY").is_some(),_=>cfg!(target_os="macos")};if usable&&Path::new(path).is_file(){let mut command=Command::new(path);command.args(args);return Ok(command);}}
+    let candidates:[(&str,&[&str],bool);3]=[("wl-paste",&["--no-newline","--type","text"],std::env::var_os("WAYLAND_DISPLAY").is_some()),("xclip",&["-selection","clipboard","-o"],std::env::var_os("DISPLAY").is_some()),("pbpaste",&[],cfg!(target_os="macos"))];
+    for(name,args,usable)in candidates{if let Some(path)=usable.then(||helper_path(name)).flatten(){let mut command=Command::new(path);command.args(args);return Ok(command);}}
     Err(io::Error::new(io::ErrorKind::NotFound,"clipboard reader unavailable"))
 }
+
 fn read_command(command:&mut Command,cancel:&AtomicBool,timeout:Duration)->io::Result<String>{
     read_command_bytes(command,cancel,timeout,LIMIT).and_then(|bytes|String::from_utf8(bytes).map_err(|_|io::Error::new(io::ErrorKind::InvalidData,"clipboard is not text")))
 }
@@ -172,12 +177,14 @@ impl ImageJob {
 }
 impl Drop for ImageJob {fn drop(&mut self){self.cancel.store(true,Ordering::Release);if let Some(thread)=self.thread.take(){let _=thread.join();}}}
 fn read_image(cancel:&AtomicBool)->io::Result<Option<doxa_input::Attachment>>{
-    let (path,list,args):(&str,&[&str],&[&str])=if std::env::var_os("WAYLAND_DISPLAY").is_some()&&Path::new("/usr/bin/wl-paste").is_file(){
-        ("/usr/bin/wl-paste",&["--list-types"],&["--type","image/png"])
-    }else if std::env::var_os("DISPLAY").is_some()&&Path::new("/usr/bin/xclip").is_file(){
-        ("/usr/bin/xclip",&["-selection","clipboard","-target","TARGETS","-out"],&["-selection","clipboard","-target","image/png","-out"])
+    let wl=std::env::var_os("WAYLAND_DISPLAY").and_then(|_|helper_path("wl-paste"));
+    let x=std::env::var_os("DISPLAY").and_then(|_|helper_path("xclip"));
+    let (path,list,args):(PathBuf,&[&str],&[&str])=if let Some(path)=wl{
+        (path,&["--list-types"],&["--type","image/png"])
+    }else if let Some(path)=x{
+        (path,&["-selection","clipboard","-target","TARGETS","-out"],&["-selection","clipboard","-target","image/png","-out"])
     }else{return Ok(None);};
-    read_image_commands(path,list,args,cancel)
+    read_image_commands(path.to_str().ok_or_else(||io::Error::other("invalid helper path"))?,list,args,cancel)
 }
 fn read_image_commands(path:&str,list:&[&str],args:&[&str],cancel:&AtomicBool)->io::Result<Option<doxa_input::Attachment>>{
     let mut types=Command::new(path);types.args(list);

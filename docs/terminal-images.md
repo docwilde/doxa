@@ -113,13 +113,15 @@ including Docker sessions. Bounded socket chunks carry bytes without adding
 host mounts or enabling network access. GLM, DeepSeek, Router and legacy Codex
 exec accept text files and explicitly refuse image attachments. Provider/model
 errors remain possible if the selected model does not support images. DOXA's
-transcript records attachment labels; the provider keeps its own image history.
+transcript omits image pixels; the provider keeps its own image history. Text
+file contents follow the prompt's normal persistence and scrubbing.
 
 **Ctrl+V** checks for PNG clipboard content before falling back to text on
 Linux. It requires `wl-paste` (Wayland, package `wl-clipboard`) or `xclip`
 (X11). Install the appropriate desktop helper if missing. File attachment works
 without a clipboard helper. macOS currently uses file attachment for images;
-its existing `pbpaste` text path remains available. Credential editors only
+its existing `pbpaste` text path remains available. Fixed helper locations are
+`/usr/bin` and `~/.local/bin`; DOXA does not run a shell or search `PATH`. Credential editors only
 request text. Clipboard content is read only after an explicit paste action.
 Terminal **Ctrl+Shift+V** pastes text through bracketed paste; it does not carry
 image bytes. Copy selected transcript text with **Ctrl+C**; without a selection
