@@ -209,3 +209,8 @@ holdout evidence or real quality validation. Every returned confidence was
 worker success, comparative worker cost, real-task routing accuracy or broad
 latency guarantees. `real_quality_validated` remains `false`. Consented,
 independently labeled real tasks and bounded worker execution remain open.
+
+A [2026-10-20 follow-up](qa/jev-followup-2026-10-20.md) records six valid
+synthetic choices and one unknown-usage attempt, safe failure diagnostics,
+retained reservations and removal of the local throwaway credential. It adds
+no independently labelled real-task or worker-execution quality claim.
