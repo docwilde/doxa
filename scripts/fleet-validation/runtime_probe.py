@@ -76,10 +76,10 @@ def main():
         '--cwd', str(repo), '--root', str(root), '--run-id', 'probe', '--run-budget', '0.1', '--review-budget', '0.05',
         '--alignment-supervisor', 'codex:gpt-6-astra', '--supervision-mode', 'enforce', '--review-max-calls', '1',
         '--quiescence-timeout', '300', '--quiet-dwell', '60', '--approve', 'none']
-    report = {'mode': 'installed-runtime-only-no-inference', 'started_at': time.time(),
+    report = {'mode': 'installed-runtime-and-explicit-live-menu' if args.native_menu_live else 'installed-runtime-only-no-inference', 'started_at': time.time(),
         'binary': str(binary), 'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
         'image': IMAGE, 'docker_engine': ENGINE, 'owner_sessions_modified': False,
-        'workers_prompted': False, 'paid_calls': 0, 'observations': []}
+        'workers_prompted': None if args.native_menu_live else False, 'paid_calls': None if args.native_menu_live else 0, 'observations': []}
     def run(extra, timeout=30):
         result = subprocess.run(base+extra, env=env, cwd=repo, text=True, capture_output=True, timeout=timeout)
         return {'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}
