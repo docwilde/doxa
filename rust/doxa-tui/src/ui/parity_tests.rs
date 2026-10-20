@@ -521,6 +521,27 @@ use super::*;
         app.preferences.set_for_test("nerd_font","0");
         let view=paint(&app); for text in ["[F] Fleet","[S]","[T]","[W]"] {assert!(view.contains(text));}
         assert!(!view.chars().any(|ch| matches!(ch as u32,0xe000..=0xf8ff|0xf0000..=0xffffd|0x100000..=0x10fffd)));
+        for icons in [false,true] {
+            app.preferences.set_for_test("nerd_font",if icons {"on"} else {"off"});
+            for (id,indent,kind) in [("normal","",if icons {"\u{f2d0}"} else {"[T]"}),
+                ("boss","  ",if icons {"\u{f508}"} else {"[S]"}),
+                ("worker","    ",if icons {"↳"} else {"[W]"}),("tab",if icons {"  "} else {"    "},"└")] {
+                app.rail_selected=app.rail_order().iter().position(|index|app.sessions[*index].id==id).unwrap();
+                let view=paint(&app);
+                assert!(view.lines().any(|line|line.contains(&format!("│{indent}▸ {kind} {id}"))),"selection must precede type with nesting retained: {view}");
+            }
+            let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(app.size.width,app.size.height)).unwrap();
+            terminal.draw(|frame|app.draw(frame)).unwrap();
+            let rail=app.layout(app.size).rail.unwrap();
+            let rows=(rail.y+1..rail.bottom()-1).map(|y|
+                (rail.x+1..rail.right()-1).map(|x|terminal.backend().buffer()[(x,y)].symbol()).collect::<String>()).collect::<Vec<_>>();
+            let root_kind=if icons {"\u{f2d0}"} else {"[T]"};
+            let parent=rows.iter().find(|line|line.contains(&format!("{root_kind} normal"))).unwrap();
+            let child=rows.iter().find(|line|line.contains("└ tab")).unwrap();
+            let parent_column=unicode_width::UnicodeWidthStr::width(&parent[..parent.find("normal").unwrap()]);
+            let child_column=unicode_width::UnicodeWidthStr::width(&child[..child.find("tab").unwrap()]);
+            assert_eq!(child_column,parent_column+2,"child titles retain their nesting with both font modes");
+        }
         let rail=app.layout(app.size).rail.unwrap();
         click(&mut app,rail.x+2,rail.y+1);
         assert!(app.fleet_rail.groups[0].collapsed);

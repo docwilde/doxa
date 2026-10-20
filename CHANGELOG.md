@@ -5,6 +5,12 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.62 — 2026-10-20
+
+**Session sidebar**
+
+- Fix **`App::draw_rail`** to place selection/activity before the session type. Keep child-tab titles **2 columns** deeper in both font modes and preserve fleet-role indentation.
+
 ## 2.0.0-beta.61 — 2026-10-20
 
 **Terminal font compatibility**
