@@ -5,6 +5,28 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.64 — 2026-10-20
+
+**Fleet controls**
+
+- Fix **`resumed_session`** to retain verified registry scope after controller restart, preserving the identity check used by later isolation changes.
+- Add Router target pins and private config selection to **Start Fleet**. Allow exact independent reviewer models while retaining the complete launch review and offline role defaults.
+
+**Review and failure handling**
+
+- Disable unrequested DeepSeek/GLM thinking for the **512-token** JSON reviewer contract. Retain closed failure categories and unknown spending reservations without retry.
+- Distinguish vendor request, output and tool limits in error cards and Router receipts. Refuse invalid peer arguments without running a handler or granting approval.
+
+**Mermaid rendering**
+
+- Retain negotiated terminal protocols and measured cell pixels. Keep readable source beneath the overview; use halfblocks when forced graphics lack verified pixel dimensions.
+- Add explicit offline provisioning for the pinned local renderer and browser. Linux VTE and Kitty checks use fixed flowchart, sequence, class and Gantt fixtures.
+
+**Evaluation and guides**
+
+- Add a single-use **12-case / $0.10** production-review challenge and blind human-review packets with source/card hashes. Synthetic references never pass the human holdout gate.
+- Refresh native capability, attachment, fleet, networking and parity guides; keep historical evidence and remaining platform limits explicit.
+
 ## 2.0.0-beta.63 — 2026-10-20
 
 **Prompt attachments**
