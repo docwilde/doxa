@@ -1,14 +1,22 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
-Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.70**, with canonical **LORE 0.62.11**. Account checks
-are bounded by their exact candidate and date.
-Beta.9 upgrades the canonical native core to **LORE 0.62.17** and verifies
-large scrub frames; the dated provider checks below retain their original scope.
-The Rust runtime implements the audited workflows below. Live account checks
-remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
-and the [remaining verification](#remaining-verification) section; implementation
-coverage alone does not establish authenticated compatibility for every provider.
+Baseline: Python `v1.19.0` production behavior. Current implementation was
+rechecked against **2.0.0-beta.63** on **2026-10-20**, with canonical
+**LORE 0.62.24**. The alpha completion table and authenticated provider results
+below are historical records, bounded by their exact candidate and date.
+Implementation coverage does not establish authenticated compatibility for every
+provider or platform; see [remaining verification](#remaining-verification).
+
+## Current beta.63 additions
+
+| Area | Current behavior and remaining boundary |
+| --- | --- |
+| Prompt files and clipboard | Attach chip/menu or Alt+A adds images and UTF-8 text to the owning pane/session draft. Linux Ctrl+V reads PNG or text through an explicit helper; Ctrl+C copies selected text with OSC52 fallback. Direct Claude/Codex receive image blocks, including Docker. PDF, Router/vendor images, macOS clipboard images and remote-hub attachments remain unsupported. [Formats and limits](terminal-images.md#prompt-attachments). |
+| Session windows and fonts | Diff opens as a vertical split within its session window. Other tabs stack indented below the first tab. Selection precedes the normal-tab/fleet/supervisor/worker marker. Nerd Font Auto uses icons only for recognized direct Kitty/WezTerm clients; other terminals receive portable labels. [Workspace guide](../rust/README.md#use-the-workspace). |
+| Fleet access and review | Start Fleet/N launches a reviewed form; live workers attach from the sidebar and M browses Messages & alignment. Workers/coordinator default independently to offline Docker; internet and native access require explicit role confirmations. Idle migration rebinds the verified daemon and holds supervised continuation for the owner. [Fleet access](fleet-access.md). |
+| Offline provider connectivity | Claude/Codex and Router CLI workers use a session-bound fixed-provider HTTPS gateway while Docker stays networkless. Web tools remain disabled; approved online coordinators handle worker research requests. Provider-host access does not isolate credentials or inspect encrypted paths. [Boundary](session-isolation.md#provider-connectivity). |
+| Router | Reviewed child/fleet allowances, history recovery and Docker migration are implemented. External CLI handoffs, CLI managed summaries and measured real-task routing quality remain open. [Current contract](jev-router.md). |
+| Mermaid | Opt-in local TUI previews and a pinned real Mermaid CLI sandbox suite exist. Terminal-protocol QA and renderer provisioning are tracked separately in the [Mermaid plan](plans/mermaid.md). |
 
 ## Implemented workflows
 
@@ -94,8 +102,9 @@ remains unsupported.
 
 - Standalone local Markdown images now render in the Rust transcript with
   bounded previews and alt-text fallback; see [terminal images](terminal-images.md).
-  Provider binary attachments remain open. Mermaid has opt-in local preview
-  support, with real CLI and terminal validation still open.
+  Prompt image attachments are a separate supported input path for direct
+  Claude/Codex sessions; the limits are listed above. Mermaid has opt-in local
+  previews and a passed pinned real CLI suite; see its plan for terminal QA.
   Missing historical provider data cannot be reconstructed from a newer runtime.
 - Only verified owned session, transcript, worktree and ledger identities authorize
   resume or mutation. Unknown legacy ownership stays protected. Deleted work
@@ -137,7 +146,9 @@ keyboard submission, never from slash dispatch, provider output or a peer messag
 
 `/mesh [RUN|stop]` owns a browser graph for this window; `/peers` opens the native
 map. `/fleet status`, `stop`, `detach`, `attach INDEX` and `mesh` operate on the
-current owned/viewed run. Start/resume requires the complete plan review.
+current owned/viewed run. The **Start Fleet** palette action or **N** in the
+Fleet browser opens the launch form; **M** on a selected run shows retained
+messages and classifications. Start/resume requires the complete plan review.
 
 `/update --restart` saves the tabset and finalizes only this window's verified idle
 sessions before reopening the upgraded frontend. A busy, changed or unsaved target
@@ -172,10 +183,10 @@ All 17 ClaudeHost fixtures passed. A
 verified actual five-hour and weekly percentages/reset times with native CLI
 provenance and no additional tools.
 
-Alpha.50 supplied the [current event-loop benchmark](rust-ui-benchmark-2026-09-30.md)
+Alpha.50 supplied the [dated event-loop benchmark](rust-ui-benchmark-2026-09-30.md)
 measurements; the [alpha.31 baseline](rust-ui-benchmark-2026-09-27.md) remains
-available. The [gallery](rust-gallery.md) records nine **alpha.68** live terminal
-captures, including grouped sessions and the memory browsers.
+available. The [gallery](rust-gallery.md) distinguishes current terminal fixture
+captures from the nine historical **alpha.68** authenticated live captures.
 
 See the [source audit](source-audit-2026-09-27.md) for confirmed follow-up fixes,
 engineering debt and validation limits.

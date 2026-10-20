@@ -10,8 +10,9 @@ This document was last read against Python **1.9.3** end to end. Later Python
 release notes and design references remain historical; they do not describe
 Rust runtime guarantees.
 
-For the latest live provider checks and their remaining limits, see the
-[2026-09-29 native verification record](live-provider-verification-2026-09-29.md).
+For dated native provider checks and their remaining limits, see the
+[2026-10-04 verification record](live-provider-verification-2026-10-04.md) and
+[current capability tracker](rust-1.19-parity.md).
 For the current Rust app, start with the [Rust guide](../rust/README.md), [engine capabilities](engine-capabilities.md), and [gallery](rust-gallery.md).
 
 ## Contents
@@ -1908,7 +1909,9 @@ says `(set by env — editing here would be shadowed; unset DOXA_X to use
 the config file)`. A save against a config file that exists but will not
 parse is refused rather than clobbering it.
 
-Settings → Appearance → **nerd font** offers **Auto** (default), **On** and **Off**.
+**Native Rust compatibility note (beta.61 onward):** Settings → Appearance →
+**nerd font** offers **Auto** (default), **On** and **Off**. See the
+[current workspace guide](../rust/README.md#use-the-workspace).
 Auto selects icons for direct Kitty and WezTerm terminals, which bundle Nerd Font
 symbols. Mint/VTE, unknown terminals, SSH and multiplexers use plain labels:
 `[T]` normal tab, `[F]` fleet, `[S]` supervisor and `[W]` worker; Git branches use
@@ -1991,7 +1994,7 @@ because home directories can be network-mounted (Unix sockets misbehave
 there). The LORE store is neither — it stays `lore_core`'s own path,
 shared with the Claude Code LORE plugin on purpose.
 
-### Evaluating pending coding skills
+### Native Rust pending-skill evaluation (beta.56 onward)
 
 The LORE proposal review includes advisory skill-evaluation evidence when
 provided by the native carrier. Changed proposal or installed baseline bytes
@@ -2010,6 +2013,6 @@ for the corpus format, immutable evidence, answer/growth checks and limits.
 The included deterministic fixture validates the mechanism; a real task
 corpus and model adapter are needed to measure skill quality.
 
-Prompt files and image clipboard input: use the **Attach** chip, **Attach files**
+**Native Rust prompt files (beta.63 onward):** use the **Attach** chip, **Attach files**
 in the command menu, or **Alt+A**. Review/remove files before Enter submits.
 [Formats, limits, clipboard helpers and provider coverage](terminal-images.md#prompt-attachments).

@@ -302,7 +302,7 @@ native LORE carrier test cover review and source integrity. These checks are
 separate from the six-call synthetic Jev transport smoke below. No authenticated
 paid summary or real-task summary quality result is recorded.
 
-## Resume and first-slice limits
+## Resume and remaining limits
 
 ```sh
 doxa new --engine router --router-config /home/you/.doxa/router-candidates.json --resume FULL_SESSION_ID --isolation native
