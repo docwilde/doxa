@@ -12,8 +12,10 @@ them from a network service.
 `image_mode` in Settings chooses `halfblock` (the default, portable Unicode
 cells), `probe` (detect Kitty, Sixel or iTerm2 graphics), a forced protocol
 (`kgp`, `sixel`, `iterm2`), or `text`. A forced protocol needs a terminal
-that implements it. `probe` asks the terminal for capabilities after entering
-the alternate screen and can pause briefly. Text mode shows the alt label.
+that implements it and reported pixel-cell dimensions; if those dimensions
+are unavailable, DOXA uses halfblocks and shows a pixel-size-unknown notice.
+`probe` negotiates capabilities and cell size after entering the alternate
+screen and can pause briefly. Text mode shows the alt label.
 
 The TUI reserves four transcript rows per preview, with at most 32 previews
 and 128 reserved image rows per transcript render. Later image tokens show
@@ -70,8 +72,11 @@ end.
 and flowchart, sequence, class and Gantt suite. All four also rendered in an
 actual GTK/VTE terminal with the portable halfblock backend. The four-row
 overview is coarse; use the accompanying source for labels and edges.
-Kitty, Sixel and iTerm2 terminal quality remains unverified; macOS keeps source
-visible because the current renderer requires Linux bubblewrap.
+The same four fixtures also passed actual Kitty 0.45.0 graphics display in
+both `kgp` and `probe` modes. Kitty preserves more detail, but four-row
+sequence/class labels remain small; the source stays available. Sixel and
+iTerm2 display remain unverified. macOS keeps source visible because the
+current renderer requires Linux bubblewrap.
 
 Run `doxa doctor` to check a configured renderer. It validates the executable
 and canonical package root against the same path policy as the TUI, including

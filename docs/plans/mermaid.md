@@ -1,6 +1,6 @@
 # Mermaid in the Rust transcript
 
-Status: **local preview, sandbox doctor, Settings preflight, bounded PNG cache and explicit offline setup implemented; pinned real CLI suite and actual VTE halfblock rendering passed on Linux**.
+Status: **local preview, sandbox doctor, Settings preflight, bounded PNG cache and explicit offline setup implemented; pinned real CLI suite, VTE halfblocks and actual Kitty graphics passed on Linux**.
 
 The native Ratatui transcript recognizes complete, standalone `mermaid` code
 fences. Without explicit configuration, it renders the source fence exactly as
@@ -44,9 +44,19 @@ DejaVu Sans Mono. Each produced halfblock cells; visual inspection confirmed
 the readable source remains beneath the coarse overview. Source-only mode and
 a narrower terminal are included in the local acceptance record.
 
-- Kitty, Sixel and iTerm2 quality still needs those real emulators; none is
-  installed on the validation host. PNG decoding and VTE halfblocks cannot
-  establish those protocol results.
+A follow-up used authenticated Ubuntu Kitty 0.45.0 packages extracted only to
+private task storage (9.9 MB download; no system installation). All four
+families rendered in both actual KGP and `probe` modes under private Xvfb with
+software Mesa. The trial caught and fixed two production bugs: a mode fallback
+overrode successful negotiation, and forced graphics assumed 8×16 pixel cells.
+Probed capabilities now survive; forced modes use actual terminal pixel
+metadata or explicitly fall back to halfblocks when it is unknown. Real Kitty
+replies reported 16×32 cells, and fixed renders used 128 pixels across four
+rows instead of 64. Eight final screenshots were visually inspected; simple
+flowchart labels are readable, while dense sequence/class labels remain small.
+
+- Sixel and iTerm2 quality still needs their actual supported emulators. PNG
+  decoding, VTE halfblocks and Kitty graphics cannot establish those results.
 - macOS stays source-only. The production boundary requires Linux bubblewrap;
   a separate macOS isolation design and host validation remain open.
 

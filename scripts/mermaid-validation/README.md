@@ -69,7 +69,10 @@ DOXA_MERMAID_RENDERER_ROOT="$root" DOXA_IMAGE_MODE=halfblock \
 ```
 
 Repeat with `sequence`, `class`, or `gantt`. Ctrl+C closes the fixture.
-`DOXA_IMAGE_MODE=text` checks source-only behavior. These commands do not start
+`DOXA_IMAGE_MODE=text` checks source-only behavior. On a real Kitty terminal,
+repeat with `DOXA_IMAGE_MODE=probe` or `kgp` to exercise pixel graphics. Forced
+graphics uses reported terminal pixel dimensions; when they are unknown it
+shows a notice and falls back to halfblocks. These commands do not start
 a provider session or use the clipboard. `TMPDIR` must remain private.
 
 ## Host validation, 2026-10-09
@@ -101,8 +104,27 @@ the four-row limit: eight vertical color samples cannot preserve small diagram
 labels. DOXA now retains the original, copyable source beneath each overview.
 This is a portable overview, not a full-size diagram viewer.
 
-Kitty, Sixel and iTerm2 display quality remains untested: none of those real
-emulators is available on this host. macOS rendering remains disabled because
+An additional actual Kitty **0.45.0** trial used authenticated Ubuntu
+`0.45.0-1build1` packages, downloaded with apt and SHA-256 checked against its
+package index. Kitty, shell integration and terminfo totalled **9,901,364 bytes**
+of downloads and **34 MiB** privately extracted. All native/Python dependencies
+were already installed; no package was installed system-wide. Private Xvfb
+and software Mesa **26.0.8 / OpenGL 4.5** supplied the actual emulator display.
+
+The trial exposed two production defects: successful `probe` negotiation was
+subsequently overridden with halfblocks, and forced graphics used fixed 8×16
+cell dimensions. Both were fixed. A transparent private PTY recording captured
+real Kitty `OK`, device attributes, 16×32 cell-size and status responses with
+timestamps. Direct production-App trials then rendered all four families in
+both `kgp` and `probe`: **eight final native captures**, with real KGP image
+transmissions and zero halfblock cells. The four-row flowchart changed from
+224×64 to 448×128 pixels; visual inspection confirmed Start/Ready?/Done labels.
+Sequence and class labels remain small within four rows, so source retention
+is still needed. Owner image-mode settings and the Mint/VTE fallback did not
+change.
+
+Sixel and iTerm2 display quality remains untested: no corresponding supported
+emulator is available on this host. macOS rendering remains disabled because
 the production isolation boundary requires Linux bubblewrap; macOS needs a
 separately reviewed implementation. No protocol or macOS result is inferred
-from PNG decoding or from the VTE trial. No Mermaid CLI was installed globally.
+from PNG decoding, the VTE trial or Kitty graphics. No Mermaid CLI was installed globally.
