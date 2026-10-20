@@ -1859,7 +1859,7 @@ index e4a0481..d622696 100644
      shutdown(&sess).await;
  }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index a541c55..74ac389 100644
+index a541c55..693eb9d 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -2932,6 +2932,11 @@ impl Session {
@@ -1941,7 +1941,26 @@ index a541c55..74ac389 100644
                  let (permissions, scope) = match decision {
                      ReviewDecision::Approved
                      | ReviewDecision::ApprovedExecpolicyAmendment { .. }
-@@ -3180,6 +3211,15 @@ impl Session {
+@@ -3167,11 +3198,13 @@ impl Session {
+                     response,
+                     &context,
+                 );
+-                self.record_granted_request_permissions_for_turn(
+-                    &response,
+-                    &environment.selection.environment_id,
+-                    turn_context,
+-                );
++                let response = self
++                    .finalize_request_permissions_for_turn(
++                        response,
++                        &environment.selection.environment_id,
++                        turn_context,
++                    )
++                    .await;
+                 return Some(response);
+             }
+         }
+@@ -3180,6 +3213,15 @@ impl Session {
          let (tx_response, rx_response) = oneshot::channel();
          let prev_entry = {
              let mut active = self.active_turn.lock().await;
@@ -1957,7 +1976,7 @@ index a541c55..74ac389 100644
              match active.as_mut() {
                  Some(at) => {
                      let mut ts = at.turn_state.lock().await;
-@@ -3324,6 +3364,15 @@ impl Session {
+@@ -3324,6 +3366,15 @@ impl Session {
          };
          match entry {
              Some(entry) => {
@@ -1973,15 +1992,62 @@ index a541c55..74ac389 100644
                  let sandbox_context = entry
                      .environment
                      .sandbox_context(/*additional_permissions*/ None);
-@@ -3380,7 +3429,7 @@ impl Session {
+@@ -3332,11 +3383,13 @@ impl Session {
+                     response,
+                     &sandbox_context.policy_context(),
+                 );
+-                self.record_granted_request_permissions_for_turn(
+-                    &response,
+-                    &entry.environment.selection.environment_id,
+-                    &entry.turn_context,
+-                );
++                let response = self
++                    .finalize_request_permissions_for_turn(
++                        response,
++                        &entry.environment.selection.environment_id,
++                        &entry.turn_context,
++                    )
++                    .await;
+                 entry.tx_response.send(response).ok();
+             }
+             None => {
+@@ -3374,14 +3427,24 @@ impl Session {
+         }
+     }
+ 
+-    fn record_granted_request_permissions_for_turn(
++    async fn finalize_request_permissions_for_turn(
+         &self,
+-        response: &RequestPermissionsResponse,
++        response: RequestPermissionsResponse,
          environment_id: &str,
          turn_context: &TurnContext,
-     ) {
--        if response.permissions.is_empty() {
-+        if turn_context.doxa_switched_to_auto() || response.permissions.is_empty() {
-             return;
+-    ) {
++    ) -> RequestPermissionsResponse {
++        // A grant is committed at the same serialized boundary as live-auto
++        // publication. Return the sanitized response to every caller as well.
++        let _active = self.active_turn.lock().await;
++        if turn_context.doxa_switched_to_auto() {
++            return RequestPermissionsResponse {
++                permissions: RequestPermissionProfile::default(),
++                scope: PermissionGrantScope::Turn,
++                strict_auto_review: false,
++            };
++        }
+         if response.permissions.is_empty() {
+-            return;
++            return response;
          }
          match response.scope {
+             PermissionGrantScope::Turn => {
+@@ -3399,6 +3462,7 @@ impl Session {
+                 );
+             }
+         }
++        response
+     }
+ 
+     pub(crate) async fn active_turn_context_and_strict_auto_review(
 diff --git a/codex-rs/core/src/session/step_activation.rs b/codex-rs/core/src/session/step_activation.rs
 index c7a5de0..2e2ce58 100644
 --- a/codex-rs/core/src/session/step_activation.rs
@@ -2074,7 +2140,7 @@ index c7a5de0..2e2ce58 100644
  
          // Recheck the latest rules before applying the update.
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index f57dec6..9d407d1 100644
+index f57dec6..7d7fc43 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
 @@ -403,6 +403,13 @@ struct ActivationFixture {
@@ -2112,7 +2178,7 @@ index f57dec6..9d407d1 100644
      let prepared = session
          .new_turn_with_default_settings("step-activation-turn".to_string(), Default::default())
          .await;
-@@ -453,6 +467,265 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
+@@ -453,6 +467,315 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
      }
  }
  
@@ -2372,6 +2438,56 @@ index f57dec6..9d407d1 100644
 +    .unwrap()
 +    .unwrap();
 +    assert!(next.permissions.is_empty());
++    session.abort_all_tasks(TurnAbortReason::Replaced).await;
++}
++
++#[tokio::test]
++async fn doxa_auto_serializes_final_grants_and_sanitizes_stale_guardian_responses() {
++    use codex_protocol::models::NetworkPermissions;
++    use codex_protocol::request_permissions::{
++        PermissionGrantScope, RequestPermissionProfile, RequestPermissionsResponse,
++    };
++    let ActivationFixture { session, turn, .. } =
++        activation_fixture_with_model_switching(activation_models(), false).await;
++    let environment = turn.initial_environments.primary().unwrap().selection();
++    let permissions = RequestPermissionProfile {
++        network: Some(NetworkPermissions {
++            enabled: Some(true),
++        }),
++        ..Default::default()
++    };
++    let active = session.active_turn.lock().await;
++    let finalization = session.finalize_request_permissions_for_turn(
++        RequestPermissionsResponse {
++            permissions,
++            scope: PermissionGrantScope::Session,
++            strict_auto_review: false,
++        },
++        &environment.environment_id,
++        &turn,
++    );
++    tokio::pin!(finalization);
++    // Finalization cannot inspect/commit a grant while publication owns its
++    // lock. This is an already-reviewed Guardian-style response, not a prompt.
++    assert!(futures::poll!(&mut finalization).is_pending());
++    assert!(
++        turn.granted_permissions(&environment.environment_id)
++            .is_none()
++    );
++    // Publish at apply_turn_settings' exact locked ArcSwap boundary. The test
++    // isolates this race; managed admission is exercised by the other tests.
++    let mut auto = (*turn.next_step_settings.load_full()).clone();
++    auto.doxa_auto_override = true;
++    turn.next_step_settings.store(Arc::new(auto));
++    drop(active);
++    let response = timeout(Duration::from_secs(2), finalization).await.unwrap();
++    assert!(response.permissions.is_empty());
++    assert_eq!(response.scope, PermissionGrantScope::Turn);
++    assert!(!response.strict_auto_review);
++    assert!(
++        turn.granted_permissions(&environment.environment_id)
++            .is_none()
++    );
 +    session.abort_all_tasks(TurnAbortReason::Replaced).await;
 +}
 +
