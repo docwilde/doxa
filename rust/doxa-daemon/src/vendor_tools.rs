@@ -492,7 +492,11 @@ mod peer_tests {
         let mut gate = NativeVendorGate::new(dir.path(), false, Some(handler), desk.clone(), &scrub, &emit, Arc::new(Mutex::new(Vec::new())));
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let bad = peer_call(doxa_engines::peer_tools::LIST, json!({"method":"stop"}));
-        assert!(runtime.block_on(gate.execute(&bad)).is_err()); assert!(displayed.borrow().is_empty());
+        let refused=runtime.block_on(gate.execute(&bad)).unwrap();
+        assert!(refused["error"].as_str().unwrap().contains("Invalid peer tool arguments"));
+        assert_eq!(calls.load(Ordering::SeqCst),0);
+        assert!(!displayed.borrow().iter().any(|event|event["type"]=="needs_input"));
+        assert!(displayed.borrow().iter().any(|event|event["data"]["failure_category"]=="peer_arguments_invalid"));
         let call = peer_call(doxa_engines::peer_tools::LIST, json!({}));
         let execution = gate.execute(&call); let id = displayed.borrow().iter().find(|event| event["type"] == "needs_input").unwrap()["data"]["id"].as_str().unwrap().to_owned();
         desk.answer(&id, &json!({"decision":"deny"})).unwrap();
