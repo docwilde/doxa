@@ -114,7 +114,9 @@ host mounts or enabling network access. GLM, DeepSeek, Router and legacy Codex
 exec accept text files and explicitly refuse image attachments. Provider/model
 errors remain possible if the selected model does not support images. DOXA's
 transcript omits image pixels; the provider keeps its own image history. Text
-file contents follow the prompt's normal persistence and scrubbing.
+file contents follow the prompt's normal persistence and scrubbing. Live prompt
+cards show file labels; questions over 8 KiB show an explicit excerpt. The
+provider and stored transcript retain the full input.
 
 **Ctrl+V** checks for PNG clipboard content before falling back to text on
 Linux. It requires `wl-paste` (Wayland, package `wl-clipboard`) or `xclip`

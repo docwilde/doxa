@@ -158,7 +158,7 @@ pub struct Session {
     pub doxa_version: String,
 }
 
-struct Prompt { images: Vec<Attachment>, text: String, public_text: String, queue_id: String, peer_origin: Option<PeerTurnOrigin> }
+struct Prompt { display_text: Option<String>, images: Vec<Attachment>, text: String, public_text: String, queue_id: String, peer_origin: Option<PeerTurnOrigin> }
 
 fn queue_preview(text: &str) -> String { text.chars().take(QUEUE_PREVIEW_CHARS).collect() }
 
@@ -346,7 +346,7 @@ impl DaemonHandle {
             let queue_id = format!("q{}", state.next_queue_id);
             state.next_queue_id += 1;
             let position = state.prompts.len() + 1;
-            state.prompts.push_back(Prompt { images:Vec::new(), text, public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: Some(origin.clone()) });
+            state.prompts.push_back(Prompt { display_text:None, images:Vec::new(), text, public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: Some(origin.clone()) });
             drop(state);
             self.inner.publish(None, json!({"type":"prompt_queued","data":{
                 "id":queue_id,"text":display,"position":position,
@@ -427,11 +427,19 @@ impl Inner {
     }
 
     fn start_turn(self: &Arc<Self>, text: String, turn: String, peer_origin: Option<PeerTurnOrigin>) {
-        self.start_turn_images(text, turn, peer_origin, Vec::new());
+        self.start_turn_images(text, turn, peer_origin, Vec::new(), None);
     }
-    fn start_turn_images(self: &Arc<Self>, text: String, turn: String, peer_origin: Option<PeerTurnOrigin>, images: Vec<Attachment>) {
+    fn start_turn_images(self: &Arc<Self>, text: String, turn: String, peer_origin: Option<PeerTurnOrigin>, images: Vec<Attachment>, display_text: Option<String>) {
         let inner = self.clone();
         thread::spawn(move || {
+            // Refresh the display scrub at execution, just like queued prompt
+            // previews. Keep file contents in provider input and persistence;
+            // only bounded owner text and labels belong in live event frames.
+            let display = display_text.as_deref().map(|text|
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(||inner.host.public_prompt(text)))
+                    .ok().and_then(Result::ok));
+            let display_failed=matches!(display,Some(None));
+            let display=display.flatten();
             // The terminal event is an idle/readiness boundary for clients.
             // Keep it until the host returns and the admission state advances;
             // otherwise a client can see turn_done and immediately have its
@@ -444,7 +452,9 @@ impl Inner {
                 if matches!(event["type"].as_str(), Some("peer_message" | "peer_sent")) { return; }
                 let is_turn_boundary = matches!(event["type"].as_str(), Some("turn_started" | "turn_refused"));
                 if !event["data"].is_object() { event["data"] = json!({}); }
+                let started=event["type"]=="turn_started";
                 if let Some(data) = event.get_mut("data").and_then(Value::as_object_mut) {
+                    if started {if let Some(display)=&display{data.insert("prompt".into(),json!(display));}}
                     // These fields are reserved for host admission. Clear any
                     // provider or middleware values on every frame, then add
                     // them only to the turn boundary events that display them.
@@ -467,8 +477,10 @@ impl Inner {
                     inner.publish(Some(&turn), event);
                 }
             };
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-                inner.host.prompt_with_images(&text, &images, peer_origin.as_ref(), &mut emit)));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if display_failed{emit(json!({"type":"turn_refused","data":{"reason":"scrub","message":"Attachment prompt could not be scrubbed"}}));}
+                else{inner.host.prompt_with_images(&text, &images, peer_origin.as_ref(), &mut emit);}
+            }));
             let terminal = terminal.unwrap_or_else(|| if result.is_err() {
                 json!({"type":"turn_done", "data":{"is_error":true,"error":"host panicked"}})
             } else { json!({"type":"turn_done", "data":{}}) });
@@ -490,13 +502,13 @@ impl Inner {
             };
             if let Some((prompt, turn)) = next {
                 let display = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-                    inner.host.public_prompt(&prompt.text)
+                    inner.host.public_prompt(prompt.display_text.as_deref().unwrap_or(&prompt.text))
                 )).ok().and_then(Result::ok)
                     .unwrap_or_else(|| "[redacted: prompt unavailable]".to_owned());
                 inner.publish(None, json!({"type":"prompt_dequeued","data":{"id":prompt.queue_id,"text":display,
                     "peer_started":prompt.peer_origin.is_some(),"peer_origin":prompt.peer_origin.as_ref().map(PeerTurnOrigin::display_label),
                     "peer_origin_data":prompt.peer_origin.as_ref().map(PeerTurnOrigin::to_value)}}));
-                inner.start_turn_images(prompt.text, turn, prompt.peer_origin, prompt.images);
+                inner.start_turn_images(prompt.text, turn, prompt.peer_origin, prompt.images, prompt.display_text);
             }
         });
     }
@@ -667,8 +679,9 @@ fn handle_prompt_attachments(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame
     if text.trim().is_empty() && attachments.is_empty() {
         send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"empty prompt"})); return false;
     }
+    let display_text=(!attachments.is_empty()).then(||doxa_input::display_text(text,&attachments));
     let display = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-        inner.host.public_prompt(&doxa_input::display_text(text,&attachments))
+        inner.host.public_prompt(display_text.as_deref().unwrap_or(text))
     )) {
         Ok(Ok(display)) => display,
         _ => {
@@ -700,7 +713,7 @@ fn handle_prompt_attachments(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame
         state.next_queue_id += 1;
         let position = state.prompts.len() + 1;
         if !send(tx, json!({"type":"reply","id":req_id,"ok":true,"queued":true,"position":position,"queue_id":queue_id})) { return false; }
-        state.prompts.push_back(Prompt { images, text: text.to_owned(), public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: None });
+        state.prompts.push_back(Prompt { display_text, images, text: text.to_owned(), public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: None });
         drop(state);
         // The reply acknowledges admission; the event also lets the origin
         // display the queued prompt alongside every other attached client.
@@ -712,7 +725,7 @@ fn handle_prompt_attachments(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame
         state.busy = true;
         state.next_turn_id += 1;
         drop(state);
-        inner.start_turn_images(text.to_owned(), turn, None, images);
+        inner.start_turn_images(text.to_owned(), turn, None, images, display_text);
     }
     true
 }
@@ -992,7 +1005,7 @@ mod tests {
         {
             let mut state = daemon.inner.state.lock().unwrap();
             state.busy = false;
-            state.prompts.push_back(Prompt { images: Vec::new(), text: "queued".into(), public_text: "queued".into(),
+            state.prompts.push_back(Prompt { display_text:None, images: Vec::new(), text: "queued".into(), public_text: "queued".into(),
                 queue_id: "q1".into(), peer_origin: None });
         }
         handle_call(&daemon.inner, &tx, &call);

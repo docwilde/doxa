@@ -98,7 +98,12 @@ pub fn prompt_text(text:&str,values:&[Attachment])->String {
     }result
 }
 pub fn display_text(text:&str,values:&[Attachment])->String {
-    let mut result=text.to_owned();for value in values {result.push_str(&format!("\n[Attachment: {} · {} bytes]",value.name,value.bytes.len()));}result
+    // At most 48 KiB even for JSON-escaped controls, leaving room in the v1
+    // frame for labels and provenance. Provider input is never clipped here.
+    let mut end=text.len().min(8*1024);while !text.is_char_boundary(end){end-=1;}
+    let mut result=text[..end].to_owned();
+    if end<text.len(){result.push_str("\n[Prompt excerpt; full input retained in transcript]");}
+    for value in values {result.push_str(&format!("\n[Attachment: {} · {} bytes]",value.name,value.bytes.len()));}result
 }
 
 #[cfg(test)]mod tests {
