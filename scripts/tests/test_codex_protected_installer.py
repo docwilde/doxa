@@ -13,6 +13,9 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location("protected_installer", Path(__file__).resolve().parents[1] / "install_codex_protected.py")
 installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)
+update_spec = importlib.util.spec_from_file_location("protected_update_fixture", Path(__file__).resolve().parents[1] / "codex-update/update.py")
+updater = importlib.util.module_from_spec(update_spec)
+update_spec.loader.exec_module(updater)
 
 
 class InstallerTests(unittest.TestCase):
@@ -182,6 +185,82 @@ sys.stdin.read()
         with self.assertRaisesRegex(ValueError, "artifact differs"):
             self.install()
         self.assertEqual(pointer.resolve(), old)
+
+    def test_two_release_rotations_upgrade_and_rollback_an_older_reviewed_installation(self):
+        self.install()
+        old = self.destination
+        old_bytes = {file.name:file.read_bytes() for file in old.iterdir()}
+        old_receipt = json.loads((old/'receipt.json').read_text())
+        fixture = self.root/'future-source'
+        source = fixture/'scripts/install_codex_protected.py'
+        source.parent.mkdir(parents=True)
+        source.write_text(Path(installer.__file__).read_text())
+        files = {
+            'rust/doxa-tui/Cargo.toml':'[package]\nname = "doxa-tui"\nversion = "2.0.0-beta.65"\n',
+            'Cargo.lock':'version = 4\n\n[[package]]\nname = "doxa-tui"\nversion = "2.0.0-beta.65"\n',
+            'CHANGELOG.md':'# Changelog\n\n## 2.0.0-beta.65 — 2026-10-21\n\nSynthetic fixture.\n',
+        }
+        for name, raw in files.items():
+            path=fixture/name; path.parent.mkdir(parents=True,exist_ok=True); path.write_text(raw)
+        pin = dict(version=installer.SOURCE_TAG.removeprefix('rust-v'),tag=installer.SOURCE_TAG,
+                   source_commit=installer.SOURCE,patch_sha256=installer.PATCH_SHA256,provider=installer.PROVIDER)
+        for version, digit in [('0.164.0','a'),('0.165.0','b')]:
+            carried = ('synthetic reviewed protection '+version+'\n').encode()
+            new = dict(pin,version=version,tag='rust-v'+version,source_commit=digit*40,
+                       patch_sha256=hashlib.sha256(carried).hexdigest(),provider='codex-'+version+'-precompact-v1')
+            revised,_,_=updater.replacement_files(fixture,pin,new,carried,'2026-10-21')
+            for name,raw in revised.items():
+                path=fixture/name; path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(raw)
+            pin=new
+        future_spec=importlib.util.spec_from_file_location('twice_rotated_installer',source)
+        future=importlib.util.module_from_spec(future_spec); future_spec.loader.exec_module(future)
+        self.assertEqual('codex-0.164.0-precompact-v1',future.PREVIOUS_PROVIDER)
+        self.assertEqual(installer.PROVIDER,future.receipt_provider(old_receipt))
+        self.assertIn((installer.SOURCE,installer.PATCH_SHA256,installer.PROVIDER),future.REVIEWED_INSTALLATIONS)
+        self.assertTrue(future.artifact_name(old.name))
+        self.assertFalse(future.artifact_name('codex-99.0.0-precompact-v1-'+'0'*64))
+        future.verify_installed(old,old_receipt)
+        self.assertEqual(old,future.active_installation(self.root/'providers'))
+        for change in ({'source_commit':'0'*40},{'patch_sha256':'0'*64},
+                       {'patch_sha256':installer.LEGACY_PATCH_SHA256},{'source_commit':[]}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                future.verify_installed(old,dict(old_receipt,**change))
+
+        self.binary.write_text(self.binary.read_text().replace(installer.AGENT_PREFIX,future.AGENT_PREFIX))
+        identity=dict(source_commit=future.SOURCE,patch_sha256=future.PATCH_SHA256,profile='dev-small',toolchain='1.95.0')
+        helper=dict(identity,product='codex-code-mode-host',v8_inputs={'synthetic':'reviewed'})
+        for name,data in [('build.json',dict(identity,binary_sha256=future.digest(self.binary))),
+                          ('code-mode-host-build.json',dict(helper,binary_sha256=future.digest(self.helper)))]:
+            path=self.root/name; path.write_text(json.dumps(data)); path.chmod(0o600)
+        verified=future.verified_artifacts(self.root,self.binary,self.helper,helper)
+        self.assertEqual(future.digest(future.PATCH),verified['patch_sha256'])
+        self.assertEqual(future.SOURCE,verified['source_commit'])
+        rollback=self.root/'skipped-release-rollback.json'
+        installed=future.install(self.binary,self.root/'providers',Path('/usr/bin/true'),self.launcher,
+                                 self.helper,helper,verified,rollback_receipt=rollback)
+        pointer=self.root/'providers/codex-current'
+        self.assertEqual(installed.parent,pointer.resolve())
+        self.assertEqual(old_bytes,{file.name:file.read_bytes() for file in old.iterdir()})
+        future.rollback_publication(rollback)
+        self.assertEqual(old,pointer.resolve())
+        self.assertEqual(old_bytes,{file.name:file.read_bytes() for file in old.iterdir()})
+
+        rollback2=self.root/'corrupt-old-rollback.json'
+        future.install(self.binary,self.root/'providers',Path('/usr/bin/true'),self.launcher,
+                       self.helper,helper,verified,rollback_receipt=rollback2)
+        (old/'codex-code-mode-host-payload').write_bytes(b'corrupt older reviewed helper')
+        with self.assertRaisesRegex(ValueError,'artifact differs'):
+            future.rollback_publication(rollback2)
+        self.assertEqual(installed.parent,pointer.resolve())
+
+    def test_reviewed_registry_is_bounded_and_rejects_malformed_or_ambiguous_identities(self):
+        for history in ([('a'*40,'b'*64,'codex-0.162.0-precompact-v1')],
+                        (('a'*40,'bad','codex-0.162.0-precompact-v1'),),
+                        ((installer.SOURCE,installer.PATCH_SHA256,'codex-99.0.0-precompact-v1'),),
+                        tuple(('a'*40,f'{i:064x}','codex-0.162.0-precompact-v1') for i in range(257))):
+            with self.subTest(history_length=len(history)), patch.object(installer,'REVIEWED_INSTALLATIONS',history):
+                with self.assertRaises(ValueError):
+                    installer.reviewed_installations()
 
     def test_cargo_mode_is_accepted_only_for_verified_build_outputs(self):
         identity = {"source_commit": installer.SOURCE, "patch_sha256": installer.PATCH_SHA256,

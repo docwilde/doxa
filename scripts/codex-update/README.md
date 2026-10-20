@@ -28,8 +28,15 @@ Release candidates, nightly tags and SDK/helper releases are ineligible.
 Explicit source commit, patch digest, protection contract and provider ID are
 written together to `scripts/codex-protected/pin.json` in each release PR.
 Current reviewed values come from installer/engine literals; there is no
-floating upstream binary or silently trusted cached checkout. Previous artifact
-receipt pins rotate exactly one generation for activation and rollback.
+floating upstream binary or silently trusted cached checkout. Before rotating
+the previous-release aliases, each update retains exact reviewed
+source/patch/provider triples in the installer's bounded migration registry.
+Users can skip releases and still upgrade or roll back a verified older
+installation. The 256-entry history refuses growth when full instead of
+silently dropping trust; explicit maintenance is then required. Artifact bytes,
+complete helper provenance and immutable receipt names are still verified.
+This migration registry does not broaden the native launcher's current-only
+payload acceptance.
 
 ## Gates and publication
 

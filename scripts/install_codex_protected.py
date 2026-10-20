@@ -29,6 +29,13 @@ LEGACY_PATCH_SHA256 = "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a
 PREVIOUS_SOURCE = "b412ff32c417f855c2b2d1581b77058eed87c84b"
 PREVIOUS_PROVIDER = "codex-0.156.1-precompact-v1"
 PREVIOUS_PATCHES = {"23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d", LEGACY_PATCH_SHA256}
+# Installer migration/rollback trust only. The native launcher stays current-only.
+# Never infer identities from an active receipt or discard older reviewed entries.
+MAX_REVIEWED_INSTALLATIONS = 256
+REVIEWED_INSTALLATIONS = (
+    ("b412ff32c417f855c2b2d1581b77058eed87c84b", "23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d", "codex-0.156.1-precompact-v1"),
+    ("b412ff32c417f855c2b2d1581b77058eed87c84b", "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b", "codex-0.156.1-precompact-v1"),
+)
 AGENT_PREFIX = "doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; "
 
 
@@ -311,10 +318,9 @@ def verified_artifacts(cache, binary, code_mode_host, helper_identity):
 def verify_installed(destination, previous):
     """Never repair or replace an installation whose own receipt does not match."""
     expected = {"contract": CONTRACT, "profile": "dev-small", "toolchain": "1.95.0"}
-    reviewed = ((previous.get("source_commit") == SOURCE and previous.get("patch_sha256") == PATCH_SHA256)
-                or (previous.get("source_commit") == PREVIOUS_SOURCE and previous.get("patch_sha256") in PREVIOUS_PATCHES))
-    if any(previous.get(key) != value for key, value in expected.items()) or not reviewed:
+    if any(previous.get(key) != value for key, value in expected.items()):
         raise ValueError("installed provider provenance differs from reviewed source")
+    receipt_provider(previous)
     helper_keys = ("code_mode_host_sha256", "code_mode_host_source_commit", "code_mode_host_dispatcher_sha256")
     if any(key in previous for key in helper_keys) and not all(key in previous for key in helper_keys):
         raise ValueError("partial code-mode helper provenance differs from installed receipt")
@@ -332,17 +338,37 @@ def verify_installed(destination, previous):
             raise ValueError("installed provider artifact differs from its receipt; publication refused")
 
 
+def reviewed_installations():
+    if not isinstance(REVIEWED_INSTALLATIONS, tuple) or len(REVIEWED_INSTALLATIONS) > MAX_REVIEWED_INSTALLATIONS:
+        raise ValueError("reviewed installation registry exceeded its bound")
+    identities = {}
+    for identity in ((SOURCE, PATCH_SHA256, PROVIDER), *REVIEWED_INSTALLATIONS):
+        if (not isinstance(identity, tuple) or len(identity) != 3
+                or not all(isinstance(value, str) for value in identity)
+                or not re.fullmatch(r"[0-9a-f]{40}", identity[0])
+                or not re.fullmatch(r"[0-9a-f]{64}", identity[1])
+                or not re.fullmatch(r"codex-(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-precompact-v1", identity[2])):
+            raise ValueError("reviewed installation registry has an invalid identity")
+        key = identity[:2]
+        if key in identities and identities[key] != identity[2]:
+            raise ValueError("reviewed installation registry has conflicting providers")
+        identities[key] = identity[2]
+    return identities
+
+
 def receipt_provider(receipt):
-    if receipt.get("source_commit") == SOURCE and receipt.get("patch_sha256") == PATCH_SHA256:
-        return PROVIDER
-    if receipt.get("source_commit") == PREVIOUS_SOURCE and receipt.get("patch_sha256") in PREVIOUS_PATCHES:
-        return PREVIOUS_PROVIDER
+    key = (receipt.get("source_commit"), receipt.get("patch_sha256"))
+    if not all(isinstance(value, str) for value in key):
+        raise ValueError("provider receipt has no reviewed release identity")
+    provider = reviewed_installations().get(key)
+    if provider is not None:
+        return provider
     raise ValueError("provider receipt has no reviewed release identity")
 
 
 def artifact_name(value):
     return isinstance(value, str) and any(re.fullmatch(re.escape(prefix) + r"-[0-9a-f]{64}", value)
-        for prefix in (PROVIDER, PREVIOUS_PROVIDER))
+        for prefix in set(reviewed_installations().values()))
 
 
 def active_installation(root):
@@ -361,7 +387,7 @@ def active_installation(root):
         return destination
     if active.exists():
         raise ValueError("active provider pointer must be a symlink")
-    for provider in (PROVIDER, PREVIOUS_PROVIDER):
+    for provider in dict.fromkeys(reviewed_installations().values()):
         legacy = root / provider
         if legacy.exists():
             private_directory(legacy)
@@ -402,7 +428,7 @@ def rollback_publication(path):
             or not isinstance(receipt["root"], str) or not Path(receipt["root"]).is_absolute()
             or not artifact(receipt["new_target"]) or not identity(receipt["new_identity"])
             or (receipt["old_target"] is not None and not artifact(receipt["old_target"]))
-            or (receipt["old_artifact"] is not None and receipt["old_artifact"] not in (PROVIDER, PREVIOUS_PROVIDER) and not artifact(receipt["old_artifact"]))
+            or (receipt["old_artifact"] is not None and receipt["old_artifact"] not in reviewed_installations().values() and not artifact(receipt["old_artifact"]))
             or (receipt["old_identity"] is not None and not identity(receipt["old_identity"]))
             or ((receipt["old_target"] is None) != (receipt["old_identity"] is None))
             or (receipt["old_target"] is not None and receipt["old_target"] != receipt["old_artifact"])):

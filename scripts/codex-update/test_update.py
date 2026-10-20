@@ -183,7 +183,7 @@ class UpdateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             files={
-                'scripts/install_codex_protected.py': 'SOURCE = "'+('a'*40)+'"\nPREVIOUS_SOURCE = "'+('b'*40)+'"\nPREVIOUS_PROVIDER = "codex-0.162.0-precompact-v1"\nPREVIOUS_PATCHES = {"'+('c'*64)+'"}\n',
+                'scripts/install_codex_protected.py': 'SOURCE = "'+('a'*40)+'"\nPREVIOUS_SOURCE = "'+('b'*40)+'"\nPREVIOUS_PROVIDER = "codex-0.162.0-precompact-v1"\nPREVIOUS_PATCHES = {"'+('c'*64)+'"}\nMAX_REVIEWED_INSTALLATIONS = 256\nREVIEWED_INSTALLATIONS = ()\n',
                 'rust/doxa-tui/Cargo.toml': '[package]\nname = "doxa-tui"\nversion = "2.0.0-beta.64"\n',
                 'rust/doxa-tui/src/launch.rs': 'legacy = "codex-0.163.0-precompact-v1";\n',
                 'scripts/codex-update/test_update.py': 'synthetic_version = "0.163.0"\n',
@@ -201,21 +201,36 @@ class UpdateTests(unittest.TestCase):
             installer=revised['scripts/install_codex_protected.py'].decode()
             self.assertIn("PREVIOUS_SOURCE = '"+'a'*40+"'",installer)
             self.assertIn("PREVIOUS_PROVIDER = 'codex-0.163.0-precompact-v1'",installer)
+            self.assertIn(repr(('b'*40,'c'*64,'codex-0.162.0-precompact-v1')),installer)
+            self.assertIn(repr(('a'*40,'d'*64,'codex-0.163.0-precompact-v1')),installer)
             self.assertIn('e'*40,installer)
             self.assertNotIn('rust/doxa-tui/src/launch.rs',revised)
             self.assertNotIn('scripts/codex-update/test_update.py',revised)
             self.assertIn(b'2.0.0-beta.65',revised['Cargo.lock'])
             self.assertTrue(notes.startswith('## 2.0.0-beta.65 — 2026-10-20\n'))
 
+    def test_installer_history_never_drops_entries_at_capacity_or_accepts_conflicting_triples(self):
+        old={'source_commit':'a'*40,'patch_sha256':'b'*64,'provider':'codex-0.163.0-precompact-v1'}
+        prefix=('MAX_REVIEWED_INSTALLATIONS = 256\nPREVIOUS_SOURCE = "'+'c'*40+'"\n'
+                'PREVIOUS_PROVIDER = "codex-0.162.0-precompact-v1"\nPREVIOUS_PATCHES = {"'+'d'*64+'"}\n')
+        history=tuple((f'{i:040x}',f'{i:064x}','codex-0.161.0-precompact-v1') for i in range(256))
+        with self.assertRaisesRegex(ValueError,'full'):
+            update.retained_installations((prefix+'REVIEWED_INSTALLATIONS = '+repr(history)).encode(),old)
+        conflict=((old['source_commit'],old['patch_sha256'],'codex-0.160.0-precompact-v1'),)
+        with self.assertRaisesRegex(ValueError,'conflicting'):
+            update.retained_installations((prefix+'REVIEWED_INSTALLATIONS = '+repr(conflict)).encode(),old)
+
     def test_scoped_pin_rewrite_preserves_prefix_and_historical_markers(self):
         old={'version':'0.163.0','tag':'rust-v0.163.0','provider':'codex-0.163.0-precompact-v1','source_commit':'a'*40,'patch_sha256':'b'*64}
-        new=dict(old,version='0.164.0',tag='rust-v0.164.0',provider='codex-0.164.0-precompact-v1')
+        new=dict(old,version='0.164.0',tag='rust-v0.164.0',provider='codex-0.164.0-precompact-v1',patch_sha256='c'*64)
         raw=(b'SOURCE_TAG = "rust-v0.163.0"\n'
+             b'PATCH_SHA256 = "'+b'b'*64+b'"\n'
              b'AGENT_PREFIX = "doxa_codex_rs/0.163.01 (prefix fixture)"\n'
              b'HISTORICAL_RELEASE = "0.163.0"\n'
              b'# SOURCE_TAG = "rust-v0.163.0" historical observation\n')
         revised=update.rewrite_pins('scripts/install_codex_protected.py',raw,old,new)
         self.assertIn(b'SOURCE_TAG = "rust-v0.164.0"',revised)
+        self.assertIn(b'PATCH_SHA256 = "'+b'c'*64+b'"',revised)
         self.assertIn(b'doxa_codex_rs/0.163.01',revised)
         self.assertIn(b'HISTORICAL_RELEASE = "0.163.0"',revised)
         self.assertIn(b'# SOURCE_TAG = "rust-v0.163.0" historical observation',revised)

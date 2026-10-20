@@ -63,7 +63,7 @@ def rewrite_pins(name, raw, old, new):
         stripped = line.lstrip()
         allowed = False
         if not stripped.startswith(("#", "//", "/*", "*")):
-            assignment = re.match(r"([A-Z_]+)\s*=", stripped)
+            assignment = re.match(r"([A-Z_][A-Z_0-9]*)\s*=", stripped)
             allowed = bool(assignment and assignment[1] in PYTHON_PINS.get(name, set()))
             allowed |= any(marker in line for marker in OTHER_PINS.get(name, ()))
         if allowed:
@@ -310,6 +310,56 @@ def sensitive_changes(status_lines):
     return sorted(set(sensitive))
 
 
+def retained_installations(raw, old):
+    """Carry trusted-base migration identities; never read an installed receipt."""
+    fields = {}
+    for node in ast.parse(raw).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            fields[node.targets[0].id] = node.value
+    if ast.literal_eval(fields["MAX_REVIEWED_INSTALLATIONS"]) != 256:
+        raise ValueError("reviewed installer history bound requires maintenance")
+    history = ast.literal_eval(fields["REVIEWED_INSTALLATIONS"])
+    if not isinstance(history, tuple) or len(history) > 256:
+        raise ValueError("reviewed installer history exceeded its bound")
+    prior_source = ast.literal_eval(fields["PREVIOUS_SOURCE"])
+    prior_provider = ast.literal_eval(fields["PREVIOUS_PROVIDER"])
+    patches = fields["PREVIOUS_PATCHES"]
+    if not isinstance(patches, ast.Set):
+        raise ValueError("reviewed previous patch inventory changed shape")
+    prior_patches = []
+    for item in patches.elts:
+        if isinstance(item, ast.Name) and item.id == "LEGACY_PATCH_SHA256":
+            item = fields[item.id]
+        prior_patches.append(ast.literal_eval(item))
+    entries = (*history, (old["source_commit"], old["patch_sha256"], old["provider"]),
+               *((prior_source, patch, prior_provider) for patch in prior_patches))
+    retained = {}
+    for identity in entries:
+        if (not isinstance(identity, tuple) or len(identity) != 3
+                or not all(isinstance(value, str) for value in identity)
+                or not SHA.fullmatch(identity[0]) or not re.fullmatch(r"[0-9a-f]{64}", identity[1])
+                or not re.fullmatch(r"codex-(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-precompact-v1", identity[2])):
+            raise ValueError("reviewed installer history has an invalid identity")
+        if identity[:2] in retained and retained[identity[:2]] != identity[2]:
+            raise ValueError("reviewed installer history has conflicting providers")
+        retained[identity[:2]] = identity[2]
+    if len(retained) > 256:
+        raise ValueError("reviewed installer history is full; explicit migration review required")
+    return tuple(sorted((*key, value) for key, value in retained.items()))
+
+
+def replace_installation_registry(installer, identities):
+    nodes = [node for node in ast.parse(installer).body if isinstance(node, ast.Assign)
+             and any(isinstance(target, ast.Name) and target.id == "REVIEWED_INSTALLATIONS" for target in node.targets)]
+    if len(nodes) != 1:
+        raise ValueError("reviewed installation registry assignment changed shape")
+    node = nodes[0]
+    lines = installer.splitlines(keepends=True)
+    replacement = "REVIEWED_INSTALLATIONS = (\n" + "".join("    " + repr(row) + ",\n" for row in identities) + ")\n"
+    lines[node.lineno-1:node.end_lineno] = [replacement]
+    return "".join(lines)
+
+
 def replacement_files(root, old, new, patch, release_date=None):
     """Reconstruct the bounded publication from the trusted base, not an artifact."""
     result = {}
@@ -321,9 +371,10 @@ def replacement_files(root, old, new, patch, release_date=None):
         if revised != raw:
             result[name] = revised
     installer_path = "scripts/install_codex_protected.py"
+    retained = retained_installations(read(root / installer_path), old)
     installer = result.get(installer_path, read(root / installer_path)).decode()
-    # Cross-version receipt trust rotates one explicitly reviewed generation.
-    # Never replace historical migration IDs by a blanket version substitution.
+    # Preserve every explicitly reviewed migration identity before rotating the
+    # convenient previous-release aliases. Old installations may skip releases.
     previous = {"PREVIOUS_SOURCE": repr(old["source_commit"]),
                 "PREVIOUS_PROVIDER": repr(old["provider"]),
                 "PREVIOUS_PATCHES": repr({old["patch_sha256"]})}
@@ -331,6 +382,7 @@ def replacement_files(root, old, new, patch, release_date=None):
         installer, count = re.subn(r"(?m)^" + name + r" = [^\n]+$", name + " = " + value, installer)
         if count != 1:
             raise ValueError("reviewed cross-version receipt rotation is unavailable: " + name)
+    installer = replace_installation_registry(installer, retained)
     result[installer_path] = installer.encode()
     result["scripts/codex-protected/precompact.patch"] = patch
     result[PIN] = encode(new)
