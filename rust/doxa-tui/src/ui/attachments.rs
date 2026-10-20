@@ -21,7 +21,7 @@ impl App {
         let Some(rect)=Self::attachment_rect(self.size)else{return true;};
         if mouse.kind!=MouseEventKind::Down(MouseButton::Left)||!rect.contains(ratatui::layout::Position::new(mouse.column,mouse.row)){return true;}
         let x=mouse.column.saturating_sub(rect.x+1);let y=mouse.row.saturating_sub(rect.y+1);
-        if y==rect.height.saturating_sub(4){
+        if rect.height>=13&&y==rect.height.saturating_sub(4){
             if x<7{self.attachment_picker.as_mut().unwrap().list=false;return self.attachment_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));}
             if x<18{self.attachment_picker.as_mut().unwrap().list=true;return self.attachment_key(KeyEvent::new(KeyCode::Delete,KeyModifiers::NONE));}
             self.attachment_picker=None;return true;
@@ -133,5 +133,16 @@ impl App {
         let WorkerCommand::PromptAttachments(id,text,attachments)=rx.recv().unwrap()else{panic!("image bytes lost")};let expected=attachments[0].bytes.clone();
         app.apply_worker_frame(WorkerFrame::AttachmentFailed{session_id:id,text,attachments,message:"disconnected".into(),delivery:PromptDelivery::Uncertain});assert!(app.notice.contains("unconfirmed"));assert!(app.pending_prompts.is_empty());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Up,KeyModifiers::ALT)));assert_eq!(app.input,"look");assert_eq!(app.prompt_attachments[&(0,"a".into())][0].bytes,expected);assert!(app.pending_prompts.is_empty());
+    }
+}
+
+#[cfg(test)]mod offline_tests {
+    use super::*;
+    use crossterm::event::Event;
+    #[test]fn archive_resume_does_not_drop_pending_attachment_content(){
+        let mut app=App::default();app.groups[0].tabs=vec!["saved".into()];app.offline_ids.insert("saved".into());app.input="look".into();app.input_cursor=4;
+        app.prompt_attachments.insert((0,"saved".into()),vec![Attachment::from_source("source.txt",b"text".to_vec()).unwrap()]);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)));
+        assert_eq!(app.input,"look");assert_eq!(app.prompt_attachments[&(0,"saved".into())].len(),1);assert!(app.pending_launches.is_empty());assert!(app.pending_prompts.is_empty());
     }
 }

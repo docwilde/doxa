@@ -1403,6 +1403,7 @@ impl App {
             }
             KeyCode::Enter if self.focus == Focus::Prompt => {
                 if !self.input.is_empty() || self.prompt_attachments.get(&self.prompt_owner()).is_some_and(|v|!v.is_empty()) {
+                    if self.groups[self.active_group].active_id().is_some_and(|id|self.offline_ids.contains(id))&&self.prompt_attachments.get(&self.prompt_owner()).is_some_and(|v|!v.is_empty()) {self.notice="Resume the session before sending attachments · draft retained".into();return true;}
                     if self.attachment_file_job.is_some()||self.clipboard_image_job.is_some(){self.notice="Wait for attachment loading to finish".into();return true;}
                     if self.input.starts_with(['/', '!'])&&self.prompt_attachments.get(&self.prompt_owner()).is_some_and(|v|!v.is_empty()){self.notice="Remove attachments before running a command".into();return true;}
                     if self.input.contains('\n')
