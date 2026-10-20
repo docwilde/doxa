@@ -1859,7 +1859,7 @@ index e4a0481..d622696 100644
      shutdown(&sess).await;
  }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index a541c55..6f31f40 100644
+index a541c55..74ac389 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -2932,6 +2932,11 @@ impl Session {
@@ -1941,7 +1941,23 @@ index a541c55..6f31f40 100644
                  let (permissions, scope) = match decision {
                      ReviewDecision::Approved
                      | ReviewDecision::ApprovedExecpolicyAmendment { .. }
-@@ -3324,6 +3355,15 @@ impl Session {
+@@ -3180,6 +3211,15 @@ impl Session {
+         let (tx_response, rx_response) = oneshot::channel();
+         let prev_entry = {
+             let mut active = self.active_turn.lock().await;
++            // Serialize with live-auto publication. An in-flight permission
++            // request must not create a new prompt after the policy tightened.
++            if turn_context.doxa_switched_to_auto() {
++                return Some(RequestPermissionsResponse {
++                    permissions: RequestPermissionProfile::default(),
++                    scope: PermissionGrantScope::Turn,
++                    strict_auto_review: false,
++                });
++            }
+             match active.as_mut() {
+                 Some(at) => {
+                     let mut ts = at.turn_state.lock().await;
+@@ -3324,6 +3364,15 @@ impl Session {
          };
          match entry {
              Some(entry) => {
@@ -1957,7 +1973,7 @@ index a541c55..6f31f40 100644
                  let sandbox_context = entry
                      .environment
                      .sandbox_context(/*additional_permissions*/ None);
-@@ -3380,7 +3420,7 @@ impl Session {
+@@ -3380,7 +3429,7 @@ impl Session {
          environment_id: &str,
          turn_context: &TurnContext,
      ) {
@@ -2058,7 +2074,7 @@ index c7a5de0..2e2ce58 100644
  
          // Recheck the latest rules before applying the update.
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index f57dec6..d3a01f1 100644
+index f57dec6..9d407d1 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
 @@ -403,6 +403,13 @@ struct ActivationFixture {
@@ -2096,7 +2112,7 @@ index f57dec6..d3a01f1 100644
      let prepared = session
          .new_turn_with_default_settings("step-activation-turn".to_string(), Default::default())
          .await;
-@@ -453,6 +467,243 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
+@@ -453,6 +467,265 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
      }
  }
  
@@ -2264,9 +2280,9 @@ index f57dec6..d3a01f1 100644
 +#[tokio::test]
 +async fn doxa_auto_refuses_pending_and_new_permission_grants() {
 +    use codex_protocol::models::NetworkPermissions;
-+    use codex_protocol::request_permissions::RequestPermissionProfile;
 +    use codex_protocol::request_permissions::{
-+        PermissionGrantScope, RequestPermissionsArgs, RequestPermissionsResponse,
++        PermissionGrantScope, RequestPermissionProfile, RequestPermissionsArgs,
++        RequestPermissionsResponse,
 +    };
 +    let ActivationFixture { session, turn, .. } =
 +        activation_fixture_with_model_switching(activation_models(), false).await;
@@ -2279,27 +2295,34 @@ index f57dec6..d3a01f1 100644
 +        .turn_environments()
 +        .next()
 +        .unwrap()
-+        .selection();
++        .clone();
 +    let permissions = RequestPermissionProfile {
 +        network: Some(NetworkPermissions {
 +            enabled: Some(true),
 +        }),
 +        ..Default::default()
 +    };
-+    let args = RequestPermissionsArgs {
-+        environment_id: None,
-+        reason: Some("synthetic network request".into()),
-+        permissions: permissions.clone(),
-+    };
-+    let pending = session.request_permissions_for_environment(
-+        &step,
-+        "doxa-pending-permission".into(),
-+        args.clone(),
-+        environment.clone(),
-+        CancellationToken::new(),
-+    );
-+    tokio::pin!(pending);
-+    assert!(futures::poll!(&mut pending).is_pending());
++    // Bind the already-pending callback directly. First polling an async
++    // request does not prove its earlier preparation has finished registering.
++    let (tx_response, rx_response) = oneshot::channel();
++    {
++        let active = session.active_turn.lock().await;
++        active
++            .as_ref()
++            .unwrap()
++            .turn_state
++            .lock()
++            .await
++            .insert_pending_request_permissions(
++                "doxa-pending-permission".into(),
++                crate::state::PendingRequestPermissions {
++                    tx_response,
++                    requested_permissions: permissions.clone(),
++                    environment: environment.clone(),
++                    turn_context: Arc::clone(&turn),
++                },
++            );
++    }
 +    assert_eq!(
 +        session
 +            .apply_turn_settings(
@@ -2316,23 +2339,38 @@ index f57dec6..d3a01f1 100644
 +        .notify_request_permissions_response(
 +            "doxa-pending-permission",
 +            RequestPermissionsResponse {
-+                permissions,
++                permissions: permissions.clone(),
 +                scope: PermissionGrantScope::Session,
 +                strict_auto_review: false,
 +            },
 +        )
 +        .await;
-+    assert!(pending.await.unwrap().permissions.is_empty());
-+    let next = session
-+        .request_permissions_for_environment(
++    let response = timeout(Duration::from_secs(2), rx_response)
++        .await
++        .unwrap()
++        .unwrap();
++    assert!(response.permissions.is_empty());
++    assert!(
++        turn.granted_permissions(&environment.selection.environment_id)
++            .is_none()
++    );
++    let next = timeout(
++        Duration::from_secs(2),
++        session.request_permissions_for_environment(
 +            &step,
 +            "doxa-new-permission".into(),
-+            args,
-+            environment,
++            RequestPermissionsArgs {
++                environment_id: None,
++                reason: Some("synthetic network request".into()),
++                permissions,
++            },
++            environment.selection(),
 +            CancellationToken::new(),
-+        )
-+        .await
-+        .unwrap();
++        ),
++    )
++    .await
++    .unwrap()
++    .unwrap();
 +    assert!(next.permissions.is_empty());
 +    session.abort_all_tasks(TurnAbortReason::Replaced).await;
 +}
