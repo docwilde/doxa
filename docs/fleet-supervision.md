@@ -8,6 +8,12 @@ PROVIDER:MODEL`. Choose the fast message reviewer separately with
 the same model, mode, review allocation, conservative rates, and threshold
 defaults. CLI options override those defaults at the launch review.
 
+For menu-driven launch, worker inspection, message classifications and runtime
+isolation changes, see [Fleet access and isolation](fleet-access.md). In the
+Fleet browser, **N** opens the launch form and **M** opens the selected run's
+**Messages & alignment** view. Clicking a live worker in the sidebar attaches
+its session; the independent reviewer has no interactive worker session.
+
 Example (the dry run makes no model calls):
 
 ```sh
@@ -128,10 +134,19 @@ the LORE-scrubbed charter, assignment, messages, and host snapshots into those
 external services. The model ID is explicit; unavailable models pause review
 rather than silently switching providers.
 
-Use `--isolation native|docker-open|docker-offline` to select each worker's
-execution boundary. The launch review and manifest record it; the owner's
-new-session default applies when omitted. Cross-backend migration is held while
-a supervised fleet binds a daemon PID; idle Docker network changes retain it.
+New fleets default both workers and the acting coordinator to `docker-offline`,
+independently of the ordinary session default. Choose roles separately with
+`--worker-isolation` and `--supervisor-isolation`; legacy `--isolation` sets both.
+Internet access requires an explicit owner opt-in, and native execution also
+requires the role's host-access confirmation. Offline Claude/Codex retain only
+the [fixed provider-host gateway](session-isolation.md#provider-connectivity).
+Workers request research from any coordinator with approved internet access.
+
+At an idle checkpoint, the owner can change a slot's profile through its
+isolation chip or `doxa fleet isolation`. The controller holds admission,
+verifies the same session and rebinds its actual daemon socket/PID. Supervised
+fleets wait for explicit owner continuation. Dependency/test recipes retain
+their narrower Docker constraints. See [the complete access and migration procedure](fleet-access.md).
 
 The controller freezes the task, approved path prefixes, run budget, deadline,
 human-only actions, and assignments before dispatch. Its manifest records the

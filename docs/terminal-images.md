@@ -12,8 +12,10 @@ them from a network service.
 `image_mode` in Settings chooses `halfblock` (the default, portable Unicode
 cells), `probe` (detect Kitty, Sixel or iTerm2 graphics), a forced protocol
 (`kgp`, `sixel`, `iterm2`), or `text`. A forced protocol needs a terminal
-that implements it. `probe` asks the terminal for capabilities after entering
-the alternate screen and can pause briefly. Text mode shows the alt label.
+that implements it and reported pixel-cell dimensions; if those dimensions
+are unavailable, DOXA uses halfblocks and shows a pixel-size-unknown notice.
+`probe` negotiates capabilities and cell size after entering the alternate
+screen and can pause briefly. Text mode shows the alt label.
 
 The TUI reserves four transcript rows per preview, with at most 32 previews
 and 128 reserved image rows per transcript render. Later image tokens show
@@ -28,12 +30,17 @@ missing, unsupported or failed image shows an unavailable label.
 
 ## Mermaid fences
 
-Complete, standalone `mermaid` code fences can become four-row previews with
-the same terminal backends. Rendering is opt-in: set **Mermaid renderer
+Complete, standalone `mermaid` code fences can gain four-row overviews with
+the same terminal backends. The original source remains readable and copyable
+below a successful preview; halfblock overviews cannot preserve small labels. Rendering is opt-in: set **Mermaid renderer
 executable** and **Mermaid renderer package root** under Settings → Appearance,
 or `DOXA_MERMAID_RENDERER` and `DOXA_MERMAID_RENDERER_ROOT`. The executable must
 be an absolute path within a dedicated, reviewed package directory and accept
 `-i INPUT -o OUTPUT` like Mermaid CLI. DOXA does not install or search for it.
+The [optional offline setup helper](../scripts/mermaid-validation/README.md#optional-offline-setup)
+prepares a dedicated pinned package and existing browser after explicit review;
+it needs about 850 MiB, installed Node/npm and a populated npm cache. It does
+not run during normal DOXA installation.
 Linux `/usr/bin/bwrap` is required. Without a configured renderer, bwrap, or
 graphics mode, the original fence remains readable.
 DOXA refuses a package root that would mount all of the user's home, DOXA
@@ -60,8 +67,16 @@ workspace discards the cache. A corrupt or
 missing cache file is removed and rendered again; the source fence remains
 visible until a valid preview is ready. The directory is removed at session
 end.
-`image_mode=text` always shows source. This path has stub-renderer coverage;
-full Mermaid CLI and a graphics terminal have not been validated here.
+`image_mode=text` shows only source. Pinned Mermaid CLI 12.0.0, Puppeteer
+25.13.0 and Chrome for Testing 131.0.6778.85 passed the Linux sandbox doctor
+and flowchart, sequence, class and Gantt suite. All four also rendered in an
+actual GTK/VTE terminal with the portable halfblock backend. The four-row
+overview is coarse; use the accompanying source for labels and edges.
+The same four fixtures also passed actual Kitty 0.45.0 graphics display in
+both `kgp` and `probe` modes. Kitty preserves more detail, but four-row
+sequence/class labels remain small; the source stays available. Sixel and
+iTerm2 display remain unverified. macOS keeps source visible because the
+current renderer requires Linux bubblewrap.
 
 Run `doxa doctor` to check a configured renderer. It validates the executable
 and canonical package root against the same path policy as the TUI, including
@@ -73,8 +88,8 @@ output. With no renderer configured, Mermaid is reported as disabled and
 doctor can still pass. A configured but broken renderer makes doctor fail.
 Passing the smoke check proves only that this command produced a decodable
 bounded PNG in the sandbox; it does not validate Mermaid CLI compatibility,
-Chromium, or a terminal graphics protocol. DOXA still has no managed renderer
-installer or browser provisioning.
+Chromium, or a terminal graphics protocol. The optional offline setup helper
+does not provision Node, download a browser or configure DOXA automatically.
 
 Before saving renderer settings, select either Mermaid field in Settings →
 Appearance and press **Ctrl+P**. The TUI checks the proposed values on a worker

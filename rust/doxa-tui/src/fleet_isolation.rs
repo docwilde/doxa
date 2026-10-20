@@ -86,6 +86,9 @@ fn apply(store:&Store,value:&mut Value,slots:&mut [Slot],request:&IsolationReque
     }
     if row["role"]=="worker" && value["supervision"]["context"]["charter"]["test_recipe"].is_object()&&request.target!=Profile::DockerOffline{return Err(invalid("frozen host test recipe requires offline workers"));}
     idle(slots)?;
+    let previous_socket=slots[index].session.socket.clone();
+    let previous_identity=rpc(&mut slots[index].client,"fleet_identity",json!({}))?;
+    let previous_pid=previous_identity["pid"].as_i64().ok_or_else(||invalid("original fleet host PID unavailable"))?;
     let context=if value["supervision"]["context"].is_object(){Some(serde_json::from_value::<doxa_fleet::Context>(value["supervision"]["context"].clone())?)}else{None};
     doxa_fleet::save_private(&store.run.join("isolation-active.json"),request)?;
     if let Some(context)=&context{doxa_fleet::isolation_change::begin(context,&request.session_id)?;}
@@ -104,11 +107,19 @@ fn apply(store:&Store,value:&mut Value,slots:&mut [Slot],request:&IsolationReque
     if resumed.hello["session_id"]!=request.session_id||resumed.hello["isolation"]["state"]!="ready"{return Err(invalid("isolation transition lost its verified session; stopping fleet"));}
     let actual=Profile::parse(resumed.hello["isolation"]["profile"].as_str().ok_or_else(||invalid("isolation transition status unavailable"))?)?;
     if actual!=request.expected_profile&&actual!=request.target{return Err(invalid("isolation transition reached an unapproved profile; stopping fleet"));}
+    let mut resumed=resumed;
+    let identity=rpc(&mut resumed,"fleet_identity",json!({}))?;
+    let pid=identity["pid"].as_i64().ok_or_else(||invalid("replacement PID unavailable"))?;
+    if pid==previous_pid&&session.socket==previous_socket {
+        // Keep the original stream and its queued policy-change event. A tail
+        // attach here would skip an unprocessed event in the same incarnation.
+    } else if pid!=previous_pid&&session.socket!=previous_socket {
+        value["slots"][index]["event_cursor"]=resumed.hello["next_seq"].clone();
+        slots[index].client=resumed;
+    } else {return Err(invalid("replacement fleet daemon incarnation is inconsistent"));}
     slots[index].session=session;
-    slots[index].client=resumed;
     value["slots"][index]["socket_path"]=json!(slots[index].session.socket);
     store.save(value)?;
-    let identity=rpc(&mut slots[index].client,"fleet_identity",json!({}))?;
     if let Some(context)=context {
         let updated=doxa_fleet::isolation_change::rebind(&context,&request.session_id,identity["pid"].as_i64().ok_or_else(||invalid("replacement PID unavailable"))? as i32,identity["cwd"].as_str().ok_or_else(||invalid("replacement cwd unavailable"))?)?;
         value["supervision"]["context"]=serde_json::to_value(&updated)?;store.save(value)?;
@@ -173,8 +184,12 @@ pub(super) fn network_briefing(value:&Value,index:usize)->String {
                 let mut line=String::new();BufReader::new(stream).read_line(&mut line).unwrap();
                 assert_eq!(serde_json::from_str::<Value>(&line).unwrap(),json!({"type":"attach","cursor":17}));
             });
+            let recovered=control::resumed_session(&runtime,"session",&socket).unwrap();
+            assert_eq!(recovered.scope_key,"/source","resume must retain the scope used by later isolation verification");
+            assert!(control::resumed_session(&runtime,"different-session",&socket).is_err());
+            assert!(control::resumed_session(&runtime,"session",&old).is_err());
             let result=reconnect(&runtime,"session");
-            if reported=="session"{let (session,client)=result.unwrap();assert_eq!(session.socket,socket);assert_eq!(client.cursor,17);}
+            if reported=="session"{let (session,client)=result.unwrap();assert_eq!(session.scope_key,recovered.scope_key);assert_eq!(session.socket,socket);assert_eq!(client.cursor,17);}
             else{assert!(result.err().unwrap().to_string().contains("identity changed"));}
             server.join().unwrap();
         }

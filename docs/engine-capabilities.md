@@ -13,15 +13,21 @@ DOXA keeps one engine per session. The model picker shows choices reported by or
 
 | Capability | Claude | Codex | DeepSeek | GLM | Router (opt-in) |
 | --- | --- | --- | --- | --- | --- |
-| Connection | Claude Code CLI | Protected private app server | Rust API client | Rust API client | Jev selection + configured API or authenticated native CLI target |
-| Authentication | Claude CLI login | Codex CLI login | `DEEPSEEK_API_KEY` or `/setup` | `ZAI_API_KEY` or `/setup` | API credentials / current CLI account; `TYPESAFE_API_KEY` for Jev |
+| Connection | Claude Code CLI | Protected private app server | Rust API client | Rust API client | Jev/SubQ selection + configured API or authenticated native CLI target |
+| Authentication | Claude CLI login | Codex CLI login | `DEEPSEEK_API_KEY` or `/setup` | `ZAI_API_KEY` or `/setup` | API credentials / current CLI account; `TYPESAFE_API_KEY` / `SUBQ_API_KEY` for decision service |
 | Session recovery | Verified native conversation | Same protected thread | Durable DOXA conversation | Durable DOXA conversation | Explicit same-config hash resume; canonical router history + private native worker proof |
 | Model change | Idle session, verified against CLI settings | Next turn on same thread | Idle session, catalog choice | Idle session, catalog choice | Idle `/model auto` or exact configured target ID |
 | Reasoning effort | Reported choices | Reported choices | Model-dependent | Model-dependent | Fixed per configured target; effective effort in route status |
 | Tool permissions | Provider controls plus DOXA peer/LORE review | On-request, auto, or full-access; full-access admits built-in peer tools | DOXA peer/LORE review | DOXA peer/LORE review | Native manual/default or explicit idle Auto; target-specific DOXA reviews |
 | Compaction | LORE review before provider compaction | Trusted `PreCompact` review in private build | Reviewed summary checkpoint | Reviewed summary checkpoint | Reviewed API summary; CLI summary target refused, originals retained |
+| Prompt files | Images and UTF-8 text | Images and UTF-8 text | UTF-8 text | UTF-8 text | UTF-8 text; images refused |
 
-Provider tool features depend on the installed CLI, model, and account. `/model`, `/effort`, and `/mode` expose only supported choices. Changes wait for the current turn and queue to finish. The picker can show separately sourced context, thinking, and price facts for an exact model ID; unknown fields stay unknown and facts do not make a model selectable. [Model fact provenance](plans/model-registry.md).
+Provider tool features depend on the installed CLI, model, and account. `/model`, `/effort`, and `/mode` expose only supported choices. Model and effort changes wait for the current turn and queue to finish; the supported active permission transitions are described below. The picker can show separately sourced context, thinking, and price facts for an exact model ID; unknown fields stay unknown and facts do not make a model selectable. [Model fact provenance](plans/model-registry.md).
+
+The **Attach** chip, **Alt+A** and Linux PNG clipboard paste send bounded image
+content directly to Claude/Codex, including Docker sessions. Text files are
+quoted input for all engines. Legacy Codex exec refuses images; PDF and remote-hub
+attachment submission remain unsupported. See [attachment formats and limits](terminal-images.md#prompt-attachments).
 
 ## Review and accounting
 
@@ -62,8 +68,9 @@ can retry inside the existing sandbox; questions and DOXA reviews stay open.
 Other permission or sandbox transitions require idle. A development
 [live check](live-codex-auto-permissions-2026-10-10.md#development-switching-an-active-turn)
 passed the pending-command switch, two later automatic commands and an
-outside-write denial on the same provider thread. The older installed beta.42
-provider still requires idle; deployment needs the updated daemon and provider.
+outside-write denial on the same provider thread. Current releases include the
+updated daemon/provider pair. An already-running older daemon retains its
+original transition limits until it is restarted.
 
 Claude and Codex context and usage figures come from their reported telemetry. DeepSeek and GLM display estimates from token counts and dated rates; cache discounts or off-peak billing can change the final bill. Missing quota or component counts remain unknown. Budgeted fleets require complete accounting for the selected model and basis. `BudgetHost` exposes its dated static price bound and keeps the actual billed tier and charge unknown. See [fleet supervision](fleet-supervision.md).
 
@@ -80,8 +87,12 @@ and uncertain attempted work is not replayed. Credential-free native fixtures
 are separate from authenticated worker/real-task verification. An authenticated six-call
 [synthetic Jev smoke](router-evaluation.md#observed-synthetic-smoke) verified
 typed transport and recorded-response replay. Worker success, real-task routing
-quality and macOS live behavior remain unmeasured. Docker, CLI handoffs and
-fleet/child config inheritance are unavailable in the first slice.
+quality and macOS live behavior remain unmeasured. Reviewed child/fleet config
+and allowance inheritance, history recovery and native/Docker migration are
+implemented; the [integration record](router-integration-2026-10-13.md) bounds
+their local verification. External CLI handoffs and CLI managed-summary targets
+remain unavailable. Internal CLI routing transfers bounded canonical history
+to a fresh private worker; it does not transfer an arbitrary external CLI session.
 
 ## Where to go next
 

@@ -1,9 +1,12 @@
 # Jev router plan
 
-Status: first native API slice implemented for integration on 2026-10-10;
-fixture validation and a measured synthetic smoke are recorded below. Real-task
-routing evaluation remains open. Reviewed managed compaction was implemented
-and locally verified on 2026-10-11; beta.44 ships this scope through PR #249.
+Status: native API/CLI routing, reviewed manual/automatic compaction,
+child/fleet allowance inheritance, history recovery and Docker migration are
+implemented through beta.63. The initial API slice, its synthetic smoke and
+subsequent local fixture results retain their dated scopes below. Real-task
+routing and summary-quality evaluation remain open; see the
+[current operator guide](../jev-router.md) and
+[2026-10-13 integration record](../router-integration-2026-10-13.md).
 
 ## Implemented scope
 
@@ -144,7 +147,7 @@ usage-based cost are estimates, not live invoices.
 - [x] Internal authenticated Claude/protected Codex workers with bounded
   canonical history transfer, native permission/tool lifecycle and fail-closed
   recovery. Credential-free Linux local fixtures; no real-account quality claim.
-- [ ] External CLI handoffs and CLI managed-summary targets; no implicit
-  propagation to child/fleet/Docker sessions.
+- [ ] External CLI handoffs and CLI managed-summary targets. These remain
+  separate from the implemented, reviewed child/fleet/Docker inheritance.
 - [ ] Authenticated platform checks. Local Linux fixtures are not authenticated
   macOS or provider availability evidence.

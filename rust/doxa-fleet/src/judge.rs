@@ -68,7 +68,10 @@ fn request_with_threshold(model:&Model,instructions:&str,input:&Value,threshold:
         "jev" | "subq"=>{let questions=NOUL_FIELDS.iter().map(|(key,question)|((*key).to_owned(),json!({"type":"noul","instructions":question}))).collect::<serde_json::Map<_,_>>();json!({"model":model.model,"state":input,"questions":questions})},
         "claude"=>json!({"model":model.model,"max_tokens":OUTPUT_TOKENS,"system":instructions,"messages":[{"role":"user","content":text}]}),
         "codex"=>json!({"model":model.model,"max_output_tokens":OUTPUT_TOKENS,"store":false,"instructions":instructions,"input":text,"tools":[]}),
-        _=>json!({"model":model.model,"max_tokens":OUTPUT_TOKENS,"stream":false,"messages":[{"role":"system","content":instructions},{"role":"user","content":text}],"response_format":{"type":"json_object"}}),
+        // DeepSeek and GLM otherwise inherit provider thinking defaults. The
+        // fixed 512-token JSON contract must reserve its output for the verdict,
+        // rather than exhaust it on an unrequested reasoning stream.
+        _=>json!({"model":model.model,"max_tokens":OUTPUT_TOKENS,"stream":false,"thinking":{"type":"disabled"},"messages":[{"role":"system","content":instructions},{"role":"user","content":text}],"response_format":{"type":"json_object"}}),
     })
 }
 /// Reservation uses one input token per request byte, including instructions,
@@ -123,15 +126,37 @@ fn settle(context:&Context,model:&Model,reserved:f64,input_rate:f64,output_rate:
                 }
                 state.observations.push(json!({"event":"review_usage","model":response.model,"latency_ms":response.latency_ms,"input_tokens":response.input_tokens,"output_tokens":response.output_tokens,"estimated_usd":actual,"output_sha256":hash(&response.result)?,"at":crate::unix_now()}));
             },
-            Err(_)=>{
+            Err(error)=>{
                 state.accounting_unknown=true;state.paused=true;
                 state.reason="reserved review failed without verified usage; reconcile spend before resume".into();
-                state.observations.push(json!({"event":"review_failed","model":model.display(),"reservation_retained":true,"at":crate::unix_now()}));
+                state.observations.push(json!({"event":"review_failed","model":model.display(),"failure_category":failure_category(error),"reservation_retained":true,"at":crate::unix_now()}));
             },
         }
         if state.observations.len()>256{state.observations.remove(0);}
         Ok(())
     })
+}
+
+#[derive(Debug)]
+struct ReviewFailure { category: &'static str, message: &'static str }
+impl std::fmt::Display for ReviewFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { formatter.write_str(self.message) }
+}
+impl std::error::Error for ReviewFailure {}
+fn classified(category: &'static str, message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, ReviewFailure { category, message })
+}
+// Journal only this closed category, never an HTTP body, URL, key or error text.
+fn failure_category(error: &io::Error) -> &'static str {
+    if let Some(failure) = error.get_ref().and_then(|cause| cause.downcast_ref::<ReviewFailure>()) { return failure.category; }
+    match error.to_string().as_str() {
+        "incomplete or tool-bearing LLM review" | "incomplete Claude review output" | "incomplete OpenAI review output" => "incomplete_or_tool_output",
+        "review response model does not match the selected model" => "model_mismatch",
+        "review input usage unavailable" | "review output usage unavailable" => "usage_missing",
+        "review response exceeds bound" => "response_too_large",
+        "reviewer did not return strict JSON" | "invalid review response JSON" | "invalid or duplicate Jev supervisor JSON" | "invalid review text" => "invalid_json",
+        _ => "invalid_response",
+    }
 }
 
 fn call_at(model:&Model,endpoint:&str,key:&str,body:&Value)->io::Result<Response>{
@@ -141,8 +166,11 @@ fn call_at(model:&Model,endpoint:&str,key:&str,body:&Value)->io::Result<Response
         let client=reqwest::Client::builder().timeout(Duration::from_secs(12)).connect_timeout(Duration::from_secs(4)).redirect(reqwest::redirect::Policy::none()).build().map_err(|_|invalid("review HTTP unavailable"))?;
         let mut request=client.post(endpoint).json(body);
         request=if model.provider=="claude"{request.header("x-api-key",key).header("anthropic-version","2023-06-01")}else{request.bearer_auth(key)};
-        let mut response=request.send().await.map_err(|_|invalid("independent review service unavailable"))?;
-        if !response.status().is_success(){return Err(invalid("independent review service refused"));}
+        let mut response=request.send().await.map_err(|error|classified(if error.is_timeout(){"deadline_exceeded"}else{"transport_unavailable"},"independent review service unavailable"))?;
+        if !response.status().is_success(){
+            let category=match response.status().as_u16(){401|403=>"http_auth_refused",402=>"http_payment_required",429=>"http_rate_limited",500..=599=>"http_service_error",_=>"http_refused"};
+            return Err(classified(category,"independent review service refused"));
+        }
         if response.content_length().is_some_and(|n|n>MAX_OUTPUT as u64){return Err(invalid("review response exceeds bound"));}
         let mut raw=Vec::new();while let Some(chunk)=response.chunk().await.map_err(|_|invalid("invalid review response"))?{raw.extend_from_slice(&chunk);if raw.len()>MAX_OUTPUT{return Err(invalid("review response exceeds bound"));}}
         if model.is_decision() {
@@ -283,6 +311,68 @@ mod tests {
         let good=json!({"model":"reviewer","choices":[{"finish_reason":"stop","message":{"content":verdict.to_string()}}],"usage":{"prompt_tokens":100,"completion_tokens":50}});assert!(parse_response(&model,&good,1).is_ok());
         for change in 0..4{let mut bad=good.clone();match change{0=>bad["choices"][0]["message"]["tool_calls"]=json!([]),1=>bad["choices"][0]["finish_reason"]=json!("length"),2=>bad["choices"][0]["message"]["content"]=json!("```json\n{}\n```"),_=>bad["usage"]=json!({})};assert!(parse_response(&model,&bad,1).is_err());}
         for provider in ["claude","codex","deepseek","glm"]{let model=Model::parse(&format!("{provider}:custom-id")).unwrap();let body=request(&model,SUPERVISOR_INSTRUCTIONS,&json!({"charter":"bounded"})).unwrap();assert!(!body.to_string().contains("previous_response_id"));assert!(!body.to_string().contains("conversation"));if provider=="codex"{assert_eq!(body["tools"],json!([]));assert_eq!(body["store"],false);}}
+    }
+    #[test]
+    fn bounded_vendor_review_does_not_inherit_provider_thinking_defaults() {
+        for provider in ["deepseek", "glm"] {
+            let model = Model::parse(&format!("{provider}:fixture-model")).unwrap();
+            for instructions in [SEMANTIC_INSTRUCTIONS, SUPERVISOR_INSTRUCTIONS] {
+                let body = request(&model, instructions, &json!({"message":"synthetic"})).unwrap();
+                assert_eq!(body["thinking"], json!({"type":"disabled"}));
+                assert_eq!(body["max_tokens"], 512);
+                assert_eq!(body["stream"], false);
+                assert!(body.get("tools").is_none());
+            }
+        }
+    }
+    #[test]
+    fn failed_http_review_retains_unknown_spend_and_only_closed_diagnostics() {
+        use crate::{Assignment, Charter, ReviewConfig};
+        use std::os::unix::fs::PermissionsExt;
+        for (status, category) in [(401,"http_auth_refused"),(402,"http_payment_required"),(429,"http_rate_limited"),(503,"http_service_error")] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
+            let charter = Charter {version:1,fleet_id:"diagnostic-fixture".into(),task:"synthetic".into(),repo:"/fixture".into(),allowed_paths:vec!["src".into()],required_evidence:vec![],worker_limit:1,run_budget_usd:Some(1.0),deadline:0,human_actions:vec![],test_recipe:None};
+            let model = Model::parse("deepseek:fixture-model").unwrap();
+            let context = Context {charter_sha256:hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"a".into(),session_id:"s".into(),pid:1,role:"worker".into(),task:"synthetic".into(),cwd:"/fixture".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}],review:ReviewConfig{message_mode:crate::Mode::Shadow,message_judge:Some(model.clone()),budget_usd:1.0,max_calls:10,..Default::default()},state_path:dir.path().join("state.json")};
+            context.validate().unwrap();
+            let body = request(&model, SEMANTIC_INSTRUCTIONS, &json!({"message":"synthetic"})).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}/review",listener.local_addr().unwrap());
+            let worker = std::thread::spawn(move || {
+                let (mut stream,_) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut raw = Vec::new();
+                loop {
+                    let mut chunk = [0;4096];let count=stream.read(&mut chunk).unwrap();assert!(count>0);raw.extend_from_slice(&chunk[..count]);
+                    if let Some(position)=raw.windows(4).position(|bytes|bytes==b"\r\n\r\n") {
+                        let header=String::from_utf8_lossy(&raw[..position]);
+                        let length=header.lines().find_map(|line|line.to_lowercase().strip_prefix("content-length: ").and_then(|value|value.parse::<usize>().ok())).unwrap();
+                        if raw.len()>=position+4+length {let sent:Value=serde_json::from_slice(&raw[position+4..position+4+length]).unwrap();assert_eq!(sent["thinking"]["type"],"disabled");break;}
+                    }
+                }
+                let private_body="fixture-provider-secret-must-never-be-recorded";
+                write!(stream,"HTTP/1.1 {status} Refused\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{private_body}",private_body.len()).unwrap();
+            });
+            let error=evaluate_request_at(&context,&model,&body,&endpoint,"fixture-api-key-must-never-be-recorded").unwrap_err();
+            worker.join().unwrap();
+            assert_eq!(error.to_string(),"independent review service refused");
+            let state=transaction(&context,|state|Ok(state.clone())).unwrap();
+            assert!(state.accounting_unknown&&state.paused);
+            assert_eq!(state.calls,1);assert!(state.reserved_usd>0.0);assert_eq!(state.actual_estimated_usd,0.0);
+            assert_eq!(state.observations.last().unwrap()["failure_category"],category);
+            assert_eq!(state.observations.last().unwrap()["reservation_retained"],true);
+            let journal=std::fs::read_to_string(&context.state_path).unwrap();
+            assert!(!journal.contains("must-never-be-recorded"));assert!(!journal.contains("127.0.0.1"));
+            assert!(reserve(&context,&model,&body).is_err());
+            assert_eq!(transaction(&context,|state|Ok(state.calls)).unwrap(),1);
+        }
+    }
+    #[test]
+    fn parse_failure_diagnostics_are_closed_even_for_untrusted_errors() {
+        for (message, category) in [("incomplete or tool-bearing LLM review","incomplete_or_tool_output"),("review response model does not match the selected model","model_mismatch"),("review input usage unavailable","usage_missing"),("reviewer did not return strict JSON","invalid_json"),("untrusted-token-must-never-appear","invalid_response")] {
+            assert_eq!(failure_category(&invalid(message)),category);
+        }
     }
     #[test]
     fn truncated_but_valid_json_never_passes_claude_or_responses_review(){

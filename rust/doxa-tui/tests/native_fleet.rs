@@ -146,6 +146,31 @@ fn controller_resume_refuses_changed_identity_then_observes_without_redelivery()
 }
 
 #[test]
+fn idle_controller_restart_does_not_recount_completed_turns(){
+    let fixture=Fixture::new();let mut child=fixture.start("30");fixture.wait_monitoring();
+    wait_until(||fixture.manifest()["slots"].as_array().unwrap().iter().all(|row|row["turn_serial"]==1));
+    let original=fixture.manifest();
+    assert!(original["slots"].as_array().unwrap().iter().all(|row|row["event_cursor"].as_u64().is_some_and(|seq|seq>0)));
+    unsafe{assert_eq!(libc::kill(child.id() as libc::pid_t,libc::SIGKILL),0);}child.wait().unwrap();
+    let path=fixture.root.join("run/manifest.json");
+    let mut legacy=original.clone();for row in legacy["slots"].as_array_mut().unwrap(){row.as_object_mut().unwrap().remove("event_cursor");}
+    fs::write(&path,serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let refused=fixture.command().args(["fleet","resume","run","--root",fixture.root.to_str().unwrap()]).output().unwrap();
+    assert!(!refused.status.success());assert!(String::from_utf8_lossy(&refused.stderr).contains("no processed event cursor"));
+    let mut restored=original.clone();restored["spec"]["quiescence_grace_s"]=json!(0.2);
+    fs::write(&path,serde_json::to_vec(&restored).unwrap()).unwrap();
+    let output=fixture.command().args(["fleet","resume","run","--root",fixture.root.to_str().unwrap()]).output().unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    let final_state=fixture.manifest();
+    for (before,after) in original["slots"].as_array().unwrap().iter().zip(final_state["slots"].as_array().unwrap()){
+        assert_eq!(before["turn_serial"],after["turn_serial"],"replayed history is not a new completed turn");
+        assert_eq!(before["last_turn"],after["last_turn"]);
+        assert_eq!(before["event_cursor"],after["event_cursor"]);
+    }
+    assert!(sockets_gone(&final_state));
+}
+
+#[test]
 fn ambiguous_dispatch_resume_never_creates_runtime_or_sends_a_prompt() {
     let fixture = Fixture::new(); let run = fixture.root.join("run");
     fs::create_dir_all(&run).unwrap(); fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o700)).unwrap();

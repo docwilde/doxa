@@ -18,6 +18,8 @@ puppeteer_package="$root/node_modules/puppeteer/package.json"
   || fail 'the pinned package, wrapper, or browser is missing'
 cmp -s -- "$script_dir/renderer.sh" "$renderer" || fail 'renderer wrapper differs from the reviewed fixture'
 cmp -s -- "$script_dir/puppeteer-config.json" "$root/puppeteer-config.json" || fail 'browser config differs from the reviewed fixture'
+cmp -s -- "$script_dir/package.json" "$root/package.json" || fail 'package manifest differs from the reviewed fixture'
+cmp -s -- "$script_dir/package-lock.json" "$root/package-lock.json" || fail 'package lock differs from the reviewed fixture'
 resolved_chrome=$(realpath -e -- "$chrome" 2>/dev/null) || fail 'browser path is unavailable'
 case "$resolved_chrome" in "$root"/*) ;; *) fail 'browser escapes the package root';; esac
 node -e 'const p=require(process.argv[1]); if(p.version!=="12.0.0") process.exit(1)' "$package" 2>/dev/null \

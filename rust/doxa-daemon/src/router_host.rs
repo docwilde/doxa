@@ -872,7 +872,7 @@ impl RouterHost {
                 } else { state.worker.accounting_unknown = true; }
                 let receipt = json!({"turn":state.turn,"selection":state.selection,"router":outcome,
                     "worker_usage":usage.map(|(input,output)|json!({"input_tokens":input,"output_tokens":output})),
-                    "worker_reservation_usd_micros":reserve,"complete":!state.unknown()});
+                    "worker_reservation_usd_micros":reserve,"failure_category":data["failure_category"],"complete":!state.unknown()});
                 state.receipts.push(receipt);
                 if self.save(&mut state).is_err() { event["data"]["accounting_unknown"] = json!(true); }
                 event["data"]["engine"] = json!(vendor(candidate.provider).engine_id());

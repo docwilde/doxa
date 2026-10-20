@@ -399,6 +399,8 @@ pub enum Error {
     InvalidToolCall,
     UnexpectedToolCall,
     ToolLimit,
+    OutputLimit,
+    RequestTooLarge,
     ToolFailed,
     InvalidToolDefinitions,
     HistoryTooLarge,
@@ -1009,7 +1011,7 @@ async fn run_turn_at(
         let mut body = request_body(vendor, model, &messages, effort)?;
         if let Some(limits) = limits {
             let remaining = limits.output_tokens.checked_sub(outcome.usage.completion_tokens)
-                .filter(|tokens| *tokens > 0).ok_or(Error::ToolLimit)?;
+                .filter(|tokens| *tokens > 0).ok_or(Error::OutputLimit)?;
             body["max_tokens"] = json!(remaining);
         }
         if !definitions.is_empty() {
@@ -1018,7 +1020,7 @@ async fn run_turn_at(
         }
         if let Some(limits) = limits {
             if serde_json::to_vec(&body).map_err(|_| Error::HistoryTooLarge)?.len() > limits.input_bytes {
-                return Err(Error::HistoryTooLarge);
+                return Err(Error::RequestTooLarge);
             }
         }
         let mut completion = stream_at_with_key(
@@ -1069,9 +1071,10 @@ async fn run_turn_at(
                 return Err(Error::IncompleteStream);
             }
             if !completion.tool_calls.is_empty() && outcome.usage.completion_tokens == limits.output_tokens {
-                return Err(Error::ToolLimit);
+                return Err(Error::OutputLimit);
             }
         }
+        if completion.finish_reason.as_deref() == Some("length") { return Err(Error::OutputLimit); }
         outcome.model = completion.model.or(outcome.model);
         outcome.text.push_str(&completion.text);
         outcome.reasoning.push_str(&completion.reasoning);
