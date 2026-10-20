@@ -2,6 +2,8 @@
 //! an interrupted dispatch is never retried as a fresh provider turn.
 #[path="fleet_isolation.rs"]
 mod isolation;
+#[path="fleet_handoff.rs"]
+mod handoff_proof;
 pub use isolation::{request_isolation,change_attached_isolation};
 use crate::{discovery, fleet_plan, fleet_view, launch, transport::DaemonClient};
 use serde_json::{json, Value};
@@ -960,14 +962,19 @@ pub fn dependency_review(root:&Path,id:&str,worker:usize)->io::Result<Review>{
     // The worker receives a checkpoint after work turn N and sends the typed
     // handoff during turn N+1. A later turn, even with identical output, cannot
     // inherit that handoff.
-    if handoff.checkpoint_turn_serial.checked_add(1)!=Some(turn_serial){
-        return Err(invalid("accepted handoff does not belong to the current successor turn"));
-    }
+    let checkpoint=&state.artifacts[&handoff.checkpoint_id];
+    let continuation=if handoff.checkpoint_turn_serial.checked_add(1)==Some(turn_serial){None}else{
+        let captured=doxa_isolation::test_runner::capture(Path::new(&assignment.cwd),None)
+            .map_err(|_|invalid("accepted handoff continuation needs a verified offline source snapshot"))?;
+        Some(handoff_proof::continuation(&value["slots"][worker],&handoff,checkpoint,
+            &context.assignments.iter().find(|row|row.role=="coordinator").ok_or_else(||invalid("coordinator unavailable"))?.session_id,
+            &captured.sha256).ok_or_else(||invalid("accepted handoff does not belong to the current audited successor turns"))?)
+    };
     let handoff_resolved=handoff.resolved();
     let checkpoint=&state.artifacts[&handoff.checkpoint_id];
     let dependents=context.assignments.iter().enumerate().filter(|(_,row)|row.depends_on.contains(&assignment.id)).map(|(index,_)|index).collect::<Vec<_>>();
     let request=json!({"run_id":id,"charter_sha256":context.charter_sha256,"worker_index":worker,"assignment_id":assignment.id,
-        "task_sha256":format!("{:x}",Sha256::digest(assignment.task.as_bytes())),"handoff_id":handoff.handoff_id,
+        "task_sha256":format!("{:x}",Sha256::digest(assignment.task.as_bytes())),"handoff_id":handoff.handoff_id,"continuation":continuation,
         "artifact_refs":handoff.artifact_refs,"checkpoint_id":handoff.checkpoint_id,
         "checkpoint_turn_serial":handoff.checkpoint_turn_serial,
         "checkpoint_turn_sha256":handoff.checkpoint_turn_sha256,
@@ -1139,6 +1146,7 @@ pub fn release_dependency(root:&Path,id:&str,worker:usize,token:&str)->io::Resul
     let checkpoint_id=review.request["checkpoint_id"].as_str().unwrap().to_owned();
     let checkpoint_turn_serial=review.request["checkpoint_turn_serial"].as_u64().ok_or_else(||invalid("dependency checkpoint serial unavailable"))?;
     let checkpoint_turn_sha256=review.request["checkpoint_turn_sha256"].as_str().ok_or_else(||invalid("dependency checkpoint digest unavailable"))?.to_owned();
+    let continuation:Option<doxa_fleet::HandshakeContinuation>=serde_json::from_value(review.request["continuation"].clone())?;
     let artifact_refs:Vec<String>=serde_json::from_value(review.request["artifact_refs"].clone())?;
     let turn_serial=review.request["turn_serial"].as_u64().ok_or_else(||invalid("dependency review turn serial unavailable"))?;
     let last_turn_sha256=review.request["last_turn_sha256"].as_str().unwrap().to_owned();
@@ -1153,8 +1161,10 @@ pub fn release_dependency(root:&Path,id:&str,worker:usize,token:&str)->io::Resul
             &&handoff.checkpoint_id==checkpoint_id
             &&handoff.checkpoint_turn_serial==checkpoint_turn_serial
             &&handoff.checkpoint_turn_sha256==checkpoint_turn_sha256
-            &&handoff.checkpoint_turn_serial.checked_add(1)==Some(turn_serial)){return Err(invalid("dependency evidence unresolved or changed before release"));}
-        state.dependency_releases.insert(assignment.id.clone(),doxa_fleet::DependencyRelease{
+            &&(if let Some(proof)=&continuation {handoff.checkpoint_turn_serial.checked_add(2)==Some(turn_serial)
+                &&proof.ack_id==handoff.ack_id&&proof.confirm_id==handoff.confirm_id}
+                else{handoff.checkpoint_turn_serial.checked_add(1)==Some(turn_serial)})){return Err(invalid("dependency evidence unresolved or changed before release"));}
+        state.dependency_releases.insert(assignment.id.clone(),doxa_fleet::DependencyRelease{continuation:continuation.clone(),
             assignment_id:assignment.id.clone(),handoff_id:handoff_id.clone(),artifact_refs:artifact_refs.clone(),
             checkpoint_id:checkpoint_id.clone(),checkpoint_turn_serial,checkpoint_turn_sha256:checkpoint_turn_sha256.clone(),
             turn_serial,last_turn_sha256:last_turn_sha256.clone(),at:doxa_fleet::unix_now()});
@@ -1224,7 +1234,9 @@ fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io:
         if let Some(changed)=&changed{for path in changed.lines(){if !context.assignments[index].permits(&context.charter,path){out_of_scope=true;}}}
         let turn=&value["slots"][index]["last_turn"];
         let turn_digest=if turn.is_null(){None}else{Some(doxa_fleet::hash(turn)?)};
-        let artifact=json!({"kind":"host_checkpoint","session_id":slot.session.id,"assignment_id":context.assignments[index].id,"changed_paths":changed,"git_observation_available":paths.is_ok()&&untracked.is_ok(),"running":state["running"],"queued":state["queued"],"last_turn":turn,"last_turn_kind":value["slots"][index]["last_turn_kind"],"turn_serial":value["slots"][index]["turn_serial"],"last_turn_sha256":turn_digest,"tests_verified":false});
+        let source_snapshot=if context.assignments[index].role=="worker"&&state["running"]==false&&state["queued"]==0
+            &&turn["is_error"]==false {doxa_isolation::test_runner::capture(cwd,None).ok().map(|capture|capture.sha256)}else{None};
+        let artifact=json!({"snapshot_sha256":source_snapshot,"kind":"host_checkpoint","session_id":slot.session.id,"assignment_id":context.assignments[index].id,"changed_paths":changed,"git_observation_available":paths.is_ok()&&untracked.is_ok(),"running":state["running"],"queued":state["queued"],"last_turn":turn,"last_turn_kind":value["slots"][index]["last_turn_kind"],"turn_serial":value["slots"][index]["turn_serial"],"last_turn_sha256":turn_digest,"tests_verified":false});
         let id=doxa_fleet::evidence_id(&artifact)?;artifacts.push((id,artifact));
     }
     let snapshot=doxa_fleet::transaction(&context,|state|{
@@ -1425,6 +1437,7 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
                     Some(kind @ ("turn_done" | "turn_refused")) => {
                         milestone=true;slot.busy=false;
                         let serial=value["slots"][index]["turn_serial"].as_u64().unwrap_or(0).checked_add(1).ok_or_else(||invalid("host turn serial exhausted"))?;
+                        value["slots"][index]["previous_turn"]=json!({"turn_serial":value["slots"][index]["turn_serial"],"last_turn_kind":value["slots"][index]["last_turn_kind"],"last_turn":value["slots"][index]["last_turn"]});
                         value["slots"][index]["turn_serial"]=json!(serial);
                         value["slots"][index]["last_turn"]=data.clone();value["slots"][index]["last_turn_kind"]=json!(kind);
                         if kind=="turn_done"{queue_auto_test(value,index)?;}
@@ -2125,7 +2138,7 @@ mod tests {
         assert!(!dispatch_released(&store,&mut manifest,&mut slots).unwrap());
         assert_eq!(manifest["slots"][2]["phase"],"dependency_waiting");
         doxa_fleet::transaction(&context,|state|{
-            state.dependency_releases.insert("first-id".into(),doxa_fleet::DependencyRelease{
+            state.dependency_releases.insert("first-id".into(),doxa_fleet::DependencyRelease{continuation:None,
                 assignment_id:"first-id".into(),handoff_id:"handoff".into(),artifact_refs:vec![evidence.clone()],checkpoint_id:evidence.clone(),
                 checkpoint_turn_serial:1,checkpoint_turn_sha256:turn_hash.clone(),turn_serial:2,
                 last_turn_sha256:doxa_fleet::hash(&json!({"handoff":true})).unwrap(),at:doxa_fleet::unix_now()});Ok(())

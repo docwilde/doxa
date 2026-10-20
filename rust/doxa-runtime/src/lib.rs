@@ -450,7 +450,7 @@ impl Inner {
                 // These names are published only by the daemon's canonical
                 // peer inbox/sender path, never by engine or provider frames.
                 if matches!(event["type"].as_str(), Some("peer_message" | "peer_sent")) { return; }
-                let is_turn_boundary = matches!(event["type"].as_str(), Some("turn_started" | "turn_refused"));
+                let is_turn_boundary = matches!(event["type"].as_str(), Some("turn_started" | "turn_done" | "turn_refused"));
                 if !event["data"].is_object() { event["data"] = json!({}); }
                 let started=event["type"]=="turn_started";
                 if let Some(data) = event.get_mut("data").and_then(Value::as_object_mut) {
@@ -1130,7 +1130,7 @@ mod tests {
             }
         }
         let terminal = frames.iter().filter(|frame|frame["event"]["type"] == "turn_done").last().unwrap();
-        assert!(terminal["event"]["data"].get("peer_origin_data").is_none(), "provider fields are stripped from non-boundary events");
+        assert_eq!(terminal["event"]["data"]["peer_origin_data"],origin.to_value(), "terminal provenance is bound to canonical queued admission, never provider values");
         handle.shutdown();
     }
     impl Host for DelayedTerminalHost {

@@ -211,7 +211,7 @@ fn dependent_worker_waits_for_host_dispatch_and_human_released_handoff() {
     let handoff_turn_hash=hash(&json!({"handoff":true})).unwrap();
     assert!(!predecessor_released(&context,&state,"predecessor",2,&handoff_turn_hash));
     transaction(&context,|state|{state.dependency_releases.insert("predecessor".into(),
-        DependencyRelease{assignment_id:"predecessor".into(),handoff_id:handoff.message_id.clone(),
+        DependencyRelease{continuation:None,assignment_id:"predecessor".into(),handoff_id:handoff.message_id.clone(),
             artifact_refs:handoff.artifact_refs.clone(),checkpoint_id:"host-checkpoint".into(),
             checkpoint_turn_serial:1,checkpoint_turn_sha256:turn_hash.clone(),
             turn_serial:2,last_turn_sha256:handoff_turn_hash.clone(),at:unix_now()});

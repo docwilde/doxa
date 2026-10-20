@@ -885,6 +885,7 @@ impl VendorHost {
         if session.is_some(){definitions.extend(doxa_engines::session_tools::definitions().into_iter().map(|row|json!({"type":"function","function":{"name":"spawn_session","description":row["description"],"parameters":row["inputSchema"]}})));}
         if !definitions.is_empty(){gate=gate.with_agent(definitions,Arc::new(move|name,args|if name=="spawn_session"{session.as_ref().ok_or("Session tools unavailable".to_owned())?(name,args)}else{agent.as_ref().ok_or("LORE tools unavailable".to_owned())?(name,args)}));}
 
+        let native_tool_audit=gate.audit_handle();
         let gate = if tools_enabled { Some(&mut gate as &mut dyn doxa_vendors::ToolGate) } else { None };
         if self.resume_preflight.load(Ordering::Acquire) {
             let measured = (|| {
@@ -1129,7 +1130,7 @@ impl VendorHost {
                         outcome.usage.prompt_tokens, outcome.usage.completion_tokens);
                     emit(json!({"type":"turn_done","data":{"is_error":false,
                         "duration_ms":started.elapsed().as_millis() as u64,
-                        "num_turns":turns,"model":model,
+                        "num_turns":turns,"model":model,"native_tool_audit":native_tool_audit.lock().ok().map(|audit|audit.clone()),
                         "prompt_tokens":outcome.usage.prompt_tokens,
                         "completion_tokens":outcome.usage.completion_tokens,
                         "usage_complete":outcome.usage_complete,

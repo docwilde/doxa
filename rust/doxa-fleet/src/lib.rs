@@ -166,11 +166,14 @@ pub struct State {
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageTrace {pub from:String,pub to:String,pub hop:u8,#[serde(default)] pub seq:u64,#[serde(default)] pub kind:Kind,#[serde(default)] pub artifact_refs:Vec<String>,#[serde(default,skip_serializing_if="Option::is_none")] pub in_reply_to:Option<String>,#[serde(default,skip_serializing_if="Option::is_none")] pub readback:Option<HandoffReadback>,#[serde(default,skip_serializing_if="Option::is_none")] pub handoff_response:Option<HandoffResponse>}
+#[derive(Clone,Debug,Default,Serialize,Deserialize)]
+#[serde(default,deny_unknown_fields)]
+pub struct HandshakeContinuation {pub ack_id:String,pub confirm_id:String,pub handoff_turn_sha256:String,pub snapshot_sha256:String}
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DependencyRelease {pub assignment_id:String,pub handoff_id:String,pub artifact_refs:Vec<String>,#[serde(default)] pub checkpoint_id:String,#[serde(default)] pub checkpoint_turn_serial:u64,#[serde(default)] pub checkpoint_turn_sha256:String,#[serde(default)] pub turn_serial:u64,pub last_turn_sha256:String,pub at:u64}
+pub struct DependencyRelease {#[serde(default,skip_serializing_if="Option::is_none")] pub continuation:Option<HandshakeContinuation>,pub assignment_id:String,pub handoff_id:String,pub artifact_refs:Vec<String>,#[serde(default)] pub checkpoint_id:String,#[serde(default)] pub checkpoint_turn_serial:u64,#[serde(default)] pub checkpoint_turn_sha256:String,#[serde(default)] pub turn_serial:u64,pub last_turn_sha256:String,pub at:u64}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
-pub struct AcceptedHandoff {pub handoff_id:String,pub artifact_refs:Vec<String>,pub checkpoint_id:String,pub checkpoint_turn_serial:u64,pub checkpoint_turn_sha256:String,pub readback:HandoffReadback,pub response:HandoffResponse}
+pub struct AcceptedHandoff {pub handoff_id:String,pub ack_id:String,pub confirm_id:String,pub artifact_refs:Vec<String>,pub checkpoint_id:String,pub checkpoint_turn_serial:u64,pub checkpoint_turn_sha256:String,pub readback:HandoffReadback,pub response:HandoffResponse}
 
 impl AcceptedHandoff { pub fn resolved(&self)->bool { self.response.agrees&&self.readback.open_questions.is_empty() } }
 
@@ -187,7 +190,7 @@ pub fn accepted_handoff(context:&Context,state:&State,predecessor:&str)->Option<
     let (ack_id,ack)=state.traces.iter().filter(|(_,row)|row.kind==Kind::Ack
         &&row.from==coordinator.session_id&&row.to==worker.session_id
         &&row.in_reply_to.as_deref()==Some(handoff_id.as_str())).max_by_key(|(_,row)|row.seq)?;
-    let (_,confirm)=state.traces.iter().filter(|(_,row)|row.kind==Kind::Confirm
+    let (confirm_id,confirm)=state.traces.iter().filter(|(_,row)|row.kind==Kind::Confirm
         &&row.from==worker.session_id&&row.to==coordinator.session_id
         &&row.in_reply_to.as_deref()==Some(ack_id.as_str())).max_by_key(|(_,row)|row.seq)?;
     if ack.seq<=handoff.seq||confirm.seq<=ack.seq
@@ -205,7 +208,7 @@ pub fn accepted_handoff(context:&Context,state:&State,predecessor:&str)->Option<
         if digest!=hash(&row["last_turn"]).ok()? {return None;}
         Some((id.clone(),serial,digest.to_owned()))
     })?;
-    Some(AcceptedHandoff{handoff_id:handoff_id.clone(),artifact_refs:handoff.artifact_refs.clone(),checkpoint_id,checkpoint_turn_serial,checkpoint_turn_sha256,readback:readback.clone(),response:response.clone()})
+    Some(AcceptedHandoff{handoff_id:handoff_id.clone(),ack_id:ack_id.clone(),confirm_id:confirm_id.clone(),artifact_refs:handoff.artifact_refs.clone(),checkpoint_id,checkpoint_turn_serial,checkpoint_turn_sha256,readback:readback.clone(),response:response.clone()})
 }
 
 pub fn predecessor_released(context:&Context,state:&State,predecessor:&str,turn_serial:u64,last_turn_sha256:&str)->bool{
@@ -216,7 +219,11 @@ pub fn predecessor_released(context:&Context,state:&State,predecessor:&str,turn_
             &&handoff.checkpoint_id==release.checkpoint_id
             &&handoff.checkpoint_turn_serial==release.checkpoint_turn_serial
             &&handoff.checkpoint_turn_sha256==release.checkpoint_turn_sha256
-            &&handoff.checkpoint_turn_serial.checked_add(1)==Some(turn_serial))
+            &&(if let Some(proof)=&release.continuation {
+                handoff.checkpoint_turn_serial.checked_add(2)==Some(turn_serial)
+                    &&proof.ack_id==handoff.ack_id&&proof.confirm_id==handoff.confirm_id
+                    &&[&proof.handoff_turn_sha256,&proof.snapshot_sha256].iter().all(|hash|hash.len()==64&&hash.bytes().all(|byte|byte.is_ascii_hexdigit()))
+            }else{handoff.checkpoint_turn_serial.checked_add(1)==Some(turn_serial)}))
 }
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]

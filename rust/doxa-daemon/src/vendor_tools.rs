@@ -177,6 +177,7 @@ impl Drop for ResolvePeer {
 /// available only after the daemon supplies its same-scope scrubbed callback;
 /// every provider call still requires a per-call permission answer.
 pub struct NativeVendorGate<'a> {
+    audit: std::sync::Arc<std::sync::Mutex<Value>>,
     workspace: Option<WorkspaceReadGate<'a>>,
     peer: Option<doxa_runtime::PeerToolHandler>,
     agent: Option<(Vec<Value>, doxa_runtime::PeerToolHandler)>,
@@ -190,7 +191,7 @@ impl<'a> NativeVendorGate<'a> {
     pub fn new(root: &'a Path, workspace: bool, peer: Option<doxa_runtime::PeerToolHandler>,
         desk: std::sync::Arc<PeerDesk>, scrub: &'a (dyn Fn(&str) -> Result<String, ()> + Sync),
         emit: &'a dyn Fn(Value), events: std::sync::Arc<std::sync::Mutex<Vec<Value>>>) -> Self {
-        Self { workspace:workspace.then(|| WorkspaceReadGate::new(root, scrub)), peer, agent:None, mcp:None, desk, scrub, emit, events }
+        Self { audit:std::sync::Arc::new(std::sync::Mutex::new(json!({"version":1,"complete":true,"actions":[]}))), workspace:workspace.then(|| WorkspaceReadGate::new(root, scrub)), peer, agent:None, mcp:None, desk, scrub, emit, events }
     }
     pub fn with_agent(mut self, definitions: Vec<Value>, handler: doxa_runtime::PeerToolHandler) -> Self {
         self.agent = Some((definitions, handler)); self
@@ -252,48 +253,8 @@ impl<'a> NativeVendorGate<'a> {
             Ok(result)
         })
     }
-}
-struct McpReviewGuard {
-    resolve: ResolvePeer, call_id: String, tool_name: String, server: String, original_tool: String,
-    submitted: bool, completed: bool,
-    service: std::sync::Arc<crate::vendor_mcp::Service>, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-impl Drop for McpReviewGuard {
-    fn drop(&mut self) {
-        if self.completed { return; }
-        if self.submitted {
-            self.cancel.store(true, std::sync::atomic::Ordering::Release);
-            self.service.abandon();
-        }
-        if let Ok(mut events) = self.resolve.events.lock() {
-            events.push(json!({"type":"tool_result","data":{"id":self.call_id,"name":self.tool_name,
-                "mcp_server_id":self.server,"mcp_tool_name":self.original_tool,"is_error":true,
-                "result_summary":if self.submitted {"MCP call interrupted or unsafe; outcome unknown; automatic replay withheld"}
-                    else {"MCP review cancelled; arguments withheld"},"external_charge_usd":null}}));
-        }
-        // ResolvePeer drops after this receipt, clearing the one-shot desk and
-        // publishing resolution before another approval/provider continuation.
-    }
-}
-impl ToolGate for NativeVendorGate<'_> {
-    fn flush_events(&mut self) {
-        // The async execution future queues events because the host emitter
-        // is turn-local. Release the queue lock before invoking that emitter.
-        let events = self.events.lock().map(|mut events| std::mem::take(&mut *events)).unwrap_or_default();
-        for event in events { (self.emit)(event); }
-    }
-    fn definitions(&self) -> Vec<Value> {
-        let mut definitions = self.workspace.as_ref().map(ToolGate::definitions).unwrap_or_default();
-        if self.peer.is_some() {
-            definitions.extend(doxa_engines::peer_tools::definitions().into_iter().map(|definition| {
-                json!({"type":"function","function":{"name":definition["name"],"description":definition["description"],"parameters":definition["inputSchema"]}})
-            }));
-        }
-        if let Some((rows, _)) = &self.agent { definitions.extend(rows.clone()); }
-        if let Some((_, rows, _, _)) = &self.mcp { definitions.extend(rows.clone()); }
-        definitions
-    }
-    fn execute<'a>(&'a mut self, call: &'a ToolCall) -> BoxFuture<'a, Result<Value, ()>> {
+    pub(super) fn audit_handle(&self)->std::sync::Arc<std::sync::Mutex<Value>>{self.audit.clone()}
+    fn execute_inner<'a>(&'a mut self, call: &'a ToolCall) -> BoxFuture<'a, Result<Value, ()>> {
         if let Some((bindings, _, service, cancel)) = &self.mcp {
             if let Some(binding) = bindings.iter().find(|binding| binding.provider_name == call.name) {
                 let (binding, service, cancel) = (binding.clone(), service.clone(), cancel.clone());
@@ -369,6 +330,83 @@ impl ToolGate for NativeVendorGate<'_> {
                 if limit < text.len() { events.push(json!({"type":"tool_result_detail","data":{"id":call_id,"text":"\n[Tool detail display limit reached]"}})); }
             }
             serde_json::from_str(&text).map_err(|_| ())
+        })
+    }
+
+}
+struct McpReviewGuard {
+    resolve: ResolvePeer, call_id: String, tool_name: String, server: String, original_tool: String,
+    submitted: bool, completed: bool,
+    service: std::sync::Arc<crate::vendor_mcp::Service>, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl Drop for McpReviewGuard {
+    fn drop(&mut self) {
+        if self.completed { return; }
+        if self.submitted {
+            self.cancel.store(true, std::sync::atomic::Ordering::Release);
+            self.service.abandon();
+        }
+        if let Ok(mut events) = self.resolve.events.lock() {
+            events.push(json!({"type":"tool_result","data":{"id":self.call_id,"name":self.tool_name,
+                "mcp_server_id":self.server,"mcp_tool_name":self.original_tool,"is_error":true,
+                "result_summary":if self.submitted {"MCP call interrupted or unsafe; outcome unknown; automatic replay withheld"}
+                    else {"MCP review cancelled; arguments withheld"},"external_charge_usd":null}}));
+        }
+        // ResolvePeer drops after this receipt, clearing the one-shot desk and
+        // publishing resolution before another approval/provider continuation.
+    }
+}
+impl ToolGate for NativeVendorGate<'_> {
+    fn flush_events(&mut self) {
+        // The async execution future queues events because the host emitter
+        // is turn-local. Release the queue lock before invoking that emitter.
+        let events = self.events.lock().map(|mut events| std::mem::take(&mut *events)).unwrap_or_default();
+        for event in events { (self.emit)(event); }
+    }
+    fn definitions(&self) -> Vec<Value> {
+        let mut definitions = self.workspace.as_ref().map(ToolGate::definitions).unwrap_or_default();
+        if self.peer.is_some() {
+            definitions.extend(doxa_engines::peer_tools::definitions().into_iter().map(|definition| {
+                json!({"type":"function","function":{"name":definition["name"],"description":definition["description"],"parameters":definition["inputSchema"]}})
+            }));
+        }
+        if let Some((rows, _)) = &self.agent { definitions.extend(rows.clone()); }
+        if let Some((_, rows, _, _)) = &self.mcp { definitions.extend(rows.clone()); }
+        definitions
+    }
+    fn execute<'a>(&'a mut self, call: &'a ToolCall) -> BoxFuture<'a, Result<Value, ()>> {
+        // Record the actual native execution boundary, including workspace and
+        // external tools that do not otherwise emit a peer-card event. No model
+        // prose or provider-supplied receipt is used as action evidence.
+        let audit=self.audit.clone();
+        let operation=match call.name.as_str(){
+            doxa_engines::peer_tools::SEND=>"send",
+            doxa_engines::peer_tools::LIST=>"list",
+            doxa_engines::peer_tools::HISTORY=>"history",_=>"other"};
+        let selected=if operation=="send" {
+            serde_json::from_str::<Value>(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string()).unwrap_or_default()).ok()
+                .filter(|args|doxa_engines::peer_tools::validated_call(&call.name,args).is_ok())
+                .map(|args|json!({"target":args["target"],"fleet_kind":args["fleet_kind"],"artifact_refs":args["artifact_refs"],"in_reply_to":args["in_reply_to"]}))
+        }else{None};
+        let index={let mut audit=audit.lock().unwrap();
+            let actions=audit["actions"].as_array_mut().unwrap();
+            if actions.len()>=25 {audit["complete"]=json!(false);None}
+            else {let index=actions.len();actions.push(json!({"operation":operation,"request":selected,"completed":false}));Some(index)}};
+        let execution=self.execute_inner(call);
+        Box::pin(async move {
+            let result=execution.await;
+            if let Some(index)=index {let mut audit=audit.lock().unwrap();let row=&mut audit["actions"][index];
+                row["completed"]=json!(true);
+                row["success"]=json!(result.as_ref().is_ok_and(|result|!result["error"].is_string()&&result["is_error"]!=true&&result["isError"]!=true));
+                if operation=="send" {if let Ok(result)=&result {
+                    // These bounded IDs are returned by the canonical peer
+                    // handler after admission/delivery, never inferred from text.
+                    row["message_id"]=result["message_id"].clone();
+                    row["delivered_to"]=result["delivered_to"].clone();
+                    row["failed"]=result["failed"].clone();
+                }}
+            }
+            result
         })
     }
 }
