@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.61 — 2026-10-20
+
+**Terminal font compatibility**
+
+- Fix default Nerd Font icons showing as boxes in stock terminal fonts. **`nerd_font`** now offers **Auto**, **On** and **Off**; Auto selects icons for direct Kitty/WezTerm and plain labels otherwise.
+- Keep legacy booleans, **`0`/`1`** and environment precedence. Settings shows Auto's effective result; detection is cached and does not read terminal input or infer support from installed host fonts.
+- Use **`[T]`**, **`[F]`**, **`[S]`**, **`[W]`** and **`git`** as portable tab, fleet, supervisor, worker and branch labels. Existing nested tab layout and explicit icon mode remain available.
+
 ## 2.0.0-beta.60 — 2026-10-20
 
 **Claude follow-up turns**

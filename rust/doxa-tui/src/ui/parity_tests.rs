@@ -519,7 +519,8 @@ use super::*;
         let view=paint(&app);
         for text in ["\u{f0e8} Fleet","\u{f508}","\u{f2d0}","└","normal","tab","boss","worker"] {assert!(view.contains(text),"missing {text}");}
         app.preferences.set_for_test("nerd_font","0");
-        let view=paint(&app); for text in ["[F] Fleet","[S]","▣"] {assert!(view.contains(text));}
+        let view=paint(&app); for text in ["[F] Fleet","[S]","[T]","[W]"] {assert!(view.contains(text));}
+        assert!(!view.chars().any(|ch| matches!(ch as u32,0xe000..=0xf8ff|0xf0000..=0xffffd|0x100000..=0x10fffd)));
         let rail=app.layout(app.size).rail.unwrap();
         click(&mut app,rail.x+2,rail.y+1);
         assert!(app.fleet_rail.groups[0].collapsed);

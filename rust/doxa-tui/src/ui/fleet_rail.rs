@@ -126,7 +126,7 @@ impl App {
         match self.fleet_rail.groups.iter().find(|group|group.members.iter().any(|member|member==id)) {
             Some(group) if group.supervisor.as_deref()==Some(id)=>
                 if self.preferences.on("nerd_font") {"  \u{f508} ".into()} else {"  [S] ".into()},
-            Some(_)=>"    ↳ ".into(), None=>String::new(),
+            Some(_)=>if self.preferences.on("nerd_font") {"    ↳ ".into()} else {"    [W] ".into()}, None=>String::new(),
         }
     }
     pub(super) fn verified_fleet_member(&self, id: &str) -> bool {
@@ -232,7 +232,8 @@ mod tests {
         let mut wrong=manifest;wrong["slots"][0]["session_id"]=json!("worker");assert!(group(PathBuf::from("/private"),"run".into(),&wrong,&live).is_none());
         let mut app=App::default();app.sessions=vec![Session {id:"worker".into(),title:"worker".into(),collection:"repo".into(),transcript:String::new(),status:String::new()},Session {id:"boss".into(),title:"boss".into(),collection:"repo".into(),transcript:String::new(),status:String::new()}];
         app.fleet_rail.groups=vec![fleet];
-        assert_eq!(app.rail_order(),[1,0]);assert_eq!(app.fleet_rail_prefix("worker"),"    ↳ ");
+        app.preferences.set_for_test("nerd_font","off");
+        assert_eq!(app.rail_order(),[1,0]);assert_eq!(app.fleet_rail_prefix("worker"),"    [W] ");
         assert!(app.collapse_fleet_parent("boss",Some(true)));assert_eq!(app.rail_order(),[1]);
         assert!(app.collapse_fleet_parent("boss",Some(false)));assert_eq!(app.rail_order(),[1,0]);
     }

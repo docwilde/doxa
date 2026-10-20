@@ -3189,12 +3189,12 @@ for line in sys.stdin:
             checked_out: Some("feature".into()), sha: Some("abcdef0".into()),
             worktree: None,
         });
-        assert!(app.chips(0).contains(&("repo", "project ⎇ main @1234567".into())));
+        assert!(app.chips(0).contains(&("repo", "project git main @1234567".into())));
         assert_eq!(app.repo_detail(0).as_deref(), Some("base main · HEAD doxa/a · managed worktree doxa/a"));
         let rendered = painted_at(&app, 220, 32);
-        assert!(rendered.contains("project ⎇ main @1234567"));
+        assert!(rendered.contains("project git main @1234567"));
         assert!(rendered.contains("u ? · scope ?"));
-        assert!(app.chips(1).contains(&("repo", "other ⎇ feature @abcdef0".into())));
+        assert!(app.chips(1).contains(&("repo", "other git feature @abcdef0".into())));
         app.preferences.set_for_test("nerd_font", "1");
         assert!(app.chips(0).contains(&("repo", "project \u{e0a0} main @1234567".into())));
         assert!(app.chips(1).contains(&("repo", "other \u{e0a0} feature @abcdef0".into())));

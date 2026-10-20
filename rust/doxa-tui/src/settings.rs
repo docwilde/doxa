@@ -105,7 +105,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "graph_context", env: "DOXA_GRAPH_CONTEXT", label: "graph context", category: "Memory", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Include graph-backed beliefs in session context.", note: "Off by default. Adds a bounded graph context block on each turn and consumes input tokens." },
     Setting { key: "graph_view", env: "DOXA_GRAPH_VIEW", label: "belief graph view", category: "Memory", kind: Kind::Choice, choices: &["", "browser", "ascii"], default: "browser", read_only: false, help: "Display belief neighborhoods in a browser or inline as ASCII.", note: "Shows the selected belief neighborhood. Use ascii for headless or SSH terminals." },
     Setting { key: "lore_root", env: "LORE_ROOT", label: "lore store", category: "Memory", kind: Kind::Text, choices: &[], default: "", read_only: true, help: "Belief store and session index directory.", note: "Changes the belief store and session index location. Existing data is not moved automatically." },
-    Setting { key: "nerd_font", env: "DOXA_NERD_FONT", label: "nerd font", category: "Appearance", kind: Kind::Bool, choices: &[], default: "1", read_only: false, help: "Use Nerd Font branch glyphs and tool, peer and reasoning icons (enabled by default).", note: "Disable if your terminal font does not contain the required glyphs." },
+    Setting { key: "nerd_font", env: "DOXA_NERD_FONT", label: "nerd font", category: "Appearance", kind: Kind::Choice, choices: &["auto", "on", "off"], default: "auto", read_only: false, help: "Auto uses icons in direct Kitty/WezTerm terminals with bundled symbols; otherwise uses plain labels.", note: "Font coverage cannot be queried portably. Choose On after confirming your font renders the icons, or Off for plain labels. SSH, multiplexers and VTE use labels in Auto." },
     Setting { key: "ctx_absolute", env: "DOXA_CTX_ABSOLUTE", label: "ctx: absolute tokens", category: "Appearance", kind: Kind::Bool, choices: &[], default: "", read_only: false, help: "Show used/total tokens beside context percentage.", note: "Shows reported used/total tokens. Missing provider measurements remain unknown." },
     Setting { key: "image_mode", env: "DOXA_IMAGE_MODE", label: "image mode", category: "Appearance", kind: Kind::Choice, choices: &["halfblock", "probe", "kgp", "sixel", "iterm2", "text"], default: "halfblock", read_only: false, help: "Render local Markdown image attachments: halfblock works in every terminal; probe detects Kitty, Sixel or iTerm2; text shows alt labels only.", note: "Only workspace-local images are rendered. External URLs remain links." },
     Setting { key: "mermaid_renderer", env: "DOXA_MERMAID_RENDERER", label: "Mermaid renderer executable", category: "Appearance", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Optional absolute path to a reviewed local mmdc-compatible renderer. Empty keeps Mermaid source fences.", note: "Requires an explicitly reviewed local renderer. Empty leaves Mermaid as source text." },
@@ -157,7 +157,7 @@ pub fn raw_from(config: &toml::Table, setting: &Setting, override_value: Option<
     if setting.key == "model" && engine != "claude" {
         return config.get("models").and_then(toml::Value::as_table).and_then(|v| v.get(engine)).and_then(toml::Value::as_str).unwrap_or("").trim().into();
     }
-    // This historically boolean setting now defaults on. Preserve old explicit
+    // This historically boolean setting now defaults to auto. Preserve old explicit
     // TOML false rather than treating it like an absent value in raw_setting.
     if setting.key == "nerd_font" && config.get(setting.key).and_then(toml::Value::as_bool) == Some(false) {
         return "0".into();
@@ -179,6 +179,7 @@ pub fn enabled(key: &str) -> bool {
     let Ok(s) = find(key) else { return false; };
     let value = raw(key);
     let value = if value.is_empty() { s.default } else { &value };
+    if key=="nerd_font" { return crate::font_support::enabled(value); }
     !value.is_empty() && !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
 }
 pub fn rows(engine: &str, session_model: Option<&str>) -> io::Result<Vec<Row>> {
@@ -211,6 +212,10 @@ pub fn rows(engine: &str, session_model: Option<&str>) -> io::Result<Vec<Row>> {
         let mut value = raw_from(&config, s, override_value.as_deref(), engine);
         let mut source = if shadowed { format!("env {} — overrides config", override_name) } else if (s.key != "model" && config.contains_key(s.key)) || !stored.is_empty() { "config.toml".into() } else { "default".into() };
         if value.is_empty() { value = s.default.into(); }
+        if s.key=="nerd_font" {
+            value=crate::font_support::mode(&value).unwrap_or("off").into();
+            if value=="auto" { source.push_str(if crate::font_support::enabled("auto") {" · auto: icons"} else {" · auto: plain labels"}); }
+        }
         if s.env == "DOXA_HOME" { value = home.display().to_string(); }
         if s.env == "DOXA_RUNTIME_DIR" { value = crate::discovery::runtime_dir()?.display().to_string(); }
         if s.env == "LORE_ROOT" { value = override_value.or_else(||config.get("lore_root").and_then(toml::Value::as_str).map(str::to_owned)
@@ -233,6 +238,10 @@ pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value
     let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else { return Ok(None); };
     let invalid = |reason: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("{}: {reason}", s.key));
     if value.len() > 4096 || value.chars().any(char::is_control) { return Err(invalid("value must be at most 4096 bytes and contain no control characters")); }
+    if s.key=="nerd_font" {
+        return crate::font_support::mode(value).map(|mode|Some(toml::Value::String(mode.into())))
+            .ok_or_else(||invalid("accepts auto, on or off"));
+    }
     Ok(Some(match s.kind {
         Kind::Bool | Kind::BoolOn => {
             let on = match value.to_ascii_lowercase().as_str() { "on"|"true"|"1"|"yes" => true, "off"|"false"|"0"|"no" => false, _ => return Err(invalid("accepts on or off")) };
