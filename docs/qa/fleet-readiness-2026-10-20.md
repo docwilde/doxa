@@ -9,8 +9,9 @@ No existing owner conversation was prompted, stopped or reconfigured.
 All containers use the reviewed rootless Engine and the installed pinned worker
 image. Claude/Codex subscription billing was unknown, so the trials used exact
 account-advertised GLM API targets and separate DeepSeek API reviewers. An
-explicit Router pin avoids a decision-service request. Local test fixtures are
-listed separately from real provider observations.
+explicit Router pin avoids a decision-service request. These pilots therefore
+bypass Jev/SubQ selection and provide no evidence about decision-service quality.
+Local test fixtures are listed separately from real provider observations.
 
 ## Observed behavior
 
@@ -22,9 +23,11 @@ listed separately from real provider observations.
 | Real reviewer and peer message | With bounded reviewer requests, real GLM worker/coordinator turns and typed status delivery succeeded. DeepSeek supplied all five message scores, admission was recorded, and the waiting dependent received no task. |
 | Start Fleet menu | The source candidate offers Router engine selections, exact target IDs and a private config path. A real GTK/VTE keyboard run edited an explicit DeepSeek reviewer, read all review pages, armed and confirmed launch, observed a successful GLM turn, then stopped the new fleet. This is a real provider run, separate from the earlier review-only terminal probe. |
 | Real menu accounting | One worker turn reported 1,236 input / 3 output tokens and $0.000187 at the declared worker rates. Its independent review reported known usage, $0.001852 estimated cost, and a retained $0.004460 conservative reservation. The verdict was `unavailable`; known token usage does not imply a valid alignment verdict. |
-| Controller restart | Actual SIGKILL/resume preserved the exact slot session IDs and did not redeliver task prompts. Further event analysis exposed replayed completion observations; see the remaining work below. |
+| Controller restart | Event analysis exposed replayed completion observations in the original resume path. After persisting processed event frontiers atomically with manifest state, a new real provider case preserved exact slot IDs and completion serials across SIGKILL/resume, without redelivering task prompts. |
 | Idle network migration | The original post-restart transition failed because recovered slots had an empty project scope. After retaining the verified registry session, actual supervisor-only offline-to-online migration succeeded; the worker remained offline and independent supervision remained paused for owner review. |
-| Handoff failure | Two real attempts stopped safely on a failed worker handoff turn and retained their unknown reservations. The second attempt's new typed diagnostic is `tool_failed`, not a request/output limit or HTTP category. The old generic failure cannot be retroactively assigned a cause. |
+| Approved research request | After explicit owner approval and supervisor-only online migration, an offline worker sent a typed question asking the coordinator to verify the title at `https://example.com/`. The coordinator returned typed evidence that no approved fetch tool was configured and that it could not verify the title. The request/response path passed; an actual web fetch remains unverified. |
+| Earlier handoff failures | Two real attempts stopped safely on failed worker handoff turns and retained their unknown reservations. The second attempt's typed diagnostic is `tool_failed`, not a request/output limit or HTTP category. The old generic failure cannot be retroactively assigned a cause. |
+| Final handoff refusal | The final worker called `peer_history` twice and never called `peer_send` for a handoff, then claimed it had sent one. The authoritative typed ledger contains no handoff or claimed UUID. Dependency review refused release, and the dependent remained dormant. Full live handoff acceptance did not pass. |
 | Teardown | Every completed probe/pilot reported `finished`, `live=false`, and absent daemon sockets. The private journals and unknown reservations remain available for inspection. |
 
 The live message review is a feasibility observation, not a calibrated quality
@@ -42,6 +45,13 @@ grants native execution or internet access.
 Controller recovery retains the observed registry session instead of fabricating
 an empty project scope. The existing ID, socket, hello, model, working directory
 and charter checks still apply before an isolation change.
+
+Controller event processing now saves each processed sequence frontier together
+with completion counters and state. Resume uses that saved frontier rather than
+the client cursor, which RPC read-ahead can advance. Same-daemon policy changes
+retain queued events; only a verified new daemon incarnation resets the frontier.
+Completed legacy runs without a trustworthy frontier refuse resume explicitly
+and retain inspect/stop access.
 
 Worker failures now retain closed diagnostic categories on the error card and
 Router receipt. Request-byte, output-token and tool-step limits are distinct;
@@ -82,20 +92,51 @@ model registry. Router request-byte/output limits and durable reservations bound
 model work. Token-based costs remain estimates, not account invoices. Unknown
 or failed attempts remain charged against the conservative pilot allocation.
 
+## Final controlled case and accounting
+
+Case `fleet-pilot-04` reached supervisor-only network migration, actual research
+question/evidence delivery, exact-counter controller recovery, and a fresh host
+checkpoint. The worker then claimed:
+
+> Handoff sent (2b2a578f-4ab9-4a04-93ba-8d80b6d1c284) with the exact artifact_refs and in_reply_to:null.
+
+Its recorded turn contains two `peer_history` calls and no `peer_send` handoff.
+The authoritative message ledger contains status, question and evidence messages,
+but no handoff or that UUID. The host refused `dependency-review` with
+`no coordinator-accepted handoff with host checkpoint`. No release command was
+sent and the dependent was never dispatched. This is a controlled model
+false-action claim caught by the deterministic release boundary; it does not
+establish a defect in ACK or successor-turn binding.
+
+| Attempt | Conservative amount held against the $0.90 fleet ceiling |
+| --- | ---: |
+| Installed first review, unknown usage | $0.007322 |
+| Case 02, including retained worker unknown | $0.237807 |
+| Case 03, including retained worker unknown | $0.194590 |
+| Actual one-worker menu trial | $0.004647 |
+| Case 04, all usage known | $0.033322 |
+| Cumulative held | **$0.477688** |
+
+Case 04 comprises $0.006312 known worker cost estimates plus $0.027010
+cumulative conservative reviewer reservations. Its reviewer cost estimate is
+$0.007163; that lower estimate does not replace the reservations in this table.
+All prior unknown reservations remain held. The unspent ceiling is $0.422312;
+no further paid call was made after the final handoff refusal. These figures are
+bounded estimates and reservations, not provider invoices.
+
 ## Remaining acceptance
 
 Full accepted handoff → ACK/read-back → sender confirmation → explicit owner
-release → dependent dispatch has not yet passed this live record. Research
-request/response after supervisor-only network approval also remains to be
-recorded. No configured API fetch tool was added merely for this trial.
-
-Restart event accounting needs to retain processed event cursors: the original
-resume path replays the retained ring and can count old `turn_done` observations
-again. A separate issue to examine is the handoff release's exact successor-turn
-binding when an ACK starts an automatic peer turn. Neither constraint should be
-weakened to make an acceptance run pass.
+release → dependent dispatch has not passed this live record. Actual fetching
+through an approved supervisor tool, Claude/Codex provider-only proxy operation,
+independently human-labelled supervision quality, and Jev/SubQ decision quality
+also remain unverified here. No API fetch tool was added merely for this trial.
 
 Local focused validation passed: four fleet-form tests, four isolation/recovery
-checks, 21 vendor transport tests, the closed diagnostic/redaction test, and the
-malformed-peer no-handler/no-approval regression. Broader integration CI belongs
-to the final combined change and is not implied by these focused results.
+checks, 21 vendor transport tests, closed diagnostic/redaction and malformed-peer
+no-handler/no-approval regressions, and the cursor frontier helper. The real
+fixture-daemon `native_fleet` process suite passed 13/13, including idle
+SIGKILL/resume without counter increments and explicit legacy refusal. Those
+fixture results are separate from the real provider observations above. Broader
+integration CI belongs to the final combined change and is not implied by this
+record.
