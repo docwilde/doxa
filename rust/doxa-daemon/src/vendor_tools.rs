@@ -388,24 +388,31 @@ impl ToolGate for NativeVendorGate<'_> {
                 .filter(|args|doxa_engines::peer_tools::validated_call(&call.name,args).is_ok())
                 .map(|args|json!({"target":args["target"],"fleet_kind":args["fleet_kind"],"artifact_refs":args["artifact_refs"],"in_reply_to":args["in_reply_to"]}))
         }else{None};
-        let index={let mut audit=audit.lock().unwrap();
-            let actions=audit["actions"].as_array_mut().unwrap();
-            if actions.len()>=25 {audit["complete"]=json!(false);None}
-            else {let index=actions.len();actions.push(json!({"operation":operation,"request":selected,"completed":false}));Some(index)}};
+        let index=if let Ok(mut audit)=audit.lock(){
+            let index=audit["actions"].as_array().map(Vec::len).unwrap_or(25);
+            if index>=25 {audit["complete"]=json!(false);None}else{
+                audit["actions"].as_array_mut().unwrap().push(json!({"operation":operation,"request":selected,"completed":false}));
+                if serde_json::to_vec(&*audit).map_or(true,|bytes|bytes.len()>8192){
+                    audit["actions"].as_array_mut().unwrap().pop();audit["complete"]=json!(false);None
+                }else{Some(index)}
+            }
+        }else{None};
         let execution=self.execute_inner(call);
         Box::pin(async move {
             let result=execution.await;
-            if let Some(index)=index {let mut audit=audit.lock().unwrap();let row=&mut audit["actions"][index];
+            if let Some(index)=index {if let Ok(mut audit)=audit.lock(){let row=&mut audit["actions"][index];
                 row["completed"]=json!(true);
                 row["success"]=json!(result.as_ref().is_ok_and(|result|!result["error"].is_string()&&result["is_error"]!=true&&result["isError"]!=true));
                 if operation=="send" {if let Ok(result)=&result {
-                    // These bounded IDs are returned by the canonical peer
-                    // handler after admission/delivery, never inferred from text.
-                    row["message_id"]=result["message_id"].clone();
-                    row["delivered_to"]=result["delivered_to"].clone();
-                    row["failed"]=result["failed"].clone();
+                    let receipt=json!({"message_id":result["message_id"],"delivered_to":result["delivered_to"],"failed":result["failed"]});
+                    if serde_json::to_vec(&receipt).map_or(true,|bytes|bytes.len()>2048){
+                        row["success"]=json!(false);audit["complete"]=json!(false);
+                    }else{for key in ["message_id","delivered_to","failed"]{row[key]=receipt[key].clone();}}
                 }}
-            }
+                if serde_json::to_vec(&*audit).map_or(true,|bytes|bytes.len()>8192){
+                    audit["actions"][index]=json!({"operation":operation,"completed":true,"success":false});audit["complete"]=json!(false);
+                }
+            }}
             result
         })
     }
@@ -417,6 +424,17 @@ mod peer_tests {
     use std::{cell::RefCell, sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}}};
     fn peer_call(name: &str, arguments: Value) -> ToolCall {
         ToolCall { id:"provider-call".into(), name:name.into(), arguments:arguments.as_object().unwrap().clone() }
+    }
+    #[test]
+    fn native_action_audit_overflow_and_poison_refuse_evidence_without_panicking(){
+        let dir=tempfile::tempdir().unwrap();let desk=Arc::new(PeerDesk::default());let scrub=|text:&str|Ok(text.to_owned());let emit=|_:Value|{};
+        let mut gate=NativeVendorGate::new(dir.path(),true,None,desk,&scrub,&emit,Arc::new(Mutex::new(Vec::new())));
+        let audit=gate.audit_handle();let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let read=peer_call("workspace_read",json!({"path":"absent"}));
+        for _ in 0..26 {let _=runtime.block_on(gate.execute(&read));}
+        assert_eq!(audit.lock().unwrap()["complete"],false);assert!(serde_json::to_vec(&*audit.lock().unwrap()).unwrap().len()<=8192);
+        let poisoned=audit.clone();let _=std::thread::spawn(move||{let _lock=poisoned.lock().unwrap();panic!("fixture audit poison");}).join();
+        let _=runtime.block_on(gate.execute(&read));assert!(audit.lock().is_err());
     }
     #[test]
     fn native_action_audit_binds_actual_send_results_and_includes_nonpeer_tools(){

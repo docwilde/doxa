@@ -923,6 +923,7 @@ impl RouterHost {
 }
 
 impl Host for RouterHost {
+    fn take_native_tool_audit(&self)->Option<Value>{self.inner.take_native_tool_audit()}
     fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
         self.prompt_impl(text, origin, emit);
     }

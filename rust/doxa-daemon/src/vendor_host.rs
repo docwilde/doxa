@@ -110,6 +110,7 @@ pub struct VendorHost {
     active: Mutex<Option<watch::Sender<bool>>>,
     turns: AtomicU64,
     estimated_cost: Mutex<CostEstimate>,
+    native_tool_audit:Mutex<Option<Value>>,
     closing: AtomicBool,
     balance: Arc<Mutex<Option<String>>>,
     balance_generation: Arc<AtomicU64>,
@@ -276,6 +277,7 @@ impl VendorHost {
             committed_bytes: AtomicU64::new(committed_bytes),
             active: Mutex::new(None),
             turns: AtomicU64::new(restored_turns),
+            native_tool_audit:Mutex::new(None),
             estimated_cost: Mutex::new(CostEstimate { spent: 0.0, complete: !resume }),
             closing: AtomicBool::new(false),
             balance: Arc::new(Mutex::new(None)),
@@ -805,6 +807,7 @@ impl Drop for ActiveTurn<'_> {
 
 impl VendorHost {
     fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        if let Ok(mut audit)=self.native_tool_audit.lock(){*audit=None;}
         if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
             emit(done("Invalid host peer provenance"));
             return;
@@ -1128,9 +1131,10 @@ impl VendorHost {
                         outcome.usage_complete,
                         outcome.model_consistent && outcome.model.as_deref() == Some(selected_model.as_str()),
                         outcome.usage.prompt_tokens, outcome.usage.completion_tokens);
+                    if let (Ok(mut stored),Ok(audit))=(self.native_tool_audit.lock(),native_tool_audit.lock()){*stored=Some(audit.clone());}
                     emit(json!({"type":"turn_done","data":{"is_error":false,
                         "duration_ms":started.elapsed().as_millis() as u64,
-                        "num_turns":turns,"model":model,"native_tool_audit":native_tool_audit.lock().ok().map(|audit|audit.clone()),
+                        "num_turns":turns,"model":model,
                         "prompt_tokens":outcome.usage.prompt_tokens,
                         "completion_tokens":outcome.usage.completion_tokens,
                         "usage_complete":outcome.usage_complete,
@@ -1155,6 +1159,7 @@ impl VendorHost {
 }
 
 impl Host for VendorHost {
+    fn take_native_tool_audit(&self)->Option<Value>{self.native_tool_audit.lock().ok()?.take()}
     fn has_active_work(&self) -> bool { self.active.try_lock().map_or(true, |active| active.is_some()) }
     fn peer_tools_ready(&self) -> bool {
         !self.closing.load(Ordering::Acquire) && self.peer_tools.lock().is_ok_and(|handler| handler.is_some())

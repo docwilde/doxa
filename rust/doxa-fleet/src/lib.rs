@@ -166,8 +166,8 @@ pub struct State {
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageTrace {pub from:String,pub to:String,pub hop:u8,#[serde(default)] pub seq:u64,#[serde(default)] pub kind:Kind,#[serde(default)] pub artifact_refs:Vec<String>,#[serde(default,skip_serializing_if="Option::is_none")] pub in_reply_to:Option<String>,#[serde(default,skip_serializing_if="Option::is_none")] pub readback:Option<HandoffReadback>,#[serde(default,skip_serializing_if="Option::is_none")] pub handoff_response:Option<HandoffResponse>}
-#[derive(Clone,Debug,Default,Serialize,Deserialize)]
-#[serde(default,deny_unknown_fields)]
+#[derive(Clone,Debug,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HandshakeContinuation {pub ack_id:String,pub confirm_id:String,pub handoff_turn_sha256:String,pub snapshot_sha256:String}
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -222,6 +222,7 @@ pub fn predecessor_released(context:&Context,state:&State,predecessor:&str,turn_
             &&(if let Some(proof)=&release.continuation {
                 handoff.checkpoint_turn_serial.checked_add(2)==Some(turn_serial)
                     &&proof.ack_id==handoff.ack_id&&proof.confirm_id==handoff.confirm_id
+                    &&state.artifacts.get(&handoff.checkpoint_id).is_some_and(|checkpoint|checkpoint["snapshot_sha256"]==proof.snapshot_sha256)
                     &&[&proof.handoff_turn_sha256,&proof.snapshot_sha256].iter().all(|hash|hash.len()==64&&hash.bytes().all(|byte|byte.is_ascii_hexdigit()))
             }else{handoff.checkpoint_turn_serial.checked_add(1)==Some(turn_serial)}))
 }

@@ -83,12 +83,14 @@ mod tests {
     #[test]
     fn real_daemon_queued_ack_reproduces_the_extra_turn_and_preserves_canonical_provenance(){
         use std::{sync::{Arc,Mutex,mpsc},collections::VecDeque,time::{Duration,Instant}};
-        struct FixtureHost {turns:Mutex<VecDeque<Value>>,entered:mpsc::Sender<()>,release:Mutex<mpsc::Receiver<()>>}
+        struct FixtureHost {audit:Mutex<Option<Value>>,turns:Mutex<VecDeque<Value>>,entered:mpsc::Sender<()>,release:Mutex<mpsc::Receiver<()>>}
         impl doxa_runtime::Host for FixtureHost {
+            fn take_native_tool_audit(&self)->Option<Value>{self.audit.lock().unwrap().take()}
             fn prompt(&self,text:&str,emit:&mut dyn FnMut(Value)){
                 emit(json!({"type":"turn_started","data":{"prompt":text}}));
                 if text=="handoff" {self.entered.send(()).unwrap();self.release.lock().unwrap().recv_timeout(Duration::from_secs(3)).unwrap();}
                 let mut data=self.turns.lock().unwrap().pop_front().unwrap();
+                *self.audit.lock().unwrap()=data.as_object_mut().unwrap().remove("native_tool_audit");
                 data["peer_started"]=json!(true);data["peer_origin_data"]=json!({"message_id":"provider-forgery"});
                 emit(json!({"type":"turn_done","data":data}));
             }
@@ -97,7 +99,7 @@ mod tests {
         let(mut row,mut handoff,mut checkpoint,digest)=fixture();
         let work=checkpoint["last_turn"].clone();let prior=row["previous_turn"]["last_turn"].clone();let current=row["last_turn"].clone();
         let(entered,notice)=mpsc::channel();let(release,wait)=mpsc::channel();
-        let host=Arc::new(FixtureHost{turns:Mutex::new(VecDeque::from([work,prior,current])),entered,release:Mutex::new(wait)});
+        let host=Arc::new(FixtureHost{audit:Mutex::new(None),turns:Mutex::new(VecDeque::from([work,prior,current])),entered,release:Mutex::new(wait)});
         let dir=tempfile::tempdir().unwrap();
         let mut daemon=doxa_runtime::Daemon::bind(dir.path(),doxa_runtime::Session{session_id:"worker".into(),cwd:"/fixture".into(),model:None,engine:"test".into(),doxa_version:"test".into()},host).unwrap().start();
         let mut client=crate::transport::DaemonClient::connect(daemon.socket_path(),Some(0)).unwrap();
