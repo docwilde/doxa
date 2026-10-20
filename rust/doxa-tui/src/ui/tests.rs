@@ -4408,7 +4408,8 @@ for line in sys.stdin:
             "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|dependency-review [RUN] SLOT|mesh [RUN]|start OPTIONS|resume RUN]", "/native-plugin preflight|run NAME", "/help"] {
             assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
         }
-        assert!(info.lines.iter().any(|line| line.contains("unavailable in Rust")));
+        assert!(info.lines.windows(2).any(|lines| lines[0].starts_with("/img")
+            && lines[1].contains("use Attach or Alt+A")));
         assert!(info.lines.windows(2).any(|lines| lines[0].starts_with("/compact") && lines[1].contains("Claude and router")));
         let menu = app.active_chooser_rect().unwrap();
         assert!(menu.bottom() < app.layout(app.size).body.bottom());
