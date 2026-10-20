@@ -44,6 +44,7 @@ pub mod maintenance;
 pub mod settings;
 pub mod keybindings;
 pub mod preferences;
+mod font_support;
 pub mod belief_graph;
 pub mod belief_preview;
 

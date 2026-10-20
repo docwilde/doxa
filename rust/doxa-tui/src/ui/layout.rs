@@ -770,7 +770,7 @@ impl App {
                 if self.preferences.on("nerd_font") {
                     label.replace("⎇", "\u{e0a0}")
                 } else {
-                    label
+                    label.replace("⎇", "git")
                 },
             ));
         }

@@ -1908,10 +1908,21 @@ says `(set by env — editing here would be shadowed; unset DOXA_X to use
 the config file)`. A save against a config file that exists but will not
 parse is refused rather than clobbering it.
 
-Nerd Font rendering is enabled by default in the Rust TUI; this does not install a
-font. Set `nerd_font = "0"` in Settings → Appearance or `DOXA_NERD_FONT=0` for
-plain fold labels. `DOXA_NERD_FONTS` is also accepted; the canonical singular
-`DOXA_NERD_FONT` wins when both are set. Received and sent peer messages start
+Settings → Appearance → **nerd font** offers **Auto** (default), **On** and **Off**.
+Auto selects icons for direct Kitty and WezTerm terminals, which bundle Nerd Font
+symbols. Mint/VTE, unknown terminals, SSH and multiplexers use plain labels:
+`[T]` normal tab, `[F]` fleet, `[S]` supervisor and `[W]` worker; Git branches use
+`git`. Auto is a conservative terminal-identity check, not a font-coverage probe.
+It is cached for the process and does not query terminal input or inspect installed
+host fonts. A terminal's custom font mappings can still require manual Off.
+
+Choose On after confirming your terminal font renders the icons. Off always uses
+plain labels. `DOXA_NERD_FONT=auto|on|off` selects the same modes; legacy `0`/`1`
+and TOML booleans remain supported. `DOXA_NERD_FONTS` is also accepted; the canonical
+singular `DOXA_NERD_FONT` wins when both are set. The Settings source shows Auto's
+effective result. No font is installed automatically.
+
+Received and sent peer messages start
 collapsed, with sender, recipient and delivery metadata in the header. Click the
 header or press Enter with transcript focus to expand or collapse the message;
 older sent records without a body explicitly say that the body was not recorded.
@@ -1937,7 +1948,7 @@ older sent records without a body explicitly say that the body was not recorded.
 | `graph_context` | `DOXA_GRAPH_CONTEXT` | off | attach a graph-context block to every turn. Recurring per-turn token cost once on, which is why it is off |
 | `graph_view` | `DOXA_GRAPH_VIEW` | `browser` | how the beliefs picker's `g` shows one belief's neighbourhood: `browser` (mermaid page under `~/.doxa/graphs`) or `ascii` (LORE's edge block, in the TUI) |
 | `lore_root` | `LORE_ROOT` | `~/.claude/lore` | where the belief store and session index live; sticky, set by `/setup` |
-| `nerd_font` | `DOXA_NERD_FONT` | on | Nerd Font branch glyphs and 🛠 tool / 🤖↓ received / 🤖↑ sent / 🧠 reasoning icons; explicit off uses plain labels |
+| `nerd_font` | `DOXA_NERD_FONT` | `auto` | `auto`, `on`, `off`; conservative terminal detection, with portable labels when support is unknown; old booleans and `0`/`1` remain valid |
 | `ctx_absolute` | `DOXA_CTX_ABSOLUTE` | off | print `24k/200k` beside the `ctx%` chip (below 100 columns it drops again) |
 | `image_mode` | `DOXA_IMAGE_MODE` | text | `probe` to detect support, or force a rung (`kgp`/`sixel`/`halfblock`/`text`) |
 | `boot_banner` | `DOXA_BOOT_BANNER` | on | draw the DOXA mark above the opening identity block |

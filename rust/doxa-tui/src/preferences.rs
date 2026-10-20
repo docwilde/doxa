@@ -15,7 +15,7 @@ impl Preferences {
     pub fn value(&self,key:&str)->&str { self.values.get(key).map(String::as_str).unwrap_or("") }
     #[cfg(test)]
     pub(crate) fn set_for_test(&mut self,key:&'static str,value:&str) { self.values.insert(key,value.into()); }
-    pub fn on(&self,key:&str)->bool { let v=self.value(key); !v.is_empty() && !matches!(v.to_ascii_lowercase().as_str(),"0"|"false"|"off"|"no") }
+    pub fn on(&self,key:&str)->bool { let v=self.value(key); if key=="nerd_font" {return crate::font_support::enabled(v);} !v.is_empty() && !matches!(v.to_ascii_lowercase().as_str(),"0"|"false"|"off"|"no") }
     pub fn sidebar_width(&self)->u16 { self.value("sidebar_width").parse::<f64>().ok().filter(|v|v.is_finite()).unwrap_or(25.0).clamp(22.0,41.0) as u16 }
     pub fn clock_format(&self)->String {
         if !self.value("clock_format").is_empty() && validate_clock_format(self.value("clock_format")).is_ok() { return self.value("clock_format").into(); }
@@ -100,7 +100,7 @@ mod tests {
         for (k,v) in values {result.values.insert(k,(*v).into());}result
     }
     #[test]
-    fn nerd_font_defaults_on_preserves_saved_off_and_environment_precedence() {
+    fn nerd_font_auto_preserves_manual_modes_and_environment_precedence() {
         use std::os::unix::fs::PermissionsExt;
         if std::env::var_os("DOXA_TEST_NERD_FONT_CHILD").is_none() {
             let home = tempfile::tempdir().unwrap();
@@ -109,7 +109,7 @@ mod tests {
             std::fs::create_dir(&runtime).unwrap();
             std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
             let mut child = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "preferences::tests::nerd_font_defaults_on_preserves_saved_off_and_environment_precedence", "--nocapture"])
+                .args(["--exact", "preferences::tests::nerd_font_auto_preserves_manual_modes_and_environment_precedence", "--nocapture"])
                 .env_clear().env("PATH", "/usr/bin:/bin")
                 .env("HOME", home.path()).env("DOXA_HOME", home.path())
                 .env("XDG_RUNTIME_DIR", &runtime).env("DOXA_RUNTIME_DIR", &runtime)
@@ -130,8 +130,16 @@ mod tests {
         let path = crate::settings::config_path().unwrap();
         let row = || crate::settings::rows("claude", None).unwrap().into_iter()
             .find(|row| row.setting.key == "nerd_font").unwrap();
+        assert!(!Preferences::load().on("nerd_font"));
+        assert!(!crate::settings::enabled("nerd_font"));
+        assert_eq!(row().value, "auto");
+        assert!(row().source.contains("auto: plain labels"));
+        crate::settings::save(&path, &[("nerd_font".into(), Some("auto".into()))], "claude").unwrap();
+        assert!(!Preferences::load().on("nerd_font"));
+        assert_eq!(row().value,"auto");
+        assert!(crate::settings::coerce(crate::settings::find("nerd_font").unwrap(),Some("maybe")).is_err());
+        crate::settings::save(&path, &[("nerd_font".into(), Some("true".into()))], "claude").unwrap();
         assert!(Preferences::load().on("nerd_font"));
-        assert!(crate::settings::enabled("nerd_font"));
         assert_eq!(row().value, "on");
         crate::settings::save(&path, &[("nerd_font".into(), Some("off".into()))], "claude").unwrap();
         assert!(!Preferences::load().on("nerd_font"));
@@ -141,7 +149,11 @@ mod tests {
         std::env::set_var("DOXA_NERD_FONTS", "off");
         std::env::set_var("DOXA_NERD_FONT", "on");
         assert!(Preferences::load().on("nerd_font"));
+        assert_eq!(row().value, "on");
         assert!(row().source.contains("DOXA_NERD_FONT —"));
+        std::env::set_var("DOXA_NERD_FONT", "auto");
+        assert!(!Preferences::load().on("nerd_font"));
+        assert_eq!(row().value,"auto");
         std::env::remove_var("DOXA_NERD_FONT");
         assert!(!Preferences::load().on("nerd_font"));
         assert!(row().shadowed);
@@ -152,7 +164,13 @@ mod tests {
         std::env::remove_var("DOXA_NERD_FONTS");
         assert!(!Preferences::load().on("nerd_font"));
         crate::settings::save(&path, &[("nerd_font".into(), None)], "claude").unwrap();
-        assert!(Preferences::load().on("nerd_font"));
+        assert!(!Preferences::load().on("nerd_font"));
+        assert_eq!(row().value, "auto");
+        for (stored,enabled,label) in [("false",false,"off"),("true",true,"on"),("\"0\"",false,"off"),("\"1\"",true,"on")] {
+            std::fs::write(&path,format!("nerd_font = {stored}\n")).unwrap();
+            assert_eq!(Preferences::load().on("nerd_font"),enabled);
+            assert_eq!(row().value,label);
+        }
     }
 
     #[test]
