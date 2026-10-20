@@ -2544,6 +2544,158 @@ index 83b1edd..65030ab 100644
          next.mcp_approvals_reviewer_override = update
              .approvals_reviewer
              .or(self.mcp_approvals_reviewer_override);
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 2cde379..01217c5 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -7499,15 +7499,17 @@ async fn record_granted_request_permissions_for_turn_uses_originating_turn() {
+         }),
+         ..RequestPermissionProfile::default()
+     };
+-    session.record_granted_request_permissions_for_turn(
+-        &codex_protocol::request_permissions::RequestPermissionsResponse {
+-            permissions: requested_permissions.clone(),
+-            scope: PermissionGrantScope::Turn,
+-            strict_auto_review: false,
+-        },
+-        codex_exec_server::LOCAL_ENVIRONMENT_ID,
+-        &turn_context,
+-    );
++    session
++        .finalize_request_permissions_for_turn(
++            codex_protocol::request_permissions::RequestPermissionsResponse {
++                permissions: requested_permissions.clone(),
++                scope: PermissionGrantScope::Turn,
++                strict_auto_review: false,
++            },
++            codex_exec_server::LOCAL_ENVIRONMENT_ID,
++            &turn_context,
++        )
++        .await;
+ 
+     assert_eq!(
+         turn_context.granted_permissions(codex_exec_server::LOCAL_ENVIRONMENT_ID),
+@@ -7529,15 +7531,17 @@ async fn request_permission_grants_are_environment_keyed() {
+         }),
+         ..RequestPermissionProfile::default()
+     };
+-    session.record_granted_request_permissions_for_turn(
+-        &codex_protocol::request_permissions::RequestPermissionsResponse {
+-            permissions: requested_permissions.clone(),
+-            scope: PermissionGrantScope::Turn,
+-            strict_auto_review: false,
+-        },
+-        "remote",
+-        &turn_context,
+-    );
++    session
++        .finalize_request_permissions_for_turn(
++            codex_protocol::request_permissions::RequestPermissionsResponse {
++                permissions: requested_permissions.clone(),
++                scope: PermissionGrantScope::Turn,
++                strict_auto_review: false,
++            },
++            "remote",
++            &turn_context,
++        )
++        .await;
+ 
+     assert_eq!(
+         turn_context.granted_permissions("remote"),
+@@ -7545,15 +7549,17 @@ async fn request_permission_grants_are_environment_keyed() {
+     );
+     assert_eq!(turn_context.granted_permissions("local"), None);
+ 
+-    session.record_granted_request_permissions_for_turn(
+-        &codex_protocol::request_permissions::RequestPermissionsResponse {
+-            permissions: requested_permissions.clone(),
+-            scope: PermissionGrantScope::Session,
+-            strict_auto_review: false,
+-        },
+-        "remote",
+-        &turn_context,
+-    );
++    session
++        .finalize_request_permissions_for_turn(
++            codex_protocol::request_permissions::RequestPermissionsResponse {
++                permissions: requested_permissions.clone(),
++                scope: PermissionGrantScope::Session,
++                strict_auto_review: false,
++            },
++            "remote",
++            &turn_context,
++        )
++        .await;
+ 
+     assert_eq!(
+         session
+@@ -7587,15 +7593,17 @@ async fn enable_strict_auto_review_for_turn_uses_originating_turn() {
+         }),
+         ..RequestPermissionProfile::default()
+     };
+-    session.record_granted_request_permissions_for_turn(
+-        &codex_protocol::request_permissions::RequestPermissionsResponse {
+-            permissions: requested_permissions,
+-            scope: PermissionGrantScope::Turn,
+-            strict_auto_review: true,
+-        },
+-        codex_exec_server::LOCAL_ENVIRONMENT_ID,
+-        &turn_context,
+-    );
++    session
++        .finalize_request_permissions_for_turn(
++            codex_protocol::request_permissions::RequestPermissionsResponse {
++                permissions: requested_permissions,
++                scope: PermissionGrantScope::Turn,
++                strict_auto_review: true,
++            },
++            codex_exec_server::LOCAL_ENVIRONMENT_ID,
++            &turn_context,
++        )
++        .await;
+ 
+     assert!(turn_context.strict_auto_review_enabled());
+ }
+diff --git a/codex-rs/core/src/session/tests/guardian_tests.rs b/codex-rs/core/src/session/tests/guardian_tests.rs
+index ab9a2be..ebc3777 100644
+--- a/codex-rs/core/src/session/tests/guardian_tests.rs
++++ b/codex-rs/core/src/session/tests/guardian_tests.rs
+@@ -663,20 +663,22 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_exec_command_policy_s
+     .await;
+ 
+     let (mut session, mut turn_context_raw) = make_session_and_context().await;
+-    session.record_granted_request_permissions_for_turn(
+-        &RequestPermissionsResponse {
+-            permissions: RequestPermissionProfile {
+-                network: Some(NetworkPermissions {
+-                    enabled: Some(true),
+-                }),
+-                ..Default::default()
++    session
++        .finalize_request_permissions_for_turn(
++            RequestPermissionsResponse {
++                permissions: RequestPermissionProfile {
++                    network: Some(NetworkPermissions {
++                        enabled: Some(true),
++                    }),
++                    ..Default::default()
++                },
++                scope: PermissionGrantScope::Turn,
++                strict_auto_review: true,
+             },
+-            scope: PermissionGrantScope::Turn,
+-            strict_auto_review: true,
+-        },
+-        codex_exec_server::LOCAL_ENVIRONMENT_ID,
+-        &turn_context_raw,
+-    );
++            codex_exec_server::LOCAL_ENVIRONMENT_ID,
++            &turn_context_raw,
++        )
++        .await;
+ 
+     Arc::make_mut(&mut turn_context_raw.config)
+         .permissions
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
 index 40cf765..1af601f 100644
 --- a/codex-rs/core/src/session/turn_context.rs
