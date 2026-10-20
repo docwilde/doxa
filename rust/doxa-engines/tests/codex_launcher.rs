@@ -2,7 +2,7 @@
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
-const PATCH: &str = "59a0bf33195f71fa9f792c5d65e89105414fbb3c2536d87f59334ff12a8e13d3";
+const PATCH: &str = "1c6e599ae48bd06e1ca125385da629d89100a85587afd1d583001a64e2a5fc8a";
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -156,7 +156,11 @@ fn version_identifies_checked_protected_payload_instead_of_newer_official_cli() 
     let dir = fixture();
     let official = dir.path().join("official-codex");
     let marker = dir.path().join("executed");
-    fs::write(&official, b"#!/bin/sh\nprintf 'official' >> \"$DOXA_VERSION_TEST_MARKER\"\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.164.0\\n'; else printf 'official:%s\\n' \"$*\"; fi\n").unwrap();
+    let version: Vec<u64> = doxa_engines::codex_compact::SUPPORTED_VERSION
+        .split('.').map(|part| part.parse().unwrap()).collect();
+    let newer_version = format!("{}.{}.{}", version[0], version[1], version[2] + 1);
+    let official_script = format!("#!/bin/sh\nprintf 'official' >> \"$DOXA_VERSION_TEST_MARKER\"\nif [ \"$1\" = --version ]; then printf 'codex-cli {newer_version}\\n'; else printf 'official:%s\\n' \"$*\"; fi\n");
+    fs::write(&official, official_script).unwrap();
     fs::set_permissions(&official, fs::Permissions::from_mode(0o700)).unwrap();
     let payload = dir.path().join("codex-app-server");
     fs::write(&payload, b"#!/bin/sh\nprintf 'payload' >> \"$DOXA_VERSION_TEST_MARKER\"\nprintf 'codex-app-server 0.163.0\\n'\n").unwrap();
@@ -167,7 +171,7 @@ fn version_identifies_checked_protected_payload_instead_of_newer_official_cli() 
     fs::write(&receipt, value.to_string()).unwrap();
     let direct = Command::new(&official).arg("--version")
         .env("DOXA_VERSION_TEST_MARKER", &marker).output().unwrap();
-    assert!(direct.status.success());assert_eq!(direct.stdout, b"codex-cli 0.164.0\n");
+    assert!(direct.status.success());assert_eq!(direct.stdout, format!("codex-cli {newer_version}\n").as_bytes());
     fs::remove_file(&marker).unwrap();
     for flag in ["--version", "-V"] {
         let result = Command::new(dir.path().join("codex")).arg(flag)
@@ -175,7 +179,7 @@ fn version_identifies_checked_protected_payload_instead_of_newer_official_cli() 
         assert!(result.status.success());
         let report = String::from_utf8(result.stdout).unwrap();
         assert_eq!(report, "doxa-codex-protected 0.163.0 (provider codex-0.163.0-precompact-v1; upstream 83086188ae0614bd882818ff1aa23f3194962012; contract doxa-precompact-fail-closed-v1)\n");
-        assert!(!report.contains("0.164.0"));assert!(!marker.exists());
+        assert!(!report.contains(&newer_version));assert!(!marker.exists());
     }
     let login = Command::new(dir.path().join("codex")).args(["login", "status"])
         .env("DOXA_VERSION_TEST_MARKER", &marker).output().unwrap();

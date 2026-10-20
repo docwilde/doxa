@@ -1859,7 +1859,7 @@ index e4a0481..e42d2fd 100644
      shutdown(&sess).await;
  }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index a541c55..a5df5c1 100644
+index a541c55..6f31f40 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -2932,6 +2932,11 @@ impl Session {
@@ -1927,7 +1927,21 @@ index a541c55..a5df5c1 100644
          let Some(environment) = step_context
              .environments
              .turn_environments()
-@@ -3324,6 +3348,15 @@ impl Session {
+@@ -3129,6 +3153,13 @@ impl Session {
+                 ) => decision,
+             };
+             if let Some(decision) = decision {
++                if turn_context.doxa_switched_to_auto() {
++                    return Some(RequestPermissionsResponse {
++                        permissions: RequestPermissionProfile::default(),
++                        scope: PermissionGrantScope::Turn,
++                        strict_auto_review: false,
++                    });
++                }
+                 let (permissions, scope) = match decision {
+                     ReviewDecision::Approved
+                     | ReviewDecision::ApprovedExecpolicyAmendment { .. }
+@@ -3324,6 +3355,15 @@ impl Session {
          };
          match entry {
              Some(entry) => {
@@ -1943,7 +1957,7 @@ index a541c55..a5df5c1 100644
                  let sandbox_context = entry
                      .environment
                      .sandbox_context(/*additional_permissions*/ None);
-@@ -3380,7 +3413,7 @@ impl Session {
+@@ -3380,7 +3420,7 @@ impl Session {
          environment_id: &str,
          turn_context: &TurnContext,
      ) {

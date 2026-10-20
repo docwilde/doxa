@@ -424,7 +424,7 @@ def configure(root, peer):
     home.mkdir(mode=0o700)
     config = '\n'.join(['model="gpt-6-sol"', 'model_provider="doxa_fixture"',
         'model_auto_compact_token_limit=100000000', 'model_post_turn_compact_threshold_percent=0',
-        '[features]', 'codex_hooks=true', 'token_budget=false', 'code_mode_only=true',
+        '[features]', 'codex_hooks=true', 'token_budget=false', 'async_compaction=false', 'code_mode_only=true',
         '[model_providers.doxa_fixture]', 'name="Owned code mode proof"',
         f'base_url="http://127.0.0.1:{peer.server.server_port}/v1"', 'wire_api="responses"',
         'requires_openai_auth=false', 'request_max_retries=0', 'stream_max_retries=0', 'supports_websockets=false'])
@@ -468,6 +468,7 @@ def provider_turn(server, root, peer, token, launcher=None):
         rpc.send({"method": "initialized"})
         config = rpc.request("config/read", {"cwd": str(root / "workspace"), "includeLayers": False})
         assert config["config"]["features"]["token_budget"] is False
+        assert config["config"]["features"]["async_compaction"] is False
         assert config["config"]["features"]["code_mode_only"] is True
         inventory = rpc.request("hooks/list", {"cwds": [str(root / "workspace")]})
         hooks = [hook for row in inventory.get("data", []) for hook in row.get("hooks", [])
