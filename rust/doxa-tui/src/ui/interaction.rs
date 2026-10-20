@@ -261,6 +261,7 @@ impl App {
             self.retire_operations(); self.chip_info = None;
         }
         if before != after {
+            self.attachment_picker=None;
             self.mcp_secret=None;
             self.retire_mcp_if_changed();
             self.branch_picker = None;
@@ -275,6 +276,7 @@ impl App {
             if moved_active_tab {
                 // The draft follows its tab rather than remaining under the
                 // old pane key. A command has already consumed its own input.
+                if let Some(values)=self.prompt_attachments.remove(&before){self.prompt_attachments.insert(after.clone(),values);}
                 self.input_drafts.remove(&before);
                 self.input_drafts.remove(&after);
             } else {
@@ -292,6 +294,7 @@ impl App {
                 (self.input, self.input_cursor) =
                     self.input_drafts.remove(&after).unwrap_or_default();
             }
+            self.prompt_attachments.retain(|(pane,id),_|self.groups.get(*pane).is_some_and(|g|g.tabs.contains(id)));
             self.slash_selected = 0;
             self.slash_dismissed = false;
         }
@@ -328,12 +331,13 @@ impl App {
         }
     }
     pub(super) fn poll_clipboard(&mut self) -> bool {
+        let attachment_changed=self.poll_attachment_jobs();
         let Some(result) = self
             .clipboard_job
             .as_ref()
             .and_then(crate::clipboard::Job::poll)
         else {
-            return false;
+            return attachment_changed;
         };
         let target = self.clipboard_job.take().unwrap().target.clone();
         let text = match result {
@@ -432,6 +436,7 @@ impl App {
     }
 
     pub(super) fn paste(&mut self, text: &str) -> bool {
+        if self.attachment_paste(text){return true;}
         if self.mcp_secret.is_some() {return self.mcp_secret_paste(text);}
         if let Some(menu) = &mut self.operations_menu {
             let handled = menu.paste(text);
@@ -632,6 +637,8 @@ impl App {
 
     pub(super) fn key(&mut self, key: KeyEvent) -> bool {
         use crate::keybindings::Action as KeyAction;
+        if self.attachment_picker.is_some(){return self.attachment_key(key);}
+        if key.code==KeyCode::Char('a')&&key.modifiers.contains(KeyModifiers::ALT)&&!self.link_interaction_blocked(){self.open_attachments();return true;}
         if self.rename_draft_backup.is_some() && self.focus == Focus::Prompt {
             if key.code == KeyCode::Esc {
                 self.restore_rename_draft();
@@ -681,6 +688,7 @@ impl App {
             if let Some(token) = self.mcp_secret.as_ref().map(|secret|secret.token)
                 .or_else(||self.operations_menu.as_ref().and_then(|menu|menu.credential_token())) {
                 self.clipboard_job = None;
+                self.clipboard_image_job=None;
                 self.clipboard_secret_owner = Some(token);
                 let mut target = self.clipboard_target(); target.draft.clear(); target.cursor = 0;
                 match crate::clipboard::Job::start(target) {
@@ -696,10 +704,11 @@ impl App {
             && !self.link_interaction_blocked()
         {
             self.clipboard_job = None;
+            self.clipboard_image_job=None;
             self.clipboard_secret_owner = None;
-            match crate::clipboard::Job::start(self.clipboard_target()) {
+            match crate::clipboard::ImageJob::start(self.clipboard_target()) {
                 Ok(job) => {
-                    self.clipboard_job = Some(job);
+                    self.clipboard_image_job = Some(job);
                     self.notice = "Reading clipboard into this prompt draft…".into();
                 }
                 Err(_) => {
@@ -1242,6 +1251,12 @@ impl App {
                     .active_id()
                     .unwrap_or("")
                     .to_owned();
+                if let Some((text,values))=self.rejected_attachment_prompts.get_mut(&target).and_then(Vec::pop){
+                    let owner=self.prompt_owner();let previous=std::mem::replace(&mut self.input,text);self.input_cursor=self.input.len();
+                    let old=self.prompt_attachments.insert(owner,values).unwrap_or_default();
+                    if !previous.is_empty()||!old.is_empty(){self.rejected_attachment_prompts.entry(target).or_default().push((previous,old));}
+                    self.notice="Prompt and attachments restored · review before retrying".into();return true;
+                }
                 if let Some(draft) = self.rejected_drafts.get_mut(&target).and_then(Vec::pop) {
                     let current = std::mem::replace(&mut self.input, draft);
                     self.input_cursor = self.input.len();
@@ -1387,7 +1402,9 @@ impl App {
                 }
             }
             KeyCode::Enter if self.focus == Focus::Prompt => {
-                if !self.input.is_empty() {
+                if !self.input.is_empty() || self.prompt_attachments.get(&self.prompt_owner()).is_some_and(|v|!v.is_empty()) {
+                    if self.attachment_file_job.is_some()||self.clipboard_image_job.is_some(){self.notice="Wait for attachment loading to finish".into();return true;}
+                    if self.input.starts_with(['/', '!'])&&self.prompt_attachments.get(&self.prompt_owner()).is_some_and(|v|!v.is_empty()){self.notice="Remove attachments before running a command".into();return true;}
                     if self.input.contains('\n')
                         && self
                             .input
@@ -1442,8 +1459,9 @@ impl App {
                                 self.notice = "Peer message queued".into();
                             }
                         } else if self.pending_prompts.len() < MAX_PENDING_PROMPTS {
-                            self.pending_prompts
-                                .push((id.to_owned(), std::mem::take(&mut self.input)));
+                            let owner=self.prompt_owner();let id=id.to_owned();
+                            if let Some(values)=self.prompt_attachments.remove(&owner).filter(|v|!v.is_empty()){self.pending_prompt_attachments.insert(self.pending_prompts.len(),values);}
+                            self.pending_prompts.push((id,std::mem::take(&mut self.input)));
                             self.input_cursor = 0;
                             self.notice = "Prompt queued".into();
                         } else {

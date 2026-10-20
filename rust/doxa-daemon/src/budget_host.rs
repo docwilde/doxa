@@ -110,6 +110,9 @@ impl BudgetHost {
 
 impl BudgetHost {
     fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl_images(text,peer_origin,&[],emit);
+    }
+    fn prompt_impl_images(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, images: &[doxa_input::Attachment], emit: &mut dyn FnMut(Value)) {
         if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
             emit(json!({"type":"turn_refused","data":{"reason":"budget","message":"Invalid host peer provenance"}}));
             return;
@@ -149,7 +152,7 @@ impl BudgetHost {
         // panics, and a caught panic must not reopen the allowance in process.
         state.unknown = true;
         let mut terminal_seen = false;
-        self.inner.prompt_with_peer_origin(text, peer_origin, &mut |mut event| {
+        self.inner.prompt_with_images(text, images, peer_origin, &mut |mut event| {
             if event["type"] == "turn_done" {
                 terminal_seen = true;
                 let cost = match self.pricing {
@@ -203,6 +206,11 @@ impl BudgetHost {
 }
 
 impl Host for BudgetHost {
+    fn supports_images(&self)->bool{self.inner.supports_images()}
+    fn prompt_with_images(&self,text:&str,images:&[doxa_input::Attachment],origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){
+        self.prompt_impl_images(text,origin,images,emit);
+    }
+
     fn isolation_status(&self) -> Option<Value> { self.inner.isolation_status() }
     fn has_active_work(&self) -> bool { self.inner.has_active_work() }
     fn peer_tools_ready(&self) -> bool { self.inner.peer_tools_ready() }

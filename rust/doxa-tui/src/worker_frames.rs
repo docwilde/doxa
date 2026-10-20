@@ -47,6 +47,7 @@ pub enum WorkerFrame {
         session_id: String,
         message: String,
     },
+    AttachmentFailed { session_id:String,text:String,attachments:Vec<doxa_input::Attachment>,message:String,delivery:PromptDelivery },
     PromptFailed {
         session_id: String,
         text: String,
@@ -193,6 +194,7 @@ impl WorkerFrame {
     /// never an encoded synthetic JSON envelope.
     pub fn into_legacy_value(self) -> Value {
         match self {
+            Self::AttachmentFailed{session_id,text,message,delivery,..}=>Self::PromptFailed{session_id,text,message,delivery}.into_legacy_value(),
             Self::Daemon {
                 session_id,
                 mut frame,

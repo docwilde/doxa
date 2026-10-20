@@ -97,17 +97,20 @@ fn reader_command()->io::Result<Command>{
     Err(io::Error::new(io::ErrorKind::NotFound,"clipboard reader unavailable"))
 }
 fn read_command(command:&mut Command,cancel:&AtomicBool,timeout:Duration)->io::Result<String>{
+    read_command_bytes(command,cancel,timeout,LIMIT).and_then(|bytes|String::from_utf8(bytes).map_err(|_|io::Error::new(io::ErrorKind::InvalidData,"clipboard is not text")))
+}
+fn read_command_bytes(command:&mut Command,cancel:&AtomicBool,timeout:Duration,limit:usize)->io::Result<Vec<u8>>{
     let(mut reader,writer)=UnixStream::pair()?;reader.set_nonblocking(true)?;
     let mut child=command.stdin(Stdio::null()).stdout(Stdio::from(OwnedFd::from(writer))).stderr(Stdio::null()).process_group(0).spawn()?;
     command.stdout(Stdio::null()); // release the parent's pipe writer after spawn
     let started=Instant::now();let mut raw=Vec::new();let mut buffer=[0u8;8192];let mut eof=false;let mut exited=None;
     let result='read: loop {
         if cancel.load(Ordering::Acquire)||started.elapsed()>=timeout{break Err(io::Error::new(io::ErrorKind::TimedOut,"clipboard read cancelled or timed out"));}
-        for _ in 0..8 {match reader.read(&mut buffer){Ok(0)=>{eof=true;break},Ok(n)=>{if raw.len()+n>LIMIT {break 'read Err(io::Error::new(io::ErrorKind::InvalidData,"clipboard exceeds 64 KiB"));}raw.extend_from_slice(&buffer[..n]);},Err(e)if e.kind()==io::ErrorKind::WouldBlock=>break,Err(e)if e.kind()==io::ErrorKind::Interrupted=>continue,Err(e)=>break 'read Err(e),}}
+        for _ in 0..8 {match reader.read(&mut buffer){Ok(0)=>{eof=true;break},Ok(n)=>{if raw.len()+n>limit {break 'read Err(io::Error::new(io::ErrorKind::InvalidData,"clipboard exceeds limit"));}raw.extend_from_slice(&buffer[..n]);},Err(e)if e.kind()==io::ErrorKind::WouldBlock=>break,Err(e)if e.kind()==io::ErrorKind::Interrupted=>continue,Err(e)=>break 'read Err(e),}}
         // Detect overflow even when a writer continues beyond the bounded buffer.
-        if raw.len()==LIMIT {match reader.read(&mut buffer){Ok(n)if n>0=>break Err(io::Error::new(io::ErrorKind::InvalidData,"clipboard exceeds 64 KiB")),Ok(0)=>eof=true,Err(e)if e.kind()==io::ErrorKind::WouldBlock=>{},Err(e)=>break Err(e),_=>{}}}
+        if raw.len()==limit {match reader.read(&mut buffer){Ok(n)if n>0=>break Err(io::Error::new(io::ErrorKind::InvalidData,"clipboard exceeds limit")),Ok(0)=>eof=true,Err(e)if e.kind()==io::ErrorKind::WouldBlock=>{},Err(e)=>break Err(e),_=>{}}}
         match child.try_wait(){Ok(Some(status))=>exited=Some(status),Ok(None)=>{},Err(e)=>break Err(e)}
-        if eof&&exited.is_some(){break if exited.unwrap().success(){String::from_utf8(raw).map_err(|_|io::Error::new(io::ErrorKind::InvalidData,"clipboard is not text"))}else{Err(io::Error::other("clipboard reader failed"))};}
+        if eof&&exited.is_some(){break if exited.unwrap().success(){Ok(raw)}else{Err(io::Error::other("clipboard reader failed"))};}
         std::thread::sleep(Duration::from_millis(5));
     };
     if result.is_err(){unsafe{libc::kill(-(child.id()as i32),libc::SIGKILL);}}let _=child.wait();result
@@ -151,4 +154,33 @@ mod tests {
         assert_eq!(read_command(&mut command,&AtomicBool::new(false),Duration::from_secs(1)).unwrap_err().kind(),io::ErrorKind::InvalidData);
     }
     #[test]fn private_reader_times_out_and_reaps_without_reading_system_clipboard(){let mut command=Command::new("python3");command.args(["-c","import time; time.sleep(10)"]);let start=Instant::now();assert_eq!(read_command(&mut command,&AtomicBool::new(false),Duration::from_millis(40)).unwrap_err().kind(),io::ErrorKind::TimedOut);assert!(start.elapsed()<Duration::from_secs(1));}
+}
+
+/// Only a normal prompt's explicit Ctrl+V probes image MIME types. Credential
+/// editors continue to use the text-only reader and never request image data.
+#[derive(Debug)]
+pub struct ImageJob { pub target:Target, rx:mpsc::Receiver<io::Result<Option<doxa_input::Attachment>>>, cancel:Arc<AtomicBool>, thread:Option<JoinHandle<()>> }
+impl ImageJob {
+    pub fn start(target:Target)->io::Result<Self>{
+        if cfg!(test){return Err(io::Error::other("clipboard image reader requires a fixture"));}
+        let(tx,rx)=mpsc::sync_channel(1);let cancel=Arc::new(AtomicBool::new(false));let cancelled=cancel.clone();
+        let thread=std::thread::spawn(move||{let _=tx.send(read_image(&cancelled));});
+        Ok(Self{target,rx,cancel,thread:Some(thread)})
+    }
+    pub fn poll(&self)->Option<io::Result<Option<doxa_input::Attachment>>>{self.rx.try_recv().ok()}
+    #[cfg(test)]pub fn fixture(target:Target,value:io::Result<Option<doxa_input::Attachment>>)->Self{let(tx,rx)=mpsc::sync_channel(1);tx.send(value).unwrap();Self{target,rx,cancel:Arc::new(AtomicBool::new(false)),thread:None}}
+}
+impl Drop for ImageJob {fn drop(&mut self){self.cancel.store(true,Ordering::Release);if let Some(thread)=self.thread.take(){let _=thread.join();}}}
+fn read_image(cancel:&AtomicBool)->io::Result<Option<doxa_input::Attachment>>{
+    let (path,list,args):(&str,&[&str],&[&str])=if std::env::var_os("WAYLAND_DISPLAY").is_some()&&Path::new("/usr/bin/wl-paste").is_file(){
+        ("/usr/bin/wl-paste",&["--list-types"],&["--type","image/png"])
+    }else if std::env::var_os("DISPLAY").is_some()&&Path::new("/usr/bin/xclip").is_file(){
+        ("/usr/bin/xclip",&["-selection","clipboard","-target","TARGETS","-out"],&["-selection","clipboard","-target","image/png","-out"])
+    }else{return Ok(None);};
+    let mut types=Command::new(path);types.args(list);
+    let available=match read_command(&mut types,cancel,Duration::from_secs(1)){Ok(value)=>value,Err(_)=>return Ok(None)};
+    if !available.lines().any(|line|line.trim()=="image/png"){return Ok(None);}
+    let mut command=Command::new(path);command.args(args);
+    let raw=read_command_bytes(&mut command,cancel,Duration::from_secs(2),doxa_input::MAX_SOURCE)?;
+    doxa_input::Attachment::from_source("clipboard.png",raw).map(Some)
 }

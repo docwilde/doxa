@@ -194,6 +194,7 @@ impl App {
             self.memory_preview.render_memory(frame,area);
         }
         self.draw_choice_dropdown(frame);
+        self.draw_attachments(frame,area);
         self.transcript_selection
             .borrow_mut()
             .finish_paint(frame.buffer_mut());
@@ -2782,7 +2783,7 @@ impl App {
                                 else if self.lore_picker.as_ref().is_some_and(|picker| picker.filter_focused) { " Filter beliefs ● " }
                                 else { " Filter beliefs (click or /) " }
                             } else if active && self.focus == Focus::Prompt {
-                                " Prompt ● "
+                                " Prompt ● · Alt+A files "
                             } else {
                                 " Prompt "
                             },

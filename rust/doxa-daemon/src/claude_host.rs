@@ -20,7 +20,7 @@ const POLL: Duration = Duration::from_millis(20);
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 type Reply = Sender<Result<Value, String>>;
 enum Command {
-    Prompt(String, Option<PeerTurnOrigin>, SyncSender<Value>, Reply),
+    Prompt(String, Vec<doxa_input::Attachment>, Option<PeerTurnOrigin>, SyncSender<Value>, Reply),
     Rpc(String, Value, Reply),
     Close,
 }
@@ -535,6 +535,9 @@ impl ClaudeHost {
 }
 impl ClaudeHost {
     fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl_images(text,&[],peer_origin,emit);
+    }
+    fn prompt_impl_images(&self,text:&str,images:&[doxa_input::Attachment],peer_origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){
         if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
             emit(done("Invalid host peer provenance"));
             return;
@@ -587,7 +590,7 @@ impl ClaudeHost {
             }
             if self
                 .commands
-                .send(Command::Prompt(text.into(), peer_origin.cloned(), tx, ack))
+                .send(Command::Prompt(text.into(), images.to_vec(), peer_origin.cloned(), tx, ack))
                 .is_err()
             {
                 self.shared.active.store(false, Ordering::Release);
@@ -613,6 +616,9 @@ impl ClaudeHost {
 }
 
 impl Host for ClaudeHost {
+    fn supports_images(&self)->bool{true}
+    fn prompt_with_images(&self,text:&str,images:&[doxa_input::Attachment],origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){self.prompt_impl_images(text,images,origin,emit);}
+
     fn has_active_work(&self) -> bool {
         self.shared.active.load(Ordering::Acquire)
     }
@@ -1309,7 +1315,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                         return;
                     }
                 }
-                Command::Prompt(text, peer_origin, sink, reply) => {
+                Command::Prompt(text, images, peer_origin, sink, reply) => {
                     streams.clear();
                     reasoning_progress = ReasoningProgress::default();
                     durable = DurableTurn::default();
@@ -1334,7 +1340,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                         else { shared.persist(record)?; }
                         shared.checkpoint(true)?;
                         let public_prompt = shared.scrub(&text)?;
-                        cli.prompt(&text, &shared.provider_session.lock().unwrap())
+                        cli.prompt_with_images(&text, &images, &shared.provider_session.lock().unwrap())
                             .map_err(|_| "Claude prompt write failed".to_owned())?;
                         Ok::<_, String>(public_prompt)
                     })();
@@ -1895,6 +1901,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                 if frame["message"].is_object() {
                     let mut message = frame["message"].clone();
                     if let Some(blocks) = message["content"].as_array_mut() {
+                        for block in blocks.iter_mut(){if block["type"]=="image"{*block=json!({"type":"text","text":"[Attached image retained in provider session; pixels omitted from DOXA transcript]"});}}
                         blocks.retain(|b| {
                             !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking"))
                         });
@@ -2169,6 +2176,20 @@ mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
     const SESSION: &str = "0b256c09-8d74-4865-9be0-4e6d24384551";
+    #[test]
+    fn attached_image_reaches_claude_as_an_image_block_and_follow_up_still_works(){
+        let (_dir,host)=fixture(r#"assert v['message']['content'][0]['type']=='text'
+  import base64
+  image=v['message']['content'][1]
+  assert image['type']=='image' and image['source']['media_type']=='image/png'
+  assert base64.b64decode(image['source']['data']).startswith(b'\x89PNG')
+  emit({'type':'result','session_id':'$SESSION','is_error':False,'total_cost_usd':0})"#);
+        let raw=doxa_input::decode_chunk("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==").unwrap();
+        let image=doxa_input::Attachment::from_source("fixture.png",raw).unwrap();let mut events=Vec::new();
+        host.prompt_with_images("look",&[image],None,&mut |e|events.push(e));
+        assert!(events.iter().any(|e|e["type"]=="turn_started"),"{events:?}");
+        assert_eq!(events.last().unwrap()["data"]["is_error"],false,"{events:?}");
+    }
     fn fixture(body: &str) -> (tempfile::TempDir, Arc<ClaudeHost>) {
         fixture_with_startup(
             body, "pass",

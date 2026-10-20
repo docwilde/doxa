@@ -223,6 +223,26 @@ impl DaemonClient {
         self.await_reply(id)
     }
 
+    pub fn prompt_attachments(&mut self,text:&str,attachments:&[doxa_input::Attachment])->Result<Value,TransportError>{
+        if attachments.is_empty(){return self.prompt(text);}
+        doxa_input::validate_set(attachments).map_err(|_|TransportError::Malformed("Invalid attachments"))?;
+        let reply=self.call("attachment_clear",Map::new())?;
+        if reply["ok"]!=true{return Ok(reply);}
+        let mut ids=Vec::new();
+        for attachment in attachments {
+            let reply=self.call("attachment_begin",json!({"name":attachment.name,"mime":attachment.mime,"bytes":attachment.bytes.len()}).as_object().unwrap().clone())?;
+            if reply["ok"]!=true{return Ok(reply);}
+            let Some(id)=reply["result"]["attachment_id"].as_str() else{return Err(TransportError::Malformed("Invalid attachment reply"));};let id=id.to_owned();
+            for (index,chunk) in attachment.bytes.chunks(doxa_input::CHUNK).enumerate(){
+                let reply=self.call("attachment_chunk",json!({"attachment_id":id,"offset":index*doxa_input::CHUNK,"data":doxa_input::encode_chunk(chunk)}).as_object().unwrap().clone())?;
+                if reply["ok"]!=true{return Ok(reply);}
+            }
+            let reply=self.call("attachment_finish",json!({"attachment_id":id}).as_object().unwrap().clone())?;
+            if reply["ok"]!=true{return Ok(reply);}ids.push(id);
+        }
+        let id=self.request_id()?;self.write_json(&json!({"type":"prompt","id":id,"text":text,"attachments":ids}))?;self.await_reply(id)
+    }
+
     pub fn call(&mut self, method: &str, params: Map<String, Value>) -> Result<Value, TransportError> {
         if method.is_empty() {
             return Err(TransportError::Malformed("empty call method"));

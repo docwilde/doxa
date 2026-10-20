@@ -18,7 +18,7 @@ impl std::fmt::Display for Error {
             Self::Io(_) => write!(f, "Claude CLI I/O failed"),
             Self::Timeout => write!(f, "Claude CLI operation timed out"),
             Self::Closed => write!(f, "Claude CLI closed"),
-            Self::Oversize => write!(f, "Claude CLI frame exceeds 1 MiB"),
+            Self::Oversize => write!(f, "Claude CLI frame exceeds 8 MiB"),
             Self::Protocol => write!(f, "invalid Claude CLI protocol frame"),
         }
     }

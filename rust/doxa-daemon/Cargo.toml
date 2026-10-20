@@ -6,6 +6,7 @@ publish = false
 license = "AGPL-3.0-only"
 
 [dependencies]
+doxa-input = { path = "../doxa-input" }
 uuid = { version = "1", features = ["v4"] }
 doxa-mcp = { path = "../doxa-mcp" }
 doxa-router = { path = "../doxa-router" }

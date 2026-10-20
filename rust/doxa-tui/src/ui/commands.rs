@@ -1096,6 +1096,7 @@ impl App {
                             self.focus = Focus::Prompt;
                         }
                     }
+                    actions::Action::AttachFiles=>self.open_attachments(),
                     actions::Action::Stop => self.open_stop_confirmation(),
                     actions::Action::Tools => {
                         self.tool_modal = true;

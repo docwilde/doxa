@@ -76,7 +76,7 @@ fn command_target(command:&crate::bridge::WorkerCommand)->Option<&str>{
     use crate::bridge::WorkerCommand::*;
     match command {
         Launch(..)=>None,
-        Attach(id,..)|AttachRuntime(id,..)|Prompt(id,..)|Answer(id,..)|Peers(id)|Message(id,..)|Models(id)
+        Attach(id,..)|AttachRuntime(id,..)|Prompt(id,..)|PromptAttachments(id,..)|Answer(id,..)|Peers(id)|Message(id,..)|Models(id)
         |SetModel(id,..)|SetEffort(id,..)|SetPermissionMode(id,..)|SetIsolation(id,..)|Branch(id,..)
         |QueueList(id)|ContextDetail(id)|RemoteHistory(id,..)|QueueCancel(id,..)|Status(id)|RefreshBilling(id)|Stop(id)
         |FinalizeForClear(id)=>Some(id),
@@ -1048,25 +1048,24 @@ pub(super) fn dispatch_prompts(
     app: &mut App,
     sender: &SyncSender<crate::bridge::WorkerCommand>,
 ) -> bool {
-    let mut prompts = app.take_prompts().into_iter();
-    while let Some(prompt) = prompts.next() {
-        match sender.try_send(crate::bridge::WorkerCommand::Prompt(prompt.0, prompt.1)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(crate::bridge::WorkerCommand::Prompt(id, text))) => {
-                let prompt = (id, text);
-                app.pending_prompts
-                    .extend(std::iter::once(prompt).chain(prompts));
-                app.notice = "Daemon writer busy · prompt retained".into();
-                return false;
+    let prompts=app.take_prompts();
+    let mut attachments=std::mem::take(&mut app.pending_prompt_attachments);
+    let mut prompts=prompts.into_iter().enumerate();
+    while let Some((index,(id,text)))=prompts.next(){
+        let command=match attachments.remove(&index){Some(values)=>crate::bridge::WorkerCommand::PromptAttachments(id,text,values),None=>crate::bridge::WorkerCommand::Prompt(id,text)};
+        match sender.try_send(command){
+            Ok(())=>{},
+            Err(error)=>{
+                let disconnected=matches!(error,TrySendError::Disconnected(_));
+                let command=match error{TrySendError::Full(command)|TrySendError::Disconnected(command)=>command};
+                match command{
+                    crate::bridge::WorkerCommand::Prompt(id,text)=>app.pending_prompts.push((id,text)),
+                    crate::bridge::WorkerCommand::PromptAttachments(id,text,values)=>{app.pending_prompt_attachments.insert(0,values);app.pending_prompts.push((id,text));},
+                    _=>unreachable!(),
+                }
+                for (old,prompt) in prompts{let next=app.pending_prompts.len();if let Some(values)=attachments.remove(&old){app.pending_prompt_attachments.insert(next,values);}app.pending_prompts.push(prompt);}
+                app.notice="Daemon writer busy or unavailable · prompt and attachments retained".into();return disconnected;
             }
-            Err(TrySendError::Disconnected(crate::bridge::WorkerCommand::Prompt(id, text))) => {
-                let prompt = (id, text);
-                app.pending_prompts
-                    .extend(std::iter::once(prompt).chain(prompts));
-                app.notice = "Daemon writer unavailable · prompt retained".into();
-                return true;
-            }
-            Err(_) => unreachable!(),
         }
     }
     false

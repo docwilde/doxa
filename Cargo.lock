@@ -455,6 +455,7 @@ dependencies = [
 name = "doxa-claude"
 version = "2.0.0-beta.62"
 dependencies = [
+ "doxa-input",
  "doxa-isolation",
  "doxa-state",
  "libc",
@@ -485,6 +486,7 @@ dependencies = [
  "doxa-claude",
  "doxa-engines",
  "doxa-fleet",
+ "doxa-input",
  "doxa-isolation",
  "doxa-lore",
  "doxa-mcp",
@@ -512,6 +514,7 @@ dependencies = [
 name = "doxa-engines"
 version = "2.0.0-beta.62"
 dependencies = [
+ "doxa-input",
  "doxa-isolation",
  "libc",
  "serde",
@@ -561,6 +564,17 @@ dependencies = [
  "tokio",
  "uuid",
  "web-push-native",
+]
+
+[[package]]
+name = "doxa-input"
+version = "2.0.0-beta.62"
+dependencies = [
+ "base64 0.22.1",
+ "image",
+ "libc",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -684,6 +698,7 @@ dependencies = [
 name = "doxa-runtime"
 version = "2.0.0-beta.62"
 dependencies = [
+ "doxa-input",
  "libc",
  "serde_json",
  "tempfile",
@@ -722,6 +737,7 @@ dependencies = [
  "doxa-codegraph",
  "doxa-engines",
  "doxa-fleet",
+ "doxa-input",
  "doxa-isolation",
  "doxa-lore",
  "doxa-mcp",

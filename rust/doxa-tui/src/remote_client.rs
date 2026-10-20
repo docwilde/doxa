@@ -330,6 +330,7 @@ async fn command_worker(command: WorkerCommand, http: Client, base: Url,
     frames: async_mpsc::Sender<WorkerFrame>, uncertain: Arc<Mutex<RetryIds>>,
     available: Availability, crypto_key:Option<[u8;32]>) {
     match command {
+        WorkerCommand::PromptAttachments(session_id,text,attachments)=>{let _=frames.send(WorkerFrame::AttachmentFailed{session_id,text,attachments,message:"Attachments require a local session connection".into(),delivery:PromptDelivery::Rejected}).await;}
         WorkerCommand::Prompt(id, text) if valid_target(&id) && available.lock().unwrap_or_else(|poison| poison.into_inner()).contains_key(&id) => {
             let incarnation=available.lock().unwrap_or_else(|poison|poison.into_inner()).get(&id).cloned().flatten();
             let Some(incarnation)=incarnation else {

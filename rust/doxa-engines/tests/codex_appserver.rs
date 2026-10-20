@@ -442,3 +442,20 @@ read()
     assert!(resolved && started.elapsed() < Duration::from_secs(1));
     driver.shutdown().await;
 }
+
+#[tokio::test]
+async fn image_input_reaches_turn_start_as_pixels_without_a_host_path() {
+    let (_dir,options)=fake();let source=std::fs::read_to_string(&options.executable).unwrap();
+    let source=source.replace("assert turn['params']['input'][0]['text'] == 'hello'",r#"assert turn['params']['input'][0]['text'] == 'hello'
+import base64
+image = turn['params']['input'][1]
+assert image['type'] == 'image'
+assert image['image_url'].startswith('data:image/png;base64,')
+assert base64.b64decode(image['image_url'].split(',',1)[1]).startswith(b'\x89PNG\r\n\x1a\n')
+assert 'path' not in image"#);std::fs::write(&options.executable,source).unwrap();
+    // A fixed 1x1 PNG fixture avoids a model call and real clipboard access.
+    let bytes=doxa_input::decode_chunk("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==").unwrap();
+    let image=doxa_input::Attachment::from_source("fixture.png",bytes).unwrap();
+    let mut driver=AppServerDriver::spawn(options,|s|s.to_owned()).await.unwrap();
+    driver.run_turn_controlled_images("hello",&[image],&CancellationToken::new(),|_|{},|_|Ok(None),None).await.unwrap();
+}

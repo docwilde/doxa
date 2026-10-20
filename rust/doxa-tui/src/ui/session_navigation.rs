@@ -1224,6 +1224,8 @@ impl App {
             self.groups.remove(removed);
             self.pane_tree = self.pane_tree.take().and_then(|tree| tree.without(removed));
             self.active_group = removed.min(self.groups.len() - 1);
+            self.prompt_attachments=std::mem::take(&mut self.prompt_attachments).into_iter().filter_map(|((index,id),values)|
+                (index!=removed).then_some(((index-usize::from(index>removed),id),values))).collect();
             self.input_drafts = std::mem::take(&mut self.input_drafts)
                 .into_iter()
                 .filter_map(|((index, id), draft)| {
@@ -1242,6 +1244,7 @@ impl App {
             }
         } else if self.groups[0].tabs.is_empty() {
             self.groups.swap(0, 1);
+            self.prompt_attachments=std::mem::take(&mut self.prompt_attachments).into_iter().map(|((index,id),values)|((if index<2{1-index}else{index},id),values)).collect();
             for id in self.groups[0].tabs.clone() {
                 if let Some(draft) = self.input_drafts.remove(&(1, id.clone())) {
                     self.input_drafts.insert((0, id), draft);

@@ -611,6 +611,14 @@ impl AppServerDriver {
     /// mode and sandbox changes remain idle operations.
     pub async fn run_turn_controlled(
         &mut self, prompt: &str, cancel: &CancellationToken,
+        emit: impl FnMut(EngineEvent),
+        request: impl FnMut(&Value) -> Result<Option<(EngineEvent, tokio::sync::oneshot::Receiver<Value>)>, String>,
+        control: Option<&mut tokio::sync::mpsc::Receiver<LiveAutoRequest>>,
+    ) -> Result<(), AppServerError> {
+        self.run_turn_controlled_images(prompt,&[],cancel,emit,request,control).await
+    }
+    pub async fn run_turn_controlled_images(
+        &mut self, prompt: &str, images: &[doxa_input::Attachment], cancel: &CancellationToken,
         mut emit: impl FnMut(EngineEvent),
         mut request: impl FnMut(&Value) -> Result<Option<(EngineEvent, tokio::sync::oneshot::Receiver<Value>)>, String>,
         mut control: Option<&mut tokio::sync::mpsc::Receiver<LiveAutoRequest>>,
@@ -635,10 +643,12 @@ impl AppServerDriver {
         let sandbox = permission.sandbox(self.options.sandbox);
         let isolation = doxa_isolation::active().map_err(AppServerError::Io)?;
         let sandbox_policy = turn_sandbox_policy(sandbox, isolation.as_ref().map(|manifest| manifest.profile));
+        let mut input=vec![json!({"type":"text","text":prompt,"text_elements":[]})];
+        input.extend(images.iter().map(doxa_input::Attachment::codex_block));
         let request_id = self.send_request_bounded("turn/start", json!({"threadId":thread_id,"model":self.options.model,"effort":self.effort,
             "approvalPolicy":if self.interactive { permission.approval_policy() } else { "never" },
             "sandboxPolicy":sandbox_policy,
-            "input":[{"type":"text","text":prompt,"text_elements":[]}]}), Some(cancel), deadline).await?;
+            "input":input}), Some(cancel), deadline).await?;
         let response = self.wait_response(request_id, Some(cancel), deadline, true).await?;
         let turn_id = response.pointer("/turn/id").and_then(Value::as_str)
             .filter(|id| valid_thread_id(id))

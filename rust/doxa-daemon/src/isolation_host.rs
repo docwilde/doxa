@@ -50,6 +50,11 @@ mod tests{
     }
 }
 impl Host for IsolationHost {
+    fn supports_images(&self)->bool{self.inner.supports_images()}
+    fn prompt_with_images(&self,text:&str,images:&[doxa_input::Attachment],origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){
+        self.prompt_with_origin_images(text,origin,images,emit);
+    }
+
     fn prompt(&self,text:&str,emit:&mut dyn FnMut(Value)) { self.prompt_with_origin(text,None,emit); }
     fn prompt_with_peer_origin(&self,text:&str,origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)) {
         self.prompt_with_origin(text,origin,emit);
@@ -106,6 +111,9 @@ impl Host for IsolationHost {
 
 impl IsolationHost {
     fn prompt_with_origin(&self,text:&str,origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)) {
+        self.prompt_with_origin_images(text,origin,&[],emit);
+    }
+    fn prompt_with_origin_images(&self,text:&str,origin:Option<&PeerTurnOrigin>,images:&[doxa_input::Attachment],emit:&mut dyn FnMut(Value)) {
         let Ok(_admission) = self.admission.try_lock() else {
             emit(json!({"type":"turn_refused","data":{"message":"Isolation policy change or another turn holds admission"}})); return;
         };
@@ -121,6 +129,6 @@ impl IsolationHost {
                 emit(json!({"type":"turn_refused","data":{"message":error.to_string()}})); return;
             }
         }
-        self.inner.prompt_with_peer_origin(text,origin,emit)
+        self.inner.prompt_with_images(text,images,origin,emit)
     }
 }

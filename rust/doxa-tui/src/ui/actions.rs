@@ -3,11 +3,12 @@
 use super::App;
 use super::commands::{COMMANDS, FLEET_ACTIONS};
 #[derive(Clone, Debug)]
-pub enum Action { New, Plugin(String), NativePlugin(String), Fleet(super::fleet_menu::SavedView), Tab(usize, usize), Command(&'static str), Stop, Tools, Close, NextPane }
+pub enum Action { New, AttachFiles, Plugin(String), NativePlugin(String), Fleet(super::fleet_menu::SavedView), Tab(usize, usize), Command(&'static str), Stop, Tools, Close, NextPane }
 #[derive(Clone, Debug)]
 pub struct Entry { pub label: String, pub help: String, pub action: Action }
 pub fn entries(app: &App, query: &str) -> Vec<Entry> {
     let mut rows = vec![Entry { label: "New tab".into(), help: "Select engine and model".into(), action: Action::New }];
+    rows.push(Entry{label:"Attach files".into(),help:"Images and UTF-8 text · Alt+A".into(),action:Action::AttachFiles});
     for (pane, group) in app.groups.iter().enumerate() {
         for (tab, id) in group.tabs.iter().enumerate() {
             let title = app.sessions.iter().find(|session| &session.id == id).map_or(id.as_str(), |session| session.title.as_str());
