@@ -9,7 +9,7 @@ the stable 2.0 release has not been cut.
 
 **Session sidebar**
 
-- Fix **`App::draw_rail`** to place the selection/activity marker before the session type icon or plain label. Retain indentation for child tabs, fleet supervisors and workers in both font modes.
+- Fix **`App::draw_rail`** to place selection/activity before the session type. Keep child-tab titles **2 columns** deeper in both font modes and preserve fleet-role indentation.
 
 ## 2.0.0-beta.61 — 2026-10-20
 

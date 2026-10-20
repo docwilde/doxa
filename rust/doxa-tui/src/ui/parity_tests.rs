@@ -525,11 +525,18 @@ use super::*;
             app.preferences.set_for_test("nerd_font",if icons {"on"} else {"off"});
             for (id,indent,kind) in [("normal","",if icons {"\u{f2d0}"} else {"[T]"}),
                 ("boss","  ",if icons {"\u{f508}"} else {"[S]"}),
-                ("worker","    ",if icons {"↳"} else {"[W]"}),("tab","  ","└")] {
+                ("worker","    ",if icons {"↳"} else {"[W]"}),("tab",if icons {"  "} else {"    "},"└")] {
                 app.rail_selected=app.rail_order().iter().position(|index|app.sessions[*index].id==id).unwrap();
                 let view=paint(&app);
                 assert!(view.lines().any(|line|line.contains(&format!("│{indent}▸ {kind} {id}"))),"selection must precede type with nesting retained: {view}");
             }
+            let view=paint(&app);
+            let root_kind=if icons {"\u{f2d0}"} else {"[T]"};
+            let parent=view.lines().find(|line|line.contains(&format!("{root_kind} normal"))).unwrap();
+            let child=view.lines().find(|line|line.contains("└ tab")).unwrap();
+            let parent_column=unicode_width::UnicodeWidthStr::width(&parent[..parent.find("normal").unwrap()]);
+            let child_column=unicode_width::UnicodeWidthStr::width(&child[..child.find("tab").unwrap()]);
+            assert_eq!(child_column,parent_column+2,"child titles retain their nesting with both font modes");
         }
         let rail=app.layout(app.size).rail.unwrap();
         click(&mut app,rail.x+2,rail.y+1);

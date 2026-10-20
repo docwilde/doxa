@@ -2139,11 +2139,17 @@ impl App {
                     };
                     let badge = format!("{pane}{provenance}{queue}");
                     let fleet_prefix = self.fleet_rail_prefix(&session.id);
+                    // [T] occupies three cells; keep child titles two columns
+                    // deeper with either the portable label or one-cell icon.
                     let tab_prefix = if fleet_prefix.is_empty() {
                         self.groups.iter().find_map(|group| group.tabs.iter().position(|id| id == &session.id)
                             .map(|position| if position == 0 {
                                 if self.preferences.on("nerd_font") { "\u{f2d0} " } else { "[T] " }
-                            } else if position + 1 == group.tabs.len() { "  └ " } else { "  ├ " })).unwrap_or("")
+                            } else if position + 1 == group.tabs.len() {
+                                if self.preferences.on("nerd_font") { "  └ " } else { "    └ " }
+                            } else {
+                                if self.preferences.on("nerd_font") { "  ├ " } else { "    ├ " }
+                            })).unwrap_or("")
                     } else { "" };
                     let title_width = usize::from(area.width.saturating_sub(5)).saturating_sub(fleet_prefix.width())
                         .saturating_sub(tab_prefix.width())
