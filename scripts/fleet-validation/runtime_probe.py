@@ -120,6 +120,9 @@ def main():
             deadline = time.monotonic()+45
             while time.monotonic() < deadline:
                 migrated = json.loads(manifest_path.read_text())
+                outcome=migrated.get('last_isolation_request',{})
+                if outcome.get('ok') is False:
+                    raise RuntimeError('Approved isolation migration failed: '+str(outcome.get('error')))
                 if migrated['slots'][0]['isolation'] == 'docker-open':
                     break
                 time.sleep(.2)

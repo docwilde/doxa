@@ -105,7 +105,7 @@ def main():
             require_known();m=snapshot();idle=True
             for row in m['slots']:
                 c=Client(row['socket_path'])
-                try:r=c.call('get_state')['result'];idle &= not r.get('running',True) and r.get('queued',1)==0
+                try:r=c.call('get_state');idle &= not r.get('running',True) and r.get('queued',1)==0
                 finally:c.close()
             stable=stable+1 if idle else 0
             if stable>=5:

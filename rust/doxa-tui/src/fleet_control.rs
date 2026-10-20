@@ -483,6 +483,13 @@ fn validate_dependency_resume(context:&doxa_fleet::Context,state:&doxa_fleet::St
     Ok(())
 }
 
+// Preserve the observed project scope across controller recovery. A fabricated
+// empty scope makes the next verified isolation transition appear cross-project.
+fn resumed_session(runtime:&Path,id:&str,socket:&Path)->io::Result<discovery::Session>{
+    discovery::sessions_in(runtime)?.into_iter().find(|session|session.id==id&&session.socket==socket)
+        .ok_or_else(||invalid("fleet live registry identity changed; resume withheld"))
+}
+
 pub fn resume(root: &Path, id: &str) -> io::Result<()> {
     let _signals = Signals::install()?;
     let initial = snapshot(root, id)?;
@@ -509,7 +516,7 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
         let engine = row["engine"].as_str().ok_or_else(|| invalid("missing fleet engine"))?;
         let mut assigned = choice(engine)?;
         assigned.lore = row["lore"].as_bool();
-        let session = discovery::Session { id:session_id, title:String::new(), socket, scope_key:String::new(), clients:None, started_at:String::new() };
+        let session = resumed_session(&root.join(id).join("rt"), &session_id, &socket)?;
         let mut slot = connect(session, &assigned, budget, row["isolation"].as_str().or_else(||value["spec"]["isolation"].as_str()).map(doxa_isolation::Profile::parse).transpose()?,row["router_config_sha256"].as_str())?;
         resumable_slot_phase(row,slot.busy)?;
         if has_dependencies{verify_dependency_container(&root.join(value["run_id"].as_str().ok_or_else(||invalid("fleet run identity unavailable"))?),&slot.session.id)?;}

@@ -173,8 +173,12 @@ pub(super) fn network_briefing(value:&Value,index:usize)->String {
                 let mut line=String::new();BufReader::new(stream).read_line(&mut line).unwrap();
                 assert_eq!(serde_json::from_str::<Value>(&line).unwrap(),json!({"type":"attach","cursor":17}));
             });
+            let recovered=control::resumed_session(&runtime,"session",&socket).unwrap();
+            assert_eq!(recovered.scope_key,"/source","resume must retain the scope used by later isolation verification");
+            assert!(control::resumed_session(&runtime,"different-session",&socket).is_err());
+            assert!(control::resumed_session(&runtime,"session",&old).is_err());
             let result=reconnect(&runtime,"session");
-            if reported=="session"{let (session,client)=result.unwrap();assert_eq!(session.socket,socket);assert_eq!(client.cursor,17);}
+            if reported=="session"{let (session,client)=result.unwrap();assert_eq!(session.scope_key,recovered.scope_key);assert_eq!(session.socket,socket);assert_eq!(client.cursor,17);}
             else{assert!(result.err().unwrap().to_string().contains("identity changed"));}
             server.join().unwrap();
         }
