@@ -13,15 +13,15 @@ import time
 
 
 def probe(binary, env, repo, root, state):
-    import gi
-    gi.require_version('Gtk','3.0');gi.require_version('Vte','2.91')
-    from gi.repository import GLib,Gtk,Pango,Vte
     read_fd,write_fd=os.pipe()
     display=subprocess.Popen(['Xvfb','-displayfd',str(write_fd),'-screen','0','2400x1600x24','-nolisten','tcp'],pass_fds=(write_fd,),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     os.close(write_fd)
     with os.fdopen(read_fd) as r:display_name=':'+r.readline().strip()
     os.environ['DISPLAY']=display_name
-    # Gtk must initialize after this private display is selected.
+    # Import Gtk only after selecting the private display: its override caches initialization.
+    import gi
+    gi.require_version('Gtk','3.0');gi.require_version('Vte','2.91')
+    from gi.repository import GLib,Gtk,Pango,Vte
     Gtk.init([])
     output=state/'native-menu';output.mkdir(mode=0o700)
     window=Gtk.Window();window.set_decorated(False);window.set_default_size(2400,1600)
@@ -29,8 +29,14 @@ def probe(binary, env, repo, root, state):
     child=[];failure=[];start=time.monotonic();steps=[];active={'index':0,'sent_at':start,'review':False}
     local_env=dict(env,DISPLAY=display_name,TERM='xterm-256color',COLORTERM='truecolor',LC_ALL='C.UTF-8',DOXA_NERD_FONT='off',DOXA_KEY_NOTICE='0')
     # Existing reviewed JSON is purely configuration, no secrets.
-    source=Path('/home/docwilde/.fl-pilot-1020/router.json')
-    config=state/'menu-router.json';config.write_text(source.read_text());config.chmod(0o600)
+    candidate={'id':'glm-small','provider':'glm','model':'glm-5.3-flash','effort':'low',
+        'description':'Menu-only review fixture; launch is never confirmed.',
+        'context_tokens':32768,'max_output_tokens':4096,'supports_tools':True,
+        'input_usd_micros_per_million':300000,'output_usd_micros_per_million':1200000}
+    value={'version':1,'jev_model':'jev-1.13.0','criteria_version':'native-menu-review',
+        'candidates':[candidate,{**candidate,'id':'glm-backup'}],'fallback_id':'glm-small',
+        'confidence_threshold':.75,'max_calls':3,'max_spend_usd_micros':3,'max_input_bytes':24576,'deadline_ms':1000}
+    config=state/'menu-router.json';config.write_text(json.dumps(value));config.chmod(0o600)
     down=b'\x1b[B';left=b'\x1b[D';enter=b'\r';erase=b'\x7f'
     script=[
         (b'\x10', 'palette'),(b'fleet start', 'palette-query'),(enter, 'open-menu'),
