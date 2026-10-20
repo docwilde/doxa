@@ -608,11 +608,16 @@ fn managed_worktree_conflict_refuses_to_start_in_original_checkout() {
     unsafe { libc::kill(non_git.id() as libc::pid_t, libc::SIGTERM); }
     wait_until(|| non_git.try_wait().unwrap().is_some());
 }
+fn supported_codex_fixture(body: &str) -> String {
+    let placeholder = "__DOXA_SUPPORTED_CODEX_VERSION__";
+    assert_eq!(body.matches(placeholder).count(), 1);
+    body.replace(placeholder, doxa_engines::codex_compact::SUPPORTED_VERSION)
+}
 fn codex_appserver_fixture(producer: &Path) -> PathBuf {
     let server = producer.with_extension("appserver");
     let turn = server.with_extension("turn");
     fs::copy(producer, &turn).unwrap();
-    executable(&server, include_str!("fixtures/codex_appserver.py"));
+    executable(&server, &supported_codex_fixture(include_str!("fixtures/codex_appserver.py")));
     server
 }
 fn codex_fixture_rpcs(producer: &Path) -> Vec<Value> {
@@ -3745,19 +3750,35 @@ fn codex_appserver_default_streams_persists_and_resumes() {
     let codex = dir.path().join("codex-appserver-fixture");
     let python = Path::new("python3");
     let log = dir.path().join("methods.log");
-    let script = r#"#!/usr/bin/env python3
+    let script = supported_codex_fixture(r#"#!/usr/bin/env python3
 import json, sys, tomllib
+
+def fixture_config():
+    overrides = [sys.argv[i+1] for i, item in enumerate(sys.argv[:-1]) if item == '-c']
+    for flag in ('features.token_budget=false', 'features.async_compaction=false',
+                 'agents.enabled=false', 'features.multi_agent_v2=false'):
+        assert flag in overrides, flag
+    def merge(target, incoming):
+        for key, value in incoming.items():
+            if isinstance(value, dict):
+                merge(target.setdefault(key, {}), value)
+            else:
+                target[key] = value
+    config = {}
+    for value in overrides:
+        merge(config, tomllib.loads(value))
+    return config
+
 
 def read(): return json.loads(sys.stdin.readline())
 def send(v): print(json.dumps(v),flush=True)
 log = open('__LOG__','a')
 init=read(); assert init['method']=='initialize'
-send({'id':init['id'],'result':{'userAgent':'doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; upstream fixture)'}})
+send({'id':init['id'],'result':{'userAgent':'doxa_codex_rs/__DOXA_SUPPORTED_CODEX_VERSION__ (doxa-precompact-fail-closed-v1; upstream fixture)'}})
 assert read()['method']=='initialized'
 thread=read()
 if thread['method']=='config/read':
-    assert 'features.token_budget=false' in sys.argv
-    send({'id':thread['id'],'result':{'config':{'features':{'token_budget':False}},'origins':{},'layers':None}})
+    send({'id':thread['id'],'result':{'config':fixture_config(),'origins':{},'layers':None}})
     thread=read()
 if thread['method']=='hooks/list':
     overrides=[sys.argv[i+1] for i,x in enumerate(sys.argv[:-1]) if x=='-c']
@@ -3789,7 +3810,7 @@ for fragment in 'sk-ownedCanonicalFixtureSecret1234567890 answer':
 send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1','turnId':'turn_1','tokenUsage':{'total':{'inputTokens':100,'outputTokens':50,'cachedInputTokens':10},'last':{'totalTokens':20000,'reasoningOutputTokens':7},'modelContextWindow':32000}}})
 send({'method':'turn/completed','params':{'threadId':'thread-1','turn':{'id':'turn_1','status':'completed','error':None}}})
 for line in sys.stdin: pass
-"#.replace("__LOG__", log.to_str().unwrap());
+"#).replace("__LOG__", log.to_str().unwrap());
     let (setup, body) = script.split_once("turn=read();").unwrap();
     let body = format!("turn=json.loads(line)\nif turn['method']=='account/rateLimits/read':\n send({{'id':turn['id'],'result':{{'rateLimits':{{'limitId':'codex','primary':{{'usedPercent':35,'windowDurationMins':300}}}}}}}})\n continue\n{}", body.split("for line in sys.stdin: pass").next().unwrap().trim_start());
     let script = format!("{setup}for line in sys.stdin:\n{}", body.lines().map(|line| format!("    {line}\n")).collect::<String>());
@@ -3911,7 +3932,7 @@ fn codex_auto_rpc(reader: &mut BufReader<UnixStream>, socket: &mut UnixStream,
 
 fn codex_auto_fixture(root: &Path, scenario: &str) -> PathBuf {
     let codex = root.join("auto-provider");
-    executable(&codex, &include_str!("fixtures/codex_live_auto.py")
+    executable(&codex, &supported_codex_fixture(include_str!("fixtures/codex_live_auto.py"))
         .replace("__SCENARIO__", scenario)
         .replace("__RELEASE__", root.join("release").to_str().unwrap())
         .replace("__LOG__", root.join("auto-rpcs.jsonl").to_str().unwrap()));
@@ -4003,7 +4024,7 @@ fn codex_auto_pending(reader: &mut BufReader<UnixStream>, socket: &mut UnixStrea
 
 fn codex_peer_permission_fixture(root: &Path) -> PathBuf {
     let codex = root.join("peer-provider");
-    executable(&codex, include_str!("fixtures/codex_peer_permissions.py"));
+    executable(&codex, &supported_codex_fixture(include_str!("fixtures/codex_peer_permissions.py")));
     codex
 }
 fn receive_one_peer_delivery(listener: UnixListener) -> thread::JoinHandle<Value> {
@@ -4796,13 +4817,30 @@ fn native_spawn_reviews_exact_task_cancels_single_use_and_publishes_verified_chi
 #[cfg(target_os = "linux")]
 fn cancellation_before_compaction_submission_clears_restart_guard_and_resumes_context() {
     let dir=tempfile::tempdir().unwrap(); let codex=dir.path().join("codex-source-stall");
-    executable(&codex,r#"#!/usr/bin/env python3
+    executable(&codex,&supported_codex_fixture(r#"#!/usr/bin/env python3
 import json,sys,os,tomllib,time
 from pathlib import Path
 root=Path(__file__).parent
 source=Path(os.environ['CODEX_HOME'])/'sessions'/'owned-thread.jsonl'
 source.parent.mkdir(parents=True,exist_ok=True)
 if not source.exists(): source.write_text(json.dumps({'type':'session_meta','payload':{'id':'thread-1'}})+'\n')
+def fixture_config():
+    overrides = [sys.argv[i+1] for i, item in enumerate(sys.argv[:-1]) if item == '-c']
+    for flag in ('features.token_budget=false', 'features.async_compaction=false',
+                 'agents.enabled=false', 'features.multi_agent_v2=false'):
+        assert flag in overrides, flag
+    def merge(target, incoming):
+        for key, value in incoming.items():
+            if isinstance(value, dict):
+                merge(target.setdefault(key, {}), value)
+            else:
+                target[key] = value
+    config = {}
+    for value in overrides:
+        merge(config, tomllib.loads(value))
+    return config
+
+
 def read():
  line=sys.stdin.readline()
  if not line: sys.exit(0)
@@ -4810,14 +4848,14 @@ def read():
  return json.loads(line)
 def send(value): print(json.dumps(value),flush=True)
 def notice(method,**params): send({'method':method,'params':dict(threadId='thread-1',**params)})
-init=read();send({'id':init['id'],'result':{'userAgent':'doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; upstream fixture)'}})
+init=read();send({'id':init['id'],'result':{'userAgent':'doxa_codex_rs/__DOXA_SUPPORTED_CODEX_VERSION__ (doxa-precompact-fail-closed-v1; upstream fixture)'}})
 assert read()['method']=='initialized'
 request=read()
 if request['method']=='model/list':
  send({'id':request['id'],'result':{'data':[{'model':'gpt-test','hidden':False,'isDefault':True,'supportedReasoningEfforts':[]}],'nextCursor':None}})
  sys.exit(0)
 assert request['method']=='config/read'
-send({'id':request['id'],'result':{'config':{'features':{'token_budget':False}},'origins':{},'layers':None}})
+send({'id':request['id'],'result':{'config':fixture_config(),'origins':{},'layers':None}})
 request=read();assert request['method']=='hooks/list'
 overrides=[sys.argv[i+1] for i,x in enumerate(sys.argv[:-1]) if x=='-c']
 hooks=next(tomllib.loads(x)['hooks'] for x in overrides if x.startswith('hooks='));key=next(iter(hooks['state']))
@@ -4838,7 +4876,7 @@ while True:
  send({'id':request['id'],'result':{'turn':{'id':'turn-1'}}})
  notice('thread/tokenUsage/updated',turnId='turn-1',tokenUsage={'last':{'inputTokens':0,'outputTokens':0,'totalTokens':0},'total':{'inputTokens':0,'outputTokens':0,'cachedInputTokens':0},'modelContextWindow':32000})
  notice('turn/completed',turn={'id':'turn-1','status':'completed','error':None})
-"#);
+"#));
     let mut process=Process::start_codex_appserver_with_review(dir.path(),&codex,false,true);
     let (mut reader,mut socket)=process.connect();
     reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
@@ -5239,7 +5277,7 @@ fn check_long_codex_restore(trimmed: bool) {
     store.try_write_thread(json!({"thread_id":"previous-thread","session_id":"codex-session","engine":"codex","transport":"app-server","cwd":dir.path(),"lore_enabled":true,"lore_tools":false,"peer_tools":false,"turn_incomplete":false,"model":"account-model","effort":"high","permission_mode":"on-request"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
     let original=fs::read(store.transcript_path()).unwrap();
     assert!(original.len()>16_384);
-    let codex=dir.path().join("codex-recovery");executable(&codex,include_str!("fixtures/codex_appserver.py"));
+    let codex=dir.path().join("codex-recovery");executable(&codex,&supported_codex_fixture(include_str!("fixtures/codex_appserver.py")));
     fs::write(codex.with_extension("context"),json!({"model_context_window":1_000_000,"model_auto_compact_token_limit":if trimmed {80_000} else {900_000}}).to_string()).unwrap();
     fs::write(codex.with_extension("fresh-thread"),"fresh-thread").unwrap();
     executable(&codex.with_extension("turn"),&format!(r#"#!/usr/bin/env python3
