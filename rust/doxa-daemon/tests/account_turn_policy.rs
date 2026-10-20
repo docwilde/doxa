@@ -4,7 +4,7 @@ use std::{fs,os::unix::fs::PermissionsExt,process::Command};
 #[test]
 fn direct_daemon_resume_refuses_lost_account_environment_state_policy_and_identity_before_provider_start(){
     for scenario in ["missing_env","cleared_env","missing_state","missing_policy","both_missing","wrong_limit","wrong_session","wrong_model","pending","not_resume"] {
-        let root=tempfile::tempdir().unwrap();fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();let home=root.path().join("home");fs::create_dir(&home).unwrap();
+        let root=tempfile::tempdir().unwrap();fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();let home=root.path().join("home");fs::create_dir(&home).unwrap();fs::set_permissions(&home,fs::Permissions::from_mode(0o700)).unwrap();
         let account=home.join("account-turns");fs::create_dir(&account).unwrap();fs::set_permissions(&account,fs::Permissions::from_mode(0o700)).unwrap();
         let marker=root.path().join("provider-called");let provider=root.path().join("provider");
         fs::write(&provider,format!("#!/usr/bin/python3\nopen({:?},'w').write('unexpected')\nraise SystemExit(1)\n",marker.to_string_lossy())).unwrap();fs::set_permissions(&provider,fs::Permissions::from_mode(0o700)).unwrap();
@@ -19,7 +19,7 @@ fn direct_daemon_resume_refuses_lost_account_environment_state_policy_and_identi
         command.env_clear().env("PATH","/usr/bin:/bin").env("HOME",&home).env("DOXA_HOME",&home).env("DOXA_LORE","0").env("DOXA_WORKTREE","0")
             .args(["--engine","codex","--model",if scenario=="wrong_model"{"gpt-other"}else{"gpt-fixture"},"--session-id","account-owned","--isolation","native","--codex-bin"]).arg(&provider)
             .arg("--runtime-dir").arg(&runtime).arg("--cwd").arg(root.path());
-        if scenario!="not_resume"{command.arg("--resume");}
+        if scenario!="not_resume"{command.args(["--resume","true"]);}
         if scenario!="missing_env"{command.env("DOXA_ACCOUNT_TURN_LIMIT",if scenario=="cleared_env"{""}else if scenario=="wrong_limit"{"3"}else{"2"}).env("DOXA_ACCOUNT_TURN_SCOPE","fleet_supervisor");}
         let output=command.output().unwrap();assert!(!output.status.success(),"opened {scenario}");
         assert!(!marker.exists(),"provider was initialized for rejected {scenario}");
