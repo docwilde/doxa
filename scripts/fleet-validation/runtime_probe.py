@@ -58,13 +58,18 @@ def main():
     meta = key_path.lstat()
     if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or stat.S_IMODE(meta.st_mode) != 0o600:
         raise RuntimeError('Private credential source is unsafe')
-    key = json.loads(key_path.read_text()).get('deepseek')
+    saved_keys=json.loads(key_path.read_text())
+    key = saved_keys.get('deepseek')
     if not isinstance(key, str) or not key:
         raise RuntimeError('Saved DeepSeek credential unavailable')
     env.update(DEEPSEEK_API_KEY=key, DOXA_HOME=str(home), DOXA_RUNTIME_DIR=str(state/'rt'),
         DOXA_DOCKER_HOST=ENGINE, DOXA_DOCKER_IMAGE=IMAGE, DOCKER_HOST=ENGINE,
         DOXA_LORE='0', DOXA_WORKTREE='1', TMPDIR='/home/docwilde/.t',
         LORE_ROOT=str(state/'lore'),LORE_PROJECTS_DIR=str(state/'projects'),LORE_CODEX_SESSIONS_DIR=str(state/'codex-sessions'), LORE_DISABLE_SYNC='1', LORE_DISABLE_REVIEW='1')
+    if args.native_menu_live:
+        glm=saved_keys.get('glm')
+        if not isinstance(glm,str) or not glm:raise RuntimeError('Saved GLM credential unavailable for explicit live case')
+        env['ZAI_API_KEY']=glm
     base = [str(binary), 'fleet']
     common = ['--pool', 'deepseek:deepseek-flash', '--supervisor', 'deepseek:deepseek-flash',
         '-n', '1', '--prompt', 'Disposable runtime acceptance only. Do not call tools, contact internet or change files.',
