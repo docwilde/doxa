@@ -304,6 +304,23 @@ impl ToolGate for NativeVendorGate<'_> {
             let result = self.workspace.as_ref().ok_or(()).and_then(|gate| gate.read(call));
             return Box::pin(async move { result });
         }
+        // Malformed model arguments have no uncertain backend outcome. Show
+        // the scrubbed refusal and let the bounded provider turn correct them;
+        // no permission or peer handler is reached on this path.
+        if matches!(call.name.as_str(),doxa_engines::peer_tools::LIST|doxa_engines::peer_tools::SEND|doxa_engines::peer_tools::HISTORY) {
+            let checked=(|| {
+                let id=(self.scrub)(&call.id)?;
+                let arguments:Value=serde_json::from_str(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string())?).map_err(|_|())?;
+                Ok::<_,()>((id,arguments))
+            })();
+            let (id,arguments)=match checked{Ok(value)=>value,Err(())=>return Box::pin(async{Err(())})};
+            if doxa_engines::peer_tools::validated_call(&call.name,&arguments).is_err(){
+                let result=json!({"error":"Invalid peer tool arguments; no action was taken. Correct the tool arguments using the advertised schema."});
+                (self.emit)(json!({"type":"tool_call","data":{"id":id,"name":call.name,"input":arguments}}));
+                (self.emit)(json!({"type":"tool_result","data":{"id":id,"name":call.name,"result_summary":result.to_string(),"is_error":true,"failure_category":"peer_arguments_invalid"}}));
+                return Box::pin(async move{Ok(result)});
+            }
+        }
         let start = (|| {
             let call_id = (self.scrub)(&call.id)?;
             let arguments: Value = serde_json::from_str(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string())?).map_err(|_| ())?;
@@ -362,6 +379,21 @@ mod peer_tests {
     use std::{cell::RefCell, sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}}};
     fn peer_call(name: &str, arguments: Value) -> ToolCall {
         ToolCall { id:"provider-call".into(), name:name.into(), arguments:arguments.as_object().unwrap().clone() }
+    }
+    #[test]
+    fn malformed_peer_handoff_is_a_scrubbed_model_refusal_without_backend_or_approval(){
+        let dir=tempfile::tempdir().unwrap();let calls=Arc::new(AtomicUsize::new(0));let called=calls.clone();
+        let handler:doxa_runtime::PeerToolHandler=Arc::new(move|_,_|{called.fetch_add(1,Ordering::SeqCst);Ok(json!({}))});
+        let desk=Arc::new(PeerDesk::default());let displayed=RefCell::new(Vec::new());
+        let emit=|event|displayed.borrow_mut().push(event);let scrub=|text:&str|Ok(text.replace("fixture-secret","[redacted]"));
+        let mut gate=NativeVendorGate::new(dir.path(),false,Some(handler),desk,&scrub,&emit,Arc::new(Mutex::new(Vec::new())));
+        let call=peer_call(doxa_engines::peer_tools::SEND,json!({"target":"current-exact-session","text":"fixture-secret","fleet_kind":"handoff","artifact_refs":[],"in_reply_to":"host-checkpoint-is-not-a-message-id"}));
+        let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let result=runtime.block_on(gate.execute(&call)).unwrap();assert!(result["error"].as_str().unwrap().contains("Invalid peer tool arguments"));
+        assert_eq!(calls.load(Ordering::SeqCst),0);
+        let events=displayed.borrow();assert!(!events.iter().any(|event|event["type"]=="needs_input"));
+        assert!(events.iter().any(|event|event["data"]["failure_category"]=="peer_arguments_invalid"));
+        assert!(!serde_json::to_string(&*events).unwrap().contains("fixture-secret"));
     }
     #[test]
     fn canonical_lore_calls_are_available_without_peer_opt_in_and_never_without_approval() {

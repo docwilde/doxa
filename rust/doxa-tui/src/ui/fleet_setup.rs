@@ -2,7 +2,7 @@
 use super::{App,ChipInfo,fleet_process,safe_label};
 use crossterm::event::{KeyCode,KeyEvent};
 use std::{io,path::PathBuf};
-const LABELS:[&str;15]=["Task","Directory","Worker engine","Worker model (blank = default)","Workers","Coordinator engine","Coordinator model","Worker isolation","Coordinator isolation","Total budget USD","Alignment supervisor","Message review","Message judge","Review budget USD","Router config (absolute path; blank = settings)"];
+const LABELS:[&str;15]=["Task","Directory","Worker engine","Worker model (blank = default)","Workers","Coordinator engine","Coordinator model","Worker isolation","Coordinator isolation","Total budget USD","Alignment supervisor (Enter edits PROVIDER:MODEL)","Message review","Message judge","Review budget USD","Router config (absolute path; blank = settings)"];
 #[derive(Debug)]
 pub(super) struct Wizard{values:[String;15],selected:usize,editing:bool}
 impl Wizard{
@@ -10,7 +10,7 @@ impl Wizard{
     fn choices(&self)->Option<&'static [&'static str]>{match self.selected{2=>Some(&["glm","deepseek","claude","codex","router"]),5=>Some(&["off","glm","deepseek","claude","codex","router"]),7|8=>Some(&["docker-offline","docker-open","native"]),10=>Some(&["off","jev:jev-1.13.0","subq:subq-snap-preview"]),11=>Some(&["off","shadow","enforce"]),_=>None}}
     fn cycle(&mut self,back:bool){if let Some(options)=self.choices(){let i=options.iter().position(|row|*row==self.values[self.selected]).unwrap_or(0);self.values[self.selected]=options[(i+if back{options.len()-1}else{1})%options.len()].into();}}
     fn lines(&self)->Vec<String>{
-        let mut lines=vec!["New fleet · ↑↓ field · ←→ choice · Enter edit · F10 review · Esc".into(),
+        let mut lines=vec!["New fleet · ↑↓ field · ←→ preset · Enter edit/select · F10 review · Esc".into(),
             "Defaults: Docker offline. Native and internet require owner confirmation.".into(),
             "Router uses exact configured target IDs in the model fields. Review its private config below.".into()];
         for (index,label) in LABELS.iter().enumerate(){lines.push(format!("{} {label}: {}{}",if self.selected==index{"▸"}else{" "},safe_label(&self.values[index]),if self.selected==index&&self.editing{" ▏"}else{""}));}
@@ -43,7 +43,7 @@ impl App{
         else{match key.code{
             KeyCode::Up=>wizard.selected=wizard.selected.saturating_sub(1),KeyCode::Down=>wizard.selected=(wizard.selected+1).min(LABELS.len()-1),
             KeyCode::Left=>wizard.cycle(true),KeyCode::Right|KeyCode::Char(' ')=>wizard.cycle(false),
-            KeyCode::Enter=>if wizard.choices().is_some(){wizard.cycle(false)}else{wizard.editing=true},
+            KeyCode::Enter=>if wizard.selected==10{wizard.editing=true}else if wizard.choices().is_some(){wizard.cycle(false)}else{wizard.editing=true},
             KeyCode::F(10)=>{
                 let prepared=wizard.args().and_then(|args|fleet_process::Prepared::start(args,None));
                 match prepared{Ok(prepared)=>{let lines=prepared.lines.clone();self.fleet_review=Some(prepared);self.fleet_setup=None;self.chip_info=Some(ChipInfo{kind:"fleet_review",label:String::new(),lines,scroll:0,owner:None});},Err(error)=>self.notice=safe_label(&error.to_string())}
@@ -74,6 +74,24 @@ impl App{
     #[test]fn wizard_engine_choices_include_router_for_workers_and_coordinator(){
         let mut wizard=Wizard::new(std::env::current_dir().unwrap());
         for field in [2,5]{wizard.selected=field;assert!(wizard.choices().unwrap().contains(&"router"));}
+    }
+
+    #[test]fn alignment_selector_enter_edits_an_exact_api_model_without_launching(){
+        use crossterm::event::KeyModifiers;
+        let mut app=App::default();app.open_fleet_setup();
+        let wizard=app.fleet_setup.as_mut().unwrap();wizard.values[0]="Bounded review".into();wizard.selected=10;
+        let press=|code|KeyEvent::new(code,KeyModifiers::NONE);
+        app.fleet_setup_key(press(KeyCode::Enter));
+        for _ in 0..3{app.fleet_setup_key(press(KeyCode::Backspace));}
+        for c in "deepseek:deepseek-flash".chars(){app.fleet_setup_key(press(KeyCode::Char(c)));}
+        app.fleet_setup_key(press(KeyCode::Enter));
+        let wizard=app.fleet_setup.as_ref().unwrap();assert!(!wizard.editing);
+        let review=crate::fleet_control::Spec::parse(&wizard.args().unwrap()).unwrap().review().unwrap();
+        assert_eq!(review["independent_review"]["supervisor"]["provider"],"deepseek");
+        assert_eq!(review["independent_review"]["supervisor"]["model"],"deepseek-flash");
+        app.fleet_setup_key(press(KeyCode::Right));
+        assert_eq!(app.fleet_setup.as_ref().unwrap().values[10],"jev:jev-1.13.0","arrows retain preset selection");
+        assert!(app.fleet_controller.is_none());
     }
 
 }
