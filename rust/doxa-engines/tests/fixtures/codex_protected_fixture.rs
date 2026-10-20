@@ -47,8 +47,10 @@ key=next(iter(hooks['state'])); command=hooks['PreCompact'][0]['hooks'][0]['comm
 query=read(); assert query['method']=='config/read'
 assert 'features.token_budget=false' in overrides
 assert 'features.async_compaction=false' in overrides
-send({'id':query['id'],'result':{'config':{'features':{'token_budget':mode=='token-budget','async_compaction':mode=='async-compaction'}},'origins':{},'layers':None}})
-if mode in ('token-budget','async-compaction'):
+assert 'agents.enabled=false' in overrides
+assert 'features.multi_agent_v2=false' in overrides
+send({'id':query['id'],'result':{'config':{'agents':{'enabled':None if mode=='missing-agent-policy' else mode=='native-agents'},'features':{'token_budget':mode=='token-budget','async_compaction':mode=='async-compaction','multi_agent_v2':None if mode=='missing-agent-policy' else mode=='native-agents-v2'}},'origins':{},'layers':None}})
+if mode in ('token-budget','async-compaction','native-agents','native-agents-v2','missing-agent-policy'):
     if sys.stdin.readline(): Path('unsafe-after-'+mode).write_text('request')
     sys.exit(0)
 query=read(); assert query['method']=='hooks/list'

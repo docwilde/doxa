@@ -26,7 +26,9 @@ Protected sessions require DOXA's private **Codex 0.163.0** app server with cont
 
 The hook binds the actual provider thread and owned rollout, prepares a scrubbed snapshot, and waits for the native LORE reviewer. Manual `/compact` independently reviews the same bound source and rechecks its identity and digest before submission. Missing, failed, timed-out, changed, asynchronous, or duplicate review blocks replacement; a worker exit code without an exact receipt is insufficient. DOXA also waits for matching hook and compaction events after submission. It does not overwrite global Codex settings or trust unrelated user hooks.
 
-The private provider makes the decision inside `run_pre_compact_hooks`, before compaction inference or history replacement. Exactly one required synchronous command must return explicit JSON approval. The provider identifies itself as `doxa_codex_rs/0.163.0` and does not impersonate stock Codex. [Authenticated default-window verification](../../docs/live-default-window-compaction-2026-09-30.md).
+DOXA disables Codex's internal multi-agent spawning and verifies that policy before starting a protected thread. Fleet/session creation and peer messages go through DOXA so visible identities, review and account limits remain authoritative. Existing injected peer tools remain available.
+
+The private provider makes the decision inside `run_pre_compact_hooks`, before compaction inference or history replacement. Exactly one required synchronous command must return explicit JSON approval. The provider identifies itself as `doxa_codex_rs/0.163.0` and does not impersonate stock Codex. [Earlier 0.156.1 authenticated default-window verification](../../docs/live-default-window-compaction-2026-09-30.md).
 
 ## Install the protected provider
 

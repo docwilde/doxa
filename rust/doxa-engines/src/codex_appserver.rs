@@ -302,6 +302,10 @@ impl AppServerDriver {
         let owner_fd = owner_peer.as_ref().map(AsRawFd::as_raw_fd);
         let mut provider_command = std::process::Command::new(&options.executable);
         provider_command.arg("app-server").arg("--stdio").current_dir(&options.cwd);
+        // DOXA owns visible sessions, peer coordination and fleet/account caps.
+        // Provider-internal children would bypass those identities and budgets.
+        provider_command.arg("-c").arg("agents.enabled=false");
+        provider_command.arg("-c").arg("features.multi_agent_v2=false");
         let offline=!doxa_isolation::task_internet_allowed()?;
         if offline {
             provider_command.arg("-c").arg("web_search=\"disabled\"");
@@ -368,6 +372,10 @@ impl AppServerDriver {
                     // Token-budget context resets bypass PreCompact in this provider.
                     // Confirm the process-local override is supported and effective.
                     let config = driver.request("config/read", json!({"cwd":driver.options.cwd,"includeLayers":false})).await?;
+                    if config["config"]["agents"]["enabled"] != false
+                        || config["config"]["features"]["multi_agent_v2"] != false {
+                        return Err(AppServerError::Protocol("Codex internal agents are not disabled; DOXA owns fleet sessions and account limits"));
+                    }
                     if config["config"]["features"]["token_budget"] != false {
                         return Err(AppServerError::Protocol("Codex unhooked token-budget reset path is not disabled"));
                     }
