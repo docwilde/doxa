@@ -325,6 +325,7 @@ pub(crate) fn router_resume_config(session_id:&str)->io::Result<(PathBuf,doxa_ro
     Ok((path,config,home))
 }
 
+fn append_codex_sandbox(command:&mut Command,explicit:Option<&str>){if let Some(sandbox)=explicit{command.args(["--sandbox",sandbox]);}}
 pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     spawn_inner(options, None, &[],None)
 }
@@ -542,7 +543,8 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
                 return Err(invalid("Claude options require --engine claude"));
             }
             let codex = codex_executable(options)?;
-            command.args(["--engine", "codex", "--codex-bin"]).arg(codex).args(["--sandbox", sandbox]);
+            command.args(["--engine", "codex", "--codex-bin"]).arg(codex);
+            append_codex_sandbox(&mut command,options.sandbox.as_deref());
             if options.resume.is_some() {
                 command.args(["--resume", "true"]);
                 // Continuing a saved tab uses the protected transport, including
@@ -749,6 +751,11 @@ mod tests {
         for (key,value) in [("pending",serde_json::json!(true)),("used",serde_json::json!(13)),("limit",serde_json::json!(11))]{let mut changed=state.clone();changed[key]=value;write(&path,&changed);assert!(saved_account_turn_limit("saved").is_err(),"{key}");}
         write(&path,&state);fs::remove_file(&policy).unwrap();assert!(saved_account_turn_limit("saved").is_err());write(&policy,&original);fs::remove_file(&path).unwrap();assert!(saved_account_turn_limit("saved").is_err());
         assert!(saved_account_turn_limit("../saved").is_err());
+    }
+    #[test]
+    fn explicit_codex_sandbox_is_forwarded_and_implicit_history_can_restore_its_policy(){
+        let mut command=Command::new("fixture");append_codex_sandbox(&mut command,None);assert_eq!(command.get_args().count(),0);
+        append_codex_sandbox(&mut command,Some("read-only"));assert_eq!(command.get_args().collect::<Vec<_>>(),["--sandbox","read-only"]);
     }
     fn router_fixture() -> serde_json::Value {
         serde_json::json!({"version":1,"jev_model":"jev-1.13.0","criteria_version":"fixture-v1",

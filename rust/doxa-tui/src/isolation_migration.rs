@@ -49,6 +49,7 @@ fn options(plan:&Value,manifest:&Manifest)->io::Result<LaunchOptions>{
 }
 
 fn verify_continuity(plan:&Value,resumed:&Value)->io::Result<()>{
+    if plan["launch"]["engine"]=="codex"&&plan["launch"]["sandbox"]!=resumed["launch"]["sandbox"]{return Err(invalid("resumed native Codex sandbox changed"));}
     for key in ["transcript_path","transcript_bytes","transcript_sha256","model","effort","permission_mode","router_checkpoint","account_turn_allowance"]{
         if resumed[key]!=plan[key]{return Err(invalid(format!("resumed conversation changed {key}")));}
     }Ok(())

@@ -45,6 +45,7 @@ pub struct DriverOptions {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub sandbox: SandboxMode,
+    pub sandbox_explicit: bool,
     pub turn_timeout: Duration,
     /// A previously recorded Codex thread ID for an explicit resume.
     pub resume_thread: Option<String>,
@@ -62,6 +63,7 @@ impl DriverOptions {
             model: None,
             effort: None,
             sandbox: SandboxMode::WorkspaceWrite,
+            sandbox_explicit: false,
             turn_timeout: Duration::from_secs(3600),
             resume_thread: None,
             require_resume: false,

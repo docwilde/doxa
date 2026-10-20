@@ -110,6 +110,7 @@ struct Options {
     #[cfg(feature = "local-test-server")]
     vendor_endpoint: Option<String>,
     sandbox: SandboxMode,
+    explicit_sandbox: bool,
 }
 fn initial_task_prompt(task: &str, parent: Option<&str>) -> String {
     // Match Python's receiving-side spawn disclosure before admitting a turn.
@@ -351,7 +352,7 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
         router_config,
         #[cfg(feature = "local-test-server")]
         vendor_endpoint,
-        sandbox,
+        sandbox, explicit_sandbox,
     })
 }
 fn invalid(message: &str) -> io::Error {
@@ -683,7 +684,7 @@ fn run() -> io::Result<()> {
                 .expect("validated Codex executable");
             driver.model = options.model.clone();
             driver.effort = options.effort.clone();
-            driver.sandbox = options.sandbox;
+            driver.sandbox = options.sandbox;driver.sandbox_explicit=options.explicit_sandbox;
             let host = Arc::new(
                 CodexHost::new(
                     driver,
@@ -692,6 +693,7 @@ fn run() -> io::Result<()> {
                 )
                 .map_err(io::Error::other)?,
             );
+            options.sandbox=match host.call("codex_sandbox_policy",&json!({})).map_err(|_|invalid("Codex sandbox policy unavailable"))?["configured_sandbox"].as_str(){Some("read-only")=>SandboxMode::ReadOnly,Some("workspace-write")=>SandboxMode::WorkspaceWrite,Some("danger-full-access")=>SandboxMode::DangerFullAccess,_=>return Err(invalid("Codex sandbox policy unavailable"))};
             codex_host = Some(host.clone());
             host
         }

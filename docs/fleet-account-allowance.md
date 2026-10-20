@@ -48,3 +48,13 @@ candidate's conservative worker hold uses the same count, context/input bound,
 output bound and declared prices. A tool call limit alone does not imply that
 the final answer fits: reserve enough requests for that answer too. Unknown
 usage retains the full reservation and stops further spending.
+
+The separate CLI-only `--supervisor-sandbox read-only|workspace-write` flag
+freezes an exact native Codex coordinator's inner command sandbox. It does not
+change its outer Docker profile. Explicit choices are shown in launch review,
+bound into the assignment plan and verified against the native host's configured
+and effective sandbox with on-request permissions. Historical resumes restore
+the saved sandbox; an explicit different choice refuses. Isolation migration
+retains the same sandbox. Omitting the flag preserves existing launch defaults.
+A read-only inner sandbox may request a one-shot network command approval even
+when the owner already opted the outer Docker coordinator into internet access.
