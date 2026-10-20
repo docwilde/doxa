@@ -695,13 +695,15 @@ async fn cancellation_and_timeout_abort_request() {
         Duration::from_millis(250),
     );
     let (_, cancel) = watch::channel(false);
+    // Keep the server response well after this deadline. Equal response and
+    // timeout delays race which ready future wins rather than test cancellation.
     assert_eq!(
         stream_once_local(
             Vendor::DeepSeek,
             &url,
             json!({}),
             cancel,
-            Duration::from_millis(250),
+            Duration::from_millis(50),
             |_| {}
         )
         .await,
