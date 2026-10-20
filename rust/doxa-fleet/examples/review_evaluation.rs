@@ -195,7 +195,9 @@ fn run_cases(plan: &Plan, file: &mut fs::File, mut evaluate: impl FnMut(&Context
                 // Production errors are static labels. Do not persist response bodies or credentials.
                 let reason = if reason.len() <= 160 && !reason.chars().any(char::is_control) { reason } else {"review evaluation failed".into()};
                 if case.role == "checkpoint" { fleet::apply_supervisor(&plan.context, Err("synthetic evaluation review unavailable".into()))?; }
-                json!({"case_id":case.id,"role":case.role,"status":"stopped","error":reason,
+                let failure_category=after.observations.iter().rev().find(|row|row["event"]=="review_failed")
+                    .and_then(|row|row["failure_category"].as_str()).unwrap_or("evaluation_schema_or_policy");
+                json!({"case_id":case.id,"role":case.role,"status":"stopped","error":reason,"failure_category":failure_category,
                     "request_sha256":fleet::hash(&case.request)?,"wall_ms":started.elapsed().as_millis(),
                     "calls":after.calls,"reserved_usd":after.reserved_usd,"known_estimated_usd":after.actual_estimated_usd,
                     "accounting_unknown":after.accounting_unknown,"automatic_retry":false})
@@ -291,7 +293,7 @@ mod tests {
         assert_eq!(plan.label_source,PROVENANCE);
         for case in &plan.cases {
             assert_eq!(case.request["max_tokens"],512);
-            assert!(case.request.get("thinking").is_none());
+            assert_eq!(case.request["thinking"]["type"],"disabled");
             assert!(case.request.get("tools").is_none());
             assert_eq!(case.request["model"],"deepseek-flash");
             assert_eq!(case.request["messages"][1]["content"],serde_json::to_string(&case.input).unwrap());
