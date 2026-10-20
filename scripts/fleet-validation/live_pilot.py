@@ -41,13 +41,14 @@ class Client:
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--live',action='store_true',help='Explicitly opt this bounded new case into paid provider calls');p.add_argument('--state',type=Path,required=True)
-    p.add_argument('--handoff-only',action='store_true',help='Focused handoff/ACK/confirmation/release case; no research or migration');p.add_argument('--max-new-budget',type=float,default=.90);p.add_argument('--image',default=IMAGE);p.add_argument('--daemon',type=Path);p.add_argument('--binary',type=Path,default=Path.home()/'.local/bin/doxa');p.add_argument('--prior-held-usd','--prior-reserved-usd',dest='prior_reserved_usd',type=float,default=0.0);p.add_argument('--case-id',default='fleet-pilot-01');p.add_argument('--review-budget',type=float,default=None);p.add_argument('--context-tokens',type=int,default=32768);p.add_argument('--output-tokens',type=int,default=4096);p.add_argument('--input-rate',type=int,default=300000);p.add_argument('--output-rate',type=int,default=1200000);args=p.parse_args()
+    p.add_argument('--review-input-rate',type=float,default=1.0);p.add_argument('--review-output-rate',type=float,default=4.0);p.add_argument('--handoff-only',action='store_true',help='Focused handoff/ACK/confirmation/release case; no research or migration');p.add_argument('--max-new-budget',type=float,default=.90);p.add_argument('--image',default=IMAGE);p.add_argument('--daemon',type=Path);p.add_argument('--binary',type=Path,default=Path.home()/'.local/bin/doxa');p.add_argument('--prior-held-usd','--prior-reserved-usd',dest='prior_reserved_usd',type=float,default=0.0);p.add_argument('--case-id',default='fleet-pilot-01');p.add_argument('--review-budget',type=float,default=None);p.add_argument('--context-tokens',type=int,default=32768);p.add_argument('--output-tokens',type=int,default=4096);p.add_argument('--input-rate',type=int,default=300000);p.add_argument('--output-rate',type=int,default=1200000);args=p.parse_args()
     if not args.live:p.error('Provider pilot requires explicit --live; no state or calls were created')
     if not 0<=args.prior_reserved_usd<.90:raise RuntimeError('Prior holds must leave a positive allocation')
 
     if not math.isfinite(args.max_new_budget) or not 0<args.max_new_budget<=.90:raise RuntimeError('New allocation must be finite and <=0.90')
     run_budget=min(.90-args.prior_reserved_usd,args.max_new_budget);review_budget=args.review_budget if args.review_budget is not None else .20-args.prior_reserved_usd
     if not 0<review_budget<run_budget:raise RuntimeError('Review allocation must leave a positive worker allocation')
+    if not all(math.isfinite(rate) for rate in (args.review_input_rate,args.review_output_rate)) or args.review_input_rate<.3 or args.review_output_rate<1.2:raise RuntimeError('DeepSeek review rates cannot be below the verified 2026-10-20 peak prices')
     if args.input_rate<150000 or args.output_rate<500000:raise RuntimeError('Rates cannot be below the verified exact-model registry')
     request_bytes=args.context_tokens-args.output_tokens
     worker_hold_micros=(request_bytes*25*args.input_rate+args.output_tokens*args.output_rate+999999)//1000000
@@ -107,12 +108,12 @@ def main():
         '--worker-task','2:'+('After explicit human dependency release, read README.md and finish in plain text without messaging.' if args.handoff_only else 'After human dependency release, send one status confirming the read-only handoff and stop.'),
         '--worker-after','2:1','--cwd',str(repo),'--root',str(root),'--run-id','pilot','--run-budget',format(run_budget,'.6f'),'--review-budget',format(review_budget,'.6f'),
         '--alignment-supervisor','deepseek:deepseek-flash','--supervision-mode','shadow','--message-review','shadow','--message-judge','llm:deepseek:deepseek-flash',
-        '--review-max-calls',('6' if args.handoff_only else '12'),'--review-interval','3600','--review-input-price','1','--review-output-price','4','--quiescence-timeout',('480' if args.handoff_only else '600'),'--quiet-dwell','120',
+        '--review-max-calls',('6' if args.handoff_only else '12'),'--review-interval','3600','--review-input-price',str(args.review_input_rate),'--review-output-price',str(args.review_output_rate),'--quiescence-timeout',('480' if args.handoff_only else '600'),'--quiet-dwell','120',
         '--approve','peer','--approval-grace','0']
     binary=args.binary.resolve(strict=True);base=[str(binary),'fleet'];manifest_path=root/'pilot/manifest.json';report={'case_id':args.case_id,'group_id':'live-pilot-20261020',
         'human_labels':False,'started_at':time.time(),'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'image':args.image,'engine':ENGINE,'focused_handoff':args.handoff_only,
         'limits':{'total_usd':run_budget,'review_usd':review_budget,'prior_retained_usd':args.prior_reserved_usd,'combined_usd':.90,'router_slots':3,'slot_usd_floor':slot_micros/1000000,'request_bytes':request_bytes,'output_tokens_per_turn':args.output_tokens,
-            'max_tool_requests_per_turn':25,'worker_hold_usd':worker_hold_micros/1000000,'input_usd_mtok':args.input_rate/1000000,'output_usd_mtok':args.output_rate/1000000,'review_max_calls':(6 if args.handoff_only else 12),'review_output_tokens':512,'review_input_usd_mtok':1,'review_output_usd_mtok':4},'steps':[]}
+            'max_tool_requests_per_turn':25,'worker_hold_usd':worker_hold_micros/1000000,'input_usd_mtok':args.input_rate/1000000,'output_usd_mtok':args.output_rate/1000000,'review_max_calls':(6 if args.handoff_only else 12),'review_output_tokens':512,'review_input_usd_mtok':args.review_input_rate,'review_output_usd_mtok':args.review_output_rate},'steps':[]}
     def run(extra,timeout=30):
         r=subprocess.run(base+extra,env=env,cwd=repo,text=True,capture_output=True,timeout=timeout)
         return {'returncode':r.returncode,'stdout':r.stdout,'stderr':r.stderr}
