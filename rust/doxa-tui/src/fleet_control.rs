@@ -1582,6 +1582,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_account_policy_binds_roles_hash_and_separate_api_partition(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("router.json");let config=crate::router_setup::tests::config();
+        fs::write(&path,serde_json::to_vec(&config).unwrap()).unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
+        let mut args:Vec<String>=["--pool","router:auto","--router-config",path.to_str().unwrap(),"--prompt","bounded task","-n","3","--supervisor","codex:gpt-6-sol","--run-budget","0.42","--supervisor-account-turn-limit","12","--dry-run"].into_iter().map(str::to_owned).collect();
+        let _fleet_root=review_fixture_root(&mut args);let spec=Spec::parse(&args).unwrap();
+        let review=spec.review().unwrap();assert_eq!(review["supervisor_account_policy"]["turn_limit"],12);assert!(review["supervisor_account_policy"]["provider_charge_usd"].is_null());
+        assert_eq!(slot_api_budget(Some(0.42),0.21,4,Some(12),0).unwrap(),None);
+        for index in 1..4{assert!((slot_api_budget(Some(0.42),0.21,4,Some(12),index).unwrap().unwrap()-0.07).abs()<1e-9);}
+        assert_eq!(slot_api_budget(Some(4.0),0.0,4,None,0).unwrap(),Some(1.0));
+        let before=spec.assignment_plan_hash().unwrap();let limit=args.iter().position(|arg|arg=="--supervisor-account-turn-limit").unwrap()+1;
+        args[limit]="11".into();assert_ne!(Spec::parse(&args).unwrap().assignment_plan_hash().unwrap(),before);
+        for invalid in ["0","33"]{args[limit]=invalid.into();assert!(Spec::parse(&args).is_err());}args[limit]="12".into();
+        let supervisor=args.iter().position(|arg|arg=="--supervisor").unwrap()+1;
+        for invalid in ["claude:sonnet","router:auto","codex"]{args[supervisor]=invalid.into();assert!(Spec::parse(&args).is_err());}
+        let mut manifest=json!({"mode":"supervisor","spec":{"supervisor_account_turn_limit":12},"slots":[{"engine":"codex","account_turn_limit":12},{"engine":"router"},{"engine":"router"},{"engine":"router"}]});
+        assert_eq!(manifest_account_limit(&manifest).unwrap(),Some(12));manifest["slots"][1]["account_turn_limit"]=json!(12);assert!(manifest_account_limit(&manifest).is_err());
+        let good=json!({"engine":"codex","billing":{"budget":null,"account_turn_allowance":{"limit":12,"used":1,"pending":false,"durable":true,"provider_charge_usd":null,"outside_api_usd_budget":true}}});
+        assert!(verify_account_allowance(&good,Some(12),false).is_ok());assert!(verify_account_allowance(&good,None,false).is_err());
+        for (key,value) in [("limit",json!(13)),("used",json!(13)),("pending",json!(true)),("durable",json!(false)),("provider_charge_usd",json!(0)),("outside_api_usd_budget",json!(false))]{let mut changed=good.clone();changed["billing"]["account_turn_allowance"][key]=value;assert!(verify_account_allowance(&changed,Some(12),false).is_err(),"{key}");}
+        let mut running=good;running["billing"]["account_turn_allowance"]["pending"]=json!(true);assert!(verify_account_allowance(&running,Some(12),true).is_ok());
+    }
+
+    #[test]
     fn processed_event_cursor_rejects_gaps_and_missing_legacy_frontiers(){
         let mut row=json!({"event_cursor":3,"turn_serial":1,"last_turn":{"is_error":false}});
         let event=|seq|json!({"type":"event","seq":seq,"event":{"type":"turn_done"}});

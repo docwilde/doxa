@@ -4,7 +4,7 @@ use std::{fs,os::unix::fs::PermissionsExt,process::Command};
 #[test]
 fn direct_daemon_resume_refuses_lost_account_environment_state_policy_and_identity_before_provider_start(){
     for scenario in ["missing_env","cleared_env","missing_state","missing_policy","both_missing","wrong_limit","wrong_session","wrong_model","pending","not_resume"] {
-        let root=tempfile::tempdir().unwrap();let home=root.path().join("home");fs::create_dir(&home).unwrap();
+        let root=tempfile::tempdir().unwrap();fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();let home=root.path().join("home");fs::create_dir(&home).unwrap();
         let account=home.join("account-turns");fs::create_dir(&account).unwrap();fs::set_permissions(&account,fs::Permissions::from_mode(0o700)).unwrap();
         let marker=root.path().join("provider-called");let provider=root.path().join("provider");
         fs::write(&provider,format!("#!/usr/bin/python3\nopen({:?},'w').write('unexpected')\nraise SystemExit(1)\n",marker.to_string_lossy())).unwrap();fs::set_permissions(&provider,fs::Permissions::from_mode(0o700)).unwrap();
@@ -30,7 +30,7 @@ fn direct_daemon_resume_refuses_lost_account_environment_state_policy_and_identi
 #[test]
 fn direct_daemon_new_account_refuses_untrusted_custom_home_before_provider_start(){
     for scenario in ["shared_parent","owner_alias"] {
-        let root=tempfile::tempdir().unwrap();let parent=root.path().join("owned");fs::create_dir(&parent).unwrap();fs::set_permissions(&parent,fs::Permissions::from_mode(0o700)).unwrap();
+        let root=tempfile::tempdir().unwrap();fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();let parent=root.path().join("owned");fs::create_dir(&parent).unwrap();fs::set_permissions(&parent,fs::Permissions::from_mode(0o700)).unwrap();
         let home=parent.join("home");fs::create_dir(&home).unwrap();fs::set_permissions(&home,fs::Permissions::from_mode(0o700)).unwrap();
         let exposed=if scenario=="shared_parent"{fs::set_permissions(&parent,fs::Permissions::from_mode(0o770)).unwrap();home.clone()}else{let alias=root.path().join("alias");std::os::unix::fs::symlink(&home,&alias).unwrap();alias};
         let marker=root.path().join("called");let provider=root.path().join("provider");fs::write(&provider,format!("#!/usr/bin/python3\nopen({:?},'w').write('unexpected')\n",marker.to_string_lossy())).unwrap();fs::set_permissions(&provider,fs::Permissions::from_mode(0o700)).unwrap();

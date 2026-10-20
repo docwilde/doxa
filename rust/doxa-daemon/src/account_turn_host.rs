@@ -151,7 +151,7 @@ impl AccountTurnHost {
         let mut terminals=0;let mut outcome="pending";let mut terminal=None;
         // Every dispatch consumes one attempt, including peer/queued/image and
         // /compact prompts. Cancellation/refusal/error never refunds an attempt.
-        self.inner.prompt_with_images(text,images,origin,&mut|mut event|{
+        self.inner.prompt_with_images(text,images,origin,&mut|event|{
             if matches!(event["type"].as_str(),Some("turn_done"|"turn_refused")){
                 terminals+=1;outcome=if event["type"]=="turn_refused"{"refused"}else if event["data"]["is_error"]==true{"error"}else{"completed"};
                 if terminal.is_none(){terminal=Some(event);}return;
@@ -238,12 +238,13 @@ mod tests {
         }
         fn initial_model(&self)->Option<String>{Some("gpt-fixture".into())}
     }
+    fn private_temp()->tempfile::TempDir{let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();dir}
     fn identity()->Value{json!({"session_id":"session","engine":"codex","role":"coordinator","model":"gpt-fixture","cwd":"/fixture"})}
     fn fixture(root:&std::path::Path)->Arc<Fixture>{Arc::new(Fixture{path:root.join("account/session.json"),calls:AtomicUsize::new(0),images:AtomicUsize::new(0)})}
     #[test]
     fn account_directory_rejects_shared_alias_and_swapped_parent_before_dispatch(){
         for scenario in ["shared","alias","swapped","replaced_alias","chmod"] {
-            let dir=tempfile::tempdir().unwrap();let root=dir.path().join("owned");fs::create_dir(&root).unwrap();
+            let dir=private_temp();let root=dir.path().join("owned");fs::create_dir(&root).unwrap();
             fs::set_permissions(&root,fs::Permissions::from_mode(0o700)).unwrap();
             if scenario=="shared"{fs::set_permissions(&root,fs::Permissions::from_mode(0o770)).unwrap();}
             let exposed=if scenario=="alias"{let alias=dir.path().join("alias");std::os::unix::fs::symlink(&root,&alias).unwrap();alias}else{root.clone()};
@@ -268,7 +269,7 @@ mod tests {
     }
     #[test]
     fn account_attempts_include_peer_attachment_compaction_refusal_and_error_without_refunds(){
-        let dir=tempfile::tempdir().unwrap();let fixture=fixture(dir.path());
+        let dir=private_temp();let fixture=fixture(dir.path());
         let host=AccountTurnHost::new(fixture.clone(),fixture.path.clone(),identity(),4,false).unwrap();
         let image=doxa_input::Attachment::from_source("source.txt",b"fixture bytes".to_vec()).unwrap();
         let mut events=Vec::new();host.prompt_with_images("image",&[image],None,&mut|event|events.push(event));
@@ -284,7 +285,7 @@ mod tests {
     }
     #[test]
     fn settled_allowance_survives_respawn_and_migration_without_model_or_limit_changes(){
-        let dir=tempfile::tempdir().unwrap();let fixture=fixture(dir.path());let path=fixture.path.clone();
+        let dir=private_temp();let fixture=fixture(dir.path());let path=fixture.path.clone();
         let host=AccountTurnHost::new(fixture.clone(),path.clone(),identity(),2,false).unwrap();host.prompt("work",&mut|_|{});
         let plan=host.call("isolation_migration_plan",&json!({})).unwrap();assert_eq!(plan["account_turn_allowance"]["used"],1);
         let mut changed=plan.clone();changed["account_turn_allowance"]["limit"]=json!(3);
@@ -299,7 +300,7 @@ mod tests {
     #[test]
     fn incomplete_crashed_missing_corrupt_and_duplicate_records_fail_closed(){
         for scenario in ["missing","panic","remove","corrupt","duplicate"] {
-            let dir=tempfile::tempdir().unwrap();let fixture=fixture(dir.path());let path=fixture.path.clone();
+            let dir=private_temp();let fixture=fixture(dir.path());let path=fixture.path.clone();
             let host=AccountTurnHost::new(fixture.clone(),path.clone(),identity(),2,false).unwrap();
             match scenario {
                 "missing"=>host.prompt("missing",&mut|_|{}),
@@ -310,7 +311,7 @@ mod tests {
             }
             drop(host);assert!(AccountTurnHost::new(fixture.clone(),path,identity(),2,true).is_err(),"reopened {scenario}");
         }
-        let dir=tempfile::tempdir().unwrap();let fixture=fixture(dir.path());let mut worker=identity();worker["role"]=json!("worker");
+        let dir=private_temp();let fixture=fixture(dir.path());let mut worker=identity();worker["role"]=json!("worker");
         assert!(AccountTurnHost::new(fixture.clone(),fixture.path.clone(),worker,2,false).is_err());
     }
     #[test]
@@ -324,7 +325,7 @@ mod tests {
             }
             fn call(&self,_:&str,_:&Value)->Result<Value,String>{Ok(json!({}))}
         }
-        let dir=tempfile::tempdir().unwrap();let fixture=fixture(dir.path());let(started,notice)=mpsc::channel();let(release,wait)=mpsc::channel();
+        let dir=private_temp();let fixture=fixture(dir.path());let(started,notice)=mpsc::channel();let(release,wait)=mpsc::channel();
         let inner=Arc::new(Blocking{inner:fixture.clone(),started,release:Mutex::new(wait)});
         let host=Arc::new(AccountTurnHost::new(inner,fixture.path.clone(),identity(),2,false).unwrap());
         let mut daemon=doxa_runtime::Daemon::bind(dir.path().join("rt"),doxa_runtime::Session{session_id:"session".into(),cwd:"/fixture".into(),model:Some("gpt-fixture".into()),engine:"codex".into(),doxa_version:"test".into()},host.clone()).unwrap().start();
