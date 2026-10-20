@@ -59,7 +59,7 @@ def probe(binary, env, repo, root, state):
         text=terminal.get_text_format(Vte.Format.TEXT)
         if active['index']<len(script):
             data,label=script[active['index']]
-            expected='Commands' if label in ('palette-query','open-menu') else ('New fleet' if label not in ('close-onboarding','palette') else None)
+            expected='Actions' if label in ('palette-query','open-menu') else ('New fleet' if label not in ('close-onboarding','palette') else None)
             if expected and expected not in text:
                 (output/'terminal.txt').write_text(text)
                 failure.append('Unexpected UI before '+label+'; no text entered');Gtk.main_quit();return False

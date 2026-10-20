@@ -63,7 +63,7 @@ def main():
     env.update(DEEPSEEK_API_KEY=key, DOXA_HOME=str(home), DOXA_RUNTIME_DIR=str(state/'rt'),
         DOXA_DOCKER_HOST=ENGINE, DOXA_DOCKER_IMAGE=IMAGE, DOCKER_HOST=ENGINE,
         DOXA_LORE='0', DOXA_WORKTREE='1', TMPDIR='/home/docwilde/.t',
-        LORE_ROOT=str(state/'lore'), LORE_DISABLE_SYNC='1', LORE_DISABLE_REVIEW='1')
+        LORE_ROOT=str(state/'lore'),LORE_PROJECTS_DIR=str(state/'projects'),LORE_CODEX_SESSIONS_DIR=str(state/'codex-sessions'), LORE_DISABLE_SYNC='1', LORE_DISABLE_REVIEW='1')
     base = [str(binary), 'fleet']
     common = ['--pool', 'deepseek:deepseek-flash', '--supervisor', 'deepseek:deepseek-flash',
         '-n', '1', '--prompt', 'Disposable runtime acceptance only. Do not call tools, contact internet or change files.',

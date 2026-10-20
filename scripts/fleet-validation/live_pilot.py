@@ -56,7 +56,7 @@ def main():
     for name in ('OPENAI_API_KEY','ANTHROPIC_API_KEY','TYPESAFE_API_KEY','SUBQ_API_KEY','DOXA_SESSION_BUDGET_USD','DOXA_MODEL','DOXA_ROUTER_MODEL','DOXA_MCP_ENABLED','DOXA_MCP_CONFIG'):env.pop(name,None)
     env.update(DEEPSEEK_API_KEY=keys['deepseek'],ZAI_API_KEY=keys['glm'],DOXA_HOME=str(home),DOXA_RUNTIME_DIR=str(state/'rt'),
         DOXA_DOCKER_HOST=ENGINE,DOCKER_HOST=ENGINE,DOXA_DOCKER_IMAGE=IMAGE,DOXA_LORE='0',DOXA_WORKTREE='1',
-        DOXA_VENDOR_TOOLS='workspace-read',TMPDIR='/home/docwilde/.t',LORE_ROOT=str(state/'lore'),LORE_DISABLE_SYNC='1',LORE_DISABLE_REVIEW='1')
+        DOXA_VENDOR_TOOLS='workspace-read',TMPDIR='/home/docwilde/.t',LORE_ROOT=str(state/'lore'),LORE_PROJECTS_DIR=str(state/'projects'),LORE_CODEX_SESSIONS_DIR=str(state/'codex-sessions'),LORE_DISABLE_SYNC='1',LORE_DISABLE_REVIEW='1')
     candidate={'id':'glm-small','provider':'glm','model':'glm-5.3-flash','effort':'low','description':'Owner pinned low-cost GLM pilot target; no automatic routing.',
         'context_tokens':32768,'max_output_tokens':4096,'supports_tools':True,'input_usd_micros_per_million':300000,'output_usd_micros_per_million':1200000}
     config={'version':1,'jev_model':'jev-1.13.0','criteria_version':'fleet-pilot-20261020','candidates':[candidate,{**candidate,'id':'glm-backup'}],
