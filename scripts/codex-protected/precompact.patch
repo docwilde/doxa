@@ -1672,7 +1672,7 @@ index bb80f85..1acd8b6 100644
  
  pub(super) async fn maybe_start(
 diff --git a/codex-rs/core/src/session/async_compaction_tests.rs b/codex-rs/core/src/session/async_compaction_tests.rs
-index e4a0481..e42d2fd 100644
+index e4a0481..d622696 100644
 --- a/codex-rs/core/src/session/async_compaction_tests.rs
 +++ b/codex-rs/core/src/session/async_compaction_tests.rs
 @@ -1,18 +1,15 @@
@@ -1814,7 +1814,7 @@ index e4a0481..e42d2fd 100644
 +                prepared
 +            )
 +            .await,
-+            Err(codex_protocol::error::CodexErr::TurnAborted)
++            Err(error) if matches!(error.details(), codex_protocol::error::CodexErrorDetails::TurnAborted)
 +        ));
 +    }
 +    wait_for_background_compaction_for_test(&sess).await;
@@ -1845,7 +1845,7 @@ index e4a0481..e42d2fd 100644
 +            world_state
 +        )
 +        .await,
-+        Err(codex_protocol::error::CodexErr::TurnAborted)
++        Err(error) if matches!(error.details(), codex_protocol::error::CodexErrorDetails::TurnAborted)
 +    ));
 +    assert_eq!(request.requests().len(), 0);
 +    assert_eq!(
