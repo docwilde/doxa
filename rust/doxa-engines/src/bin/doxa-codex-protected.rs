@@ -1,5 +1,6 @@
 //! Native launcher for DOXA's private fail-closed app server. Other commands
-//! retain the official CLI. The provider itself attests its compiled contract.
+//! retain the official CLI. Version reports identify the receipt-checked
+//! protected payload; the provider itself attests its compiled contract.
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -135,7 +136,9 @@ fn run() -> io::Result<()> {
     let helper_mode = launcher
         .file_name()
         .is_some_and(|name| name == "codex-code-mode-host");
-    if !helper_mode && args.first().is_none_or(|arg| arg != "app-server") {
+    let version_mode = !helper_mode
+        && matches!(args.as_slice(), [arg] if arg == "--version" || arg == "-V");
+    if !helper_mode && !version_mode && args.first().is_none_or(|arg| arg != "app-server") {
         if !receipt.official_cli.is_absolute()
             || std::fs::canonicalize(&receipt.official_cli)? == launcher
         {
@@ -171,6 +174,15 @@ fn run() -> io::Result<()> {
         checked_binary(&path, &receipt.binary_sha256)?
     };
     let _dispatcher = checked_binary(&root.join("codex-code-mode-host"), dispatcher_digest)?;
+    if version_mode {
+        // The reviewed receipt/source and the complete checked installation
+        // bind this pinned payload version. Never substitute the separately
+        // installed official CLI's version or start a provider to inspect it.
+        let version = doxa_engines::codex_compact::SUPPORTED_VERSION;
+        println!("doxa-codex-protected {version} (provider codex-{version}-precompact-v1; upstream {}; contract {})",
+            receipt.source_commit, receipt.contract);
+        return Ok(());
+    }
     if !helper_mode {
         args.remove(0);
         if args.first().is_some_and(|arg| arg == "--stdio") {
