@@ -3,7 +3,7 @@ use serde_json::json;
 use std::{fs,os::unix::fs::PermissionsExt,process::Command};
 #[test]
 fn direct_daemon_resume_refuses_lost_account_environment_state_policy_and_identity_before_provider_start(){
-    for scenario in ["missing_env","cleared_env","missing_state","missing_policy","both_missing","wrong_limit","wrong_session","wrong_model","pending","not_resume"] {
+    for scenario in ["missing_env","cleared_env","missing_state","missing_policy","both_missing","wrong_limit","wrong_session","wrong_model","pending","invalid_terminal","not_resume"] {
         let root=tempfile::tempdir().unwrap();fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();let home=root.path().join("home");fs::create_dir(&home).unwrap();fs::set_permissions(&home,fs::Permissions::from_mode(0o700)).unwrap();
         let account=home.join("account-turns");fs::create_dir(&account).unwrap();fs::set_permissions(&account,fs::Permissions::from_mode(0o700)).unwrap();
         let marker=root.path().join("provider-called");let provider=root.path().join("provider");
@@ -12,6 +12,7 @@ fn direct_daemon_resume_refuses_lost_account_environment_state_policy_and_identi
         if scenario=="wrong_session"{original["identity"]["session_id"]=json!("other-session");}
         let mut record=original.clone();record["used"]=json!(1);record["last_outcome"]=json!("completed");
         if scenario=="pending"{record["pending"]=json!(true);record["last_outcome"]=json!("pending");}
+        if scenario=="invalid_terminal"{record["last_outcome"]=json!("made-up-provider-state");}
         for (name,value,omit) in [("account-owned.json",record,scenario=="missing_state"||scenario=="both_missing"),("account-owned.policy.json",original,scenario=="missing_policy"||scenario=="both_missing")] {
             if !omit{let path=account.join(name);fs::write(&path,value.to_string()).unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();}
         }

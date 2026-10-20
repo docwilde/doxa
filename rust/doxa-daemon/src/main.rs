@@ -590,7 +590,11 @@ fn run() -> io::Result<()> {
         .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".doxa"));
     if !budget_home.is_absolute() { return Err(invalid("DOXA home must be absolute")); }
     let budget_path = budget_home.join("budgets").join(format!("{}.json", options.session_id));
-    account_turn_host::preflight(&budget_home.join("account-turns").join(format!("{}.json",options.session_id)),account_turn_limit,options.resume,&options.session_id,options.model.as_deref())?;
+    if let Some(model)=account_turn_host::preflight(&budget_home.join("account-turns").join(format!("{}.json",options.session_id)),account_turn_limit,options.resume,&options.session_id,options.model.as_deref())? {
+        // Historical resumes without --model retain the journal's exact model
+        // before the Codex driver or provider thread can be initialized.
+        options.model=Some(model);
+    }
     if ceiling.is_none() && fs::symlink_metadata(&budget_path).is_ok() {
         return Err(invalid("session has durable budget accounting; resume requires the original session budget"));
     }

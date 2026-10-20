@@ -12,7 +12,9 @@ attachment prompts and explicit compaction prompts. Refusal/error/cancellation
 does not refund an attempt. Missing or duplicate terminal events leave the
 attempt unsettled. Resume requires the original session/model/role/limit,
 initial policy and settled journal. Direct daemon startup enforces this even if
-the caller removes the allowance environment. Child spawning is refused rather
+the caller removes the allowance environment. A historical resume without a
+model restores its verified exact saved model before Codex startup; malformed
+terminal categories are also refused there. Child spawning is refused rather
 than inheriting an unrelated fresh allowance. Isolation migration compares the
 same observed allowance before stop and after respawn. Charges remain unknown
 and outside the worker API ledger; backend-internal RPCs are not individually
@@ -35,7 +37,7 @@ rates and bounds are conservative accounting inputs, not measured pilot usage.
 Unknown usage continues to retain the full hold.
 
 Local validation passed: five account-host lifecycle/path tests, the child-spawn
-guard regression, two direct-daemon startup tests covering ten policy/resume
+guard regression, two direct-daemon startup tests covering eleven policy/resume
 cases and two custom-home path cases, three frontend account role/history/
 migration tests, all 36 fleet-control tests, and the production reservation
 regression. The broader account filters each passed seven tests, including

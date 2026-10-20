@@ -99,21 +99,24 @@ impl Journal {
 }
 /// Startup must enforce persisted account policy even when a caller clears
 /// its environment. A frontend hint is never authority to remove an allowance.
-pub fn preflight(path:&std::path::Path,requested:Option<u64>,resume:bool,session:&str,model:Option<&str>)->io::Result<()>{
+pub fn preflight(path:&std::path::Path,requested:Option<u64>,resume:bool,session:&str,model:Option<&str>)->io::Result<Option<String>>{
     let policy=path.with_extension("policy.json");
     if requested.is_some(){trusted_chain(path.parent().ok_or_else(||denied("account journal parent unavailable"))?)?;}
     let present=|path:&std::path::Path|match fs::symlink_metadata(path){Ok(_)=>Ok(true),Err(error)if error.kind()==io::ErrorKind::NotFound=>Ok(false),Err(error)=>Err(error)};
     let existing=present(path)?||present(&policy)?;
-    if !existing&&requested.is_none(){return Ok(());}
+    if !existing&&requested.is_none(){return Ok(None);}
     let limit=requested.ok_or_else(||denied("session has durable account turn policy; its original allowance is required"))?;
-    if !resume {if existing{return Err(denied("account turn policy already exists; explicit resume required"));}return Ok(());}
+    if !resume {if existing{return Err(denied("account turn policy already exists; explicit resume required"));}
+        let model=model.filter(|model|model.starts_with("gpt-")&&model.len()<=128).ok_or_else(||denied("account policy needs its exact native Codex model"))?;return Ok(Some(model.into()));}
     let row=Journal::read_path(path).map_err(|_|denied("saved account turn record is missing or unsafe"))?;let original=Journal::read_path(&policy).map_err(|_|denied("saved account turn policy is missing or unsafe"))?;
     if row.version!=1||row.limit!=limit||row.identity["session_id"]!=session||row.identity["engine"]!="codex"||row.identity["role"]!="coordinator"
         ||model.is_some_and(|model|row.identity["model"]!=model)||row.pending||row.used>limit
+        ||row.identity["model"].as_str().is_none_or(|model|!model.starts_with("gpt-")||model.len()>128)
+        ||!matches!(row.last_outcome.as_str(),"new"|"completed"|"refused"|"error")
         ||original!= (Record{version:1,identity:row.identity.clone(),limit,used:0,pending:false,last_outcome:"new".into()}){
         return Err(denied("saved account turn identity, policy or settlement changed"));
     }
-    Ok(())
+    Ok(Some(row.identity["model"].as_str().unwrap().into()))
 }
 impl AccountTurnHost {
     pub fn new(inner:Arc<dyn Host>,path:PathBuf,identity:Value,limit:u64,resume:bool)->io::Result<Self>{
@@ -294,6 +297,7 @@ mod tests {
         assert!(host.call("isolation_migration_stop",&json!({"confirmed":true,"expected":changed})).is_err());
         assert!(host.call("isolation_migration_stop",&json!({"confirmed":true,"expected":plan})).is_ok());
         assert!(host.call("set_model",&json!({"model":"other"})).is_err());drop(host);
+        assert_eq!(preflight(&path,Some(2),true,"session",None).unwrap().as_deref(),Some("gpt-fixture"));
         assert!(AccountTurnHost::new(fixture.clone(),path.clone(),identity(),3,true).is_err());
         let mut wrong=identity();wrong["model"]=json!("gpt-other");assert!(AccountTurnHost::new(fixture.clone(),path.clone(),wrong,2,true).is_err());
         let resumed=AccountTurnHost::new(fixture.clone(),path,identity(),2,true).unwrap();resumed.prompt("second",&mut|_|{});resumed.prompt("third",&mut|_|{});
