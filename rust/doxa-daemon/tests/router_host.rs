@@ -479,6 +479,7 @@ mod tests {
             // Config still requires two targets; the account catalog makes
             // only the non-thinking DeepSeek target eligible for this turn.
             let mut cfg=config();cfg.candidates.retain(|candidate|candidate.id!="thinking");
+            for candidate in &mut cfg.candidates{candidate.max_tool_requests=Some(6);}
             cfg.validate().unwrap();
             let host=make_host(&env,cfg.clone(),&server,false,Some(2.0));
             let calls=Arc::new(AtomicUsize::new(0));let executed=calls.clone();
@@ -497,7 +498,7 @@ mod tests {
             assert_eq!(calls.load(Ordering::SeqCst),0);assert_eq!(server.bodies().len(),1);
             let state=env.state();assert_eq!(state["worker"]["accounting_unknown"],true);
             assert_eq!(state["incomplete"],true);assert_eq!(state["worker"]["estimated_actual_usd_micros"],0);
-            assert!(state["worker"]["retained_reservation_usd_micros"].as_u64().unwrap()>0);
+            assert_eq!(state["worker"]["retained_reservation_usd_micros"],235623,"unknown usage retains the exact six-request reservation");
             assert!(host.billing_snapshot().unwrap()["session_cost_usd"].is_null());
             let projects=env.root.path().join("projects");
             let project=fs::read_dir(projects).unwrap().next().unwrap().unwrap().path();
