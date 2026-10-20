@@ -1,13 +1,13 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. Current implementation was
-rechecked against **2.0.0-beta.63** on **2026-10-20**, with canonical
+rechecked against **2.0.0-beta.64** on **2026-10-20**, with canonical
 **LORE 0.62.24**. The alpha completion table and authenticated provider results
 below are historical records, bounded by their exact candidate and date.
 Implementation coverage does not establish authenticated compatibility for every
 provider or platform; see [remaining verification](#remaining-verification).
 
-## Current beta.63 additions
+## Current native additions
 
 | Area | Current behavior and remaining boundary |
 | --- | --- |
@@ -16,7 +16,7 @@ provider or platform; see [remaining verification](#remaining-verification).
 | Fleet access and review | Start Fleet/N launches a reviewed form; live workers attach from the sidebar and M browses Messages & alignment. Workers/coordinator default independently to offline Docker; internet and native access require explicit role confirmations. Idle migration rebinds the verified daemon and holds supervised continuation for the owner. [Fleet access](fleet-access.md). |
 | Offline provider connectivity | Claude/Codex and Router CLI workers use a session-bound fixed-provider HTTPS gateway while Docker stays networkless. Web tools remain disabled; approved online coordinators handle worker research requests. Provider-host access does not isolate credentials or inspect encrypted paths. [Boundary](session-isolation.md#provider-connectivity). |
 | Router | Reviewed child/fleet allowances, history recovery and Docker migration are implemented. External CLI handoffs, CLI managed summaries and measured real-task routing quality remain open. [Current contract](jev-router.md). |
-| Mermaid | Opt-in local TUI previews and a pinned real Mermaid CLI sandbox suite exist. Terminal-protocol QA and renderer provisioning are tracked separately in the [Mermaid plan](plans/mermaid.md). |
+| Mermaid | Opt-in local previews retain readable source. Explicit offline provisioning, the pinned CLI sandbox suite, actual VTE halfblocks and Kitty KGP/probe trials passed. Sixel/iTerm2 display quality and isolated macOS rendering remain open. [Mermaid plan](plans/mermaid.md). |
 
 ## Implemented workflows
 

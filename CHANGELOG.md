@@ -10,6 +10,7 @@ the stable 2.0 release has not been cut.
 **Fleet controls**
 
 - Fix **`resumed_session`** to retain verified registry scope after controller restart, preserving the identity check used by later isolation changes.
+- Persist processed event cursors with turn counters; controller resume no longer counts old completions again. Completed legacy runs without a cursor require inspection or stop.
 - Add Router target pins and private config selection to **Start Fleet**. Allow exact independent reviewer models while retaining the complete launch review and offline role defaults.
 
 **Review and failure handling**
