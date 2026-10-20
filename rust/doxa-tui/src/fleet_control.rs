@@ -1584,7 +1584,7 @@ mod tests {
 
     #[test]
     fn native_account_policy_binds_roles_hash_and_separate_api_partition(){
-        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("router.json");let config=crate::router_setup::tests::config();
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("router.json");let mut config=crate::router_setup::tests::config();config.max_calls=3;
         fs::write(&path,serde_json::to_vec(&config).unwrap()).unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
         let mut args:Vec<String>=["--pool","router:auto","--router-config",path.to_str().unwrap(),"--prompt","bounded task","-n","3","--supervisor","codex:gpt-6-sol","--run-budget","0.42","--supervisor-account-turn-limit","12","--dry-run"].into_iter().map(str::to_owned).collect();
         let _fleet_root=review_fixture_root(&mut args);let spec=Spec::parse(&args).unwrap();
