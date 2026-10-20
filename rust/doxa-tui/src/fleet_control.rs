@@ -483,6 +483,28 @@ fn validate_dependency_resume(context:&doxa_fleet::Context,state:&doxa_fleet::St
     Ok(())
 }
 
+// This frontier represents processed events, never transport read-ahead.
+// Cursor and resulting counters/state are persisted in the same manifest save.
+fn saved_event_cursor(row:&Value)->io::Result<Option<u64>>{
+    if let Some(cursor)=row["event_cursor"].as_u64(){return Ok(Some(cursor));}
+    if !row["event_cursor"].is_null(){return Err(invalid("invalid fleet event cursor"));}
+    if row["turn_serial"].as_u64().unwrap_or(0)>0||!row["last_turn"].is_null(){
+        return Err(invalid("completed legacy fleet has no processed event cursor; inspect or stop the run"));
+    }
+    Ok(None)
+}
+fn record_event_cursor(row:&mut Value,frame:&Value)->io::Result<bool>{
+    if frame["type"]!="event"{return Ok(false);}
+    if frame["event"]["type"]=="replay_gap"{return Err(invalid("fleet event replay is incomplete; inspect or stop the run"));}
+    let seq=frame["seq"].as_u64().ok_or_else(||invalid("fleet event sequence unavailable"))?;
+    if let Some(cursor)=row["event_cursor"].as_u64(){
+        if seq<cursor{return Ok(false);}
+        if seq>cursor{return Err(invalid("fleet event replay skipped observations; inspect or stop the run"));}
+    }
+    row["event_cursor"]=json!(seq.checked_add(1).ok_or_else(||invalid("fleet event sequence exhausted"))?);
+    Ok(true)
+}
+
 // Preserve the observed project scope across controller recovery. A fabricated
 // empty scope makes the next verified isolation transition appear cross-project.
 fn resumed_session(runtime:&Path,id:&str,socket:&Path)->io::Result<discovery::Session>{
@@ -517,7 +539,8 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
         let mut assigned = choice(engine)?;
         assigned.lore = row["lore"].as_bool();
         let session = resumed_session(&root.join(id).join("rt"), &session_id, &socket)?;
-        let mut slot = connect(session, &assigned, budget, row["isolation"].as_str().or_else(||value["spec"]["isolation"].as_str()).map(doxa_isolation::Profile::parse).transpose()?,row["router_config_sha256"].as_str())?;
+        let cursor=saved_event_cursor(row)?;
+        let mut slot = connect_from(session, &assigned, budget, row["isolation"].as_str().or_else(||value["spec"]["isolation"].as_str()).map(doxa_isolation::Profile::parse).transpose()?,row["router_config_sha256"].as_str(),cursor)?;
         resumable_slot_phase(row,slot.busy)?;
         if has_dependencies{verify_dependency_container(&root.join(value["run_id"].as_str().ok_or_else(||invalid("fleet run identity unavailable"))?),&slot.session.id)?;}
         if value["ledger_path"].is_string() {
@@ -635,7 +658,13 @@ fn verify_dependency_container(run:&Path,session_id:&str)->io::Result<()> {
     evidence_store_outside_mounts(&run,&[&manifest.checkout,&manifest.private_home,&manifest.cache,&manifest.broker])
 }
 fn connect(session: discovery::Session, expected: &Choice, budget: Option<f64>, isolation:Option<doxa_isolation::Profile>,router_hash:Option<&str>) -> io::Result<Slot> {
-    let mut client = DaemonClient::connect(&session.socket, None).map_err(io::Error::other)?;
+    connect_from(session,expected,budget,isolation,router_hash,None)
+}
+fn connect_from(session: discovery::Session, expected: &Choice, budget: Option<f64>, isolation:Option<doxa_isolation::Profile>,router_hash:Option<&str>,cursor:Option<u64>) -> io::Result<Slot> {
+    let mut client = DaemonClient::connect(&session.socket, cursor).map_err(io::Error::other)?;
+    if cursor.is_some_and(|cursor|client.hello["next_seq"].as_u64().is_none_or(|head|cursor>head)) {
+        return Err(invalid("fleet event cursor exceeds this daemon history; inspect or stop the run"));
+    }
     if client.hello["session_id"] != session.id || client.hello["engine"] != engine_name(expected.engine) { return Err(invalid("fleet daemon identity changed")); }
     if expected.engine==launch::Engine::Router && (router_hash.is_none() || client.hello["billing"]["config_sha256"].as_str()!=router_hash) {
         return Err(invalid("fleet Router configuration or routing allocation changed"));
@@ -714,7 +743,7 @@ pub fn start(args: &[String]) -> io::Result<()> {
             let session = launch::spawn_fleet(&options, &runtime, budget, assigned.engine != launch::Engine::Fixture, assigned.lore.unwrap_or(spec.lore_enabled))?;
             // Publish the started identity before attachment can fail.
             value["slots"].as_array_mut().unwrap().push(json!({"index":index,"isolation":isolation.key(),"task_internet":crate::fleet_policy::task_internet(isolation),"role":if spec.preflight.supervisor.is_some() && index == 0 { "supervisor" } else { "worker" },
-                "engine":engine_name(assigned.engine),"model":assigned.model,"router_config":router_paths.get(&index),"router_config_sha256":configs.iter().find(|(slot,_)|*slot==index).and_then(|(_,config)|config.hash().ok()),"lore":assigned.lore,"phase":"started","session_id":session.id,"socket_path":session.socket,"pending_asks":[],"approvals":[],
+                "engine":engine_name(assigned.engine),"model":assigned.model,"router_config":router_paths.get(&index),"router_config_sha256":configs.iter().find(|(slot,_)|*slot==index).and_then(|(_,config)|config.hash().ok()),"event_cursor":0,"lore":assigned.lore,"phase":"started","session_id":session.id,"socket_path":session.socket,"pending_asks":[],"approvals":[],
                 "task":index.checked_sub(usize::from(spec.preflight.supervisor.is_some())).and_then(|worker|spec.worker_tasks.get(worker)),
                 "allowed_paths":index.checked_sub(usize::from(spec.preflight.supervisor.is_some())).and_then(|worker|spec.worker_paths.get(worker)).filter(|paths|!paths.is_empty()).unwrap_or(&spec.allowed_paths),
                 "depends_on":index.checked_sub(usize::from(spec.preflight.supervisor.is_some())).and_then(|worker|spec.worker_after.get(worker)).cloned().unwrap_or_default()}));
@@ -1389,6 +1418,7 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
                     Err(error) => return Err(io::Error::other(error)),
                 };
                 let Some(frame) = frame else { break; };
+                if !record_event_cursor(&mut value["slots"][index],&frame)?{continue;}
                 let event = &frame["event"]; let data = &event["data"];
                 match event["type"].as_str() {
                     Some("turn_start") => slot.busy = true,
@@ -1469,6 +1499,22 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
 mod tests {
     use super::*;
 
+    #[test]
+    fn processed_event_cursor_rejects_gaps_and_missing_legacy_frontiers(){
+        let mut row=json!({"event_cursor":3,"turn_serial":1,"last_turn":{"is_error":false}});
+        let event=|seq|json!({"type":"event","seq":seq,"event":{"type":"turn_done"}});
+        assert!(record_event_cursor(&mut row,&event(3)).unwrap());assert_eq!(row["event_cursor"],4);
+        assert!(!record_event_cursor(&mut row,&event(3)).unwrap());assert_eq!(row["turn_serial"],1);
+        assert!(record_event_cursor(&mut row,&event(5)).is_err());assert_eq!(row["event_cursor"],4);
+        assert!(record_event_cursor(&mut row,&json!({"type":"event","seq":4,"event":{"type":"replay_gap"}})).is_err());
+        assert!(record_event_cursor(&mut row,&json!({"type":"event","seq":-1})).is_err());
+        assert!(!record_event_cursor(&mut row,&json!({"type":"reply","id":1})).unwrap());
+        assert!(saved_event_cursor(&json!({"last_turn":{"is_error":false}})).is_err());
+        assert!(saved_event_cursor(&json!({"turn_serial":1})).is_err());
+        assert!(saved_event_cursor(&json!({"event_cursor":"4"})).is_err());
+        assert_eq!(saved_event_cursor(&json!({"last_turn":null})).unwrap(),None);
+        assert!(record_event_cursor(&mut json!({"event_cursor":u64::MAX}),&event(u64::MAX)).is_err());
+    }
     fn router_resume_hello(mode:&str)->Value {
         json!({"type":"hello","proto":1,"engine":"router","session_id":"pending-router","cwd":"/repo","next_seq":0,
             "billing":{"mode":mode,"router_usage":{"accounting_unknown":false,"reserved_usd_micros":1250},
