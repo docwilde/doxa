@@ -263,21 +263,23 @@ impl Spec {
     pub fn review(&self) -> io::Result<Value> {
         let preflight = self.preflight_note()?;
         let assignments = self.assignments()?;
-        Ok(json!({"review_version":1,"isolation":self.access.workers.key(),"access":self.access.review(self.preflight.supervisor.is_some()),"independent_review":self.review,"allowed_paths":self.allowed_paths,"test_recipe":self.test_recipe,"auto_test":self.auto_test,"test_recipe_sha256":self.test_recipe_review_hash()?,"prompt_sha256":format!("{:x}", Sha256::digest(self.prompt.as_bytes())),"assignments_sha256":self.assignment_plan_hash()?,"run_id":self.preflight.run_id,"root":self.preflight.root,"cwd":self.cwd,
-            "mode":if self.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
-            "interactive":self.preflight.supervisor.is_some() && self.prompt.trim().is_empty(),
-            "workers":self.preflight.sessions,"sessions":assignments.len(),"run_budget_usd":self.preflight.run_budget_usd,"supervisor_account_policy":self.supervisor_account_turn_limit.map(|limit|json!({"turn_limit":limit,"provider_charge_usd":null,"outside_api_usd_budget":true})),
-            "router_config_sha256":self.router_config.as_ref().map(doxa_router::Config::hash).transpose()?,
-            "router_allocations":self.router_slot_configs(&assignments)?.iter().map(|(index,config)|json!({"slot":index,"config_sha256":config.hash().ok(),"routing_calls":config.max_calls,"routing_spend_usd_micros":config.max_spend_usd_micros})).collect::<Vec<_>>(),
-            "allow_unbudgeted":self.preflight.allow_unbudgeted,"approval_policy":self.preflight.approve,
-            "memory_off":self.memory_off,"lore_enabled":self.lore_enabled,"approval_grace_s":self.preflight.approval_grace_s,"dry_run":self.dry_run,"seed":self.seed,"quiescence_timeout_s":self.timeout.map(|duration| duration.as_secs_f64()),"quiescence_grace_s":self.quiet.as_secs_f64(),
-            "preflight":preflight,"slots":assignments.iter().enumerate().map(|(index, choice)| json!({
+        let account_policy=self.supervisor_account_turn_limit.map(|limit|json!({"turn_limit":limit,"provider_charge_usd":null,"outside_api_usd_budget":true}));
+        let slot_reviews=assignments.iter().enumerate().map(|(index, choice)| json!({
                 "index":index,"isolation":self.access.slot(self.preflight.supervisor.is_some() && index==0).key(),"engine":engine_name(choice.engine),"model":choice.model,"lore":choice.lore,
                 "role":if self.preflight.supervisor.is_some() && index == 0 { "supervisor" } else { "worker" },
                 "task_sha256":index.checked_sub(usize::from(self.preflight.supervisor.is_some())).and_then(|worker|self.worker_tasks.get(worker)).map(|task|format!("{:x}",Sha256::digest(task.as_bytes()))),
                 "allowed_paths":index.checked_sub(usize::from(self.preflight.supervisor.is_some())).and_then(|worker|self.worker_paths.get(worker)).filter(|paths|!paths.is_empty()).unwrap_or(&self.allowed_paths),
                 "depends_on":index.checked_sub(usize::from(self.preflight.supervisor.is_some())).and_then(|worker|self.worker_after.get(worker)).cloned().unwrap_or_default()
-            })).collect::<Vec<_>>()}))
+            })).collect::<Vec<_>>();
+        Ok(json!({"review_version":1,"isolation":self.access.workers.key(),"access":self.access.review(self.preflight.supervisor.is_some()),"independent_review":self.review,"allowed_paths":self.allowed_paths,"test_recipe":self.test_recipe,"auto_test":self.auto_test,"test_recipe_sha256":self.test_recipe_review_hash()?,"prompt_sha256":format!("{:x}", Sha256::digest(self.prompt.as_bytes())),"assignments_sha256":self.assignment_plan_hash()?,"run_id":self.preflight.run_id,"root":self.preflight.root,"cwd":self.cwd,
+            "mode":if self.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
+            "interactive":self.preflight.supervisor.is_some() && self.prompt.trim().is_empty(),
+            "workers":self.preflight.sessions,"sessions":assignments.len(),"run_budget_usd":self.preflight.run_budget_usd,"supervisor_account_policy":account_policy,
+            "router_config_sha256":self.router_config.as_ref().map(doxa_router::Config::hash).transpose()?,
+            "router_allocations":self.router_slot_configs(&assignments)?.iter().map(|(index,config)|json!({"slot":index,"config_sha256":config.hash().ok(),"routing_calls":config.max_calls,"routing_spend_usd_micros":config.max_spend_usd_micros})).collect::<Vec<_>>(),
+            "allow_unbudgeted":self.preflight.allow_unbudgeted,"approval_policy":self.preflight.approve,
+            "memory_off":self.memory_off,"lore_enabled":self.lore_enabled,"approval_grace_s":self.preflight.approval_grace_s,"dry_run":self.dry_run,"seed":self.seed,"quiescence_timeout_s":self.timeout.map(|duration| duration.as_secs_f64()),"quiescence_grace_s":self.quiet.as_secs_f64(),
+            "preflight":preflight,"slots":slot_reviews}))
     }
     fn assignment_plan_hash(&self)->io::Result<String>{
         let original=doxa_fleet::hash(&(&self.worker_tasks,&self.worker_paths,&self.worker_after,
