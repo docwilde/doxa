@@ -530,10 +530,14 @@ use super::*;
                 let view=paint(&app);
                 assert!(view.lines().any(|line|line.contains(&format!("│{indent}▸ {kind} {id}"))),"selection must precede type with nesting retained: {view}");
             }
-            let view=paint(&app);
+            let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(app.size.width,app.size.height)).unwrap();
+            terminal.draw(|frame|app.draw(frame)).unwrap();
+            let rail=app.layout(app.size).rail.unwrap();
+            let rows=(rail.y+1..rail.bottom()-1).map(|y|
+                (rail.x+1..rail.right()-1).map(|x|terminal.backend().buffer()[(x,y)].symbol()).collect::<String>()).collect::<Vec<_>>();
             let root_kind=if icons {"\u{f2d0}"} else {"[T]"};
-            let parent=view.lines().find(|line|line.contains(&format!("{root_kind} normal"))).unwrap();
-            let child=view.lines().find(|line|line.contains("└ tab")).unwrap();
+            let parent=rows.iter().find(|line|line.contains(&format!("{root_kind} normal"))).unwrap();
+            let child=rows.iter().find(|line|line.contains("└ tab")).unwrap();
             let parent_column=unicode_width::UnicodeWidthStr::width(&parent[..parent.find("normal").unwrap()]);
             let child_column=unicode_width::UnicodeWidthStr::width(&child[..child.find("tab").unwrap()]);
             assert_eq!(child_column,parent_column+2,"child titles retain their nesting with both font modes");
