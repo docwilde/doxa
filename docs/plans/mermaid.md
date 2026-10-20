@@ -1,6 +1,6 @@
 # Mermaid in the Rust transcript
 
-Status: **local preview, sandbox doctor, Settings preflight and bounded session PNG cache implemented; pinned real CLI sandbox suite passed on Linux**.
+Status: **local preview, sandbox doctor, Settings preflight, bounded PNG cache and explicit offline setup implemented; pinned real CLI suite and actual VTE halfblock rendering passed on Linux**.
 
 The native Ratatui transcript recognizes complete, standalone `mermaid` code
 fences. Without explicit configuration, it renders the source fence exactly as
@@ -11,9 +11,11 @@ one on `PATH`, or sends diagram text to a hosted service.
 The renderer runs off the UI thread behind Linux bubblewrap with no network,
 private input/output files, a five-second timeout, and bounded source and PNG
 sizes. Its package root and system runtime are readable; the session workspace
-and home are absent. A successful result becomes a four-row terminal image.
-During rendering, on failure, or in text mode, the original fence stays
-readable. [Current controls and limits](../terminal-images.md#mermaid-fences).
+and home are absent. A successful result adds a four-row terminal overview. The original fence
+stays readable and copyable below it, including after successful rendering.
+The actual halfblock trial showed that eight vertical color samples cannot
+preserve diagram labels; the preview supplements the source. Text mode shows
+only source. [Current controls and limits](../terminal-images.md#mermaid-fences).
 
 `doxa doctor` now checks configured paths against the preview policy, probes
 bubblewrap/user namespaces, and renders a fixed PNG with a bounded decoder.
@@ -27,17 +29,26 @@ PNG. It uses only a fixed sample diagram; no transcript source enters the
 preflight. A changed setting invalidates the displayed result. Saving remains
 explicit, and a failed preview still leaves the source fence visible.
 
-## Still open
+## Acceptance and remaining limits
 
-- Validate Kitty, Sixel, iTerm2 and on-screen halfblock quality in real
-  terminals. The [pinned local CLI suite](../../scripts/mermaid-validation/README.md)
-  passed fixed flowchart, sequence, class and Gantt sandbox renders on Linux,
-  but this agent terminal reports `TERM=dumb`.
-- Decide whether the installer should offer the large optional Node/Chromium
-  dependency. It should state the cost before installation and never install
-  Node silently.
-- Evaluate macOS isolation separately. The Linux sandbox requirement currently
-  leaves Mermaid source visible on other platforms.
+On 2026-10-20, the [explicit offline helper](../../scripts/mermaid-validation/README.md)
+provisioned a dedicated 822 MiB package/browser from an existing reviewed npm
+cache and Chrome copy. It uses the locked archive integrity, skips lifecycle
+scripts, refuses existing destinations and never downloads Node/browser or
+changes settings. The installed beta.63 doctor and pinned real CLI four-family
+sandbox suite passed. The normal installer keeps the large dependency optional.
+
+The production App rendered flowchart, sequence, class and Gantt fixtures in
+real GTK3/VTE 0.84.0 on a private Xvfb display, at 125 columns × 33 rows with
+DejaVu Sans Mono. Each produced halfblock cells; visual inspection confirmed
+the readable source remains beneath the coarse overview. Source-only mode and
+a narrower terminal are included in the local acceptance record.
+
+- Kitty, Sixel and iTerm2 quality still needs those real emulators; none is
+  installed on the validation host. PNG decoding and VTE halfblocks cannot
+  establish those protocol results.
+- macOS stays source-only. The production boundary requires Linux bubblewrap;
+  a separate macOS isolation design and host validation remain open.
 
 Graphviz translation and a hosted renderer are outside this slice. A partial
 flowchart translator would not cover Mermaid's sequence, class, and Gantt
