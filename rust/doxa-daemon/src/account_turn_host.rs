@@ -43,7 +43,7 @@ pub fn preflight(path:&std::path::Path,requested:Option<u64>,resume:bool,session
     if !existing&&requested.is_none(){return Ok(());}
     let limit=requested.ok_or_else(||denied("session has durable account turn policy; its original allowance is required"))?;
     if !resume {if existing{return Err(denied("account turn policy already exists; explicit resume required"));}return Ok(());}
-    let row=Journal::read_path(path)?;let original=Journal::read_path(&policy)?;
+    let row=Journal::read_path(path).map_err(|_|denied("saved account turn record is missing or unsafe"))?;let original=Journal::read_path(&policy).map_err(|_|denied("saved account turn policy is missing or unsafe"))?;
     if row.version!=1||row.limit!=limit||row.identity["session_id"]!=session||row.identity["engine"]!="codex"||row.identity["role"]!="coordinator"
         ||model.is_some_and(|model|row.identity["model"]!=model)||row.pending||row.used>limit
         ||original!= (Record{version:1,identity:row.identity.clone(),limit,used:0,pending:false,last_outcome:"new".into()}){
