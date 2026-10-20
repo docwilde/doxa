@@ -15,6 +15,7 @@ import socket
 import stat
 import subprocess
 import time
+import threading
 from runtime_probe import IMAGE, ENGINE, private_write
 
 class Client:
@@ -128,6 +129,31 @@ def main():
     report['version']=subprocess.check_output([str(binary),'--version'],text=True)
     report['dry_run']=run(opts+['--dry-run']);save()
     if report['dry_run']['returncode']!=0:raise RuntimeError('Pilot dry run refused')
+    collectors=[];collectors_stop=threading.Event()
+    def collect_events(row):
+        path=state/('events-'+row['session_id']+'.jsonl')
+        sock=socket.socket(socket.AF_UNIX);sock.settimeout(.3)
+        try:
+            sock.connect(row['socket_path']);pending=b'';attached=False;written=0
+            with open(path,'xb') as out:
+                os.chmod(path,0o600)
+                while not collectors_stop.is_set():
+                    try:chunk=sock.recv(65536)
+                    except socket.timeout:continue
+                    if not chunk:break
+                    pending+=chunk
+                    while b'\n' in pending:
+                        line,pending=pending.split(b'\n',1)
+                        if len(line)>65536:raise RuntimeError('Event exceeds protocol bound')
+                        frame=json.loads(line)
+                        if not attached:
+                            if frame.get('type')!='hello':raise RuntimeError('Missing event collector hello')
+                            sock.sendall(b'{"type":"attach","cursor":0}\n');attached=True
+                        written+=len(line)+1
+                        if written>8*1024*1024:raise RuntimeError('Event capture exceeds private bound')
+                        out.write(line+b'\n');out.flush()
+        except (OSError,ValueError,RuntimeError):pass
+        finally:sock.close()
     log=open(state/'controller.log','w');child=subprocess.Popen(base+opts,env=env,cwd=repo,stdin=subprocess.DEVNULL,stdout=log,stderr=log)
     report['controller_pid']=child.pid;save()
     try:
@@ -137,6 +163,8 @@ def main():
             if manifest_path.exists() and snapshot().get('phase')=='monitoring':break
             time.sleep(.2)
         else:raise RuntimeError('Monitoring deadline exceeded')
+        for row in snapshot()['slots']:
+            thread=threading.Thread(target=collect_events,args=(row,),daemon=True);thread.start();collectors.append(thread)
         wait_idle('initial_live_turns')
         m=snapshot();assert m['slots'][2]['phase']=='dependency_waiting'
         report['alignment']=run(['alignment','pilot','--root',str(root)]);save()
@@ -187,6 +215,8 @@ def main():
             child.send_signal(signal.SIGINT)
             try:child.wait(timeout=15)
             except subprocess.TimeoutExpired:child.kill();child.wait()
+        collectors_stop.set()
+        for thread in collectors:thread.join(timeout=1)
         log.close()
         if manifest_path.exists():
             final=snapshot();report['final_manifest']=final;report['final_guard']=guard()
