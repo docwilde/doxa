@@ -733,6 +733,23 @@ pub fn stop(session: &Session) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn account_history_preserves_limit_and_refuses_lost_or_unsettled_records(){
+        if std::env::var("DOXA_ACCOUNT_HISTORY_TEST").as_deref()!=Ok("1"){
+            let root=tempfile::tempdir().unwrap();fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();
+            let result=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","launch::tests::account_history_preserves_limit_and_refuses_lost_or_unsettled_records"])
+                .env_clear().env("PATH","/usr/bin:/bin").env("HOME",root.path().join("home")).env("DOXA_HOME",root.path()).env("TMPDIR",std::env::var_os("TMPDIR").unwrap()).env("DOXA_ACCOUNT_HISTORY_TEST","1").status().unwrap();assert!(result.success());return;
+        }
+        let home=doxa_isolation::home().unwrap();let account=home.join("account-turns");fs::create_dir(&account).unwrap();fs::set_permissions(&account,fs::Permissions::from_mode(0o700)).unwrap();
+        let path=account.join("saved.json");let policy=account.join("saved.policy.json");
+        let original=serde_json::json!({"version":1,"identity":{"session_id":"saved","engine":"codex","role":"coordinator","model":"gpt-6-sol"},"limit":12,"used":0,"pending":false,"last_outcome":"new"});
+        let mut state=original.clone();state["used"]=serde_json::json!(3);state["last_outcome"]=serde_json::json!("completed");
+        let write=|path:&Path,value:&serde_json::Value|{fs::write(path,value.to_string()).unwrap();fs::set_permissions(path,fs::Permissions::from_mode(0o600)).unwrap();};
+        write(&path,&state);write(&policy,&original);assert_eq!(saved_account_turn_limit("saved").unwrap(),Some(12));
+        for (key,value) in [("pending",serde_json::json!(true)),("used",serde_json::json!(13)),("limit",serde_json::json!(11))]{let mut changed=state.clone();changed[key]=value;write(&path,&changed);assert!(saved_account_turn_limit("saved").is_err(),"{key}");}
+        write(&path,&state);fs::remove_file(&policy).unwrap();assert!(saved_account_turn_limit("saved").is_err());write(&policy,&original);fs::remove_file(&path).unwrap();assert!(saved_account_turn_limit("saved").is_err());
+        assert!(saved_account_turn_limit("../saved").is_err());
+    }
     fn router_fixture() -> serde_json::Value {
         serde_json::json!({"version":1,"jev_model":"jev-1.13.0","criteria_version":"fixture-v1",
             "fallback_id":"ds-fixture","confidence_threshold":0.5,"max_calls":2,
