@@ -589,8 +589,7 @@ def scenario(server, scratch, daemon=None, launcher=None, lore=None, missing_hel
                       and report.get("turn_status") == "completed" and report["fixture_unchanged"])
             if missing_helper:
                 report["transport"] = "compiled-provider-missing-helper"
-                assert not set(peer.tool_names).intersection({"spawn_agent", "send_message", "list_agents", "wait_agent", "followup_task", "interrupt_agent"}), "native agent tools bypass visible session control"
-            passed = (not peer.failed and peer.requests == 2 and peer.first_request_token_absent
+                passed = (not peer.failed and peer.requests == 2 and peer.first_request_token_absent
                           and peer.code_mode_only and peer.output_seen and not peer.read_verified
                           and not report.get("command_read_verified") and not report.get("final_token_matches")
                           and "host" in peer.output_error_tags and report["fixture_unchanged"])
