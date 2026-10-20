@@ -6,8 +6,10 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 import publish
@@ -16,6 +18,84 @@ import verify
 
 
 class UpdateTests(unittest.TestCase):
+    @staticmethod
+    def tags(*names):
+        return "".join("a"*40 + "\trefs/tags/" + name + "\n" for name in names).encode()
+
+    def test_more_than_1000_historical_prereleases_and_current_pin_need_no_release_api(self):
+        raw = self.tags("rust-v0.163.0", *[f"rust-v0.164.0-alpha.{n}" for n in range(1501)])
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / "candidate"
+            with patch.object(update, "baseline", return_value={"version":"0.163.0"}), \
+                    patch.object(update, "remote_tags", return_value=raw), patch.object(update, "api") as api:
+                self.assertEqual({"action":"none"}, update.prepare(Path(directory), candidate))
+                api.assert_not_called()
+                self.assertFalse(candidate.exists())
+
+    def test_discovery_skips_unpublished_tags_drafts_prereleases_and_selects_oldest_eligible(self):
+        names = ["rust-v0.168.0", "rust-v0.166.0", "rust-v0.165.0", "rust-v0.164.0", "rust-v0.167.0"]
+        replies = [urllib.error.HTTPError("fixture",404,"not released",{},None),
+                   dict(tag_name="rust-v0.165.0",draft=True,prerelease=False),
+                   dict(tag_name="rust-v0.166.0",draft=False,prerelease=True),
+                   dict(tag_name="rust-v0.167.0",draft=False,prerelease=False)]
+        with patch.object(update,"remote_tags",return_value=self.tags(*names)), \
+                patch.object(update,"api",side_effect=replies) as api:
+            self.assertEqual("rust-v0.167.0",update.discover("0.163.0"))
+            self.assertEqual([update.UPSTREAM+"/releases/tags/"+tag for tag in sorted(names)[0:4]],
+                             [call.args[0] for call in api.call_args_list])
+
+    def test_multiple_published_releases_choose_oldest_without_creation_date_order(self):
+        def published(url):
+            return dict(tag_name=url.rsplit("/",1)[1],draft=False,prerelease=False,
+                        created_at="2099-01-01T00:00:00Z")
+        with patch.object(update,"remote_tags",return_value=self.tags("rust-v0.170.0","rust-v0.164.0","rust-v0.165.0")), \
+                patch.object(update,"api",side_effect=published) as api:
+            self.assertEqual("rust-v0.164.0",update.discover("0.163.0"))
+            self.assertEqual(1,api.call_count)
+
+    def test_unpublished_stable_tags_alone_do_not_propose_an_update(self):
+        with patch.object(update,"remote_tags",return_value=self.tags("rust-v0.164.0")), \
+                patch.object(update,"api",side_effect=urllib.error.HTTPError("fixture",404,"absent",{},None)):
+            self.assertIsNone(update.discover("0.163.0"))
+
+    def test_tag_parser_ignores_nonstable_and_rejects_bad_duplicate_or_oversize_inventory(self):
+        raw=self.tags("rust-v0.164.0-rc.1","sdk-v9.0.0","unrelated-über","rust-v0.0164.0","rust-v0.164.0","rust-v0.163.0")
+        self.assertEqual(["rust-v0.164.0"],update.newer_tags(raw,"0.163.0"))
+        for invalid in (b"not-a-ref\n",self.tags("rust-v0.164.0","rust-v0.164.0")):
+            with self.assertRaises(ValueError):
+                update.newer_tags(invalid,"0.163.0")
+        with patch.object(update,"MAX_TAG_BYTES",8), self.assertRaises(ValueError):
+            update.newer_tags(raw,"0.163.0")
+        with patch.object(update,"MAX_REMOTE_TAGS",1), self.assertRaises(ValueError):
+            update.newer_tags(raw,"0.163.0")
+
+    def test_candidate_check_limit_and_metadata_or_api_errors_refuse_without_skip(self):
+        names=["rust-v0.164.0","rust-v0.165.0"]
+        with patch.object(update,"remote_tags",return_value=self.tags(*names)), \
+                patch.object(update,"MAX_RELEASE_CANDIDATES",1), \
+                patch.object(update,"api",side_effect=urllib.error.HTTPError("fixture",404,"absent",{},None)) as api:
+            with self.assertRaises(ValueError):
+                update.discover("0.163.0")
+            self.assertEqual(1,api.call_count)
+        with patch.object(update,"remote_tags",return_value=self.tags(names[0])), \
+                patch.object(update,"api",return_value=dict(tag_name=names[1],draft=False,prerelease=False)):
+            with self.assertRaises(ValueError):
+                update.discover("0.163.0")
+        with patch.object(update,"remote_tags",return_value=self.tags(names[0])), \
+                patch.object(update,"api",side_effect=urllib.error.HTTPError("fixture",403,"refused",{},None)):
+            with self.assertRaises(urllib.error.HTTPError):
+                update.discover("0.163.0")
+
+    def test_remote_inventory_uses_fixed_official_repo_and_stops_before_byte_overflow(self):
+        real_popen=subprocess.Popen
+        def fixture(args,**kw):
+            self.assertEqual(["git","ls-remote","--refs","--tags",update.UPSTREAM_GIT],args)
+            return real_popen([sys.executable,"-c","import sys; sys.stdout.buffer.write(b'x'*65536)"],**kw)
+        with patch.object(update.subprocess,"Popen",side_effect=fixture), \
+                patch.object(update,"MAX_TAG_BYTES",32):
+            with self.assertRaises(ValueError):
+                update.remote_tags()
+
     def test_discovery_only_published_stable_and_does_not_skip_versions(self):
         def release(tag, **kw):
             return dict(tag_name=tag, draft=False, prerelease=False, **kw)

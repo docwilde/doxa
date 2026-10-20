@@ -16,6 +16,8 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
+import signal
 import stat
 import subprocess
 import sys
@@ -26,11 +28,15 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 UPSTREAM = "https://api.github.com/repos/openai/codex"
-TAG = re.compile(r"rust-v(\d+)\.(\d+)\.(\d+)\Z")
+UPSTREAM_GIT = "https://github.com/openai/codex.git"
+TAG = re.compile(r"rust-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 PIN = "scripts/codex-protected/pin.json"
 BRANCH = "automation/codex-protected-"
 MAX_FILE = 4 * 1024 * 1024
+MAX_TAG_BYTES = 8 * 1024 * 1024
+MAX_REMOTE_TAGS = 100000
+MAX_RELEASE_CANDIDATES = 64
 
 # Only these current executable pins and active contract fixtures may advance.
 # Comments, historical examples, unsupported-version probes and migration paths
@@ -165,6 +171,81 @@ def choose(releases, current):
                 found.append((version, item))
     # Never silently skip a stable release when several appeared between polls.
     return min(found, key=lambda item: item[0])[1] if found else None
+
+
+def remote_tags():
+    """Read the fixed official tag inventory with byte and wall-clock bounds."""
+    environment = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    process = subprocess.Popen(["git", "ls-remote", "--refs", "--tags", UPSTREAM_GIT],
+        cwd=ROOT, env=environment, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+    try:
+        deadline = time.monotonic() + 60
+        raw = bytearray()
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise ValueError("official tag discovery exceeded time bound")
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                if len(raw) + len(chunk) > MAX_TAG_BYTES:
+                    raise ValueError("official tag inventory exceeded byte bound")
+                raw.extend(chunk)
+        status = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if status:
+            raise ValueError("official tag discovery failed")
+        return bytes(raw)
+    finally:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.wait(timeout=5)
+        process.stdout.close()
+
+
+def newer_tags(raw, current):
+    if len(raw) > MAX_TAG_BYTES:
+        raise ValueError("official tag inventory exceeded byte bound")
+    rows = raw.decode("utf-8").splitlines()
+    if len(rows) > MAX_REMOTE_TAGS:
+        raise ValueError("official tag inventory exceeded tag bound")
+    found = {}
+    for row in rows:
+        fields = row.split("\t")
+        if len(fields) != 2 or not SHA.fullmatch(fields[0]) or not fields[1].startswith("refs/tags/"):
+            raise ValueError("official tag inventory has malformed refs")
+        tag = fields[1].removeprefix("refs/tags/")
+        match = TAG.fullmatch(tag)
+        if match and tuple(map(int, match.groups())) > tuple(map(int, current.split("."))):
+            if tag in found:
+                raise ValueError("official tag inventory has duplicate stable refs")
+            found[tag] = tuple(map(int, match.groups()))
+    return sorted(found, key=found.get)
+
+
+def discover(current):
+    # Release-list creation order and the number of historical prereleases do
+    # not decide eligibility. Check newer exact stable tags in version order.
+    for index, tag in enumerate(newer_tags(remote_tags(), current)):
+        if index >= MAX_RELEASE_CANDIDATES:
+            raise ValueError("newer stable release checks exceeded discovery bound")
+        try:
+            item = api(UPSTREAM + "/releases/tags/" + tag)
+        except urllib.error.HTTPError as error:
+            error.close()
+            if error.code != 404:
+                raise
+            continue  # A precreated tag without a published release is ineligible.
+        if not isinstance(item, dict) or item.get("tag_name") != tag:
+            raise ValueError("official release metadata differs from its requested tag")
+        if choose([item], current) is not None:
+            return tag
+    return None
 
 
 def official_release(tag):
@@ -305,26 +386,16 @@ def replacement_files(root, old, new, patch, release_date=None):
 def prepare(root, directory, tag=None, release_date=None):
     old = baseline(root)
     if tag is None:
-        releases = []
-        # Pagination is bounded; refuse an incomplete history instead of skipping.
-        for page in range(1, 11):
-            rows = api(UPSTREAM + f"/releases?per_page=100&page={page}")
-            releases.extend(rows)
-            if len(rows) < 100:
-                break
-        else:
-            raise ValueError("release history exceeds discovery bound")
-        item = choose(releases, old["version"])
-        if item is None:
+        tag = discover(old["version"])
+        if tag is None:
             return {"action": "none"}
-        tag = item["tag_name"]
     match = TAG.fullmatch(tag)
     if not match or tuple(map(int, match.groups())) <= tuple(map(int, old["version"].split("."))):
         raise ValueError("release must advance the reviewed pin")
     release, commit = official_release(tag)
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
     source = directory / "source"
-    run("git", "clone", "--depth", "1", "--branch", tag, "https://github.com/openai/codex.git", str(source))
+    run("git", "clone", "--depth", "1", "--branch", tag, UPSTREAM_GIT, str(source))
     if run("git", "rev-parse", "HEAD", cwd=source) != commit:
         raise ValueError("fetched upstream release moved")
     run("git", "fetch", "--depth", "1", "origin", "tag", old["tag"], cwd=source)

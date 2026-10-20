@@ -17,9 +17,14 @@ The workflow is disabled until the repository variable
 This source change does not enable it, install a provider, change repository
 settings, add a token, or assert that a hosted candidate has built successfully.
 
-The six-hour discovery selects the oldest newer stable version from its bounded
-release inventory, so consecutive releases are processed in order. Drafts,
-release candidates, nightly tags and SDK/helper releases are ineligible.
+The six-hour discovery reads the fixed official Git tag inventory (8 MiB,
+100,000 tags and 60 seconds maximum), considers only exact `rust-vX.Y.Z` tags
+newer than the pin, and checks their release metadata in ascending version
+order. It selects the oldest published stable version; tags without a release,
+drafts and prereleases are ineligible. At most 64 newer candidate tags are
+checked before refusing. Historical prereleases do not require release API
+pagination, and release creation dates do not determine processing order.
+Release candidates, nightly tags and SDK/helper releases are ineligible.
 Explicit source commit, patch digest, protection contract and provider ID are
 written together to `scripts/codex-protected/pin.json` in each release PR.
 Current reviewed values come from installer/engine literals; there is no
