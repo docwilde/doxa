@@ -34,6 +34,23 @@ impl Journal {
         fs::File::open(parent)?.sync_all()
     }
 }
+/// Startup must enforce persisted account policy even when a caller clears
+/// its environment. A frontend hint is never authority to remove an allowance.
+pub fn preflight(path:&std::path::Path,requested:Option<u64>,resume:bool,session:&str,model:Option<&str>)->io::Result<()>{
+    let policy=path.with_extension("policy.json");
+    let present=|path:&std::path::Path|match fs::symlink_metadata(path){Ok(_)=>Ok(true),Err(error)if error.kind()==io::ErrorKind::NotFound=>Ok(false),Err(error)=>Err(error)};
+    let existing=present(path)?||present(&policy)?;
+    if !existing&&requested.is_none(){return Ok(());}
+    let limit=requested.ok_or_else(||denied("session has durable account turn policy; its original allowance is required"))?;
+    if !resume {if existing{return Err(denied("account turn policy already exists; explicit resume required"));}return Ok(());}
+    let row=Journal::read_path(path)?;let original=Journal::read_path(&policy)?;
+    if row.version!=1||row.limit!=limit||row.identity["session_id"]!=session||row.identity["engine"]!="codex"||row.identity["role"]!="coordinator"
+        ||model.is_some_and(|model|row.identity["model"]!=model)||row.pending||row.used>limit
+        ||original!= (Record{version:1,identity:row.identity.clone(),limit,used:0,pending:false,last_outcome:"new".into()}){
+        return Err(denied("saved account turn identity, policy or settlement changed"));
+    }
+    Ok(())
+}
 impl AccountTurnHost {
     pub fn new(inner:Arc<dyn Host>,path:PathBuf,identity:Value,limit:u64,resume:bool)->io::Result<Self>{
         if !(1..=32).contains(&limit)||identity["engine"]!="codex"||identity["role"]!="coordinator"
