@@ -1015,6 +1015,6 @@ mod request_bound_tests {
     #[test]
     fn reservation_matches_the_reviewed_whole_turn_http_limit(){
         let mut row:Candidate=serde_json::from_value(json!({"id":"ds","provider":"deepseek","model":"deepseek-flash","effort":"none","description":"Bounded fixture","context_tokens":40000,"max_output_tokens":4096,"max_tool_requests":6,"supports_tools":true,"input_usd_micros_per_million":300000,"output_usd_micros_per_million":1200000})).unwrap();
-        assert_eq!(worker_hold(&row),Some(69543));row.max_tool_requests=None;assert_eq!(worker_hold(&row),Some(274196));
+        assert_eq!(worker_hold(&row),Some(69543));row.max_tool_requests=Some(4);assert_eq!(worker_hold(&row),Some(48000));row.max_tool_requests=None;assert_eq!(worker_hold(&row),Some(274196));
     }
 }
