@@ -39,7 +39,9 @@ class Client:
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--state',type=Path,required=True)
-    p.add_argument('--binary',type=Path,default=Path.home()/'.local/bin/doxa');args=p.parse_args()
+    p.add_argument('--binary',type=Path,default=Path.home()/'.local/bin/doxa');p.add_argument('--prior-reserved-usd',type=float,default=0.0);p.add_argument('--case-id',default='fleet-pilot-01');args=p.parse_args()
+    if not 0<=args.prior_reserved_usd<.20:raise RuntimeError('Prior holds must leave a positive review allocation')
+    run_budget=.90-args.prior_reserved_usd;review_budget=.20-args.prior_reserved_usd
     state=args.state.resolve();state.mkdir(mode=0o700,parents=True,exist_ok=False)
     if len(str(state))>42:raise RuntimeError('Use a short real-disk state path')
     home,root,repo=(state/n for n in ('h','f','repo'))
@@ -60,7 +62,7 @@ def main():
     config={'version':1,'jev_model':'jev-1.13.0','criteria_version':'fleet-pilot-20261020','candidates':[candidate,{**candidate,'id':'glm-backup'}],
         'fallback_id':'glm-small','confidence_threshold':.75,'max_calls':3,'max_spend_usd_micros':3,'max_input_bytes':24576,'deadline_ms':1000}
     conf=state/'router.json';private_write(conf,json.dumps(config,indent=2)+'\n')
-    task=('Bounded acceptance case fleet-pilot-01. Two workers and one acting coordinator verify a read-only dependency and research handoff. '
+    task=('Bounded acceptance case '+args.case_id+'. Two workers and one acting coordinator verify a read-only dependency and research handoff. '
         'Do not write files, spawn sessions, run shell commands, use third-party services, reveal credentials or expand scope. '
         'Use only DOXA peer_list/peer_send and workspace_read. Maximum four sent peer messages per slot. '
         'Worker 1 initially reads README.md and sends exactly one status to the coordinator, then ends its turn. '
@@ -75,13 +77,13 @@ def main():
     opts=['start','--pool','router:glm-small','--supervisor','router:glm-small','--router-config',str(conf),'-n','2','--prompt',task,
         '--worker-task','1:Read README.md and send one status, then wait for owner checkpoint/handoff instructions.',
         '--worker-task','2:After human dependency release, send one status confirming the read-only handoff and stop.',
-        '--worker-after','2:1','--cwd',str(repo),'--root',str(root),'--run-id','pilot','--run-budget','0.90','--review-budget','0.20',
+        '--worker-after','2:1','--cwd',str(repo),'--root',str(root),'--run-id','pilot','--run-budget',format(run_budget,'.6f'),'--review-budget',format(review_budget,'.6f'),
         '--alignment-supervisor','deepseek:deepseek-flash','--supervision-mode','shadow','--message-review','shadow','--message-judge','llm:deepseek:deepseek-flash',
         '--review-max-calls','12','--review-interval','120','--review-input-price','1','--review-output-price','4','--quiescence-timeout','600','--quiet-dwell','120',
         '--approve','peer','--approval-grace','0']
-    binary=args.binary.resolve(strict=True);base=[str(binary),'fleet'];manifest_path=root/'pilot/manifest.json';report={'case_id':'fleet-pilot-01','group_id':'live-pilot-20261020',
+    binary=args.binary.resolve(strict=True);base=[str(binary),'fleet'];manifest_path=root/'pilot/manifest.json';report={'case_id':args.case_id,'group_id':'live-pilot-20261020',
         'human_labels':False,'started_at':time.time(),'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'image':IMAGE,'engine':ENGINE,
-        'limits':{'total_usd':.90,'review_usd':.20,'router_slots':3,'slot_usd_floor':.233333,'request_bytes':28672,'output_tokens_per_turn':4096,
+        'limits':{'total_usd':run_budget,'review_usd':review_budget,'prior_retained_usd':args.prior_reserved_usd,'combined_usd':.90,'router_slots':3,'slot_usd_floor':.233333,'request_bytes':28672,'output_tokens_per_turn':4096,
             'max_tool_requests_per_turn':25,'worker_hold_usd':.2199552,'review_max_calls':12,'review_output_tokens':512,'review_input_usd_mtok':1,'review_output_usd_mtok':4},'steps':[]}
     def run(extra,timeout=30):
         r=subprocess.run(base+extra,env=env,cwd=repo,text=True,capture_output=True,timeout=timeout)
@@ -149,9 +151,11 @@ def main():
         report['dependency_review']=run(['dependency-review','pilot','1','--root',str(root)]);save()
         # Keep human release separate. A real accepted handoff is necessary.
         if report['dependency_review']['returncode']!=0:raise RuntimeError('Dependency review not releasable; retained evidence')
-        review=json.loads(report['dependency_review']['stdout'])
-        token=review.get('review_token') or review.get('token')
-        if not token:raise RuntimeError('Dependency review token unavailable; inspect private receipt')
+        body,separator,token=report['dependency_review']['stdout'].rpartition('\nReview token: ')
+        if not separator:raise RuntimeError('Dependency review token unavailable; inspect private receipt')
+        review=json.loads(body);token=token.strip()
+        if not review.get('handoff_resolved') or len(token)!=64:
+            raise RuntimeError('Dependency handoff unresolved; human release withheld')
         report['dependency_release']=run(['dependency-release','pilot','1',token,'--root',str(root)]);save()
         wait_idle('released_dependent_turn')
         report['migration_no_optin']=run(['isolation','pilot','0','docker-open','--root',str(root)])
