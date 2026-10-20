@@ -135,7 +135,7 @@ impl Host for AccountTurnHost {
     fn isolation_status(&self)->Option<Value>{self.inner.isolation_status()}
     fn has_active_work(&self)->bool{self.inner.has_active_work()}
     fn peer_tools_ready(&self)->bool{self.inner.peer_tools_ready()}
-    fn set_session_tool_handler(&self,handler:doxa_runtime::PeerToolHandler)->bool{self.inner.set_session_tool_handler(handler)}
+    fn set_session_tool_handler(&self,_handler:doxa_runtime::PeerToolHandler)->bool{false}
     fn set_peer_tool_handler(&self,handler:doxa_runtime::PeerToolHandler)->bool{self.inner.set_peer_tool_handler(handler)}
     fn can_set_model(&self)->bool{false}
     fn model_change_requires_idle(&self)->bool{true}
