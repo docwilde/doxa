@@ -32,6 +32,7 @@ def main():
     parser.add_argument('--binary', type=Path, default=Path.home()/'.local/bin/doxa')
     parser.add_argument('--state', type=Path, required=True)
     parser.add_argument('--native-menu', action='store_true')
+    parser.add_argument('--native-menu-live', action='store_true', help='Explicit bounded $0.10 live menu case')
     args = parser.parse_args()
     state = args.state.resolve()
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -101,9 +102,9 @@ def main():
         report['observations'].append('Initial review unavailable; both real Docker slots held before prompt dispatch, zero reviewer reservations')
         report['alignment'] = run(['alignment', 'probe', '--root', str(root)])
         report['status'] = run(['status', 'probe', '--root', str(root)])
-        if args.native_menu:
+        if args.native_menu or args.native_menu_live:
             from native_menu_probe import probe
-            report['native_menu']=probe(binary,env,repo,root,state)
+            report['native_menu']=probe(binary,env,repo,root,state,live=args.native_menu_live)
         # Crash only this owned controller, preserving its verified live slots.
         child.kill(); child.wait(timeout=10)
         with open(state/'resume.log', 'w') as out:
