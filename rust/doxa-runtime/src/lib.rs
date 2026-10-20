@@ -439,7 +439,7 @@ impl Inner {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(||inner.host.public_prompt(text)))
                     .ok().and_then(Result::ok));
             let display_failed=matches!(display,Some(None));
-            let display=display.flatten();
+            let display=display.flatten().map(|text|doxa_input::event_display(&text));
             // The terminal event is an idle/readiness boundary for clients.
             // Keep it until the host returns and the admission state advances;
             // otherwise a client can see turn_done and immediately have its
@@ -505,6 +505,7 @@ impl Inner {
                     inner.host.public_prompt(prompt.display_text.as_deref().unwrap_or(&prompt.text))
                 )).ok().and_then(Result::ok)
                     .unwrap_or_else(|| "[redacted: prompt unavailable]".to_owned());
+                let display=if prompt.display_text.is_some(){doxa_input::event_display(&display)}else{display};
                 inner.publish(None, json!({"type":"prompt_dequeued","data":{"id":prompt.queue_id,"text":display,
                     "peer_started":prompt.peer_origin.is_some(),"peer_origin":prompt.peer_origin.as_ref().map(PeerTurnOrigin::display_label),
                     "peer_origin_data":prompt.peer_origin.as_ref().map(PeerTurnOrigin::to_value)}}));
@@ -689,6 +690,7 @@ fn handle_prompt_attachments(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame
             return false;
         }
     };
+    let display=if display_text.is_some(){doxa_input::event_display(&display)}else{display};
     let text=doxa_input::prompt_text(text,&attachments);
     let images:Vec<_>=attachments.into_iter().filter(Attachment::is_image).collect();
     // Admit prompts in the same order as permission changes. Scrubbing runs

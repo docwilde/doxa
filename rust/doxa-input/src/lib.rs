@@ -106,6 +106,14 @@ pub fn display_text(text:&str,values:&[Attachment])->String {
     for value in values {result.push_str(&format!("\n[Attachment: {} · {} bytes]",value.name,value.bytes.len()));}result
 }
 
+/// Scrubbers may expand text. Enforce the wire budget after scrubbing too;
+/// a seven-KiB UTF-8 prefix fits even with six-byte JSON control escapes.
+pub fn event_display(text:&str)->String {
+    if serde_json::to_vec(text).is_ok_and(|bytes|bytes.len()<=48*1024){return text.to_owned();}
+    let mut end=text.len().min(7*1024);while !text.is_char_boundary(end){end-=1;}
+    format!("{}\n[Display excerpt; full input unchanged]",&text[..end])
+}
+
 #[cfg(test)]mod tests {
     use super::*;
     #[test]fn selected_files_are_bounded_and_do_not_follow_links(){let dir=tempfile::tempdir().unwrap();let p=dir.path().join("notes.txt");std::fs::write(&p,"hello").unwrap();assert!(!Attachment::load(&p).unwrap().is_image());let link=dir.path().join("link");std::os::unix::fs::symlink(&p,&link).unwrap();assert!(Attachment::load(&link).is_err());assert!(Attachment::from_source("x.pdf",b"%PDF-1\x00".to_vec()).is_err());assert!(Attachment::from_source("x",vec![b'x';MAX_TEXT+1]).is_err());}
