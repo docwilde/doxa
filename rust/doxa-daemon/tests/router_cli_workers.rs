@@ -33,7 +33,10 @@ impl Drop for Server {fn drop(&mut self){self.stop.store(true,Ordering::Release)
 struct Env {root:tempfile::TempDir}
 impl Env {
     fn new()->Self {let root=tempfile::tempdir().unwrap();let env=Self{root};fs::create_dir(env.cwd()).unwrap();fs::write(env.path().join("mode"),"normal").unwrap();
-        for provider in ["claude","codex"] {let path=env.path().join(provider);fs::write(&path,include_str!("fixtures/router_cli.py")).unwrap();fs::set_permissions(path,fs::Permissions::from_mode(0o700)).unwrap();}
+        let fixture=include_str!("fixtures/router_cli.py");let placeholder="__DOXA_SUPPORTED_CODEX_VERSION__";
+        assert_eq!(fixture.matches(placeholder).count(),1);
+        let fixture=fixture.replace(placeholder,doxa_engines::codex_compact::SUPPORTED_VERSION);
+        for provider in ["claude","codex"] {let path=env.path().join(provider);fs::write(&path,&fixture).unwrap();fs::set_permissions(path,fs::Permissions::from_mode(0o700)).unwrap();}
         let cli=|id:&str,provider:&str|json!({"id":id,"provider":provider,"billing":"cli_account","model":format!("{provider}-fixture-1"),"effort":"high","description":"Operator local fixture policy only","context_tokens":131072,"max_output_tokens":512,"supports_tools":true});
         let api=|id:&str,provider:&str,model:&str,input,output|json!({"id":id,"provider":provider,"model":model,"effort":if provider=="glm"{"high"}else{"none"},"description":"Operator local fixture policy only","context_tokens":131072,"max_output_tokens":512,"supports_tools":true,"input_usd_micros_per_million":input,"output_usd_micros_per_million":output});
         let config=json!({"version":1,"jev_model":doxa_router::JEV_MODEL,"criteria_version":"native-fixture-v1","candidates":[cli("claude","claude"),cli("codex","codex"),api("ds","deepseek","deepseek-flash",300000,1200000),api("glm","glm","glm-5.3-flash",150000,500000)],"fallback_id":"ds","confidence_threshold":0.8,"max_calls":10,"max_spend_usd_micros":10000,"max_input_bytes":8192,"deadline_ms":1000});

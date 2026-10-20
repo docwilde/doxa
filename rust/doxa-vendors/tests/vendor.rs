@@ -57,6 +57,21 @@ async fn admitted_stream_distinguishes_known_no_call_failures_from_potential_htt
 }
 
 #[tokio::test]
+async fn explicit_request_cap_counts_final_response_and_never_opens_request_seven(){
+    let _credential_guard=credential_guard().await;std::env::set_var("DEEPSEEK_API_KEY","test-secret-1234");
+    const TOOL:&str="data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n";
+    const ANSWER:&str="data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"done\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n";
+    for terminal in [true,false]{
+        let mut responses=vec![TOOL;6];if terminal{responses[5]=ANSWER;}
+        let(url,server)=multi_server(responses);let mut history=Vec::new();let mut gate=LookupGate{calls:Vec::new()};let(_,cancel)=watch::channel(false);
+        let result=run_turn_limited_local(Vendor::DeepSeek,&url,"deepseek-flash","none",&mut history,"question",Some(&mut gate),cancel,Duration::from_secs(3),|_|{},
+            TurnLimits{input_bytes:16384,output_tokens:64,max_requests:Some(6)}).await;
+        if terminal{assert_eq!(result.unwrap().requests,6);assert_eq!(gate.calls.len(),5);}else{assert!(matches!(result,Err(Error::ToolLimit)));assert!(history.is_empty());}
+        assert_eq!(server.join().unwrap().0.len(),6);
+    }
+}
+
+#[tokio::test]
 async fn bounded_turn_shares_output_allowance_across_continuations() {
     let _credential_guard = credential_guard().await;
     std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
@@ -65,7 +80,7 @@ async fn bounded_turn_shares_output_allowance_across_continuations() {
     let (url, task) = multi_server(vec![tool,answer]);
     let mut history = Vec::new();let mut gate = LookupGate{calls:Vec::new()};let (_,cancel)=watch::channel(false);
     let outcome=run_turn_limited_local(Vendor::DeepSeek,&url,"deepseek-flash","none",&mut history,"question",
-        Some(&mut gate),cancel,Duration::from_secs(3),|_|{},TurnLimits{input_bytes:16384,output_tokens:10}).await.unwrap();
+        Some(&mut gate),cancel,Duration::from_secs(3),|_|{},TurnLimits{max_requests:None,input_bytes:16384,output_tokens:10}).await.unwrap();
     let requests=task.join().unwrap().0;
     assert_eq!(requests[0]["max_tokens"],10);assert_eq!(requests[1]["max_tokens"],7);
     assert_eq!(outcome.usage.completion_tokens,7);assert_eq!(gate.calls,["1"]);
@@ -86,14 +101,14 @@ async fn bounded_turn_checks_usage_and_model_before_tools_and_refuses_oversized_
         let (url,task)=multi_server(vec![Box::leak(body.into_boxed_str())]);
         let mut history=Vec::new();let mut gate=LookupGate{calls:Vec::new()};let (_,cancel)=watch::channel(false);
         let result=run_turn_limited_local(Vendor::DeepSeek,&url,"deepseek-flash","none",&mut history,"question",
-            Some(&mut gate),cancel,Duration::from_secs(3),|_|{},TurnLimits{input_bytes:16384,output_tokens:10}).await;
+            Some(&mut gate),cancel,Duration::from_secs(3),|_|{},TurnLimits{max_requests:None,input_bytes:16384,output_tokens:10}).await;
         assert!(matches!(result,Err(Error::IncompleteStream)));assert!(gate.calls.is_empty());assert!(history.is_empty());
         assert_eq!(task.join().unwrap().0.len(),1);
     }
     let listener=TcpListener::bind("127.0.0.1:0").unwrap();listener.set_nonblocking(true).unwrap();
     let mut history=Vec::new();let (_,cancel)=watch::channel(false);
     let result=run_turn_limited_local(Vendor::DeepSeek,&format!("http://{}/chat",listener.local_addr().unwrap()),"deepseek-flash","none",
-        &mut history,"too large",None,cancel,Duration::from_secs(3),|_|{},TurnLimits{input_bytes:1,output_tokens:10}).await;
+        &mut history,"too large",None,cancel,Duration::from_secs(3),|_|{},TurnLimits{max_requests:None,input_bytes:1,output_tokens:10}).await;
     assert!(matches!(result,Err(Error::RequestTooLarge)));assert!(listener.accept().is_err());
 }
 
@@ -104,7 +119,7 @@ async fn bounded_nonempty_text_refuses_zero_usage_without_changing_direct_vendor
     const ZERO: &str = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"generated answer\"}}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0}}\n\ndata: [DONE]\n\n";
     let (url,task)=multi_server(vec![ZERO]);let mut history=Vec::new();let (_,cancel)=watch::channel(false);
     let result=run_turn_limited_local(Vendor::DeepSeek,&url,"deepseek-flash","none",&mut history,"question",
-        None,cancel,Duration::from_secs(3),|_|{},TurnLimits{input_bytes:16384,output_tokens:10}).await;
+        None,cancel,Duration::from_secs(3),|_|{},TurnLimits{max_requests:None,input_bytes:16384,output_tokens:10}).await;
     assert!(matches!(result,Err(Error::IncompleteStream)));assert!(history.is_empty());
     assert_eq!(task.join().unwrap().0.len(),1);
     let (url,task)=multi_server(vec![ZERO]);let (_,cancel)=watch::channel(false);
@@ -121,7 +136,7 @@ async fn bounded_output_cap_is_distinct_from_incomplete_usage_and_does_not_retry
     const LIMITED: &str = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"length\",\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":10}}\n\ndata: [DONE]\n\n";
     let (url,task)=multi_server(vec![LIMITED]);let mut history=Vec::new();let (_,cancel)=watch::channel(false);
     let result=run_turn_limited_local(Vendor::DeepSeek,&url,"deepseek-flash","none",&mut history,"question",
-        None,cancel,Duration::from_secs(3),|_|{},TurnLimits{input_bytes:16384,output_tokens:10}).await;
+        None,cancel,Duration::from_secs(3),|_|{},TurnLimits{max_requests:None,input_bytes:16384,output_tokens:10}).await;
     assert!(matches!(result,Err(Error::OutputLimit)));assert!(history.is_empty());
     assert_eq!(task.join().unwrap().0.len(),1);
 }
@@ -680,13 +695,15 @@ async fn cancellation_and_timeout_abort_request() {
         Duration::from_millis(250),
     );
     let (_, cancel) = watch::channel(false);
+    // Keep the server response well after this deadline. Equal response and
+    // timeout delays race which ready future wins rather than test cancellation.
     assert_eq!(
         stream_once_local(
             Vendor::DeepSeek,
             &url,
             json!({}),
             cancel,
-            Duration::from_millis(250),
+            Duration::from_millis(50),
             |_| {}
         )
         .await,

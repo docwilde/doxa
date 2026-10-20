@@ -71,6 +71,7 @@ pub struct CodexHost {
     catalog_options: AppServerOptions,
     billing: Mutex<Option<Value>>,
     rollout_path: Mutex<Option<PathBuf>>,
+    configured_sandbox:doxa_engines::codex_driver::SandboxMode,
     transport: &'static str,
     closing: AtomicBool,
     routed: bool,
@@ -96,6 +97,12 @@ enum IndexCommand {
     Stop,
 }
 
+fn resume_sandbox(record:&Value,configured:doxa_engines::codex_driver::SandboxMode,explicit:bool)->Result<doxa_engines::codex_driver::SandboxMode,String>{
+    use doxa_engines::codex_driver::SandboxMode;
+    let saved=match record.get("sandbox"){None=>return Ok(configured),Some(Value::String(value))=>match value.as_str(){"read-only"=>SandboxMode::ReadOnly,"workspace-write"=>SandboxMode::WorkspaceWrite,"danger-full-access"=>SandboxMode::DangerFullAccess,_=>return Err("Codex saved sandbox is invalid".into())},_=>return Err("Codex saved sandbox is invalid".into())};
+    if explicit&&saved!=configured{return Err("Codex resume sandbox differs from the saved policy".into());}Ok(saved)
+}
+fn sandbox_name(sandbox:doxa_engines::codex_driver::SandboxMode)->&'static str{use doxa_engines::codex_driver::SandboxMode;match sandbox{SandboxMode::ReadOnly=>"read-only",SandboxMode::WorkspaceWrite=>"workspace-write",SandboxMode::DangerFullAccess=>"danger-full-access"}}
 impl CodexHost {
     // Store only the display event, never the provider frame. try_append
     // scrubs every string again and refuses to write if LORE is unavailable.
@@ -158,6 +165,7 @@ impl CodexHost {
             store.verify_thread_checkpoint(&value).map_err(|_| {
                 "Codex transcript does not match its durable checkpoint; refusing to resume the thread".to_owned()
             })?;
+            options.sandbox=resume_sandbox(&value,options.sandbox,options.sandbox_explicit)?;
             let recorded_model = match value.get("model") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(model)) if !model.is_empty() && model.len() <= 128
@@ -296,6 +304,7 @@ impl CodexHost {
                 }
             }
         };
+        let configured_sandbox=options.sandbox;
         let driver = if transport == "app-server" {
             CodexTransport::AppServer {
                 options: AppServerOptions { executable: options.executable.clone(), cwd: options.cwd.clone(),
@@ -330,7 +339,7 @@ impl CodexHost {
             catalog_options,
             billing: Mutex::new(None),
             rollout_path: Mutex::new(rollout_path),
-            transport,
+            transport, configured_sandbox,
             closing: AtomicBool::new(false), routed,
         };
         let effort = host.initial_effort();
@@ -440,6 +449,7 @@ impl CodexHost {
             fields.insert("permission_mode".into(), json!(self.permission.lock().unwrap().mode()));
         }
         fields.insert("transport".into(), json!(self.transport));
+        fields.insert("sandbox".into(),json!(sandbox_name(self.configured_sandbox)));
         fields.insert("lore_enabled".into(), json!(self.lore_enabled));
         fields.insert("lore_tools".into(), json!(self.agent_tools.is_some()));
         fields.insert("peer_tools".into(), json!(self.peer_tools_allowed && self.peer_tools.lock().unwrap().is_some()));
@@ -601,6 +611,16 @@ impl CodexHost {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recorded_sandbox_restores_implicit_history_but_rejects_explicit_policy_changes(){
+        use doxa_engines::codex_driver::SandboxMode;
+        let saved=serde_json::json!({"sandbox":"read-only"});
+        assert_eq!(super::resume_sandbox(&saved,SandboxMode::WorkspaceWrite,false).unwrap(),SandboxMode::ReadOnly);
+        assert_eq!(super::resume_sandbox(&saved,SandboxMode::ReadOnly,true).unwrap(),SandboxMode::ReadOnly);
+        assert!(super::resume_sandbox(&saved,SandboxMode::WorkspaceWrite,true).is_err());
+        assert_eq!(super::resume_sandbox(&serde_json::json!({}),SandboxMode::WorkspaceWrite,false).unwrap(),SandboxMode::WorkspaceWrite);
+        for value in [serde_json::Value::Null,serde_json::json!("invalid"),serde_json::json!(true)]{assert!(super::resume_sandbox(&serde_json::json!({"sandbox":value}),SandboxMode::ReadOnly,false).is_err());}
+    }
     use super::*;
 
     #[test]
@@ -1086,6 +1106,7 @@ impl Host for CodexHost {
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "codex_sandbox_policy"=>{let permission=*self.permission.lock().map_err(|_|"Codex permission state unavailable")?;Ok(json!({"configured_sandbox":sandbox_name(self.configured_sandbox),"effective_sandbox":if permission==CodexPermission::FullAccess{"danger-full-access"}else if permission==CodexPermission::Auto&&self.configured_sandbox==doxa_engines::codex_driver::SandboxMode::DangerFullAccess{"workspace-write"}else{sandbox_name(self.configured_sandbox)},"permission_mode":permission.mode(),"transport":self.transport}))},
             "isolation_transport_reset" => {
                 if self.has_active_work() || self.closing.load(Ordering::Acquire) {
                     return Err("Codex isolation changes require an idle provider".into());

@@ -2,7 +2,7 @@
 //! Interactive requests require a host bridge; unknown requests are refused.
 //!
 //! The shapes below come from `codex app-server generate-ts --experimental`
-//! (Codex 0.156.1). Stdio is newline-delimited JSON-RPC without LSP headers.
+//! (Codex 0.163.0). Stdio is newline-delimited JSON-RPC without LSP headers.
 use std::io;
 use std::os::unix::{process::CommandExt, net::UnixStream, io::AsRawFd};
 use std::collections::VecDeque;
@@ -302,6 +302,10 @@ impl AppServerDriver {
         let owner_fd = owner_peer.as_ref().map(AsRawFd::as_raw_fd);
         let mut provider_command = std::process::Command::new(&options.executable);
         provider_command.arg("app-server").arg("--stdio").current_dir(&options.cwd);
+        // DOXA owns visible sessions, peer coordination and fleet/account caps.
+        // Provider-internal children would bypass those identities and budgets.
+        provider_command.arg("-c").arg("agents.enabled=false");
+        provider_command.arg("-c").arg("features.multi_agent_v2=false");
         let offline=!doxa_isolation::task_internet_allowed()?;
         if offline {
             provider_command.arg("-c").arg("web_search=\"disabled\"");
@@ -368,8 +372,15 @@ impl AppServerDriver {
                     // Token-budget context resets bypass PreCompact in this provider.
                     // Confirm the process-local override is supported and effective.
                     let config = driver.request("config/read", json!({"cwd":driver.options.cwd,"includeLayers":false})).await?;
+                    if config["config"]["agents"]["enabled"] != false
+                        || config["config"]["features"]["multi_agent_v2"] != false {
+                        return Err(AppServerError::Protocol("Codex internal agents are not disabled; DOXA owns fleet sessions and account limits"));
+                    }
                     if config["config"]["features"]["token_budget"] != false {
                         return Err(AppServerError::Protocol("Codex unhooked token-budget reset path is not disabled"));
+                    }
+                    if config["config"]["features"]["async_compaction"] != false {
+                        return Err(AppServerError::Protocol("Codex unreviewed asynchronous compaction path is not disabled"));
                     }
                     driver.configured_context_window = config["config"]["model_context_window"].as_u64().filter(|value| *value > 0);
                     driver.configured_compact_limit = config["config"]["model_auto_compact_token_limit"].as_u64().filter(|value| *value > 0);
@@ -1241,18 +1252,18 @@ for line in sys.stdin:
 
     #[test]
     fn provider_version_uses_only_the_authoritative_product_prefix() {
-        let desktop = "Codex Desktop/0.156.1 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)";
+        let desktop = "Codex Desktop/0.163.0 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)";
         assert_eq!(provider_version(desktop), Some(crate::codex_compact::SUPPORTED_VERSION));
-        assert_eq!(provider_version("codex_cli_rs/0.156.1"), Some(crate::codex_compact::SUPPORTED_VERSION));
+        assert_eq!(provider_version("codex_cli_rs/0.163.0"), Some(crate::codex_compact::SUPPORTED_VERSION));
         for agent in [
-            "Codex Desktop/0.1.0 (doxa; 0.156.1)",
-            "codex_cli_rs/0.1.0 (client/0.156.1)",
-            "Codex Desktop (doxa/0.156.1)",
-            "codex_cli_rs (doxa; 0.156.1)",
-            "unknown/0.156.1 (doxa; 0.156.1)",
-            "doxa/0.156.1",
-            "Codex Desktop/unknown (doxa; 0.156.1)",
-            "Codex Desktop/0.156.1-client",
+            "Codex Desktop/0.1.0 (doxa; 0.163.0)",
+            "codex_cli_rs/0.1.0 (client/0.163.0)",
+            "Codex Desktop (doxa/0.163.0)",
+            "codex_cli_rs (doxa; 0.163.0)",
+            "unknown/0.163.0 (doxa; 0.163.0)",
+            "doxa/0.163.0",
+            "Codex Desktop/unknown (doxa; 0.163.0)",
+            "Codex Desktop/0.163.0-client",
         ] {
             assert_ne!(provider_version(agent), Some(crate::codex_compact::SUPPORTED_VERSION), "{agent}");
         }

@@ -48,6 +48,12 @@ fn options(plan:&Value,manifest:&Manifest)->io::Result<LaunchOptions>{
         router_config:if engine==Engine::Router{Some(PathBuf::from(record["router_config"].as_str().filter(|path|Path::new(path).is_absolute()).ok_or_else(||invalid("Router migration requires its reviewed config path"))?))}else{None},..LaunchOptions::default()})
 }
 
+fn verify_continuity(plan:&Value,resumed:&Value)->io::Result<()>{
+    if plan["launch"]["engine"]=="codex"&&plan["launch"]["sandbox"]!=resumed["launch"]["sandbox"]{return Err(invalid("resumed native Codex sandbox changed"));}
+    for key in ["transcript_path","transcript_bytes","transcript_sha256","model","effort","permission_mode","router_checkpoint","account_turn_allowance"]{
+        if resumed[key]!=plan[key]{return Err(invalid(format!("resumed conversation changed {key}")));}
+    }Ok(())
+}
 fn resume(plan:&Value,manifest:&Manifest)->io::Result<DaemonClient>{
     let session=launch::spawn_migrated(&options(plan,manifest)?,&plan["launch"])?;
     let mut client=DaemonClient::connect(&session.socket,None).map_err(invalid)?;
@@ -55,9 +61,7 @@ fn resume(plan:&Value,manifest:&Manifest)->io::Result<DaemonClient>{
         if client.hello["session_id"]!=manifest.session_id||client.hello["isolation"]["profile"]!=manifest.profile.key()
             ||client.hello["isolation"]["state"]!="ready"{return Err(invalid("resumed daemon did not verify its session and isolation identity"));}
         let resumed=call(&mut client,"isolation_migration_plan",json!({}))?;
-        for key in ["transcript_path","transcript_bytes","transcript_sha256","model","effort","permission_mode","router_checkpoint"]{
-            if resumed[key]!=plan[key]{return Err(invalid(format!("resumed conversation changed {key}")));}
-        }
+        verify_continuity(plan,&resumed)?;
         if plan["launch"]["engine"]=="codex"{
             let verified=call(&mut client,"verify_resume",json!({}))?;
             if verified["verified"]!=true{return Err(invalid("Codex provider did not verify the saved thread"));}
@@ -109,6 +113,13 @@ pub(crate) fn change(client:&mut DaemonClient,target:Profile)->io::Result<(Daemo
 mod tests{
     use super::*;
     use std::{ffi::OsString,os::unix::{fs::{FileTypeExt,PermissionsExt},net::UnixListener},process::Command};
+    #[test]
+    fn account_migration_requires_the_exact_settled_allowance_after_respawn(){
+        let plan=json!({"model":"gpt-6-sol","account_turn_allowance":{"limit":12,"used":3,"pending":false,"remaining":9,"durable":true,"provider_charge_usd":null,"outside_api_usd_budget":true}});
+        assert!(verify_continuity(&plan,&plan).is_ok());
+        for (key,value) in [("limit",json!(13)),("used",json!(0)),("pending",json!(true)),("outside_api_usd_budget",json!(false))]{let mut changed=plan.clone();changed["account_turn_allowance"][key]=value;assert!(verify_continuity(&plan,&changed).is_err(),"{key}");}
+        let mut missing=plan.clone();missing.as_object_mut().unwrap().remove("account_turn_allowance");assert!(verify_continuity(&plan,&missing).is_err());
+    }
     fn reviewed_test_host_path(host:&str,uid:u32)->Option<PathBuf>{
         if uid==0{return None;}
         let socket=host.strip_prefix("unix://")?;

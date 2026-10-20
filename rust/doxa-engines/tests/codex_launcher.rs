@@ -2,7 +2,7 @@
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
-const PATCH: &str = "23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d";
+const PATCH: &str = "3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c";
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -38,8 +38,8 @@ fn fixture() -> tempfile::TempDir {
     )
     .unwrap();
     fs::write(dir.path().join("receipt.json"),json!({"contract":"doxa-precompact-fail-closed-v1",
-        "source_commit":"b412ff32c417f855c2b2d1581b77058eed87c84b","patch_sha256":PATCH,
-        "code_mode_host_source_commit":"b412ff32c417f855c2b2d1581b77058eed87c84b",
+        "source_commit":"83086188ae0614bd882818ff1aa23f3194962012","patch_sha256":PATCH,
+        "code_mode_host_source_commit":"83086188ae0614bd882818ff1aa23f3194962012",
         "code_mode_host_sha256":format!("{:x}",Sha256::digest(fs::read("/usr/bin/true").unwrap())),
         "code_mode_host_dispatcher_sha256":format!("{:x}",Sha256::digest(fs::read(env!("CARGO_BIN_EXE_doxa-codex-protected")).unwrap())),
         "binary_sha256":format!("{:x}",Sha256::digest(fs::read("/usr/bin/true").unwrap())),"official_cli":"/usr/bin/printf"}).to_string()).unwrap();
@@ -149,6 +149,81 @@ fn native_launcher_executes_checked_binary_and_keeps_official_cli_commands() {
         .unwrap();
     assert!(result.status.success());
     assert_eq!(result.stdout, b"version=official");
+}
+
+#[test]
+fn version_identifies_checked_protected_payload_instead_of_newer_official_cli() {
+    let dir = fixture();
+    let official = dir.path().join("official-codex");
+    let marker = dir.path().join("executed");
+    let version: Vec<u64> = doxa_engines::codex_compact::SUPPORTED_VERSION
+        .split('.').map(|part| part.parse().unwrap()).collect();
+    let newer_version = format!("{}.{}.{}", version[0], version[1], version[2] + 1);
+    let official_script = format!("#!/bin/sh\nprintf 'official' >> \"$DOXA_VERSION_TEST_MARKER\"\nif [ \"$1\" = --version ]; then printf 'codex-cli {newer_version}\\n'; else printf 'official:%s\\n' \"$*\"; fi\n");
+    fs::write(&official, official_script).unwrap();
+    fs::set_permissions(&official, fs::Permissions::from_mode(0o700)).unwrap();
+    let payload = dir.path().join("codex-app-server");
+    fs::write(&payload, b"#!/bin/sh\nprintf 'payload' >> \"$DOXA_VERSION_TEST_MARKER\"\nprintf 'codex-app-server 0.163.0\\n'\n").unwrap();
+    let receipt = dir.path().join("receipt.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    value["official_cli"] = json!(official);
+    value["binary_sha256"] = json!(format!("{:x}", Sha256::digest(fs::read(&payload).unwrap())));
+    fs::write(&receipt, value.to_string()).unwrap();
+    let direct = Command::new(&official).arg("--version")
+        .env("DOXA_VERSION_TEST_MARKER", &marker).output().unwrap();
+    assert!(direct.status.success());assert_eq!(direct.stdout, format!("codex-cli {newer_version}\n").as_bytes());
+    fs::remove_file(&marker).unwrap();
+    for flag in ["--version", "-V"] {
+        let result = Command::new(dir.path().join("codex")).arg(flag)
+            .env("DOXA_VERSION_TEST_MARKER", &marker).output().unwrap();
+        assert!(result.status.success());
+        let report = String::from_utf8(result.stdout).unwrap();
+        assert_eq!(report, "doxa-codex-protected 0.163.0 (provider codex-0.163.0-precompact-v1; upstream 83086188ae0614bd882818ff1aa23f3194962012; contract doxa-precompact-fail-closed-v1)\n");
+        assert!(!report.contains(&newer_version));assert!(!marker.exists());
+    }
+    let login = Command::new(dir.path().join("codex")).args(["login", "status"])
+        .env("DOXA_VERSION_TEST_MARKER", &marker).output().unwrap();
+    assert!(login.status.success());assert_eq!(login.stdout, b"official:login status\n");
+    assert_eq!(fs::read(&marker).unwrap(), b"official");
+    // The payload report does not depend on the delegated CLI remaining present.
+    fs::remove_file(&official).unwrap();fs::remove_file(&marker).unwrap();
+    assert!(Command::new(dir.path().join("codex")).arg("--version")
+        .env("DOXA_VERSION_TEST_MARKER", &marker).output().unwrap().status.success());
+    assert!(!marker.exists());
+}
+
+#[test]
+fn version_refuses_missing_or_unsafe_receipts_and_unverified_payloads() {
+    for change in ["receipt-missing", "receipt-mode", "receipt-symlink", "receipt-fifo", "receipt-hardlink",
+        "receipt-source", "payload-hash", "helper-missing", "dispatcher-hash", "directory-mode"] {
+        let dir = fixture();let receipt = dir.path().join("receipt.json");
+        match change {
+            "receipt-missing" => fs::remove_file(&receipt).unwrap(),
+            "receipt-mode" => fs::set_permissions(&receipt, fs::Permissions::from_mode(0o644)).unwrap(),
+            "receipt-symlink" => {
+                fs::rename(&receipt, dir.path().join("original-receipt")).unwrap();
+                std::os::unix::fs::symlink(dir.path().join("original-receipt"), &receipt).unwrap();
+            }
+            "receipt-fifo" => {
+                fs::remove_file(&receipt).unwrap();
+                use std::os::unix::ffi::OsStrExt;
+                let name = std::ffi::CString::new(receipt.as_os_str().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            }
+            "receipt-hardlink" => fs::hard_link(&receipt, dir.path().join("receipt-alias")).unwrap(),
+            "receipt-source" => {
+                let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+                value["source_commit"] = json!("unreviewed-source");fs::write(&receipt, value.to_string()).unwrap();
+            }
+            "payload-hash" => fs::write(dir.path().join("codex-app-server"), b"changed payload").unwrap(),
+            "helper-missing" => fs::remove_file(dir.path().join("codex-code-mode-host-payload")).unwrap(),
+            "dispatcher-hash" => fs::write(dir.path().join("codex-code-mode-host"), b"changed dispatcher").unwrap(),
+            "directory-mode" => fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap(),
+            _ => unreachable!(),
+        }
+        assert_refusal(Command::new(dir.path().join("codex")).arg("--version"),
+            std::time::Instant::now() + std::time::Duration::from_secs(1), change);
+    }
 }
 #[test]
 fn invalid_receipts_and_changed_provider_artifacts_refuse_without_dispatch() {

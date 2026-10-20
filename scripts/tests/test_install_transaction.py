@@ -13,7 +13,17 @@ class InstallTransactionTests(unittest.TestCase):
         server=root/'server';server.write_text('#!/usr/bin/python3\nimport json,sys\nq=json.loads(sys.stdin.readline());print(json.dumps({"id":q["id"],"result":{"userAgent":'+repr(module.AGENT_PREFIX+'fixture)')+'}}),flush=True);sys.stdin.read()\n');server.chmod(0o700)
         launcher=root/'launcher';launcher.write_bytes(b'fixture dispatcher');launcher.chmod(0o700);helper=root/'helper';helper.write_bytes(b'fixture helper');helper.chmod(0o700)
         provider=home/'providers';result=module.install(server,provider,Path('/usr/bin/true'),launcher,helper)
-        legacy=provider/module.PROVIDER;result.parent.rename(legacy);(provider/'codex-current').unlink();receipt=json.loads((legacy/'receipt.json').read_text());receipt['patch_sha256']=module.LEGACY_PATCH_SHA256;(legacy/'receipt.json').write_text(json.dumps(receipt))
+        # Seed one complete reviewed historical tuple. Mixing today's source
+        # with an older patch must fail before reaching either injected fault.
+        old_source,old_patch,old_provider=next(identity for identity in module.REVIEWED_INSTALLATIONS
+            if identity[1]==module.LEGACY_PATCH_SHA256)
+        legacy=provider/old_provider;result.parent.rename(legacy);(provider/'codex-current').unlink()
+        receipt=json.loads((legacy/'receipt.json').read_text())
+        receipt.update(source_commit=old_source,patch_sha256=old_patch,code_mode_host_source_commit=old_source)
+        (legacy/'receipt.json').write_text(json.dumps(receipt))
+        self.assertEqual(module.receipt_provider(receipt),old_provider)
+        module.verify_installed(legacy,receipt)
+        provider_before={path.name:path.read_bytes() for path in legacy.iterdir()}
         (bins/'doxa-rs').write_bytes(b'old frontend untouched')
         def tool(name,text):
             p=tools/name;p.write_text(textwrap.dedent(text));p.chmod(0o700)
@@ -68,7 +78,7 @@ class InstallTransactionTests(unittest.TestCase):
         run=subprocess.run(['/bin/sh',str(TREE/'scripts/install.sh'),'HEAD'],env=env,capture_output=True,text=True,timeout=15)
         self.assertNotEqual(run.returncode,0,run.stdout+run.stderr)
         if expected_sha is None:
-            self.assertIn('injected',run.stderr)
+            self.assertIn({'stage':'injected ENOSPC staging failure','handoff':'injected handoff failure'}[failure],run.stderr)
         else:
             self.assertIn('does not match DOXA_RUST_EXPECTED_SHA',run.stderr)
             self.assertFalse(cargo_marker.exists(),run.stdout+run.stderr)
@@ -76,6 +86,7 @@ class InstallTransactionTests(unittest.TestCase):
         after=os.readlink(provider/'codex-current') if (provider/'codex-current').is_symlink() else None
         self.assertEqual(before,after,run.stdout+run.stderr)
         self.assertEqual(module.active_installation(provider),legacy)
+        self.assertEqual(provider_before,{path.name:path.read_bytes() for path in legacy.iterdir()})
         self.assertFalse((bins/'doxa-plugin-worker').exists())
     def test_provider_rolls_back_after_staging_failure(self): self.exercise('stage')
     def test_provider_and_frontend_roll_back_after_handoff_failure(self): self.exercise('handoff')

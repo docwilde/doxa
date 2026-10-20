@@ -146,7 +146,7 @@ fn explicit_legacy_migration_resumes_exact_provider_thread_without_creating_one(
     let store = seed(root);
     let before = fs::read(store.transcript_path()).unwrap();
     let provider = root.join("provider");
-    fs::write(&provider,r#"#!/usr/bin/env python3
+    let fixture = r#"#!/usr/bin/env python3
 import json,sys,tomllib,os,socket,threading,signal
 if 'DOXA_CODEX_OWNER_FD' in os.environ:
  control=socket.socket(fileno=int(os.environ['DOXA_CODEX_OWNER_FD']))
@@ -163,11 +163,19 @@ def read():
 def reply(query,result):print(json.dumps({'id':query['id'],'result':result}),flush=True)
 def event(method,**params):print(json.dumps({'method':method,'params':dict(threadId='legacy-thread',**params)}),flush=True)
 query=read();assert query['method']=='initialize'
-reply(query,{'userAgent':'doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; fixture)'})
+reply(query,{'userAgent':'doxa_codex_rs/__DOXA_SUPPORTED_CODEX_VERSION__ (doxa-precompact-fail-closed-v1; fixture)'})
 assert read()['method']=='initialized'
 args=sys.argv[1:];overrides=[args[i+1] for i,value in enumerate(args[:-1]) if value=='-c']
-hooks=next(tomllib.loads(value)['hooks'] for value in overrides if value.startswith('hooks='))
-query=read();assert query['method']=='config/read';reply(query,{'config':{'features':{'token_budget':False}}})
+for flag in ['features.token_budget=false','features.async_compaction=false','agents.enabled=false','features.multi_agent_v2=false']:
+ assert flag in overrides, flag
+def merge(target, incoming):
+ for key,value in incoming.items():
+  if isinstance(value,dict):merge(target.setdefault(key,{}),value)
+  else:target[key]=value
+config={}
+for value in overrides:merge(config,tomllib.loads(value))
+hooks=config['hooks']
+query=read();assert query['method']=='config/read';reply(query,{'config':config})
 query=read();assert query['method']=='hooks/list'
 key=next(iter(hooks['state']));handler=hooks['PreCompact'][0]['hooks'][0]
 reply(query,{'data':[{'hooks':[dict(key=key,command=handler['command'],handlerType='command',enabled=True,trustStatus='trusted',currentHash=hooks['state'][key]['trusted_hash'],eventName='preCompact',source='sessionFlags',timeoutSec=240,**{'async':False})]}]})
@@ -178,7 +186,17 @@ reply(query,{'turn':{'id':'migration-turn'}})
 event('item/completed',turnId='migration-turn',item={'id':'answer','type':'agentMessage','text':'native continuation'})
 event('turn/completed',turn={'id':'migration-turn','status':'completed','error':None})
 sys.stdin.read()
-"#).unwrap();
+"#;
+    let version_placeholder = "__DOXA_SUPPORTED_CODEX_VERSION__";
+    assert_eq!(fixture.matches(version_placeholder).count(), 1);
+    fs::write(
+        &provider,
+        fixture.replace(
+            version_placeholder,
+            doxa_engines::codex_compact::SUPPORTED_VERSION,
+        ),
+    )
+    .unwrap();
     fs::set_permissions(&provider, fs::Permissions::from_mode(0o700)).unwrap();
     let mut child = command(root, &provider)
         .env("DOXA_CODEX_MIGRATE_APPSERVER", "1")

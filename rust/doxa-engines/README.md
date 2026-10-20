@@ -22,11 +22,13 @@ Assistant text and reasoning are bounded and scrubbed as complete messages. The 
 
 ## Compaction protection
 
-Protected sessions require DOXA's private **Codex 0.156.1** app server with contract `doxa-precompact-fail-closed-v1`. Before thread startup, DOXA checks the build identity, trusted synchronous `PreCompact` hook hash, and disabled unhooked token-budget reset. Stock or unsupported app servers fail before creating or resuming a protected thread.
+Protected sessions require DOXA's private **Codex 0.163.0** app server with contract `doxa-precompact-fail-closed-v1`. Before thread startup, DOXA checks the build identity, trusted synchronous `PreCompact` hook hash, and disabled token-budget and asynchronous compaction flags. The protected payload also refuses speculative background compaction internally, regardless of client feature overrides. Stock or unsupported app servers fail before creating or resuming a protected thread.
 
 The hook binds the actual provider thread and owned rollout, prepares a scrubbed snapshot, and waits for the native LORE reviewer. Manual `/compact` independently reviews the same bound source and rechecks its identity and digest before submission. Missing, failed, timed-out, changed, asynchronous, or duplicate review blocks replacement; a worker exit code without an exact receipt is insufficient. DOXA also waits for matching hook and compaction events after submission. It does not overwrite global Codex settings or trust unrelated user hooks.
 
-The private provider makes the decision inside `run_pre_compact_hooks`, before compaction inference or history replacement. Exactly one required synchronous command must return explicit JSON approval. The provider identifies itself as `doxa_codex_rs/0.156.1` and does not impersonate stock Codex. [Authenticated default-window verification](../../docs/live-default-window-compaction-2026-09-30.md).
+DOXA disables Codex's internal multi-agent spawning and verifies that policy before starting a protected thread. Fleet/session creation and peer messages go through DOXA so visible identities, review and account limits remain authoritative. Existing injected peer tools remain available.
+
+The private provider makes the decision inside `run_pre_compact_hooks`, before compaction inference or history replacement. Exactly one required synchronous command must return explicit JSON approval. The provider identifies itself as `doxa_codex_rs/0.163.0` and does not impersonate stock Codex. [Earlier 0.156.1 authenticated default-window verification](../../docs/live-default-window-compaction-2026-09-30.md).
 
 ## Install the protected provider
 
@@ -40,7 +42,7 @@ python3 scripts/install_codex_protected.py \
   --launcher "$PWD/target/debug/doxa-codex-protected"
 ```
 
-The installer pins source commit `b412ff32c417f855c2b2d1581b77058eed87c84b` and a reviewed patch checksum. The patch normalizes local workspace package versions in the upstream lockfile; external sources and checksums stay fixed. A bounded initialize probe checks the compiled contract. Receipts bind the source, patch, dispatcher, server, and helper bytes. The code-mode helper's V8 inputs come from checksum-verified official artifacts. Changed fingerprints, corrupt installs, or partial receipts are refused; a fresh reviewed rebuild publishes a new immutable directory and atomically selects it for new launches. Existing processes keep their original files. An explicit `--codex-bin` takes precedence.
+The installer pins source commit `83086188ae0614bd882818ff1aa23f3194962012` and a reviewed patch checksum. Each upstream/patch identity gets a separate retained source checkout. Cross-version publication checks the old receipt and helper bytes before selecting a new immutable artifact; rollback retains that prior provider. The patch normalizes local workspace package versions in the upstream lockfile; external sources and checksums stay fixed. A bounded initialize probe checks the compiled contract. Receipts bind the source, patch, dispatcher, server, and helper bytes. The code-mode helper's V8 inputs come from checksum-verified official artifacts. Changed fingerprints, corrupt installs, or partial receipts are refused; a fresh reviewed rebuild publishes a new immutable directory and atomically selects it for new launches. Existing processes keep their original files. An explicit `--codex-bin` takes precedence.
 
 Set `DOXA_CODEX_PROTECTED_CACHE` to choose the standard build cache, or pass `--cache` to the standalone builder. `DOXA_INSTALL_CODEX_PROTECTED=0` skips this optional provider. The official Codex CLI remains available for login and help; DOXA does not replace it.
 

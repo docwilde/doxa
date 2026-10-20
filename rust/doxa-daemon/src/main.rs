@@ -4,6 +4,7 @@ mod mcp;
 mod claude_host;
 mod recovery_context;
 mod budget_host;
+mod account_turn_host;
 mod codex_host;
 mod peer_host;
 mod peer_wake;
@@ -109,6 +110,7 @@ struct Options {
     #[cfg(feature = "local-test-server")]
     vendor_endpoint: Option<String>,
     sandbox: SandboxMode,
+    explicit_sandbox: bool,
 }
 fn initial_task_prompt(task: &str, parent: Option<&str>) -> String {
     // Match Python's receiving-side spawn disclosure before admitting a turn.
@@ -350,7 +352,7 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
         router_config,
         #[cfg(feature = "local-test-server")]
         vendor_endpoint,
-        sandbox,
+        sandbox, explicit_sandbox,
     })
 }
 fn invalid(message: &str) -> io::Error {
@@ -575,6 +577,12 @@ fn run() -> io::Result<()> {
         }
         _ => None,
     };
+    let account_turn_limit=env::var("DOXA_ACCOUNT_TURN_LIMIT").ok().filter(|value|!value.trim().is_empty())
+        .map(|value|value.parse::<u64>().map_err(|_|invalid("invalid account turn limit"))).transpose()?;
+    if account_turn_limit.is_some_and(|limit|!(1..=32).contains(&limit)||options.engine!=Engine::Codex||ceiling.is_some()
+        ||env::var("DOXA_ACCOUNT_TURN_SCOPE").ok().as_deref()!=Some("fleet_supervisor")){
+        return Err(invalid("account turn allowance requires an explicit native Codex fleet supervisor outside the API dollar budget"));
+    }
     let router_ceiling=if options.engine==Engine::Router {
         env::var("DOXA_SESSION_BUDGET_USD").ok().filter(|raw|!raw.trim().is_empty())
             .map(|raw|doxa_router::usd_micros(&raw)).transpose()?
@@ -583,6 +591,11 @@ fn run() -> io::Result<()> {
         .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".doxa"));
     if !budget_home.is_absolute() { return Err(invalid("DOXA home must be absolute")); }
     let budget_path = budget_home.join("budgets").join(format!("{}.json", options.session_id));
+    if let Some(model)=account_turn_host::preflight(&budget_home.join("account-turns").join(format!("{}.json",options.session_id)),account_turn_limit,options.resume,&options.session_id,options.model.as_deref())? {
+        // Historical resumes without --model retain the journal's exact model
+        // before the Codex driver or provider thread can be initialized.
+        options.model=Some(model);
+    }
     if ceiling.is_none() && fs::symlink_metadata(&budget_path).is_ok() {
         return Err(invalid("session has durable budget accounting; resume requires the original session budget"));
     }
@@ -671,7 +684,7 @@ fn run() -> io::Result<()> {
                 .expect("validated Codex executable");
             driver.model = options.model.clone();
             driver.effort = options.effort.clone();
-            driver.sandbox = options.sandbox;
+            driver.sandbox = options.sandbox;driver.sandbox_explicit=options.explicit_sandbox;
             let host = Arc::new(
                 CodexHost::new(
                     driver,
@@ -680,6 +693,7 @@ fn run() -> io::Result<()> {
                 )
                 .map_err(io::Error::other)?,
             );
+            options.sandbox=match host.call("codex_sandbox_policy",&json!({})).map_err(|_|invalid("Codex sandbox policy unavailable"))?["configured_sandbox"].as_str(){Some("read-only")=>SandboxMode::ReadOnly,Some("workspace-write")=>SandboxMode::WorkspaceWrite,Some("danger-full-access")=>SandboxMode::DangerFullAccess,_=>return Err(invalid("Codex sandbox policy unavailable"))};
             codex_host = Some(host.clone());
             host
         }
@@ -739,12 +753,12 @@ fn run() -> io::Result<()> {
         Some(runtime) => Arc::new(isolation_host::IsolationHost::new(host, runtime.clone(),json!({
             "engine":options.engine.name(),"runtime":options.runtime,"linger":options.linger.as_secs_f64(),
             "router_config":options.router_config,"router_config_sha256":router_config_hash,
-            "home":isolation_home,"environment":(["DOXA_HOME","DOXA_PEER_LEDGER","DOXA_AGENT_PEER_SEND","LORE_STORE_DIR","LORE_DATA_DIR","LORE_RUNTIME_DIR"].into_iter().filter_map(|key|env::var(key).ok().map(|value|(key.to_owned(),json!(value)))).collect::<serde_json::Map<_,_>>()),
+            "home":isolation_home,"environment":(["DOXA_HOME","DOXA_PEER_LEDGER","DOXA_AGENT_PEER_SEND","LORE_STORE_DIR","LORE_DATA_DIR","LORE_RUNTIME_DIR","DOXA_ACCOUNT_TURN_LIMIT","DOXA_ACCOUNT_TURN_SCOPE"].into_iter().filter_map(|key|env::var(key).ok().map(|value|(key.to_owned(),json!(value)))).collect::<serde_json::Map<_,_>>()),
             "claude_home":doxa_claude::isolation::config_dir(),
             "codex_bin":options.codex_bin,"claude_bin":options.claude_bin,"sandbox":if options.engine==Engine::Codex {Some(match options.sandbox {
                 SandboxMode::ReadOnly=>"read-only",SandboxMode::WorkspaceWrite=>"workspace-write",SandboxMode::DangerFullAccess=>"danger-full-access"})}else{None},
             "spawn_depth":options.spawn_depth,"parent_session_id":options.parent_session_id,
-            "inbound":inbound_turns,"ceiling":ceiling,"lore":doxa_state::lore_enabled_default()}))),
+            "inbound":inbound_turns,"ceiling":ceiling,"account_turn_limit":account_turn_limit,"lore":doxa_state::lore_enabled_default()}))),
         None => host,
     };
     let host: Arc<dyn Host> = match ceiling.filter(|_|options.engine!=Engine::Router) {
@@ -759,6 +773,11 @@ fn run() -> io::Result<()> {
         },
         None => host,
     };
+    let host:Arc<dyn Host>=if let Some(limit)=account_turn_limit {
+        let identity=json!({"session_id":options.session_id,"engine":"codex","role":"coordinator","model":options.model,"cwd":doxa_isolation::context_cwd(&options.cwd)?});
+        Arc::new(account_turn_host::AccountTurnHost::new(host,budget_home.join("account-turns").join(format!("{}.json",options.session_id)),identity,limit,options.resume)?)
+    }else{host};
+
     let repo_root = if profile.docker() || retained_private_checkout { Some(doxa_peers::scope_for_cwd(&options.cwd)?) }
         else { session_title::repo_root(&options.cwd) };
     let base_title = session_title::base(host.initial_model().as_deref().or(options.model.as_deref()),

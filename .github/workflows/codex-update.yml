@@ -1,0 +1,191 @@
+name: Protected Codex update
+
+on:
+  schedule:
+    - cron: "43 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      resume_run_id:
+        description: Original verified update run (recovery only)
+        type: string
+        default: ''
+      resume_pr:
+        description: Exact original release PR (required with resume_run_id)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-protected-release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify protected candidate
+    if: vars.CODEX_PROTECTED_UPDATES_ENABLED == 'true' && inputs.resume_run_id == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    outputs:
+      action: ${{ steps.prepare.outputs.action }}
+      candidate_sha: ${{ steps.compile.outputs.candidate_sha256 }}
+      proof_sha: ${{ steps.compile.outputs.proof_sha256 }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prepare owned temporary storage
+        run: |
+          mkdir -p "$HOME/.t"
+          chmod 700 "$HOME/.t"
+          echo "TMPDIR=$HOME/.t" >> "$GITHUB_ENV"
+      - name: Discover immutable stable release and carry reviewed patch
+        id: prepare
+        run: python3 scripts/codex-update/update.py prepare --directory "$RUNNER_TEMP/codex-candidate"
+      - name: Prepare bounded private build service
+        if: steps.prepare.outputs.action == 'propose'
+        run: |
+          set -euo pipefail
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Materialize exact candidate without write credentials
+        if: steps.prepare.outputs.action == 'propose'
+        run: python3 scripts/codex-update/update.py materialize --directory "$RUNNER_TEMP/codex-candidate"
+      - name: Build and test the actual protected server and helper
+        id: compile
+        if: steps.prepare.outputs.action == 'propose'
+        run: |
+          set -euo pipefail
+          python3 -W error::ResourceWarning -m unittest discover -s scripts/codex-update -p 'test_*.py' -v
+          systemd-run --user --scope -q -p MemoryMax=8G -p MemorySwapMax=0 \
+            python3 scripts/codex-update/verify.py --root "$GITHUB_WORKSPACE" --cache "$RUNNER_TEMP/codex-build" \
+              --candidate-directory "$RUNNER_TEMP/codex-candidate" --job-output "$GITHUB_OUTPUT"
+      - name: Export only bounded source proposal
+        if: steps.prepare.outputs.action == 'propose'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: protected-codex-candidate
+          path: |
+            ${{ runner.temp }}/codex-candidate/candidate.json
+            ${{ runner.temp }}/codex-candidate/compiled-gates.json
+            ${{ runner.temp }}/codex-candidate/files
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    name: Protected PR merge and release
+    needs: verify
+    if: github.ref == 'refs/heads/main' && needs.verify.outputs.action == 'propose'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: protected-codex-candidate
+          path: ${{ runner.temp }}/candidate-input
+      - name: Reconstruct all candidate bytes independently
+        env:
+          EXPECTED_CANDIDATE_SHA: ${{ needs.verify.outputs.candidate_sha }}
+          EXPECTED_PROOF_SHA: ${{ needs.verify.outputs.proof_sha }}
+        run: |
+          python3 scripts/codex-update/update.py validate-artifact \
+            --directory "$RUNNER_TEMP/candidate-input" --reconstruction "$RUNNER_TEMP/reconstructed"
+      - name: Wait for real PR gates then merge, annotate and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_CANDIDATE_SHA: ${{ needs.verify.outputs.candidate_sha }}
+          EXPECTED_PROOF_SHA: ${{ needs.verify.outputs.proof_sha }}
+        run: python3 scripts/codex-update/publish.py publish --directory "$RUNNER_TEMP/reconstructed"
+
+  blocked:
+    name: Report refused update
+    needs: [verify, publish]
+    if: always() && github.ref == 'refs/heads/main' && (needs.verify.result == 'failure' || needs.publish.result == 'failure')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Leave visible failed update record
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/codex-update/publish.py blocked
+
+  recover:
+    name: Recover exact interrupted release
+    if: github.ref == 'refs/heads/main' && vars.CODEX_PROTECTED_UPDATES_ENABLED == 'true' && inputs.resume_run_id != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate recovery identifiers
+        env:
+          ORIGINAL_RUN: ${{ inputs.resume_run_id }}
+          ORIGINAL_PR: ${{ inputs.resume_pr }}
+        run: |
+          python3 - <<'PY'
+          import os
+          assert os.environ['ORIGINAL_RUN'].isdecimal() and os.environ['ORIGINAL_PR'].isdecimal()
+          PY
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: protected-codex-candidate
+          path: ${{ runner.temp }}/candidate-input
+          run-id: ${{ inputs.resume_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Reconstruct from the original trusted base without executing it
+        env:
+          CODEX_UPDATE_ORIGINAL_RUN: ${{ inputs.resume_run_id }}
+          ORIGINAL_PR: ${{ inputs.resume_pr }}
+        run: |
+          python3 - <<'PY'
+          import importlib.util, os, pathlib, re, subprocess, sys
+          sys.path.insert(0, 'scripts/codex-update')
+          import update
+          incoming = pathlib.Path(os.environ['RUNNER_TEMP']) / 'candidate-input'
+          meta = update.load(update.read(incoming / 'candidate.json'))
+          assert re.fullmatch('[0-9a-f]{40}', meta['base_sha'])
+          assert meta['verification_run_id'] == os.environ['CODEX_UPDATE_ORIGINAL_RUN']
+          subprocess.run(['git','merge-base','--is-ancestor',meta['base_sha'],'HEAD'],check=True)
+          base = pathlib.Path(os.environ['RUNNER_TEMP']) / 'original-base'
+          subprocess.run(['git','worktree','add','--detach',str(base),meta['base_sha']],check=True)
+          pr = update.api('https://api.github.com/repos/docwilde/doxa/pulls/'+os.environ['ORIGINAL_PR'])
+          candidates = re.findall(r'(?m)^Candidate SHA256: ([0-9a-f]{64})$',pr.get('body',''))
+          proofs = re.findall(r'(?m)^Compiled proof SHA256: ([0-9a-f]{64})$',pr.get('body',''))
+          assert len(candidates)==len(proofs)==1
+          update.validate_artifact(base,incoming,pathlib.Path(os.environ['RUNNER_TEMP'])/'reconstructed',candidates[0],proofs[0])
+          PY
+      - name: Resume exact protected merge/tag/release transaction
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ORIGINAL_PR: ${{ inputs.resume_pr }}
+        run: |
+          python3 scripts/codex-update/publish.py resume --directory "$RUNNER_TEMP/reconstructed" --pr "$ORIGINAL_PR"

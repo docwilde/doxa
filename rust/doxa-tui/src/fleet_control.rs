@@ -2,6 +2,8 @@
 //! an interrupted dispatch is never retried as a fresh provider turn.
 #[path="fleet_isolation.rs"]
 mod isolation;
+#[path="fleet_handoff.rs"]
+mod handoff_proof;
 pub use isolation::{request_isolation,change_attached_isolation};
 use crate::{discovery, fleet_plan, fleet_view, launch, transport::DaemonClient};
 use serde_json::{json, Value};
@@ -11,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --router-config ABSOLUTE_PATH        Reviewed Router pool config; call/spend limits split across slots\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Acting coordinator; task may be interactive\n  --alignment-supervisor PROVIDER:MODEL Independent read-only alignment model (jev:jev-1.13.0 or subq:subq-snap-preview)\n  --supervision-mode shadow|enforce     Independent review action (default enforce)\n  --message-review off|shadow|enforce   Fast semantic admission mode\n  --message-judge llm:PROVIDER:MODEL | jev:MODEL | subq:MODEL\n  --review-budget USD                  Reserved from the total run budget\n  --review-max-calls N --review-interval SECONDS\n  --review-input-price USD_PER_MTOK --review-output-price USD_PER_MTOK\n  --review-threshold PROBABILITY        Message risk / decision Choice confidence guard\n  --strict-unreviewed                  Hold every message if its judge is unavailable\n  --allowed-path RELATIVE_PREFIX       Approved scope (repeatable; default repository)\n  --worker-task INDEX:TEXT             Frozen task for each worker (1-based; specify all)\n  --worker-path INDEX:RELATIVE_PREFIX  Narrow one worker's approved paths (repeatable)\n  --worker-after INDEX:PREDECESSOR    Wait for an earlier worker (repeatable)\n  --test-recipe ABSOLUTE_JSON_PATH    Frozen offline Docker test command\n  --auto-test                         Collect host receipts after worker turns\n  --worker-isolation PROFILE          Workers: docker-offline by default\n  --supervisor-isolation PROFILE      Coordinator: docker-offline by default\n  --allow-worker-internet             Owner opt-in for worker task internet\n  --allow-supervisor-internet         Owner opt-in for coordinator task internet\n  --confirm-native-workers            Confirm workers have owner host access\n  --confirm-native-supervisor         Confirm coordinator has owner host access\n  --isolation native|docker-open|docker-offline\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, debrief RUN, test RUN SLOT, resume, continue RUN CHARTER_HASH, dependency-evidence, dependency-review, dependency-release, review, answer, attach, stop\n  calibrate LABELED_JSONL               Offline threshold metrics; no model calls\n  evaluate-development PRIVATE_JSONL --message-judge PROVIDER:MODEL\n                                       Development-only metrics and identity before holdout\n  evaluate-messages PRIVATE_JSONL --message-judge PROVIDER:MODEL [--gate PRIVATE_JSON]\n                                       Offline holdout metrics or fixed gate; no model calls\n";
+pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --router-config ABSOLUTE_PATH        Reviewed Router pool config; call/spend limits split across slots\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Acting coordinator; task may be interactive\n  --alignment-supervisor PROVIDER:MODEL Independent read-only alignment model (jev:jev-1.13.0 or subq:subq-snap-preview)\n  --supervision-mode shadow|enforce     Independent review action (default enforce)\n  --message-review off|shadow|enforce   Fast semantic admission mode\n  --message-judge llm:PROVIDER:MODEL | jev:MODEL | subq:MODEL\n  --review-budget USD                  Reserved from the total run budget\n  --review-max-calls N --review-interval SECONDS\n  --review-input-price USD_PER_MTOK --review-output-price USD_PER_MTOK\n  --review-threshold PROBABILITY        Message risk / decision Choice confidence guard\n  --strict-unreviewed                  Hold every message if its judge is unavailable\n  --allowed-path RELATIVE_PREFIX       Approved scope (repeatable; default repository)\n  --worker-task INDEX:TEXT             Frozen task for each worker (1-based; specify all)\n  --worker-path INDEX:RELATIVE_PREFIX  Narrow one worker's approved paths (repeatable)\n  --worker-after INDEX:PREDECESSOR    Wait for an earlier worker (repeatable)\n  --test-recipe ABSOLUTE_JSON_PATH    Frozen offline Docker test command\n  --auto-test                         Collect host receipts after worker turns\n  --worker-isolation PROFILE          Workers: docker-offline by default\n  --supervisor-isolation PROFILE      Coordinator: docker-offline by default\n  --allow-worker-internet             Owner opt-in for worker task internet\n  --allow-supervisor-internet         Owner opt-in for coordinator task internet\n  --confirm-native-workers            Confirm workers have owner host access\n  --confirm-native-supervisor         Confirm coordinator has owner host access\n  --isolation native|docker-open|docker-offline\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --supervisor-sandbox read-only|workspace-write Native Codex coordinator sandbox (CLI-only)\n  --supervisor-account-turn-limit N    Native Codex only: 1..32 account attempts; unknown account charges excluded from API USD\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, debrief RUN, test RUN SLOT, resume, continue RUN CHARTER_HASH, dependency-evidence, dependency-review, dependency-release, review, answer, attach, stop\n  calibrate LABELED_JSONL               Offline threshold metrics; no model calls\n  evaluate-development PRIVATE_JSONL --message-judge PROVIDER:MODEL\n                                       Development-only metrics and identity before holdout\n  evaluate-messages PRIVATE_JSONL --message-judge PROVIDER:MODEL [--gate PRIVATE_JSON]\n                                       Offline holdout metrics or fixed gate; no model calls\n";
 
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message.into()) }
 fn now() -> String { OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default() }
@@ -79,6 +81,8 @@ pub struct Spec {
     preflight: fleet_plan::Preflight, access:crate::fleet_policy::Policy, pool: Vec<Choice>, prompt: String, cwd: PathBuf,
     review: doxa_fleet::ReviewConfig, allowed_paths:Vec<String>, worker_tasks:Vec<String>, worker_paths:Vec<Vec<String>>, worker_after:Vec<Vec<usize>>, test_recipe:Option<doxa_fleet::evidence::TestRecipe>, auto_test:bool, seed: u64, timeout: Option<Duration>, quiet: Duration, dry_run: bool, memory_off: u64, lore_enabled: bool,
     router_config: Option<doxa_router::Config>,
+    supervisor_account_turn_limit:Option<u64>,
+    supervisor_sandbox:Option<String>,
 }
 impl Spec {
     pub fn parse(args: &[String]) -> io::Result<Self> {
@@ -102,6 +106,7 @@ impl Spec {
         let mut task_options=Vec::new(); let mut path_options=Vec::new(); let mut after_options=Vec::new();
         let mut base = Vec::new(); let mut pool = None; let mut prompt = String::new(); let mut prompt_file = None; let mut test_recipe = None; let mut router_path = None;
         let mut cwd = std::env::current_dir()?; let mut seed = 0; let mut timeout = None;
+        let mut supervisor_account_turn_limit=None;let mut supervisor_sandbox=None;
         let mut quiet = Duration::from_secs(20); let mut dry_run = false; let mut auto_test=false; let mut memory_off = 0; let mut index = 0;
         while index < args.len() {
             let key = args[index].as_str();
@@ -147,6 +152,8 @@ impl Spec {
                     },
                     "--pool" => pool = Some(value.split(',').map(choice).collect::<io::Result<Vec<_>>>()?),
                     "--router-config" => router_path=Some(PathBuf::from(value)),
+                    "--supervisor-sandbox"=>{if supervisor_sandbox.is_some()||!matches!(value.as_str(),"read-only"|"workspace-write"){return Err(invalid("invalid or duplicate supervisor sandbox"));}supervisor_sandbox=Some(value.clone());},
+                    "--supervisor-account-turn-limit"=>{if supervisor_account_turn_limit.is_some(){return Err(invalid("duplicate supervisor account allowance"));}supervisor_account_turn_limit=Some(value.parse::<u64>().map_err(|_|invalid("invalid supervisor account turn limit"))?);},
                     "--prompt" => prompt = value.clone(), "--prompt-file" => prompt_file = Some(PathBuf::from(value)),
                     "--cwd" => cwd = PathBuf::from(value),
                     "--seed" => seed = value.parse::<u64>().or_else(|_| value.parse::<i64>().map(|seed| seed as u64)).map_err(|_| invalid("fleet seed must be a signed or unsigned 64-bit integer"))?,
@@ -240,35 +247,57 @@ impl Spec {
             return Err(invalid("worker dependencies require Docker-isolated fleet sessions; native workers can invoke owner-local release commands"));
         }
         memory_off = memory_off.min(preflight.sessions);
-        let spec=Self { review, allowed_paths, worker_tasks, worker_paths, worker_after, test_recipe, auto_test, preflight, access, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default(),router_config };
+        let spec=Self { supervisor_sandbox,supervisor_account_turn_limit,review, allowed_paths, worker_tasks, worker_paths, worker_after, test_recipe, auto_test, preflight, access, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default(),router_config };
+        if spec.supervisor_sandbox.is_some(){let supervisor=spec.preflight.supervisor.as_deref().map(choice).transpose()?.ok_or_else(||invalid("supervisor sandbox needs an exact native Codex coordinator"))?;if supervisor.engine!=launch::Engine::Codex||supervisor.model.as_deref().is_none_or(|model|!model.starts_with("gpt-")||model.len()>128){return Err(invalid("supervisor sandbox needs an exact native Codex coordinator"));}}
+        if let Some(limit)=spec.supervisor_account_turn_limit {
+            let supervisor=spec.preflight.supervisor.as_deref().map(choice).transpose()?.ok_or_else(||invalid("account allowance needs a native Codex coordinator"))?;
+            if !(1..=32).contains(&limit)||supervisor.engine!=launch::Engine::Codex
+                ||supervisor.model.as_deref().is_none_or(|model|!model.starts_with("gpt-")||model.len()>128)
+                ||spec.preflight.run_budget_usd.is_none()||spec.pool.iter().any(|row|row.engine!=launch::Engine::Router)
+                ||spec.router_config.as_ref().is_none_or(|config|config.candidates.iter().any(|candidate|candidate.provider.is_cli())) {
+                return Err(invalid("account turn allowance requires an exact native Codex coordinator and separately budgeted API Router workers"));
+            }
+        }
         spec.router_slot_configs(&spec.assignments()?)?;
         Ok(spec)
     }
     /// Complete validation and a readable launch review without provider
     /// discovery, session creation, prompt text or filesystem mutations.
     pub fn review(&self) -> io::Result<Value> {
-        let preflight = fleet_plan::check(&self.preflight, fleet_plan::available_memory_mb())?;
+        let preflight = self.preflight_note()?;
         let assignments = self.assignments()?;
-        Ok(json!({"review_version":1,"isolation":self.access.workers.key(),"access":self.access.review(self.preflight.supervisor.is_some()),"independent_review":self.review,"allowed_paths":self.allowed_paths,"test_recipe":self.test_recipe,"auto_test":self.auto_test,"test_recipe_sha256":self.test_recipe_review_hash()?,"prompt_sha256":format!("{:x}", Sha256::digest(self.prompt.as_bytes())),"assignments_sha256":self.assignment_plan_hash()?,"run_id":self.preflight.run_id,"root":self.preflight.root,"cwd":self.cwd,
-            "mode":if self.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
-            "interactive":self.preflight.supervisor.is_some() && self.prompt.trim().is_empty(),
-            "workers":self.preflight.sessions,"sessions":assignments.len(),"run_budget_usd":self.preflight.run_budget_usd,
-            "router_config_sha256":self.router_config.as_ref().map(doxa_router::Config::hash).transpose()?,
-            "router_allocations":self.router_slot_configs(&assignments)?.iter().map(|(index,config)|json!({"slot":index,"config_sha256":config.hash().ok(),"routing_calls":config.max_calls,"routing_spend_usd_micros":config.max_spend_usd_micros})).collect::<Vec<_>>(),
-            "allow_unbudgeted":self.preflight.allow_unbudgeted,"approval_policy":self.preflight.approve,
-            "memory_off":self.memory_off,"lore_enabled":self.lore_enabled,"approval_grace_s":self.preflight.approval_grace_s,"dry_run":self.dry_run,"seed":self.seed,"quiescence_timeout_s":self.timeout.map(|duration| duration.as_secs_f64()),"quiescence_grace_s":self.quiet.as_secs_f64(),
-            "preflight":preflight,"slots":assignments.iter().enumerate().map(|(index, choice)| json!({
+        let account_policy=self.supervisor_account_turn_limit.map(|limit|json!({"turn_limit":limit,"provider_charge_usd":null,"outside_api_usd_budget":true}));
+        let slot_reviews=assignments.iter().enumerate().map(|(index, choice)| json!({
                 "index":index,"isolation":self.access.slot(self.preflight.supervisor.is_some() && index==0).key(),"engine":engine_name(choice.engine),"model":choice.model,"lore":choice.lore,
                 "role":if self.preflight.supervisor.is_some() && index == 0 { "supervisor" } else { "worker" },
                 "task_sha256":index.checked_sub(usize::from(self.preflight.supervisor.is_some())).and_then(|worker|self.worker_tasks.get(worker)).map(|task|format!("{:x}",Sha256::digest(task.as_bytes()))),
                 "allowed_paths":index.checked_sub(usize::from(self.preflight.supervisor.is_some())).and_then(|worker|self.worker_paths.get(worker)).filter(|paths|!paths.is_empty()).unwrap_or(&self.allowed_paths),
                 "depends_on":index.checked_sub(usize::from(self.preflight.supervisor.is_some())).and_then(|worker|self.worker_after.get(worker)).cloned().unwrap_or_default()
-            })).collect::<Vec<_>>()}))
+            })).collect::<Vec<_>>();
+        Ok(json!({"review_version":1,"isolation":self.access.workers.key(),"access":self.access.review(self.preflight.supervisor.is_some()),"independent_review":self.review,"allowed_paths":self.allowed_paths,"test_recipe":self.test_recipe,"auto_test":self.auto_test,"test_recipe_sha256":self.test_recipe_review_hash()?,"prompt_sha256":format!("{:x}", Sha256::digest(self.prompt.as_bytes())),"assignments_sha256":self.assignment_plan_hash()?,"run_id":self.preflight.run_id,"root":self.preflight.root,"cwd":self.cwd,
+            "mode":if self.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
+            "interactive":self.preflight.supervisor.is_some() && self.prompt.trim().is_empty(),
+            "workers":self.preflight.sessions,"sessions":assignments.len(),"run_budget_usd":self.preflight.run_budget_usd,"supervisor_account_policy":account_policy,"supervisor_sandbox":self.supervisor_sandbox,
+            "router_config_sha256":self.router_config.as_ref().map(doxa_router::Config::hash).transpose()?,
+            "router_allocations":self.router_slot_configs(&assignments)?.iter().map(|(index,config)|json!({"slot":index,"config_sha256":config.hash().ok(),"routing_calls":config.max_calls,"routing_spend_usd_micros":config.max_spend_usd_micros})).collect::<Vec<_>>(),
+            "allow_unbudgeted":self.preflight.allow_unbudgeted,"approval_policy":self.preflight.approve,
+            "memory_off":self.memory_off,"lore_enabled":self.lore_enabled,"approval_grace_s":self.preflight.approval_grace_s,"dry_run":self.dry_run,"seed":self.seed,"quiescence_timeout_s":self.timeout.map(|duration| duration.as_secs_f64()),"quiescence_grace_s":self.quiet.as_secs_f64(),
+            "preflight":preflight,"slots":slot_reviews}))
     }
     fn assignment_plan_hash(&self)->io::Result<String>{
-        // Bind owner review to role isolation as well as tasks and routing.
-        doxa_fleet::hash(&(&self.worker_tasks,&self.worker_paths,&self.worker_after,
-            &self.router_config,self.access.review(self.preflight.supervisor.is_some())))
+        let original=doxa_fleet::hash(&(&self.worker_tasks,&self.worker_paths,&self.worker_after,
+            &self.router_config,self.access.review(self.preflight.supervisor.is_some())))?;
+        let original=if let Some(limit)=self.supervisor_account_turn_limit {doxa_fleet::hash(&(original,"native_codex_account_turns",limit))?}else{original};
+        if let Some(sandbox)=&self.supervisor_sandbox{doxa_fleet::hash(&(original,"native_codex_supervisor_sandbox",sandbox))}else{Ok(original)}
+    }
+    fn preflight_note(&self)->io::Result<String>{
+        let original=fleet_plan::check(&self.preflight,fleet_plan::available_memory_mb())?;
+        if let Some(limit)=self.supervisor_account_turn_limit {
+            let mut lines=original.lines().filter(|line|!line.contains("per session")).map(str::to_owned).collect::<Vec<_>>();
+            lines.push(format!("Native Codex supervisor: at most {limit} provider-account dispatch attempts; charges unknown and outside the API dollar allowance. Cancelled/refused attempts are consumed."));
+            lines.push(format!("API allowance: ${:.6} after independent review, divided across {} API workers",self.preflight.run_budget_usd.unwrap()-if self.review.enabled(){self.review.budget_usd}else{0.0},self.preflight.sessions));
+            Ok(lines.join("\n"))
+        }else{Ok(original)}
     }
     fn test_recipe_review_hash(&self)->io::Result<String>{doxa_fleet::hash(&(&self.test_recipe,self.auto_test))}
     fn router_slot_configs(&self,assignments:&[Choice])->io::Result<Vec<(usize,doxa_router::Config)>> {
@@ -512,6 +541,39 @@ fn resumed_session(runtime:&Path,id:&str,socket:&Path)->io::Result<discovery::Se
         .ok_or_else(||invalid("fleet live registry identity changed; resume withheld"))
 }
 
+fn slot_api_budget(total:Option<f64>,review:f64,count:usize,account:Option<u64>,index:usize)->io::Result<Option<f64>>{
+    if account.is_some()&&index==0{return Ok(None);}
+    let count=count.checked_sub(usize::from(account.is_some())).filter(|count|*count>0).ok_or_else(||invalid("API fleet allocation has no workers"))?;
+    total.map(|total|{let value=(total-review)/count as f64;if !value.is_finite()||value<=0.0{Err(invalid("API fleet allowance must remain positive"))}else{Ok(value)}}).transpose()
+}
+fn manifest_account_limit(value:&Value)->io::Result<Option<u64>>{
+    let field=&value["spec"]["supervisor_account_turn_limit"];if field.is_null(){return Ok(None);}
+    let limit=field.as_u64().filter(|limit|(1..=32).contains(limit)).ok_or_else(||invalid("invalid fleet supervisor account limit"))?;
+    let rows=value["slots"].as_array().ok_or_else(||invalid("fleet slots unavailable"))?;
+    if value["mode"]!="supervisor"||rows.first().is_none_or(|row|row["engine"]!="codex"||row["account_turn_limit"]!=limit)
+        ||rows.iter().skip(1).any(|row|row["engine"]!="router"||!row["account_turn_limit"].is_null()) {return Err(invalid("fleet supervisor account role policy changed"));}
+    Ok(Some(limit))
+}
+fn manifest_supervisor_sandbox(value:&Value)->io::Result<Option<String>>{
+    let field=&value["spec"]["supervisor_sandbox"];if field.is_null(){return Ok(None);}
+    let sandbox=field.as_str().filter(|value|matches!(*value,"read-only"|"workspace-write")).ok_or_else(||invalid("invalid frozen supervisor sandbox"))?;
+    if value["mode"]!="supervisor"||value["slots"][0]["engine"]!="codex"||value["slots"][0]["sandbox"]!=sandbox||value["slots"].as_array().is_none_or(|rows|rows.iter().skip(1).any(|row|!row["sandbox"].is_null())){return Err(invalid("supervisor sandbox role policy changed"));}Ok(Some(sandbox.into()))
+}
+fn sandbox_observation(observed:&Value,expected:&str)->io::Result<()>{
+    if observed["configured_sandbox"]!=expected||observed["effective_sandbox"]!=expected||observed["permission_mode"]!="on-request"||observed["transport"]!="app-server"{return Err(invalid("native Codex supervisor sandbox could not be verified"));}Ok(())
+}
+fn verify_supervisor_sandbox(client:&mut DaemonClient,expected:Option<&str>)->io::Result<()>{if let Some(expected)=expected{sandbox_observation(&rpc(client,"codex_sandbox_policy",json!({}))?,expected)?;}Ok(())}
+fn verify_account_allowance(hello:&Value,expected:Option<u64>,busy:bool)->io::Result<()>{
+    let allowance=&hello["billing"]["account_turn_allowance"];
+    if let Some(limit)=expected {
+        if hello["engine"]!="codex"||allowance["limit"]!=limit||allowance["durable"]!=true||allowance["outside_api_usd_budget"]!=true
+            ||allowance.get("provider_charge_usd")!=Some(&Value::Null)||allowance["used"].as_u64().is_none_or(|used|used>limit)
+            ||allowance["remaining"].as_u64()!=allowance["used"].as_u64().and_then(|used|limit.checked_sub(used))||allowance["pending"].as_bool().is_none()
+            ||(!busy&&allowance["pending"]!=false)||!hello["billing"]["budget"].is_null(){return Err(invalid("native Codex account allowance could not be verified"));}
+    }else if !allowance.is_null(){return Err(invalid("unreviewed native account allowance appeared"));}
+    Ok(())
+}
+
 pub fn resume(root: &Path, id: &str) -> io::Result<()> {
     let _signals = Signals::install()?;
     let initial = snapshot(root, id)?;
@@ -527,7 +589,7 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
     if total_budget.is_some_and(|budget| !budget.is_finite() || budget <= 0.0) ||
         (total_budget.is_none() && value["spec"]["allow_unbudgeted"] != true) { return Err(invalid("fleet resume budget is not verifiable")); }
     let review_budget = value["supervision"]["context"]["review"]["budget_usd"].as_f64().unwrap_or(0.0);
-    let budget = total_budget.map(|total| (total-review_budget) / rows.len() as f64);
+    let account_limit=manifest_account_limit(&value)?;let supervisor_sandbox=manifest_supervisor_sandbox(&value)?;
     let has_dependencies=value["supervision"]["context"]["assignments"].as_array()
         .is_some_and(|assignments|assignments.iter().any(|row|row["depends_on"].as_array().is_some_and(|deps|!deps.is_empty())));
     let mut slots = Vec::new();
@@ -540,7 +602,9 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
         assigned.lore = row["lore"].as_bool();
         let session = resumed_session(&root.join(id).join("rt"), &session_id, &socket)?;
         let cursor=saved_event_cursor(row)?;
+        let budget=slot_api_budget(total_budget,review_budget,rows.len(),account_limit,index)?;
         let mut slot = connect_from(session, &assigned, budget, row["isolation"].as_str().or_else(||value["spec"]["isolation"].as_str()).map(doxa_isolation::Profile::parse).transpose()?,row["router_config_sha256"].as_str(),cursor)?;
+        if index==0{verify_account_allowance(&slot.client.hello,account_limit,slot.busy)?;verify_supervisor_sandbox(&mut slot.client,supervisor_sandbox.as_deref())?;}
         resumable_slot_phase(row,slot.busy)?;
         if has_dependencies{verify_dependency_container(&root.join(value["run_id"].as_str().ok_or_else(||invalid("fleet run identity unavailable"))?),&slot.session.id)?;}
         if value["ledger_path"].is_string() {
@@ -702,7 +766,7 @@ pub fn start(args: &[String]) -> io::Result<()> {
         let actual=spec.test_recipe_review_hash()?;
         if expected.to_str()!=Some(actual.as_str()){return Err(invalid("fleet automatic test choice or frozen recipe changed after review"));}
     }
-    let note = fleet_plan::check(&spec.preflight, fleet_plan::available_memory_mb())?;
+    let note = spec.preflight_note()?;
     let assigned = spec.assignments()?;
     println!("{note}");
     for (index, row) in assigned.iter().enumerate() { println!("slot {index}: {}:{} · memory {}", engine_name(row.engine), row.model.as_deref().unwrap_or("default"), if row.lore == Some(false) { "off" } else { "on" }); }
@@ -725,25 +789,27 @@ pub fn start(args: &[String]) -> io::Result<()> {
         trusted_dir(&directory)?.sync_all()?;
     }
     let review_budget=if spec.review.enabled(){spec.review.budget_usd}else{0.0};
-    let budget = spec.preflight.run_budget_usd.map(|total| (total-review_budget) / assigned.len() as f64);
+
     let mut value = json!({"native_version":1,"run_id":spec.preflight.run_id,"ledger_path":ledger_home.join("peers/messages.jsonl"),"started_at":now(),"heartbeat_at":now(),
         "live":true,"phase":"starting","mode":if spec.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
         "interactive":spec.preflight.supervisor.is_some() && spec.prompt.trim().is_empty(),
         "spec":{"isolation":spec.access.workers.key(),"access":spec.access.review(spec.preflight.supervisor.is_some()),"auto_test":spec.auto_test,"n":spec.preflight.sessions,"sessions":assigned.len(),"memory_off":spec.memory_off,"lore_enabled":spec.lore_enabled,"memory_sampler":"splitmix64-memory-v1","seed":spec.seed,"sampler":"splitmix64-v1","run_budget_usd":spec.preflight.run_budget_usd,
-            "allow_unbudgeted":spec.preflight.allow_unbudgeted,"cwd":spec.cwd,"quiescence_timeout_s":spec.timeout.map(|duration| duration.as_secs_f64()),"quiet_dwell_s":spec.quiet.as_secs_f64(),"quiescence_grace_s":spec.quiet.as_secs_f64()},
+            "allow_unbudgeted":spec.preflight.allow_unbudgeted,"supervisor_account_turn_limit":spec.supervisor_account_turn_limit,"supervisor_sandbox":spec.supervisor_sandbox,"cwd":spec.cwd,"quiescence_timeout_s":spec.timeout.map(|duration| duration.as_secs_f64()),"quiet_dwell_s":spec.quiet.as_secs_f64(),"quiescence_grace_s":spec.quiet.as_secs_f64()},
         "approvals":{"policy":spec.preflight.approve,"grace_s":spec.preflight.approval_grace_s,"asked":0,"auto_approved":0,"answered":0,"refused":0},"auto_test_runs":0,"slots":[]});
     store.save(&value)?;
     let mut slots = Vec::new();
+    let slot_count=assigned.len();
     let result = (|| -> io::Result<()> {
         for (index, assigned) in assigned.iter().enumerate() {
             ensure_active(&store)?;
             let isolation=spec.access.slot(spec.preflight.supervisor.is_some() && index==0);
-            let options = launch::LaunchOptions { isolation:Some(isolation), engine: assigned.engine, model: assigned.model.clone(), cwd: Some(spec.cwd.clone()),router_config:router_paths.get(&index).cloned(),
+            let budget=slot_api_budget(spec.preflight.run_budget_usd,review_budget,slot_count,spec.supervisor_account_turn_limit,index)?;
+            let options = launch::LaunchOptions { sandbox:if index==0{spec.supervisor_sandbox.clone()}else{None},account_turn_limit:if index==0{spec.supervisor_account_turn_limit}else{None},isolation:Some(isolation), engine: assigned.engine, model: assigned.model.clone(), cwd: Some(spec.cwd.clone()),router_config:router_paths.get(&index).cloned(),
                 linger: Some(60.0), ..Default::default() };
             let session = launch::spawn_fleet(&options, &runtime, budget, assigned.engine != launch::Engine::Fixture, assigned.lore.unwrap_or(spec.lore_enabled))?;
             // Publish the started identity before attachment can fail.
             value["slots"].as_array_mut().unwrap().push(json!({"index":index,"isolation":isolation.key(),"task_internet":crate::fleet_policy::task_internet(isolation),"role":if spec.preflight.supervisor.is_some() && index == 0 { "supervisor" } else { "worker" },
-                "engine":engine_name(assigned.engine),"model":assigned.model,"router_config":router_paths.get(&index),"router_config_sha256":configs.iter().find(|(slot,_)|*slot==index).and_then(|(_,config)|config.hash().ok()),"event_cursor":0,"lore":assigned.lore,"phase":"started","session_id":session.id,"socket_path":session.socket,"pending_asks":[],"approvals":[],
+                "sandbox":if index==0{spec.supervisor_sandbox.clone()}else{None},"account_turn_limit":if index==0{spec.supervisor_account_turn_limit}else{None},"engine":engine_name(assigned.engine),"model":assigned.model,"router_config":router_paths.get(&index),"router_config_sha256":configs.iter().find(|(slot,_)|*slot==index).and_then(|(_,config)|config.hash().ok()),"event_cursor":0,"lore":assigned.lore,"phase":"started","session_id":session.id,"socket_path":session.socket,"pending_asks":[],"approvals":[],
                 "task":index.checked_sub(usize::from(spec.preflight.supervisor.is_some())).and_then(|worker|spec.worker_tasks.get(worker)),
                 "allowed_paths":index.checked_sub(usize::from(spec.preflight.supervisor.is_some())).and_then(|worker|spec.worker_paths.get(worker)).filter(|paths|!paths.is_empty()).unwrap_or(&spec.allowed_paths),
                 "depends_on":index.checked_sub(usize::from(spec.preflight.supervisor.is_some())).and_then(|worker|spec.worker_after.get(worker)).cloned().unwrap_or_default()}));
@@ -751,6 +817,7 @@ pub fn start(args: &[String]) -> io::Result<()> {
             ensure_active(&store)?;
             let router_hash=configs.iter().find(|(slot,_)|*slot==index).map(|(_,config)|config.hash()).transpose()?;
             let mut slot = connect(session, assigned, budget, Some(isolation),router_hash.as_deref())?;
+            if index==0{verify_account_allowance(&slot.client.hello,spec.supervisor_account_turn_limit,false)?;verify_supervisor_sandbox(&mut slot.client,spec.supervisor_sandbox.as_deref())?;}
             if spec.worker_after.iter().any(|row|!row.is_empty()){verify_dependency_container(&store.run,&slot.session.id)?;}
             if spec.preflight.supervisor.is_some() {
                 let capability = rpc(&mut slot.client, "peer_tools_status", json!({}))?;
@@ -931,6 +998,9 @@ pub fn continue_run(root:&Path,id:&str,charter_hash:&str)->io::Result<Value>{
 /// Review a completed turn and a coordinator-accepted, host-checkpoint-backed
 /// handoff. This offers an owner decision; it never asserts tests passed.
 pub fn dependency_review(root:&Path,id:&str,worker:usize)->io::Result<Review>{
+    dependency_review_with_snapshot(root,id,worker,&|cwd|Ok(doxa_isolation::test_runner::capture(cwd,None)?.sha256))
+}
+fn dependency_review_with_snapshot(root:&Path,id:&str,worker:usize,capture:&dyn Fn(&Path)->io::Result<String>)->io::Result<Review>{
     let value=snapshot(root,id)?;
     if value["phase"]!="monitoring"||value["live"]!=true||value["mode"]!="supervisor"||worker==0{
         return Err(invalid("dependency review requires a live supervised coordinator fleet"));
@@ -960,14 +1030,19 @@ pub fn dependency_review(root:&Path,id:&str,worker:usize)->io::Result<Review>{
     // The worker receives a checkpoint after work turn N and sends the typed
     // handoff during turn N+1. A later turn, even with identical output, cannot
     // inherit that handoff.
-    if handoff.checkpoint_turn_serial.checked_add(1)!=Some(turn_serial){
-        return Err(invalid("accepted handoff does not belong to the current successor turn"));
-    }
+    let checkpoint=&state.artifacts[&handoff.checkpoint_id];
+    let continuation=if handoff.checkpoint_turn_serial.checked_add(1)==Some(turn_serial){None}else{
+        let captured=capture(Path::new(&assignment.cwd))
+            .map_err(|_|invalid("accepted handoff continuation needs a verified offline source snapshot"))?;
+        Some(handoff_proof::continuation(&value["slots"][worker],&handoff,checkpoint,
+            &context.assignments.iter().find(|row|row.role=="coordinator").ok_or_else(||invalid("coordinator unavailable"))?.session_id,
+            &captured).ok_or_else(||invalid("accepted handoff does not belong to the current audited successor turns"))?)
+    };
     let handoff_resolved=handoff.resolved();
     let checkpoint=&state.artifacts[&handoff.checkpoint_id];
     let dependents=context.assignments.iter().enumerate().filter(|(_,row)|row.depends_on.contains(&assignment.id)).map(|(index,_)|index).collect::<Vec<_>>();
     let request=json!({"run_id":id,"charter_sha256":context.charter_sha256,"worker_index":worker,"assignment_id":assignment.id,
-        "task_sha256":format!("{:x}",Sha256::digest(assignment.task.as_bytes())),"handoff_id":handoff.handoff_id,
+        "task_sha256":format!("{:x}",Sha256::digest(assignment.task.as_bytes())),"handoff_id":handoff.handoff_id,"continuation":continuation,
         "artifact_refs":handoff.artifact_refs,"checkpoint_id":handoff.checkpoint_id,
         "checkpoint_turn_serial":handoff.checkpoint_turn_serial,
         "checkpoint_turn_sha256":handoff.checkpoint_turn_sha256,
@@ -1130,7 +1205,10 @@ fn run_auto_host_test(root:&Path,id:&str,worker:usize,serial:u64,cancel:&AutoTes
 }
 
 pub fn release_dependency(root:&Path,id:&str,worker:usize,token:&str)->io::Result<Value>{
-    let review=dependency_review(root,id,worker)?;
+    release_dependency_with_snapshot(root,id,worker,token,&|cwd|Ok(doxa_isolation::test_runner::capture(cwd,None)?.sha256))
+}
+fn release_dependency_with_snapshot(root:&Path,id:&str,worker:usize,token:&str,capture:&dyn Fn(&Path)->io::Result<String>)->io::Result<Value>{
+    let review=dependency_review_with_snapshot(root,id,worker,capture)?;
     if token!=review.token{return Err(invalid("dependency review changed; review it again"));}
     let value=snapshot(root,id)?;
     let context:doxa_fleet::Context=serde_json::from_value(value["supervision"]["context"].clone()).map_err(|_|invalid("fleet charter unavailable"))?;
@@ -1139,6 +1217,7 @@ pub fn release_dependency(root:&Path,id:&str,worker:usize,token:&str)->io::Resul
     let checkpoint_id=review.request["checkpoint_id"].as_str().unwrap().to_owned();
     let checkpoint_turn_serial=review.request["checkpoint_turn_serial"].as_u64().ok_or_else(||invalid("dependency checkpoint serial unavailable"))?;
     let checkpoint_turn_sha256=review.request["checkpoint_turn_sha256"].as_str().ok_or_else(||invalid("dependency checkpoint digest unavailable"))?.to_owned();
+    let continuation:Option<doxa_fleet::HandshakeContinuation>=serde_json::from_value(review.request["continuation"].clone())?;
     let artifact_refs:Vec<String>=serde_json::from_value(review.request["artifact_refs"].clone())?;
     let turn_serial=review.request["turn_serial"].as_u64().ok_or_else(||invalid("dependency review turn serial unavailable"))?;
     let last_turn_sha256=review.request["last_turn_sha256"].as_str().unwrap().to_owned();
@@ -1147,14 +1226,19 @@ pub fn release_dependency(root:&Path,id:&str,worker:usize,token:&str)->io::Resul
         ||doxa_fleet::hash(&value["slots"][worker]["last_turn"])?!=last_turn_sha256{
         return Err(invalid("predecessor turn changed before release"));
     }
+    if continuation.as_ref().is_some_and(|proof|capture(Path::new(&assignment.cwd)).ok().as_deref()!=Some(&proof.snapshot_sha256)){
+        return Err(invalid("dependency source changed before release"));
+    }
     doxa_fleet::transaction(&context,|state|{
         if state.paused||!doxa_fleet::accepted_handoff(&context,state,&assignment.id).is_some_and(|handoff|
             handoff.resolved()&&handoff.handoff_id==handoff_id&&handoff.artifact_refs==artifact_refs
             &&handoff.checkpoint_id==checkpoint_id
             &&handoff.checkpoint_turn_serial==checkpoint_turn_serial
             &&handoff.checkpoint_turn_sha256==checkpoint_turn_sha256
-            &&handoff.checkpoint_turn_serial.checked_add(1)==Some(turn_serial)){return Err(invalid("dependency evidence unresolved or changed before release"));}
-        state.dependency_releases.insert(assignment.id.clone(),doxa_fleet::DependencyRelease{
+            &&(if let Some(proof)=&continuation {handoff.checkpoint_turn_serial.checked_add(2)==Some(turn_serial)
+                &&proof.ack_id==handoff.ack_id&&proof.confirm_id==handoff.confirm_id}
+                else{handoff.checkpoint_turn_serial.checked_add(1)==Some(turn_serial)})){return Err(invalid("dependency evidence unresolved or changed before release"));}
+        state.dependency_releases.insert(assignment.id.clone(),doxa_fleet::DependencyRelease{continuation:continuation.clone(),
             assignment_id:assignment.id.clone(),handoff_id:handoff_id.clone(),artifact_refs:artifact_refs.clone(),
             checkpoint_id:checkpoint_id.clone(),checkpoint_turn_serial,checkpoint_turn_sha256:checkpoint_turn_sha256.clone(),
             turn_serial,last_turn_sha256:last_turn_sha256.clone(),at:doxa_fleet::unix_now()});
@@ -1222,9 +1306,23 @@ fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io:
         let changed=match (&paths,&untracked){(Ok(paths),Ok(untracked))=>Some(format!("{paths}{untracked}")),_=>None};
         missing_git_evidence |= changed.is_none();
         if let Some(changed)=&changed{for path in changed.lines(){if !context.assignments[index].permits(&context.charter,path){out_of_scope=true;}}}
-        let turn=&value["slots"][index]["last_turn"];
-        let turn_digest=if turn.is_null(){None}else{Some(doxa_fleet::hash(turn)?)};
-        let artifact=json!({"kind":"host_checkpoint","session_id":slot.session.id,"assignment_id":context.assignments[index].id,"changed_paths":changed,"git_observation_available":paths.is_ok()&&untracked.is_ok(),"running":state["running"],"queued":state["queued"],"last_turn":turn,"last_turn_kind":value["slots"][index]["last_turn_kind"],"turn_serial":value["slots"][index]["turn_serial"],"last_turn_sha256":turn_digest,"tests_verified":false});
+        let turn=value["slots"][index]["last_turn"].clone();
+        let turn_digest=if turn.is_null(){None}else{Some(doxa_fleet::hash(&turn)?)};
+        // Freeze once per eligible work turn. Failed/oversized captures stay
+        // unavailable for that turn; periodic idle reviews never rescan it.
+        let serial=value["slots"][index]["turn_serial"].clone();
+        let eligible=context.assignments[index].role=="worker"&&value["slots"][index]["isolation"]=="docker-offline"
+            &&context.assignments.iter().any(|row|row.depends_on.contains(&context.assignments[index].id))
+            &&state["running"]==false&&state["queued"]==0&&turn["is_error"]==false
+            &&turn["peer_started"]==false&&turn["native_tool_audit"]["complete"]==true
+            &&!turn["native_tool_audit"]["actions"].as_array().is_some_and(|actions|actions.iter().any(|action|matches!(action["request"]["fleet_kind"].as_str(),Some("handoff"|"confirm"))));
+        if eligible&&value["slots"][index]["source_snapshot_turn"]!=serial {
+            let digest=doxa_isolation::test_runner::capture(cwd,None).ok().map(|capture|capture.sha256);
+            value["slots"][index]["source_snapshot_turn"]=serial.clone();
+            value["slots"][index]["source_snapshot_sha256"]=json!(digest);
+        }
+        let source_snapshot=if eligible&&value["slots"][index]["source_snapshot_turn"]==serial {value["slots"][index]["source_snapshot_sha256"].clone()}else{Value::Null};
+        let artifact=json!({"snapshot_sha256":source_snapshot,"kind":"host_checkpoint","session_id":slot.session.id,"assignment_id":context.assignments[index].id,"changed_paths":changed,"git_observation_available":paths.is_ok()&&untracked.is_ok(),"running":state["running"],"queued":state["queued"],"last_turn":turn,"last_turn_kind":value["slots"][index]["last_turn_kind"],"turn_serial":value["slots"][index]["turn_serial"],"last_turn_sha256":turn_digest,"tests_verified":false});
         let id=doxa_fleet::evidence_id(&artifact)?;artifacts.push((id,artifact));
     }
     let snapshot=doxa_fleet::transaction(&context,|state|{
@@ -1424,9 +1522,7 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
                     Some("turn_start") => slot.busy = true,
                     Some(kind @ ("turn_done" | "turn_refused")) => {
                         milestone=true;slot.busy=false;
-                        let serial=value["slots"][index]["turn_serial"].as_u64().unwrap_or(0).checked_add(1).ok_or_else(||invalid("host turn serial exhausted"))?;
-                        value["slots"][index]["turn_serial"]=json!(serial);
-                        value["slots"][index]["last_turn"]=data.clone();value["slots"][index]["last_turn_kind"]=json!(kind);
+                        let serial=handoff_proof::record_completion(&mut value["slots"][index],data,kind)?;
                         if kind=="turn_done"{queue_auto_test(value,index)?;}
                         else if value["spec"]["auto_test"]==true && value["slots"][index]["role"]=="worker" {
                             value["slots"][index]["auto_test"]=json!({"state":"skipped","turn_serial":serial,"reason":"worker turn was refused"});
@@ -1498,6 +1594,41 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_supervisor_sandbox_binds_review_role_hash_and_live_observation(){
+        let mut args:Vec<String>=["--pool","deepseek:deepseek-flash","--supervisor","codex:gpt-6-sol","--prompt","readonly acceptance","-n1","--run-budget","1","--dry-run"].into_iter().map(str::to_owned).collect();
+        let _root=review_fixture_root(&mut args);let legacy=Spec::parse(&args).unwrap().assignment_plan_hash().unwrap();
+        args.extend(["--supervisor-sandbox".into(),"read-only".into()]);let spec=Spec::parse(&args).unwrap();assert_eq!(spec.review().unwrap()["supervisor_sandbox"],"read-only");let readonly=spec.assignment_plan_hash().unwrap();assert_ne!(readonly,legacy);
+        let last=args.len()-1;args[last]="workspace-write".into();assert_ne!(Spec::parse(&args).unwrap().assignment_plan_hash().unwrap(),readonly);
+        args[last]="danger-full-access".into();assert!(Spec::parse(&args).is_err());args[last]="read-only".into();let coordinator=args.iter().position(|arg|arg=="--supervisor").unwrap()+1;
+        for invalid in ["claude:sonnet","router:auto","codex"]{args[coordinator]=invalid.into();assert!(Spec::parse(&args).is_err());}
+        let good=json!({"configured_sandbox":"read-only","effective_sandbox":"read-only","permission_mode":"on-request","transport":"app-server"});assert!(sandbox_observation(&good,"read-only").is_ok());
+        for (key,value) in [("effective_sandbox","danger-full-access"),("configured_sandbox","workspace-write"),("permission_mode","auto"),("transport","exec")]{let mut changed=good.clone();changed[key]=json!(value);assert!(sandbox_observation(&changed,"read-only").is_err());}
+        let mut manifest=json!({"mode":"supervisor","spec":{"supervisor_sandbox":"read-only"},"slots":[{"engine":"codex","sandbox":"read-only"},{"engine":"deepseek"}]});assert_eq!(manifest_supervisor_sandbox(&manifest).unwrap().as_deref(),Some("read-only"));manifest["slots"][0]["sandbox"]=json!("workspace-write");assert!(manifest_supervisor_sandbox(&manifest).is_err());
+    }
+    #[test]
+    fn native_account_policy_binds_roles_hash_and_separate_api_partition(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("router.json");let mut config=crate::router_setup::tests::config();config.max_calls=3;
+        fs::write(&path,serde_json::to_vec(&config).unwrap()).unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
+        let mut args:Vec<String>=["--pool","router:auto","--router-config",path.to_str().unwrap(),"--prompt","bounded task","-n","3","--supervisor","codex:gpt-6-sol","--run-budget","0.42","--supervisor-account-turn-limit","12","--dry-run"].into_iter().map(str::to_owned).collect();
+        let _fleet_root=review_fixture_root(&mut args);let spec=Spec::parse(&args).unwrap();
+        let review=spec.review().unwrap();assert_eq!(review["supervisor_account_policy"]["turn_limit"],12);assert!(review["supervisor_account_policy"]["provider_charge_usd"].is_null());
+        assert_eq!(slot_api_budget(Some(0.42),0.21,4,Some(12),0).unwrap(),None);
+        for index in 1..4{assert!((slot_api_budget(Some(0.42),0.21,4,Some(12),index).unwrap().unwrap()-0.07).abs()<1e-9);}
+        assert_eq!(slot_api_budget(Some(4.0),0.0,4,None,0).unwrap(),Some(1.0));
+        let before=spec.assignment_plan_hash().unwrap();let limit=args.iter().position(|arg|arg=="--supervisor-account-turn-limit").unwrap()+1;
+        args[limit]="11".into();assert_ne!(Spec::parse(&args).unwrap().assignment_plan_hash().unwrap(),before);
+        for invalid in ["0","33"]{args[limit]=invalid.into();assert!(Spec::parse(&args).is_err());}args[limit]="12".into();
+        let supervisor=args.iter().position(|arg|arg=="--supervisor").unwrap()+1;
+        for invalid in ["claude:sonnet","router:auto","codex"]{args[supervisor]=invalid.into();assert!(Spec::parse(&args).is_err());}
+        let mut manifest=json!({"mode":"supervisor","spec":{"supervisor_account_turn_limit":12},"slots":[{"engine":"codex","account_turn_limit":12},{"engine":"router"},{"engine":"router"},{"engine":"router"}]});
+        assert_eq!(manifest_account_limit(&manifest).unwrap(),Some(12));manifest["slots"][1]["account_turn_limit"]=json!(12);assert!(manifest_account_limit(&manifest).is_err());
+        let good=json!({"engine":"codex","billing":{"budget":null,"account_turn_allowance":{"limit":12,"used":1,"remaining":11,"pending":false,"durable":true,"provider_charge_usd":null,"outside_api_usd_budget":true}}});
+        assert!(verify_account_allowance(&good,Some(12),false).is_ok());assert!(verify_account_allowance(&good,None,false).is_err());
+        for (key,value) in [("limit",json!(13)),("used",json!(13)),("pending",json!(true)),("durable",json!(false)),("provider_charge_usd",json!(0)),("outside_api_usd_budget",json!(false))]{let mut changed=good.clone();changed["billing"]["account_turn_allowance"][key]=value;assert!(verify_account_allowance(&changed,Some(12),false).is_err(),"{key}");}
+        let mut running=good;running["billing"]["account_turn_allowance"]["pending"]=json!(true);assert!(verify_account_allowance(&running,Some(12),true).is_ok());
+    }
 
     #[test]
     fn processed_event_cursor_rejects_gaps_and_missing_legacy_frontiers(){
@@ -1991,7 +2122,7 @@ mod tests {
         fs::set_permissions(&socket,fs::Permissions::from_mode(0o600)).unwrap();
         let worker_pid=std::process::id() as i32;
         let server=std::thread::spawn(move||{
-            for _ in 0..5 {
+            for _ in 0..9 {
                 let (mut stream,_)=listener.accept().unwrap();
                 writeln!(stream,"{}",json!({"type":"hello","proto":1,"session_id":"worker","cwd":"/repo","next_seq":0})).unwrap();
                 let mut reader=BufReader::new(stream.try_clone().unwrap());let mut line=String::new();
@@ -2014,7 +2145,7 @@ mod tests {
                 doxa_fleet::Assignment{id:"child-id".into(),session_id:"child".into(),pid:3,role:"worker".into(),task:"Consume".into(),cwd:"/repo".into(),base_commit:None,allowed_paths:vec![],depends_on:vec!["worker-id".into()]},
             ],review:Default::default(),state_path:store.run.join("guard-state.json")};
         context.validate().unwrap();
-        let checkpoint=json!({"kind":"host_checkpoint","assignment_id":"worker-id","session_id":"worker","git_observation_available":true,"changed_paths":"src/lib.rs\n","last_turn":{"ok":true},"last_turn_kind":"turn_done","turn_serial":1,"last_turn_sha256":doxa_fleet::hash(&json!({"ok":true})).unwrap(),"running":false,"queued":0,"tests_verified":false});
+        let checkpoint=json!({"kind":"host_checkpoint","assignment_id":"worker-id","session_id":"worker","git_observation_available":true,"changed_paths":"src/lib.rs\n","snapshot_sha256":"a".repeat(64),"last_turn":{"ok":true,"is_error":false,"usage_complete":true,"model_consistent":true},"last_turn_kind":"turn_done","turn_serial":1,"last_turn_sha256":doxa_fleet::hash(&json!({"ok":true,"is_error":false,"usage_complete":true,"model_consistent":true})).unwrap(),"running":false,"queued":0,"tests_verified":false});
         let evidence=doxa_fleet::evidence_id(&checkpoint).unwrap();
         doxa_fleet::transaction(&context,|state|{
             state.artifacts.insert(evidence.clone(),checkpoint.clone());
@@ -2065,6 +2196,33 @@ mod tests {
         let mut guard=state.clone();guard.dispatched_assignments.insert("child-id".into(),true);
         assert!(validate_dependency_resume(&context,&guard,dispatched["slots"].as_array().unwrap()).is_ok());
         assert!(validate_dependency_resume(&context,&guard,manifest["slots"].as_array().unwrap()).is_err());
+        // The same review/release path now exercises a queued ACK, including
+        // its exact owner token and live-host identity/idle rechecks. Only the
+        // bounded source-capture adapter is injected for this Unix fixture.
+        let digest="a".repeat(64);
+        let send=|kind:&str,id:&str,reply:Value|json!({"operation":"send","completed":true,"success":true,
+            "request":{"fleet_kind":kind,"target":"boss","in_reply_to":reply,"artifact_refs":[evidence]},
+            "message_id":id,"delivered_to":["boss"],"failed":[]});
+        let prior=json!({"is_error":false,"usage_complete":true,"model_consistent":true,"peer_started":false,
+            "native_tool_audit":{"version":1,"complete":true,"actions":[send("handoff","handoff",Value::Null)]}});
+        let current=json!({"is_error":false,"usage_complete":true,"model_consistent":true,"peer_started":true,
+            "peer_origin_data":{"source":"peer_message","sender_session_id":"boss","message_id":"ack"},
+            "native_tool_audit":{"version":1,"complete":true,"actions":[send("confirm","confirm",json!("ack"))]}});
+        let mut continued=manifest.clone();continued["slots"][1]["turn_serial"]=json!(3);continued["slots"][1]["last_turn"]=current;
+        continued["slots"][1]["previous_turn"]=json!({"turn_serial":2,"last_turn_kind":"turn_done","last_turn":prior});store.save(&continued).unwrap();
+        let capture=|_:&Path|Ok(digest.clone());
+        let reviewed=dependency_review_with_snapshot(root.path(),"dependency-test",1,&capture).unwrap();
+        assert_eq!(reviewed.request["continuation"]["ack_id"],"ack");
+        let mut altered=continued.clone();altered["slots"][1]["previous_turn"]["last_turn"]["native_tool_audit"]["actions"].as_array_mut().unwrap()
+            .push(json!({"operation":"list","completed":true,"success":true}));store.save(&altered).unwrap();
+        assert!(release_dependency_with_snapshot(root.path(),"dependency-test",1,&reviewed.token,&capture).is_err(),"changed valid receipt changes the owner review token");
+        store.save(&continued).unwrap();
+        assert!(release_dependency_with_snapshot(root.path(),"dependency-test",1,&reviewed.token,&|_:&Path|Ok("c".repeat(64))).is_err(),"changed source refuses the reviewed continuation");
+        release_dependency_with_snapshot(root.path(),"dependency-test",1,&reviewed.token,&capture).unwrap();
+        let state=doxa_fleet::transaction(&context,|state|Ok(state.clone())).unwrap();
+        assert!(dependencies_released(&context,&state,&continued,2,&[false;3]).unwrap());
+        let mut arbitrary=state.clone();arbitrary.dependency_releases.get_mut("worker-id").unwrap().continuation.as_mut().unwrap().snapshot_sha256="c".repeat(64);
+        assert!(!dependencies_released(&context,&arbitrary,&continued,2,&[false;3]).unwrap(),"a hex-looking digest cannot replace the selected host snapshot");
         server.join().unwrap();
     }
     #[test]
@@ -2125,7 +2283,7 @@ mod tests {
         assert!(!dispatch_released(&store,&mut manifest,&mut slots).unwrap());
         assert_eq!(manifest["slots"][2]["phase"],"dependency_waiting");
         doxa_fleet::transaction(&context,|state|{
-            state.dependency_releases.insert("first-id".into(),doxa_fleet::DependencyRelease{
+            state.dependency_releases.insert("first-id".into(),doxa_fleet::DependencyRelease{continuation:None,
                 assignment_id:"first-id".into(),handoff_id:"handoff".into(),artifact_refs:vec![evidence.clone()],checkpoint_id:evidence.clone(),
                 checkpoint_turn_serial:1,checkpoint_turn_sha256:turn_hash.clone(),turn_serial:2,
                 last_turn_sha256:doxa_fleet::hash(&json!({"handoff":true})).unwrap(),at:doxa_fleet::unix_now()});Ok(())

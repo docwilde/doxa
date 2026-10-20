@@ -42,6 +42,9 @@ pub struct Candidate {
     pub description: String,
     pub context_tokens: u64,
     pub max_output_tokens: u64,
+    /// Optional hard HTTP request count per API turn; absent preserves the historical 25.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub max_tool_requests:Option<u8>,
     pub supports_tools: bool,
     // Absent for CLI account targets; zero is an absence sentinel, never a price.
     #[serde(default, skip_serializing_if = "zero")]
@@ -153,6 +156,36 @@ pub enum Reason {
     SingleEligible, AccountingUnknown,
 }
 
+/// Closed diagnostic metadata only. Never retain response bodies, error text,
+/// headers, credentials or endpoint URLs, or use this to change admission.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCategory {
+    Authentication, PaymentRequired, RateLimited, Overloaded, OtherHttp,
+    Timeout, Transport, InvalidJson, ResponseTooLarge, InvalidSchema,
+}
+
+impl FailureCategory {
+    fn reason(self) -> Reason {
+        match self {
+            Self::InvalidJson | Self::ResponseTooLarge | Self::InvalidSchema => Reason::InvalidResponse,
+            _ => Reason::Unavailable,
+        }
+    }
+    fn http(status: reqwest::StatusCode) -> Self {
+        match status.as_u16() {
+            401 | 403 => Self::Authentication,
+            402 => Self::PaymentRequired,
+            429 => Self::RateLimited,
+            500..=599 => Self::Overloaded,
+            _ => Self::OtherHttp,
+        }
+    }
+    fn transport(error: reqwest::Error) -> Self {
+        if error.is_timeout() { Self::Timeout } else { Self::Transport }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Usage { pub input_tokens: u64, pub output_tokens: u64 }
@@ -162,6 +195,8 @@ pub struct Usage { pub input_tokens: u64, pub output_tokens: u64 }
 pub struct Outcome {
     pub candidate_id: String,
     pub reason: Reason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_category: Option<FailureCategory>,
     pub confidence: Option<f64>,
     pub usage: Option<Usage>,
     pub latency_ms: u64,
@@ -235,6 +270,7 @@ impl Config {
                 || !matches!(row.effort.as_str(), "none" | "low" | "medium" | "high" | "xhigh" | "max")
                 || !bounded(&row.description, 1200) || !(1..=2_000_000).contains(&row.context_tokens)
                 || row.max_output_tokens == 0 || row.max_output_tokens > row.context_tokens
+                || row.max_tool_requests.is_some_and(|limit|!(1..=25).contains(&limit)||row.provider.is_cli())
                 || row.provider.is_cli() != (row.billing == Billing::CliAccount)
                 || (row.billing == Billing::Api && (row.input_usd_micros_per_million == 0
                     || row.input_usd_micros_per_million > 1_000_000_000 || row.output_usd_micros_per_million == 0
@@ -335,7 +371,7 @@ pub fn reserve(config: &Config, ledger: &mut Ledger, prepared: &Prepared) -> io:
 }
 
 pub fn fallback(_config: &Config, prepared: &Prepared, reason: Reason) -> Outcome {
-    Outcome { candidate_id:prepared.fallback_id.clone(),reason,confidence:None,usage:None,latency_ms:0,
+    Outcome { candidate_id:prepared.fallback_id.clone(),reason,failure_category:None,confidence:None,usage:None,latency_ms:0,
         model:None,request_sha256:prepared.request_sha256.clone(),response_sha256:None,
         router_cost_usd_micros:Some(0),attempted:false,verified_response:None }
 }
@@ -360,6 +396,7 @@ pub fn parse_response(config: &Config, prepared: &Prepared, value: &Value, laten
     let mut outcome = fallback(config,prepared,Reason::InvalidResponse);
     if config.validate().is_err() { return outcome; }
     outcome.attempted = true;
+    outcome.failure_category = Some(FailureCategory::InvalidSchema);
     outcome.latency_ms = latency_ms;
     outcome.response_sha256 = hash(value).ok();
     outcome.model = if value["model"] == config.jev_model {Some(config.jev_model.clone())} else {None};
@@ -400,6 +437,7 @@ pub fn parse_response(config: &Config, prepared: &Prepared, value: &Value, laten
         Ok((choice.into(),if tied {0.0}else{confidence}))
     };
     if let Ok((id, confidence)) = validate() {
+        outcome.failure_category = None;
         outcome.verified_response = Some(value.clone());
         outcome.confidence = Some(confidence);
         if confidence > 0.0 && confidence >= config.confidence_threshold { outcome.candidate_id=id;outcome.reason=Reason::Selected; }
@@ -452,23 +490,23 @@ fn call_inner(config: &Config, prepared: &Prepared, key: &str, cancel: &AtomicBo
         let work=async {
             let client=reqwest::Client::builder().timeout(Duration::from_millis(config.deadline_ms))
                 .connect_timeout(Duration::from_millis(config.deadline_ms.min(4000)))
-                .redirect(reqwest::redirect::Policy::none()).build().map_err(|_|Reason::Unavailable)?;
-            let mut response=client.post(endpoint).bearer_auth(key).json(&prepared.body).send().await.map_err(|_|Reason::Unavailable)?;
-            if !response.status().is_success() { return Err(Reason::Unavailable); }
-            if response.content_length().is_some_and(|n|n>64*1024) { return Err(Reason::InvalidResponse); }
+                .redirect(reqwest::redirect::Policy::none()).build().map_err(FailureCategory::transport)?;
+            let mut response=client.post(endpoint).bearer_auth(key).json(&prepared.body).send().await.map_err(FailureCategory::transport)?;
+            if !response.status().is_success() { return Err(FailureCategory::http(response.status())); }
+            if response.content_length().is_some_and(|n|n>64*1024) { return Err(FailureCategory::ResponseTooLarge); }
             let mut bytes=Vec::new();
-            while let Some(chunk)=response.chunk().await.map_err(|_|Reason::Unavailable)? {
+            while let Some(chunk)=response.chunk().await.map_err(FailureCategory::transport)? {
                 bytes.extend_from_slice(&chunk);
-                if bytes.len()>64*1024 { return Err(Reason::InvalidResponse); }
+                if bytes.len()>64*1024 { return Err(FailureCategory::ResponseTooLarge); }
             }
-            strict::parse(&bytes).map_err(|_|Reason::InvalidResponse)
+            strict::parse(&bytes).map_err(|_|FailureCategory::InvalidJson)
         };
         tokio::pin!(work);
         loop {
             tokio::select! {
                 result=&mut work=>break match result {
                     Ok(value)=>parse_response(config,prepared,&value,started.elapsed().as_millis() as u64),
-                    Err(reason)=>{let mut result=fallback(config,prepared,reason);result.attempted=true;result.router_cost_usd_micros=None;result}
+                    Err(category)=>{let mut result=fallback(config,prepared,category.reason());result.failure_category=Some(category);result.attempted=true;result.router_cost_usd_micros=None;result}
                 },
                 _=tokio::time::sleep(Duration::from_millis(10))=>if cancel.load(Ordering::Acquire) {
                     let mut result=fallback(config,prepared,Reason::Cancelled);result.attempted=true;result.router_cost_usd_micros=None;break result;
@@ -478,6 +516,8 @@ fn call_inner(config: &Config, prepared: &Prepared, key: &str, cancel: &AtomicBo
     });
     outcome.latency_ms=started.elapsed().as_millis() as u64;
     // A cancellation racing the response must never authorize worker execution.
-    if cancel.load(Ordering::Acquire) { outcome.candidate_id=prepared.fallback_id.clone();outcome.reason=Reason::Cancelled; }
+    if cancel.load(Ordering::Acquire) {
+        outcome.candidate_id=prepared.fallback_id.clone();outcome.reason=Reason::Cancelled;outcome.failure_category=None;
+    }
     outcome
 }

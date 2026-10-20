@@ -49,7 +49,11 @@ pub struct SpawnManager {
     closed: AtomicBool,
     cancel: std::sync::atomic::AtomicU64,
 }
+fn account_limited()->bool{
+    ["DOXA_ACCOUNT_TURN_LIMIT","DOXA_ACCOUNT_TURN_SCOPE"].iter().any(|name|std::env::var(name).is_ok_and(|value|!value.trim().is_empty()))
+}
 pub fn enabled() -> bool {
+    if account_limited(){return false;}
     let home = std::env::var_os("DOXA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -230,6 +234,7 @@ impl SpawnManager {
         Ok(live)
     }
     pub fn spawn(&self, args: &Value, host: &dyn Host) -> Result<Value, String> {
+        if account_limited(){return Err("Native coordinator account turn policy forbids child session spawning; no child allowance was created".into());}
         doxa_engines::session_tools::validate(args)?;
         if self
             .active
@@ -464,6 +469,24 @@ impl Drop for SpawnManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn account_coordinator_cannot_spawn_or_publish_a_child_allowance_even_with_spawn_opt_in(){
+        if std::env::var("DOXA_TEST_ACCOUNT_SPAWN").as_deref()!=Ok("1"){
+            let dir=tempfile::tempdir().unwrap();
+            let status=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","session_spawn::tests::account_coordinator_cannot_spawn_or_publish_a_child_allowance_even_with_spawn_opt_in"])
+                .env_clear().env("PATH","/usr/bin:/bin").env("HOME",dir.path()).env("DOXA_HOME",dir.path())
+                .env("TMPDIR",std::env::var_os("TMPDIR").unwrap()).env("DOXA_TEST_ACCOUNT_SPAWN","1")
+                .env("DOXA_SPAWN_SESSIONS","1").env("DOXA_ACCOUNT_TURN_LIMIT","8").env("DOXA_ACCOUNT_TURN_SCOPE","fleet_supervisor").status().unwrap();
+            assert!(status.success());return;
+        }
+        struct Never;impl Host for Never{fn prompt(&self,_:&str,_:&mut dyn FnMut(Value)){panic!("unexpected provider dispatch");}fn call(&self,_:&str,_:&Value)->Result<Value,String>{panic!("unexpected approval or child operator");}}
+        let dir=tempfile::tempdir().unwrap();let(events,received)=mpsc::sync_channel(8);let runtime=dir.path().join("runtime");
+        let config=SpawnConfig{executable:std::env::current_exe().unwrap(),engine:"codex".into(),runtime:runtime.clone(),cwd:dir.path().to_owned(),session_id:"parent".into(),depth:0,provider_args:vec![]};
+        let manager=SpawnManager::new(config,events).unwrap();assert!(!enabled());
+        let result=manager.spawn(&json!({"task":"An otherwise owner-approvable child task"}),&Never);
+        assert!(result.unwrap_err().contains("account turn policy"));assert!(received.try_recv().is_err());assert!(!runtime.exists());assert!(!manager.is_active());
+    }
     #[test]
     fn scope_reservation_is_nonblocking_and_immutable_flags_are_refused() {
         let dir = tempfile::tempdir().unwrap();

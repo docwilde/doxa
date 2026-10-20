@@ -30,7 +30,7 @@ fn worker_hold(candidate: &Candidate) -> Option<u64> {
     // each UTF-8 byte as a token for admission, including tool definitions and
     // tool results. Never reserve only the initial prompt's estimated usage.
     let input = candidate.context_tokens.checked_sub(candidate.max_output_tokens)?
-        .checked_mul(doxa_vendors::MAX_TOOL_STEPS as u64 + 1)?;
+        .checked_mul(candidate.max_tool_requests.map(u64::from).unwrap_or(doxa_vendors::MAX_TOOL_STEPS as u64 + 1))?;
     priced(input, candidate.max_output_tokens, candidate)
 }
 fn summary_hold(candidate: &Candidate) -> Option<u64> {
@@ -476,7 +476,7 @@ impl RouterHost {
         if self.cancel.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
             return Err("Router compaction cancelled before admission".into());
         }
-        let limits = TurnLimits { input_bytes: usize::try_from(input_bytes).map_err(|_|"Summary byte cap overflow")?,
+        let limits = TurnLimits { max_requests:None,input_bytes: usize::try_from(input_bytes).map_err(|_|"Summary byte cap overflow")?,
             output_tokens: candidate.max_output_tokens };
         let target = json!({"target_id":candidate.id,"engine":vendor(candidate.provider).engine_id(),
             "model":candidate.model,"effort":candidate.effort});
@@ -833,7 +833,7 @@ impl RouterHost {
                 "fallback_reason":if outcome.reason == Reason::Selected { Value::Null } else { serde_json::to_value(&outcome.reason).unwrap() },
                 "latency_ms":outcome.latency_ms,"cost_usd":outcome.router_cost_usd_micros.map(|cost|cost as f64 / 1_000_000.0),
                 "cost_is_estimate":true,"context_basis":"operator_request_byte_cap","provider_window":provider_window,
-                "input_cap_bytes":candidate.context_tokens-candidate.max_output_tokens,"output_cap_tokens":candidate.max_output_tokens});
+                "input_cap_bytes":candidate.context_tokens-candidate.max_output_tokens,"output_cap_tokens":candidate.max_output_tokens,"max_tool_requests":candidate.max_tool_requests.unwrap_or(25)});
             state.worker.retained_reservation_usd_micros = state.worker.retained_reservation_usd_micros.checked_add(reserve).ok_or("Worker allowance overflow")?;
             state.selection = Some(selection.clone());
             self.save(&mut state)?;
@@ -843,7 +843,7 @@ impl RouterHost {
             return self.run_cli(text,candidate,&selection,&outcome,peer_origin,emit);
         }
         if let Err(error) = self.inner.select_route(vendor(candidate.provider), &candidate.model, &candidate.effort, selection.clone(),
-            TurnLimits { input_bytes: usize::try_from(candidate.context_tokens-candidate.max_output_tokens).map_err(|_| "Worker context cap overflow")?,
+            TurnLimits { max_requests:candidate.max_tool_requests,input_bytes: usize::try_from(candidate.context_tokens-candidate.max_output_tokens).map_err(|_| "Worker context cap overflow")?,
                 output_tokens: candidate.max_output_tokens }, Some(self.cancel.clone())) {
             let mut state = self.state.lock().unwrap();
             state.worker.retained_reservation_usd_micros -= reserve; state.incomplete = false; self.save(&mut state)?;
@@ -923,6 +923,7 @@ impl RouterHost {
 }
 
 impl Host for RouterHost {
+    fn take_native_tool_audit(&self)->Option<Value>{self.inner.take_native_tool_audit()}
     fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
         self.prompt_impl(text, origin, emit);
     }
@@ -1005,5 +1006,15 @@ impl Host for RouterHost {
                 "delegated_reservation_usd_micros":state.allocations.iter().map(|row|row.ceiling_usd_micros).sum::<u64>(),
                 "aggregate_held_usd":state.held().map(|sum|sum as f64/1_000_000.0),
                 "accounting_unknown":state.unknown(),"durable":true,"cost_scope":self.cost_scope(),"cost_basis":"aggregate_upper_rates"}}))
+    }
+}
+
+#[cfg(test)]
+mod request_bound_tests {
+    use super::*;
+    #[test]
+    fn reservation_matches_the_reviewed_whole_turn_http_limit(){
+        let mut row:Candidate=serde_json::from_value(json!({"id":"ds","provider":"deepseek","model":"deepseek-flash","effort":"none","description":"Bounded fixture","context_tokens":40000,"max_output_tokens":4096,"max_tool_requests":6,"supports_tools":true,"input_usd_micros_per_million":300000,"output_usd_micros_per_million":1200000})).unwrap();
+        assert_eq!(worker_hold(&row),Some(69543));row.max_tool_requests=Some(4);assert_eq!(worker_hold(&row),Some(48000));row.max_tool_requests=None;assert_eq!(worker_hold(&row),Some(274196));row.context_tokens=35000;row.max_output_tokens=2048;row.max_tool_requests=Some(4);assert_eq!(worker_hold(&row),Some(42000));
     }
 }

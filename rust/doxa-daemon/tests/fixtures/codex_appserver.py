@@ -62,6 +62,23 @@ def reply(request, value):
     send({'id': request['id'], 'result': value})
 
 
+def fixture_config():
+    overrides = [sys.argv[i+1] for i, item in enumerate(sys.argv[:-1]) if item == '-c']
+    for flag in ('features.token_budget=false', 'features.async_compaction=false',
+                 'agents.enabled=false', 'features.multi_agent_v2=false'):
+        assert flag in overrides, flag
+    def merge(target, incoming):
+        for key, value in incoming.items():
+            if isinstance(value, dict):
+                merge(target.setdefault(key, {}), value)
+            else:
+                target[key] = value
+    config = {}
+    for value in overrides:
+        merge(config, tomllib.loads(value))
+    return config
+
+
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get('method')
@@ -74,12 +91,11 @@ for line in sys.stdin:
         params.pop('input', None)
         output.write(json.dumps({'method': method, 'params': params}) + '\n')
     if method == 'initialize':
-        reply(request, {'userAgent': 'doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; upstream fixture)'})
+        reply(request, {'userAgent': 'doxa_codex_rs/__DOXA_SUPPORTED_CODEX_VERSION__ (doxa-precompact-fail-closed-v1; upstream fixture)'})
     elif method == 'initialized':
         continue
     elif method == 'config/read':
-        assert 'features.token_budget=false' in sys.argv
-        config = {'features': {'token_budget': False}}
+        config = fixture_config()
         context_file = Path(__file__).with_suffix('.context')
         if context_file.exists():
             config.update(json.loads(context_file.read_text()))

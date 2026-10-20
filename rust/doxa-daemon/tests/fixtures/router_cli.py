@@ -21,6 +21,22 @@ def send(value):
 def reply(row, value):
     send({'id':row['id'], 'result':value})
 
+def fixture_config():
+    overrides = [sys.argv[i+1] for i, item in enumerate(sys.argv[:-1]) if item == '-c']
+    for flag in ('features.token_budget=false', 'features.async_compaction=false',
+                 'agents.enabled=false', 'features.multi_agent_v2=false'):
+        assert flag in overrides, flag
+    def merge(target, incoming):
+        for key, value in incoming.items():
+            if isinstance(value, dict):
+                merge(target.setdefault(key, {}), value)
+            else:
+                target[key] = value
+    config = {}
+    for value in overrides:
+        merge(config, tomllib.loads(value))
+    return config
+
 fd = os.environ.pop('DOXA_CODEX_OWNER_FD', None)
 if fd:
     owner = socket.socket(fileno=int(fd)); owner.settimeout(5)
@@ -74,11 +90,11 @@ for line in sys.stdin:
     if codex:
         method=row.get('method')
         capture(method or 'response',row.get('params',row.get('result',{})))
-        if method=='initialize': reply(row,{'userAgent':'doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; upstream fixture)'})
+        if method=='initialize': reply(row,{'userAgent':'doxa_codex_rs/__DOXA_SUPPORTED_CODEX_VERSION__ (doxa-precompact-fail-closed-v1; upstream fixture)'})
         elif method=='initialized': pass
         elif method=='account/read': reply(row,{'account':None if mode()=='no-auth' else {'type':'chatgpt'},'requiresOpenaiAuth':True})
         elif method=='model/list': reply(row,{'data':[{'model':expected,'isDefault':True,'supportedReasoningEfforts':[] if mode()=='missing-effort' else [{'reasoningEffort':'high'}],'defaultReasoningEffort':'high'}],'nextCursor':None})
-        elif method=='config/read': reply(row,{'config':{'features':{'token_budget':False}},'origins':{},'layers':None})
+        elif method=='config/read': reply(row,{'config':fixture_config(),'origins':{},'layers':None})
         elif method=='hooks/list':
             overrides=[sys.argv[i+1] for i,v in enumerate(sys.argv[:-1]) if v=='-c']
             hooks=next(tomllib.loads(v)['hooks'] for v in overrides if v.startswith('hooks='))

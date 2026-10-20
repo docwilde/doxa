@@ -23,6 +23,23 @@ def tool():
                      'callId': 'peer-call-' + str(turn_number) + '-' + str(step),
                      'namespace': None, 'tool': name, 'arguments': arguments}})
 
+def fixture_config():
+    overrides = [sys.argv[i+1] for i, item in enumerate(sys.argv[:-1]) if item == '-c']
+    for flag in ('features.token_budget=false', 'features.async_compaction=false',
+                 'agents.enabled=false', 'features.multi_agent_v2=false'):
+        assert flag in overrides, flag
+    def merge(target, incoming):
+        for key, value in incoming.items():
+            if isinstance(value, dict):
+                merge(target.setdefault(key, {}), value)
+            else:
+                target[key] = value
+    config = {}
+    for value in overrides:
+        merge(config, tomllib.loads(value))
+    return config
+
+
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get('method')
@@ -33,11 +50,11 @@ for line in sys.stdin:
             log.write(json.dumps({'method': method, 'params': params}) + '\n')
     if method == 'initialize':
         send({'id': request['id'], 'result': {'userAgent':
-              'doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; fixture)'}})
+              'doxa_codex_rs/__DOXA_SUPPORTED_CODEX_VERSION__ (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; fixture)'}})
     elif method == 'initialized':
         pass
     elif method == 'config/read':
-        send({'id': request['id'], 'result': {'config': {'features': {'token_budget': False}}}})
+        send({'id': request['id'], 'result': {'config': fixture_config()}})
     elif method == 'hooks/list':
         overrides = [sys.argv[i+1] for i, item in enumerate(sys.argv[:-1]) if item == '-c']
         hooks = next(tomllib.loads(value)['hooks'] for value in overrides if value.startswith('hooks='))

@@ -1,6 +1,6 @@
 # Mermaid in the Rust transcript
 
-Status: **local preview, sandbox doctor, Settings preflight, bounded PNG cache and explicit offline setup implemented; pinned real CLI suite, VTE halfblocks and actual Kitty graphics passed on Linux**.
+Status: **local preview, sandbox doctor, Settings preflight, bounded PNG cache and explicit offline setup implemented; pinned real CLI suite and actual VTE, Kitty, Xterm Sixel and WezTerm iTerm2-protocol display passed on Linux**.
 
 The native Ratatui transcript recognizes complete, standalone `mermaid` code
 fences. Without explicit configuration, it renders the source fence exactly as
@@ -55,10 +55,25 @@ replies reported 16×32 cells, and fixed renders used 128 pixels across four
 rows instead of 64. Eight final screenshots were visually inspected; simple
 flowchart labels are readable, while dense sequence/class labels remain small.
 
-- Sixel and iTerm2 quality still needs their actual supported emulators. PNG
-  decoding, VTE halfblocks and Kitty graphics cannot establish those results.
-- macOS stays source-only. The production boundary requires Linux bubblewrap;
-  a separate macOS isolation design and host validation remain open.
+A fresh beta.64 production-App fixture also passed actual
+[Xterm 407 Sixel](https://invisible-island.net/xterm/manpage/xterm.html) and
+[WezTerm 20240203-110809-5046fc22 iTerm2-protocol](https://wezterm.org/imgcat.html)
+display. Authenticated packages were extracted to private task storage, with
+no system installation. Each emulator rendered all four families in forced
+and `probe` modes: 16 final captures at 125 columns × 33 rows. Actual protocol
+payloads and transcript screenshot regions matched between each forced/probe
+pair; all eight forced-mode images were visually inspected. Source remained
+readable beneath each overview. Xterm reported 17×33 pixel cells (132-pixel
+previews); WezTerm reported 16×32 cells (128-pixel previews). Dense labels still
+need the accompanying source. These are direct Linux emulator results, without
+tmux or SSH.
+
+macOS stays source-only. No Mac was available for this acceptance run. The
+[scoped isolation design](mermaid-macos-isolation.md) proposes a dedicated,
+networkless renderer VM and concrete containment, signing and display gates;
+it is not implemented. Actual iTerm2 app, Retina, macOS isolation and Apple
+silicon browser acceptance remain open. Linux WezTerm protocol display does
+not establish those results.
 
 Graphviz translation and a hosted renderer are outside this slice. A partial
 flowchart translator would not cover Mermaid's sequence, class, and Gantt

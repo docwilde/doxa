@@ -1,5 +1,6 @@
 //! Native launcher for DOXA's private fail-closed app server. Other commands
-//! retain the official CLI. The provider itself attests its compiled contract.
+//! retain the official CLI. Version reports identify the receipt-checked
+//! protected payload; the provider itself attests its compiled contract.
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -17,9 +18,9 @@ use std::{
     process::Command,
 };
 
-const SOURCE: &str = "b412ff32c417f855c2b2d1581b77058eed87c84b";
+const SOURCE: &str = "83086188ae0614bd882818ff1aa23f3194962012";
 const CONTRACT: &str = "doxa-precompact-fail-closed-v1";
-const PATCH: &str = "23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d";
+const PATCH: &str = "3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c";
 const MAX_BINARY: u64 = 1024 * 1024 * 1024;
 
 #[derive(Deserialize)]
@@ -135,7 +136,9 @@ fn run() -> io::Result<()> {
     let helper_mode = launcher
         .file_name()
         .is_some_and(|name| name == "codex-code-mode-host");
-    if !helper_mode && args.first().is_none_or(|arg| arg != "app-server") {
+    let version_mode = !helper_mode
+        && matches!(args.as_slice(), [arg] if arg == "--version" || arg == "-V");
+    if !helper_mode && !version_mode && args.first().is_none_or(|arg| arg != "app-server") {
         if !receipt.official_cli.is_absolute()
             || std::fs::canonicalize(&receipt.official_cli)? == launcher
         {
@@ -171,6 +174,15 @@ fn run() -> io::Result<()> {
         checked_binary(&path, &receipt.binary_sha256)?
     };
     let _dispatcher = checked_binary(&root.join("codex-code-mode-host"), dispatcher_digest)?;
+    if version_mode {
+        // The reviewed receipt/source and the complete checked installation
+        // bind this pinned payload version. Never substitute the separately
+        // installed official CLI's version or start a provider to inspect it.
+        let version = doxa_engines::codex_compact::SUPPORTED_VERSION;
+        println!("doxa-codex-protected {version} (provider codex-{version}-precompact-v1; upstream {}; contract {})",
+            receipt.source_commit, receipt.contract);
+        return Ok(());
+    }
     if !helper_mode {
         args.remove(0);
         if args.first().is_some_and(|arg| arg == "--stdio") {

@@ -6,10 +6,14 @@ no fleet, and never enables enforcement. A passing report means the recorded
 sample meets those limits; it does not establish population error rates,
 alignment-supervisor quality or live fleet recovery.
 
-No consented real-message corpus or measured real-judge acceptance result is
-shipped with DOXA. Test fixtures exercise scoring and provenance refusal only.
-Live automatic test collection, coordinator handoffs, reviewer outages,
-controller restart and cleanup still need installed-host validation.
+No independently human-labelled holdout or measured real-judge acceptance result
+is shipped with DOXA. The [controlled pilot record](qa/fleet-readiness-2026-10-20.md)
+contains actual provider review, safe refusals, controller recovery and cleanup.
+A private blinded development packet contains four verified messages from three
+correlated pilot cases, all conservatively grouped as one fleet. Labels remain
+blank. One further message was excluded because its reviewer-result hash could
+not be bound to the retained normalized verdict. These observations do not pass
+the human holdout gate or establish natural-work supervision quality.
 
 ## Prepare development evidence before the holdout
 
@@ -121,7 +125,7 @@ cargo test --locked --offline -p doxa-tui --test message_gate
 
 The CLI regression checks development-only output, fixed-threshold failure
 JSON and exit status, unchanged private inputs, and absence of daemon or fleet
-home creation. Fixtures exercise the implementation; no real judge calls or
-live fleets were used. A consented real-message corpus, approved operational
-limits, real latency and billing, and installed-host fleet recovery remain
-open.
+home creation. Those offline fixtures made no real judge calls and started no
+live fleet. Later controlled live trials are recorded separately above; they
+do not replace a consented, independently labelled natural-work corpus or a
+passing frozen holdout. Provider costs remain estimates, not billing invoices.

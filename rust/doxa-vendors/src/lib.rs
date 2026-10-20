@@ -27,7 +27,7 @@ pub const MAX_TURN_DURATION: Duration = Duration::from_secs(3600);
 /// serialized request (including tools), not an estimated token count. The
 /// output allowance is shared across every request in the tool loop.
 #[derive(Clone, Copy, Debug)]
-pub struct TurnLimits { pub input_bytes: usize, pub output_tokens: u64 }
+pub struct TurnLimits { pub input_bytes: usize, pub output_tokens: u64, pub max_requests:Option<u8> }
 const BALANCE_URL: &str = "https://api.deepseek.com/user/balance";
 const BALANCE_BODY_MAX: usize = 4096;
 
@@ -964,6 +964,8 @@ async fn run_turn_at(
     mut on_delta: impl FnMut(Delta),
     limits: Option<TurnLimits>,
 ) -> Result<TurnOutcome, Error> {
+    let request_limit=limits.and_then(|limits|limits.max_requests).map(usize::from).unwrap_or(MAX_TOOL_STEPS+1);
+    if !(1..=MAX_TOOL_STEPS+1).contains(&request_limit){return Err(Error::ToolLimit);}
     let deadline = deadline.min(MAX_TURN_DURATION);
     let started = Instant::now();
     let definitions = gate.as_ref().map(|g| g.definitions()).unwrap_or_default();
@@ -999,6 +1001,8 @@ async fn run_turn_at(
         requests: 0,
     };
     loop {
+        // This includes the final answer request, not only tool-bearing steps.
+        if outcome.requests>=request_limit{return Err(Error::ToolLimit);}
         if *cancel.borrow() {
             return Err(Error::Cancelled);
         }

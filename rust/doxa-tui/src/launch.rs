@@ -70,6 +70,7 @@ pub struct LaunchOptions {
     pub claude_bin: Option<PathBuf>,
     pub resume: Option<String>,
     pub router_config: Option<PathBuf>,
+    pub account_turn_limit:Option<u64>,
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -279,6 +280,22 @@ fn saved_budget(session_id: &str) -> io::Result<Option<f64>> {
     Ok(Some(ceiling))
 }
 
+fn saved_account_turn_limit(session_id:&str)->io::Result<Option<u64>>{
+    if !doxa_state::valid_session_id(session_id){return Err(invalid("invalid account resume identity"));}
+    let root=doxa_isolation::home()?.join("account-turns");let path=root.join(format!("{session_id}.json"));let policy=root.join(format!("{session_id}.policy.json"));
+    let present=|path:&Path|match fs::symlink_metadata(path){Ok(_)=>Ok(true),Err(error)if error.kind()==io::ErrorKind::NotFound=>Ok(false),Err(error)=>Err(error)};
+    if !present(&path)?&&!present(&policy)?{return Ok(None);}
+    let record:serde_json::Value=serde_json::from_str(&doxa_router::read_private(&path,8192).map_err(|_|invalid("account turn record unavailable; resume withheld"))?)?;
+    let original:serde_json::Value=serde_json::from_str(&doxa_router::read_private(&policy,8192).map_err(|_|invalid("account turn policy unavailable; resume withheld"))?)?;
+    let limit=record["limit"].as_u64().filter(|limit|(1..=32).contains(limit)).ok_or_else(||invalid("invalid saved account turn limit"))?;
+    if record["version"]!=1||record["identity"]["session_id"]!=session_id||record["identity"]["engine"]!="codex"||record["identity"]["role"]!="coordinator"
+        ||record["pending"]!=false||record["used"].as_u64().is_none_or(|used|used>limit)
+        ||original["version"]!=1||original["identity"]!=record["identity"]||original["limit"]!=limit||original["used"]!=0||original["pending"]!=false||original["last_outcome"]!="new" {
+        return Err(invalid("saved account allowance is changed or unsettled"));
+    }
+    Ok(Some(limit))
+}
+
 fn saved_router_journal(session_id: &str) -> io::Result<serde_json::Value> {
     if !doxa_state::valid_session_id(session_id) { return Err(invalid("invalid Router resume identity")); }
     let home = doxa_isolation::home()?;
@@ -308,6 +325,7 @@ pub(crate) fn router_resume_config(session_id:&str)->io::Result<(PathBuf,doxa_ro
     Ok((path,config,home))
 }
 
+fn append_codex_sandbox(command:&mut Command,explicit:Option<&str>){if let Some(sandbox)=explicit{command.args(["--sandbox",sandbox]);}}
 pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     spawn_inner(options, None, &[],None)
 }
@@ -318,6 +336,9 @@ pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>,
     let mut environment = vec![("DOXA_RUNTIME_DIR", runtime.to_string_lossy().into_owned()),
         ("DOXA_AGENT_PEER_SEND", "1".into()),
         ("DOXA_PEER_INBOUND_TURNS", if inbound { "1" } else { "0" }.into())];
+    if options.account_turn_limit.is_some_and(|limit|options.engine!=Engine::Codex||!(1..=32).contains(&limit)||budget.is_some()){return Err(invalid("account turn policy requires an unpriced native Codex coordinator"));}
+    environment.push(("DOXA_ACCOUNT_TURN_LIMIT",options.account_turn_limit.map(|limit|limit.to_string()).unwrap_or_default()));
+    environment.push(("DOXA_ACCOUNT_TURN_SCOPE",if options.account_turn_limit.is_some(){"fleet_supervisor"}else{""}.into()));
     environment.push(("DOXA_LORE", if lore { "1" } else { "0" }.into()));
     environment.push(("DOXA_SESSION_BUDGET_USD", budget.map(|value| value.to_string()).unwrap_or_default()));
     let run = runtime.parent().ok_or_else(|| invalid("fleet runtime has no run root"))?;
@@ -339,7 +360,7 @@ pub(crate) fn spawn_migrated(options:&LaunchOptions,record:&serde_json::Value)->
     let mut environment=vec![("DOXA_PEER_INBOUND_TURNS",if record["inbound"]==true{"1"}else{"0"}.into()),
         ("DOXA_LORE",if record["lore"]==true{"1"}else{"0"}.into()),
         ("DOXA_SESSION_BUDGET_USD",record["ceiling"].as_f64().map(|n|n.to_string()).unwrap_or_default())];
-    for key in ["DOXA_HOME","DOXA_PEER_LEDGER","DOXA_AGENT_PEER_SEND","LORE_STORE_DIR","LORE_DATA_DIR","LORE_RUNTIME_DIR"]{
+    for key in ["DOXA_HOME","DOXA_PEER_LEDGER","DOXA_AGENT_PEER_SEND","LORE_STORE_DIR","LORE_DATA_DIR","LORE_RUNTIME_DIR","DOXA_ACCOUNT_TURN_LIMIT","DOXA_ACCOUNT_TURN_SCOPE"]{
         if let Some(value)=record["environment"][key].as_str(){environment.push((key,value.to_owned()));}
     }
     spawn_inner(options,Some(runtime),&environment,Some(record))
@@ -466,7 +487,10 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
     if let Some(value) = crate::preferences::lore_notify_override() { command.env("LORE_NOTIFY", value); }
     for (key, value) in environment { command.env(key, value); }
     if environment.is_empty() && options.resume.is_some() && options.engine!=Engine::Router {
-        if let Some(ceiling) = saved_budget(&id)? {
+        if let Some(limit)=saved_account_turn_limit(&id)? {
+            if options.engine!=Engine::Codex{return Err(invalid("saved account policy requires the original native Codex engine"));}
+            command.env("DOXA_SESSION_BUDGET_USD","").env("DOXA_ACCOUNT_TURN_LIMIT",limit.to_string()).env("DOXA_ACCOUNT_TURN_SCOPE","fleet_supervisor");
+        }else if let Some(ceiling) = saved_budget(&id)? {
             // Restore the original allowance, never a fresh allowance. The
             // daemon verifies engine/model/cwd and the durable spent total.
             command.env("DOXA_SESSION_BUDGET_USD", ceiling.to_string());
@@ -519,7 +543,8 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
                 return Err(invalid("Claude options require --engine claude"));
             }
             let codex = codex_executable(options)?;
-            command.args(["--engine", "codex", "--codex-bin"]).arg(codex).args(["--sandbox", sandbox]);
+            command.args(["--engine", "codex", "--codex-bin"]).arg(codex);
+            append_codex_sandbox(&mut command,options.sandbox.as_deref());
             if options.resume.is_some() {
                 command.args(["--resume", "true"]);
                 // Continuing a saved tab uses the protected transport, including
@@ -710,6 +735,28 @@ pub fn stop(session: &Session) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn account_history_preserves_limit_and_refuses_lost_or_unsettled_records(){
+        if std::env::var("DOXA_ACCOUNT_HISTORY_TEST").as_deref()!=Ok("1"){
+            let root=tempfile::tempdir().unwrap();fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();
+            let result=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","launch::tests::account_history_preserves_limit_and_refuses_lost_or_unsettled_records"])
+                .env_clear().env("PATH","/usr/bin:/bin").env("HOME",root.path().join("home")).env("DOXA_HOME",root.path()).env("TMPDIR",std::env::var_os("TMPDIR").unwrap()).env("DOXA_ACCOUNT_HISTORY_TEST","1").status().unwrap();assert!(result.success());return;
+        }
+        let home=doxa_isolation::home().unwrap();let account=home.join("account-turns");fs::create_dir(&account).unwrap();fs::set_permissions(&account,fs::Permissions::from_mode(0o700)).unwrap();
+        let path=account.join("saved.json");let policy=account.join("saved.policy.json");
+        let original=serde_json::json!({"version":1,"identity":{"session_id":"saved","engine":"codex","role":"coordinator","model":"gpt-6-sol"},"limit":12,"used":0,"pending":false,"last_outcome":"new"});
+        let mut state=original.clone();state["used"]=serde_json::json!(3);state["last_outcome"]=serde_json::json!("completed");
+        let write=|path:&Path,value:&serde_json::Value|{fs::write(path,value.to_string()).unwrap();fs::set_permissions(path,fs::Permissions::from_mode(0o600)).unwrap();};
+        write(&path,&state);write(&policy,&original);assert_eq!(saved_account_turn_limit("saved").unwrap(),Some(12));
+        for (key,value) in [("pending",serde_json::json!(true)),("used",serde_json::json!(13)),("limit",serde_json::json!(11))]{let mut changed=state.clone();changed[key]=value;write(&path,&changed);assert!(saved_account_turn_limit("saved").is_err(),"{key}");}
+        write(&path,&state);fs::remove_file(&policy).unwrap();assert!(saved_account_turn_limit("saved").is_err());write(&policy,&original);fs::remove_file(&path).unwrap();assert!(saved_account_turn_limit("saved").is_err());
+        assert!(saved_account_turn_limit("../saved").is_err());
+    }
+    #[test]
+    fn explicit_codex_sandbox_is_forwarded_and_implicit_history_can_restore_its_policy(){
+        let mut command=Command::new("fixture");append_codex_sandbox(&mut command,None);assert_eq!(command.get_args().count(),0);
+        append_codex_sandbox(&mut command,Some("read-only"));assert_eq!(command.get_args().collect::<Vec<_>>(),["--sandbox","read-only"]);
+    }
     fn router_fixture() -> serde_json::Value {
         serde_json::json!({"version":1,"jev_model":"jev-1.13.0","criteria_version":"fixture-v1",
             "fallback_id":"ds-fixture","confidence_threshold":0.5,"max_calls":2,

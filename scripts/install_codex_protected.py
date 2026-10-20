@@ -19,13 +19,24 @@ import tomllib
 import re
 from contextlib import contextmanager
 
-SOURCE = "b412ff32c417f855c2b2d1581b77058eed87c84b"
+SOURCE = "83086188ae0614bd882818ff1aa23f3194962012"
+SOURCE_TAG = "rust-v0.163.0"
 CONTRACT = "doxa-precompact-fail-closed-v1"
-PROVIDER = "codex-0.156.1-precompact-v1"
+PROVIDER = "codex-0.163.0-precompact-v1"
 PATCH = Path(__file__).resolve().parent / "codex-protected/precompact.patch"
-PATCH_SHA256 = "23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d"
+PATCH_SHA256 = "3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c"
 LEGACY_PATCH_SHA256 = "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b"
-AGENT_PREFIX = "doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; "
+PREVIOUS_SOURCE = "b412ff32c417f855c2b2d1581b77058eed87c84b"
+PREVIOUS_PROVIDER = "codex-0.156.1-precompact-v1"
+PREVIOUS_PATCHES = {"23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d", LEGACY_PATCH_SHA256}
+# Installer migration/rollback trust only. The native launcher stays current-only.
+# Never infer identities from an active receipt or discard older reviewed entries.
+MAX_REVIEWED_INSTALLATIONS = 256
+REVIEWED_INSTALLATIONS = (
+    ("b412ff32c417f855c2b2d1581b77058eed87c84b", "23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d", "codex-0.156.1-precompact-v1"),
+    ("b412ff32c417f855c2b2d1581b77058eed87c84b", "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b", "codex-0.156.1-precompact-v1"),
+)
+AGENT_PREFIX = "doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; "
 
 
 def digest(path):
@@ -89,27 +100,15 @@ def run(arguments, **kwargs):
 def prepare_source(cache):
     if digest(PATCH) != PATCH_SHA256:
         raise ValueError("provider patch differs from its reviewed checksum")
-    source = cache / "source"
+    # Source and patch identity select a fresh immutable build checkout. Older
+    # caches are retained without being reset, reused or treated as build input.
+    source = cache / ("source-" + SOURCE + "-" + PATCH_SHA256)
     if not source.exists():
-        run(["git", "clone", "--depth", "1", "--branch", "rust-v0.156.1",
+        run(["git", "clone", "--depth", "1", "--branch", SOURCE_TAG,
              "https://github.com/openai/codex.git", str(source)])
     actual = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
     if actual != SOURCE:
         raise ValueError("provider source is not the pinned official commit")
-    previous_patch = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary"])
-    if hashlib.sha256(previous_patch).hexdigest() == LEGACY_PATCH_SHA256:
-        if subprocess.check_output(["git", "-C", str(source), "ls-files", "--others", "--exclude-standard"]):
-            raise ValueError("provider source has untracked files")
-        # Preserve the exact reviewed legacy checkout, its index and artifacts.
-        # A patch-specific worktree lets the default cache upgrade without
-        # resetting source files or accepting arbitrary local edits.
-        updated_source = cache / ("source-" + PATCH_SHA256)
-        if not updated_source.exists():
-            run(["git", "-C", str(source), "worktree", "add", "--detach", str(updated_source), SOURCE])
-        source = updated_source
-        actual = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-        if actual != SOURCE:
-            raise ValueError("provider source is not the pinned official commit")
     reverse = subprocess.run(["git", "-C", str(source), "apply", "--reverse", "--check", str(PATCH)],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if reverse.returncode:
@@ -258,7 +257,7 @@ def build(cache, cargo):
                "--bin", "codex-app-server", "-j", "1"]
     if shutil.which("systemd-run") and subprocess.run(["systemctl", "--user", "show-environment"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-        command = ["systemd-run", "--user", "--scope", "-q", "-p", "MemoryMax=12G", "-p", "MemorySwapMax=0"] + command
+        command = ["systemd-run", "--user", "--scope", "-q", "-p", "MemoryMax=8G", "-p", "MemorySwapMax=0"] + command
     else:
         raise ValueError("a user systemd scope is required for the bounded provider build")
     run(command, cwd=source / "codex-rs", env=environment)
@@ -290,7 +289,7 @@ def build_code_mode_host(cache, cargo):
     if not shutil.which("systemd-run") or subprocess.run(["systemctl", "--user", "show-environment"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
         raise ValueError("a user systemd scope is required for the bounded code-mode host build")
-    command = ["systemd-run", "--user", "--scope", "-q", "-p", "MemoryMax=12G", "-p", "MemorySwapMax=0",
+    command = ["systemd-run", "--user", "--scope", "-q", "-p", "MemoryMax=8G", "-p", "MemorySwapMax=0",
                cargo, "build", "--locked", "--profile", "dev-small", "-p", "codex-code-mode-host",
                "--bin", "codex-code-mode-host", "-j", "1"]
     run(command, cwd=source / "codex-rs", env=environment)
@@ -318,17 +317,16 @@ def verified_artifacts(cache, binary, code_mode_host, helper_identity):
 
 def verify_installed(destination, previous):
     """Never repair or replace an installation whose own receipt does not match."""
-    expected = {"contract": CONTRACT, "source_commit": SOURCE,
-                "profile": "dev-small", "toolchain": "1.95.0"}
-    if (any(previous.get(key) != value for key, value in expected.items())
-            or previous.get("patch_sha256") not in {PATCH_SHA256, LEGACY_PATCH_SHA256}):
+    expected = {"contract": CONTRACT, "profile": "dev-small", "toolchain": "1.95.0"}
+    if any(previous.get(key) != value for key, value in expected.items()):
         raise ValueError("installed provider provenance differs from reviewed source")
+    receipt_provider(previous)
     helper_keys = ("code_mode_host_sha256", "code_mode_host_source_commit", "code_mode_host_dispatcher_sha256")
     if any(key in previous for key in helper_keys) and not all(key in previous for key in helper_keys):
         raise ValueError("partial code-mode helper provenance differs from installed receipt")
     files = [("codex-app-server", "binary_sha256")]
     if all(key in previous for key in helper_keys):
-        if previous["code_mode_host_source_commit"] != SOURCE:
+        if previous["code_mode_host_source_commit"] != previous["source_commit"]:
             raise ValueError("code-mode helper source differs from reviewed source")
         files += [("codex-code-mode-host-payload", "code_mode_host_sha256"),
                   ("codex-code-mode-host", "code_mode_host_dispatcher_sha256"),
@@ -340,26 +338,60 @@ def verify_installed(destination, previous):
             raise ValueError("installed provider artifact differs from its receipt; publication refused")
 
 
+def reviewed_installations():
+    if not isinstance(REVIEWED_INSTALLATIONS, tuple) or len(REVIEWED_INSTALLATIONS) > MAX_REVIEWED_INSTALLATIONS:
+        raise ValueError("reviewed installation registry exceeded its bound")
+    identities = {}
+    for identity in ((SOURCE, PATCH_SHA256, PROVIDER), *REVIEWED_INSTALLATIONS):
+        if (not isinstance(identity, tuple) or len(identity) != 3
+                or not all(isinstance(value, str) for value in identity)
+                or not re.fullmatch(r"[0-9a-f]{40}", identity[0])
+                or not re.fullmatch(r"[0-9a-f]{64}", identity[1])
+                or not re.fullmatch(r"codex-(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-precompact-v1", identity[2])):
+            raise ValueError("reviewed installation registry has an invalid identity")
+        key = identity[:2]
+        if key in identities and identities[key] != identity[2]:
+            raise ValueError("reviewed installation registry has conflicting providers")
+        identities[key] = identity[2]
+    return identities
+
+
+def receipt_provider(receipt):
+    key = (receipt.get("source_commit"), receipt.get("patch_sha256"))
+    if not all(isinstance(value, str) for value in key):
+        raise ValueError("provider receipt has no reviewed release identity")
+    provider = reviewed_installations().get(key)
+    if provider is not None:
+        return provider
+    raise ValueError("provider receipt has no reviewed release identity")
+
+
+def artifact_name(value):
+    return isinstance(value, str) and any(re.fullmatch(re.escape(prefix) + r"-[0-9a-f]{64}", value)
+        for prefix in set(reviewed_installations().values()))
+
+
 def active_installation(root):
     active = root / "codex-current"
     if active.is_symlink():
         target = Path(os.readlink(active))
-        if target.is_absolute() or len(target.parts) != 1 or not target.name.startswith(PROVIDER + "-"):
+        if target.is_absolute() or len(target.parts) != 1 or not artifact_name(target.name):
             raise ValueError("active provider pointer is not a reviewed local artifact directory")
         destination = root / target
         if not destination.is_dir():
             raise ValueError("active provider artifact directory is missing")
         private_directory(destination)
         receipt_bytes = private_read(destination / "receipt.json", 16384)
-        if destination.name != PROVIDER + "-" + hashlib.sha256(receipt_bytes).hexdigest():
+        if destination.name != receipt_provider(json.loads(receipt_bytes)) + "-" + hashlib.sha256(receipt_bytes).hexdigest():
             raise ValueError("active provider receipt differs from immutable artifact identity")
         return destination
     if active.exists():
         raise ValueError("active provider pointer must be a symlink")
-    legacy = root / PROVIDER
-    if legacy.exists():
-        private_directory(legacy)
-        return legacy
+    for provider in dict.fromkeys(reviewed_installations().values()):
+        legacy = root / provider
+        if legacy.exists():
+            private_directory(legacy)
+            return legacy
     return None
 
 
@@ -389,15 +421,14 @@ def write_rollback_receipt(path, value):
 def rollback_publication(path):
     receipt = json.loads(private_read(path, 8192))
     keys = {"version", "root", "old_target", "old_artifact", "old_identity", "new_target", "new_identity"}
-    def artifact(value):
-        return isinstance(value, str) and re.fullmatch(re.escape(PROVIDER) + r"-[0-9a-f]{64}", value)
+    artifact = artifact_name
     def identity(value):
         return isinstance(value, list) and len(value) == 2 and all(type(n) is int and n >= 0 for n in value)
     if (not isinstance(receipt, dict) or set(receipt) != keys or receipt["version"] != 1
             or not isinstance(receipt["root"], str) or not Path(receipt["root"]).is_absolute()
             or not artifact(receipt["new_target"]) or not identity(receipt["new_identity"])
             or (receipt["old_target"] is not None and not artifact(receipt["old_target"]))
-            or (receipt["old_artifact"] is not None and receipt["old_artifact"] != PROVIDER and not artifact(receipt["old_artifact"]))
+            or (receipt["old_artifact"] is not None and receipt["old_artifact"] not in reviewed_installations().values() and not artifact(receipt["old_artifact"]))
             or (receipt["old_identity"] is not None and not identity(receipt["old_identity"]))
             or ((receipt["old_target"] is None) != (receipt["old_identity"] is None))
             or (receipt["old_target"] is not None and receipt["old_target"] != receipt["old_artifact"])):

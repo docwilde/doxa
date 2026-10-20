@@ -67,6 +67,14 @@ returns `cancelled` and the host must stop, never execute the fallback. In produ
 fixed HTTPS with redirects disabled, bounded response bytes and a deadline.
 The `test-transport` feature exposes loopback-only HTTP for deterministic tests.
 
+Failed attempts may include an optional closed `failure_category`: authentication
+(HTTP 401/403), payment required (402), rate limited (429), overloaded (5xx),
+other HTTP status, timeout, transport, invalid JSON, response too large, or
+invalid schema. This diagnostic does not change the routing reason, fallback,
+unknown accounting, reservation or retry policy. It contains no raw response
+body, error text, header, credential or endpoint. Non-success HTTP bodies are
+not read. A status such as 402 does not prove zero billing or release its hold.
+
 TypeSafe documents limitations with numeric precision, indirection, irrelevant
 state, adversarial text and option ordering. Keep arithmetic in Rust, send only
 relevant data and evaluate candidate rubrics/order against the actual workload.
@@ -91,7 +99,10 @@ Input contains `summary`, `estimated_input_tokens`, `max_output_tokens`,
 `config_sha256`, `criteria_sha256`, `request_sha256`, a strict API `response`
 or typed `transport_error`, `latency_ms`, `attempted` and `rejected_usage`.
 The latter retains verified pinned-model usage for a rejected answer without
-storing untrusted response prose. Consent/scrubbing/human labels remain
+storing untrusted response prose. Recordings can also retain the optional
+`failure_category`; older recordings without it still replay. A category must
+match the attempted failure, and cannot accompany a successful response.
+Consent/scrubbing/human labels remain
 operator attestations; a file cannot prove their truth.
 
 Synthetic cases require `label_source: machine`; real cases require `human`.
@@ -198,3 +209,8 @@ holdout evidence or real quality validation. Every returned confidence was
 worker success, comparative worker cost, real-task routing accuracy or broad
 latency guarantees. `real_quality_validated` remains `false`. Consented,
 independently labeled real tasks and bounded worker execution remain open.
+
+A [2026-10-20 follow-up](qa/jev-followup-2026-10-20.md) records six valid
+synthetic choices and one unknown-usage attempt, safe failure diagnostics,
+retained reservations and removal of the local throwaway credential. It adds
+no independently labelled real-task or worker-execution quality claim.

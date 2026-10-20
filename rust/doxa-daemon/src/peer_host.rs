@@ -671,6 +671,7 @@ impl PeerHost {
 }
 
 impl Host for PeerHost {
+    fn take_native_tool_audit(&self)->Option<Value>{self.inner.take_native_tool_audit()}
     fn supports_images(&self)->bool{self.inner.supports_images()}
     fn prompt_with_images(&self,text:&str,images:&[doxa_input::Attachment],origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){
         self.prompt_with_origin_images(text,origin,images,emit);

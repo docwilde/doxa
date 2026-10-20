@@ -34,7 +34,7 @@ def read():
 def send(x): print(json.dumps(x),flush=True)
 def notice(method,**params): send({'method':method,'params':dict(threadId='thread-actual',**params)})
 init=read(); assert init['method']=='initialize'
-agent='codex_cli_rs/0.156.1' if mode=='stock' else 'doxa_codex_rs/'+('0.1.0' if mode=='version' else '0.156.1')+' (doxa-precompact-fail-closed-v1; upstream fixture)'
+agent='codex_cli_rs/0.163.0' if mode=='stock' else 'doxa_codex_rs/'+('0.1.0' if mode=='version' else '0.163.0')+' (doxa-precompact-fail-closed-v1; upstream fixture)'
 send({'id':init['id'],'result':{'userAgent':agent}})
 assert read()['method']=='initialized'
 if mode in ('version','stock'):
@@ -46,9 +46,12 @@ hooks=next(tomllib.loads(x)['hooks'] for x in overrides if x.startswith('hooks='
 key=next(iter(hooks['state'])); command=hooks['PreCompact'][0]['hooks'][0]['command']
 query=read(); assert query['method']=='config/read'
 assert 'features.token_budget=false' in overrides
-send({'id':query['id'],'result':{'config':{'features':{'token_budget':mode=='token-budget'}},'origins':{},'layers':None}})
-if mode=='token-budget':
-    if sys.stdin.readline(): Path('unsafe-after-token-budget').write_text('request')
+assert 'features.async_compaction=false' in overrides
+assert 'agents.enabled=false' in overrides
+assert 'features.multi_agent_v2=false' in overrides
+send({'id':query['id'],'result':{'config':{'agents':{'enabled':None if mode=='missing-agent-policy' else mode=='native-agents'},'features':{'token_budget':mode=='token-budget','async_compaction':mode=='async-compaction','multi_agent_v2':None if mode=='missing-agent-policy' else mode=='native-agents-v2'}},'origins':{},'layers':None}})
+if mode in ('token-budget','async-compaction','native-agents','native-agents-v2','missing-agent-policy'):
+    if sys.stdin.readline(): Path('unsafe-after-'+mode).write_text('request')
     sys.exit(0)
 query=read(); assert query['method']=='hooks/list'
 row={'key':key,'command':command,'handlerType':'command','enabled':True,'trustStatus':'trusted','currentHash':hooks['state'][key]['trusted_hash'],'eventName':'preCompact','source':'sessionFlags','timeoutSec':240,'async':False}
@@ -147,7 +150,7 @@ else:
 "#).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let gate_dir = dir.path().join("gate"); fs::create_dir(&gate_dir).unwrap(); fs::set_permissions(&gate_dir, fs::Permissions::from_mode(0o700)).unwrap();
-    let gate = CompactGate::prepare(&gate_dir, &std::env::current_exe().unwrap(), &dir.path().join("codex-home"), dir.path(), "doxa-fixture", "0.156.1").unwrap();
+    let gate = CompactGate::prepare(&gate_dir, &std::env::current_exe().unwrap(), &dir.path().join("codex-home"), dir.path(), "doxa-fixture", "0.163.0").unwrap();
     let options = AppServerOptions { executable, cwd:dir.path().to_owned(), model:None, sandbox:SandboxMode::WorkspaceWrite, permission:CodexPermission::OnRequest, resume_thread:None, turn_timeout:Duration::from_secs(3) };
     (dir, options, gate)
 }

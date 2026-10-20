@@ -1,5 +1,5 @@
 //! Reproducible recorded-response evaluation and explicitly opt-in synthetic smoke.
-use crate::{Config, Ledger, Outcome, Prepared, Reason, Reservation, RoutingInput, Usage};
+use crate::{Config, FailureCategory, Ledger, Outcome, Prepared, Reason, Reservation, RoutingInput, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::{BTreeMap, BTreeSet}, io, path::Path, sync::atomic::AtomicBool};
@@ -19,6 +19,8 @@ pub struct Recording {
     pub request_sha256: String,
     pub response: Option<Value>,
     pub transport_error: Option<Reason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_category: Option<FailureCategory>,
     pub latency_ms: u64,
     pub attempted: bool,
     /// Retain reported usage for a rejected answer without retaining invalid prose.
@@ -141,11 +143,16 @@ fn recorded(config: &Config, prepared: &Prepared, record: &Recording) -> io::Res
         || record.request_sha256!=prepared.request_sha256 || record.latency_ms>120_000 {
         return Err(invalid("recorded response does not bind exact model criteria configuration and input"));
     }
+    if record.failure_category.is_some_and(|category| !record.attempted || record.response.is_some()
+        || record.transport_error.as_ref()!=Some(&category.reason())) {
+        return Err(invalid("recorded failure category does not match the attempted failure"));
+    }
     match (&record.response,&record.transport_error) {
         (Some(response),None) if record.attempted && record.rejected_usage.is_none()=>Ok(crate::parse_response(config,prepared,response,record.latency_ms)),
         (None,Some(reason)) if matches!(reason,Reason::Unavailable|Reason::InvalidResponse|Reason::Cancelled|Reason::Budget|Reason::AccountingUnknown|Reason::SingleEligible)=>{
             if !record.attempted && record.rejected_usage.is_some() { return Err(invalid("uncalled router cannot report token usage")); }
             let mut out=crate::fallback(config,prepared,reason.clone());out.attempted=record.attempted;out.latency_ms=record.latency_ms;
+            out.failure_category=record.failure_category;
             out.usage=record.rejected_usage.clone();
             out.router_cost_usd_micros=if !record.attempted {Some(0)} else {out.usage.as_ref().and_then(|usage|
                 crate::token_cost(usage.input_tokens,0,config.decision().input_usd_micros_per_million(),0).ok())};
@@ -204,6 +211,7 @@ pub fn evaluate_observed(config: &Config, text: &str, live: bool, key: Option<&s
             row.recording=Some(Recording{config_sha256:prepared.config_sha256.clone(),criteria_sha256:prepared.criteria_sha256.clone(),
                 request_sha256:prepared.request_sha256.clone(),response:outcome.verified_response.clone(),
                 transport_error:if outcome.verified_response.is_none(){Some(outcome.reason.clone())}else{None},
+                failure_category:outcome.failure_category,
                 latency_ms:outcome.latency_ms,attempted:outcome.attempted,rejected_usage:if outcome.verified_response.is_none(){outcome.usage.clone()}else{None}});
             recordings.push(row);
         }
@@ -236,7 +244,7 @@ pub fn fixture_recordings(config: &Config, text: &str) -> io::Result<String> {
             .collect::<serde_json::Map<_,_>>();
         row.recording=Some(Recording{config_sha256:prepared.config_sha256,criteria_sha256:prepared.criteria_sha256,
             request_sha256:prepared.request_sha256,response:Some(json!({"model":config.jev_model,"answers":{"target":{"type":"choice", "choice":row.expected_candidate_id,"probabilities":probabilities,"confidence":1.0}},"usage":{"input_tokens":100,"output_tokens":if config.decision()==crate::DecisionModel::SubqSnap{0}else{20}}})),
-            transport_error:None,latency_ms:10,attempted:true,rejected_usage:None});
+            transport_error:None,failure_category:None,latency_ms:10,attempted:true,rejected_usage:None});
         serde_json::to_string(&row).map_err(io::Error::other)
     }).collect::<io::Result<Vec<_>>>()?;
     Ok(rows.join("\n"))

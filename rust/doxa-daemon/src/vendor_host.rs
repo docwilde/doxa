@@ -110,6 +110,7 @@ pub struct VendorHost {
     active: Mutex<Option<watch::Sender<bool>>>,
     turns: AtomicU64,
     estimated_cost: Mutex<CostEstimate>,
+    native_tool_audit:Mutex<Option<Value>>,
     closing: AtomicBool,
     balance: Arc<Mutex<Option<String>>>,
     balance_generation: Arc<AtomicU64>,
@@ -276,6 +277,7 @@ impl VendorHost {
             committed_bytes: AtomicU64::new(committed_bytes),
             active: Mutex::new(None),
             turns: AtomicU64::new(restored_turns),
+            native_tool_audit:Mutex::new(None),
             estimated_cost: Mutex::new(CostEstimate { spent: 0.0, complete: !resume }),
             closing: AtomicBool::new(false),
             balance: Arc::new(Mutex::new(None)),
@@ -428,7 +430,7 @@ impl VendorHost {
         let history_bytes = serde_json::to_vec(&self.context_messages(&history)).map_err(|_| "Router history cannot be measured")?.len();
         let request_bytes = usize::try_from(input_bound).map_err(|_| "Router input bound overflow")?.saturating_sub(history_bytes);
         let budget = crate::recovery_context::Budget::api("router","router-conversation-v1",
-            Some(doxa_vendors::TurnLimits {input_bytes:input_cap,output_tokens:0}));
+            Some(doxa_vendors::TurnLimits {max_requests:None,input_bytes:input_cap,output_tokens:0}));
         let plan = crate::recovery_context::assess(&self.store,budget,request_bytes,
             Some((history_bytes,"serialized_router_request_byte_bound"))).map_err(|error| error.to_string())?;
         if let Some(context) = &plan.context { *self.compact_context.lock().unwrap() = Some((history.len(),context.clone())); }
@@ -805,6 +807,7 @@ impl Drop for ActiveTurn<'_> {
 
 impl VendorHost {
     fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        if let Ok(mut audit)=self.native_tool_audit.lock(){*audit=None;}
         if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
             emit(done("Invalid host peer provenance"));
             return;
@@ -885,6 +888,7 @@ impl VendorHost {
         if session.is_some(){definitions.extend(doxa_engines::session_tools::definitions().into_iter().map(|row|json!({"type":"function","function":{"name":"spawn_session","description":row["description"],"parameters":row["inputSchema"]}})));}
         if !definitions.is_empty(){gate=gate.with_agent(definitions,Arc::new(move|name,args|if name=="spawn_session"{session.as_ref().ok_or("Session tools unavailable".to_owned())?(name,args)}else{agent.as_ref().ok_or("LORE tools unavailable".to_owned())?(name,args)}));}
 
+        let native_tool_audit=gate.audit_handle();
         let gate = if tools_enabled { Some(&mut gate as &mut dyn doxa_vendors::ToolGate) } else { None };
         if self.resume_preflight.load(Ordering::Acquire) {
             let measured = (|| {
@@ -1127,6 +1131,7 @@ impl VendorHost {
                         outcome.usage_complete,
                         outcome.model_consistent && outcome.model.as_deref() == Some(selected_model.as_str()),
                         outcome.usage.prompt_tokens, outcome.usage.completion_tokens);
+                    if let (Ok(mut stored),Ok(audit))=(self.native_tool_audit.lock(),native_tool_audit.lock()){*stored=Some(audit.clone());}
                     emit(json!({"type":"turn_done","data":{"is_error":false,
                         "duration_ms":started.elapsed().as_millis() as u64,
                         "num_turns":turns,"model":model,
@@ -1154,6 +1159,7 @@ impl VendorHost {
 }
 
 impl Host for VendorHost {
+    fn take_native_tool_audit(&self)->Option<Value>{self.native_tool_audit.lock().ok()?.take()}
     fn has_active_work(&self) -> bool { self.active.try_lock().map_or(true, |active| active.is_some()) }
     fn peer_tools_ready(&self) -> bool {
         !self.closing.load(Ordering::Acquire) && self.peer_tools.lock().is_ok_and(|handler| handler.is_some())
