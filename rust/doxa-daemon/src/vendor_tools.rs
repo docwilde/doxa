@@ -254,7 +254,7 @@ impl<'a> NativeVendorGate<'a> {
         })
     }
     pub(super) fn audit_handle(&self)->std::sync::Arc<std::sync::Mutex<Value>>{self.audit.clone()}
-    fn execute_inner<'a>(&'a mut self, call: &'a ToolCall) -> BoxFuture<'a, Result<Value, ()>> {
+    fn execute_inner<'b>(&'b mut self, call: &'b ToolCall) -> BoxFuture<'b, Result<Value, ()>> {
         if let Some((bindings, _, service, cancel)) = &self.mcp {
             if let Some(binding) = bindings.iter().find(|binding| binding.provider_name == call.name) {
                 let (binding, service, cancel) = (binding.clone(), service.clone(), cancel.clone());
