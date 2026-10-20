@@ -450,8 +450,8 @@ async fn image_input_reaches_turn_start_as_pixels_without_a_host_path() {
 import base64
 image = turn['params']['input'][1]
 assert image['type'] == 'image'
-assert image['image_url'].startswith('data:image/png;base64,')
-assert base64.b64decode(image['image_url'].split(',',1)[1]).startswith(b'\x89PNG\r\n\x1a\n')
+assert image['url'].startswith('data:image/png;base64,')
+assert base64.b64decode(image['url'].split(',',1)[1]).startswith(b'\x89PNG\r\n\x1a\n')
 assert 'path' not in image"#);std::fs::write(&options.executable,source).unwrap();
     // A fixed 1x1 PNG fixture avoids a model call and real clipboard access.
     let bytes=doxa_input::decode_chunk("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8pcHFwMDAxMDAwMDAAAAPKgEwVo7a6wAAAABJRU5ErkJggg==").unwrap();

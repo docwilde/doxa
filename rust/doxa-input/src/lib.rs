@@ -78,7 +78,8 @@ impl Attachment {
     pub fn is_image(&self)->bool {self.mime.starts_with("image/")}
     pub fn encoded(&self)->String {STANDARD.encode(&*self.bytes)}
     pub fn claude_block(&self)->Value {json!({"type":"image","source":{"type":"base64","media_type":self.mime,"data":self.encoded()}})}
-    pub fn codex_block(&self)->Value {json!({"type":"image","image_url":format!("data:{};base64,{}",self.mime,self.encoded())})}
+    // App-server UserInput::Image uses `url`; Responses/core uses `image_url`.
+    pub fn codex_block(&self)->Value {json!({"type":"image","url":format!("data:{};base64,{}",self.mime,self.encoded())})}
 }
 pub fn decode_chunk(value:&str)->io::Result<Vec<u8>> {
     if value.len()>CHUNK*4/3+4 {return Err(invalid("Attachment chunk too large"));}
@@ -103,6 +104,6 @@ pub fn display_text(text:&str,values:&[Attachment])->String {
 #[cfg(test)]mod tests {
     use super::*;
     #[test]fn selected_files_are_bounded_and_do_not_follow_links(){let dir=tempfile::tempdir().unwrap();let p=dir.path().join("notes.txt");std::fs::write(&p,"hello").unwrap();assert!(!Attachment::load(&p).unwrap().is_image());let link=dir.path().join("link");std::os::unix::fs::symlink(&p,&link).unwrap();assert!(Attachment::load(&link).is_err());assert!(Attachment::from_source("x.pdf",b"%PDF-1\x00".to_vec()).is_err());assert!(Attachment::from_source("x",vec![b'x';MAX_TEXT+1]).is_err());}
-    #[test]fn image_bytes_use_real_provider_blocks_and_drop_metadata(){let img=image::DynamicImage::new_rgb8(3,2);let mut png=Cursor::new(Vec::new());img.write_to(&mut png,ImageFormat::Png).unwrap();let a=Attachment::from_source("screenshot.png",png.into_inner()).unwrap();assert!(a.is_image());assert_eq!(a.claude_block()["source"]["media_type"],"image/png");assert!(a.codex_block()["image_url"].as_str().unwrap().starts_with("data:image/png;base64,"));assert!(Attachment::from_wire("x","image/jpeg",(*a.bytes).clone()).is_err());assert!(!display_text("look",&[a.clone()]).contains(&a.encoded()));assert!(prompt_text("look",&[a]).contains("Attached image"));}
+    #[test]fn image_bytes_use_real_provider_blocks_and_drop_metadata(){let img=image::DynamicImage::new_rgb8(3,2);let mut png=Cursor::new(Vec::new());img.write_to(&mut png,ImageFormat::Png).unwrap();let a=Attachment::from_source("screenshot.png",png.into_inner()).unwrap();assert!(a.is_image());assert_eq!(a.claude_block()["source"]["media_type"],"image/png");assert!(a.codex_block()["url"].as_str().unwrap().starts_with("data:image/png;base64,"));assert!(Attachment::from_wire("x","image/jpeg",(*a.bytes).clone()).is_err());assert!(!display_text("look",&[a.clone()]).contains(&a.encoded()));assert!(prompt_text("look",&[a]).contains("Attached image"));}
     #[test]fn uploaded_chunks_and_aggregate_have_separate_limits(){assert!(decode_chunk(&encode_chunk(&vec![1;CHUNK+1])).is_err());assert!(decode_chunk("!?").is_err());let a=Attachment::from_source("x.txt",b"source".to_vec()).unwrap();assert!(validate_set(&vec![a;5]).is_err());}
 }
