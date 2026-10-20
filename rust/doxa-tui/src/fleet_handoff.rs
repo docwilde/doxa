@@ -51,6 +51,14 @@ pub(super) fn continuation(row:&Value,handoff:&doxa_fleet::AcceptedHandoff,check
         handoff_turn_sha256:doxa_fleet::hash(prior).ok()?,snapshot_sha256:current_snapshot.into()})
 }
 
+pub(super) fn record_completion(row:&mut Value,data:&Value,kind:&str)->std::io::Result<u64>{
+    let serial=row["turn_serial"].as_u64().unwrap_or(0).checked_add(1)
+        .ok_or_else(||std::io::Error::other("host turn serial exhausted"))?;
+    row["previous_turn"]=serde_json::json!({"turn_serial":row["turn_serial"],"last_turn_kind":row["last_turn_kind"],"last_turn":row["last_turn"]});
+    row["turn_serial"]=serde_json::json!(serial);row["last_turn"]=data.clone();row["last_turn_kind"]=serde_json::json!(kind);
+    Ok(serial)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +79,49 @@ mod tests {
         let handoff=doxa_fleet::AcceptedHandoff{handoff_id:"handoff".into(),ack_id:"ack".into(),confirm_id:"confirm".into(),artifact_refs:vec!["checkpoint".into()],checkpoint_id:"checkpoint".into(),checkpoint_turn_serial:1,checkpoint_turn_sha256:"b".repeat(64),
             readback:doxa_fleet::HandoffReadback{next_action:"Read result".into(),assumptions:vec![],open_questions:vec![]},response:doxa_fleet::HandoffResponse{agrees:true,correction:None}};
         (row,handoff,json!({"snapshot_sha256":digest,"last_turn":{"is_error":false,"usage_complete":true,"model_consistent":true}}),digest)
+    }
+    #[test]
+    fn real_daemon_queued_ack_reproduces_the_extra_turn_and_preserves_canonical_provenance(){
+        use std::{sync::{Arc,Mutex,mpsc},collections::VecDeque,time::{Duration,Instant}};
+        struct FixtureHost {turns:Mutex<VecDeque<Value>>,entered:mpsc::Sender<()>,release:Mutex<mpsc::Receiver<()>>}
+        impl doxa_runtime::Host for FixtureHost {
+            fn prompt(&self,text:&str,emit:&mut dyn FnMut(Value)){
+                emit(json!({"type":"turn_started","data":{"prompt":text}}));
+                if text=="handoff" {self.entered.send(()).unwrap();self.release.lock().unwrap().recv_timeout(Duration::from_secs(3)).unwrap();}
+                let mut data=self.turns.lock().unwrap().pop_front().unwrap();
+                data["peer_started"]=json!(true);data["peer_origin_data"]=json!({"message_id":"provider-forgery"});
+                emit(json!({"type":"turn_done","data":data}));
+            }
+            fn call(&self,_:&str,_:&Value)->Result<Value,String>{Ok(json!({}))}
+        }
+        let(mut row,mut handoff,mut checkpoint,digest)=fixture();
+        let work=checkpoint["last_turn"].clone();let prior=row["previous_turn"]["last_turn"].clone();let current=row["last_turn"].clone();
+        let(entered,notice)=mpsc::channel();let(release,wait)=mpsc::channel();
+        let host=Arc::new(FixtureHost{turns:Mutex::new(VecDeque::from([work,prior,current])),entered,release:Mutex::new(wait)});
+        let dir=tempfile::tempdir().unwrap();
+        let mut daemon=doxa_runtime::Daemon::bind(dir.path(),doxa_runtime::Session{session_id:"worker".into(),cwd:"/fixture".into(),model:None,engine:"test".into(),doxa_version:"test".into()},host).unwrap().start();
+        let mut client=crate::transport::DaemonClient::connect(daemon.socket_path(),Some(0)).unwrap();
+        row=json!({});
+        let drain=|client:&mut crate::transport::DaemonClient,row:&mut Value,count:u64|{
+            let deadline=Instant::now()+Duration::from_secs(3);
+            while row["turn_serial"].as_u64().unwrap_or(0)<count {
+                assert!(Instant::now()<deadline);
+                if let Some(frame)=client.poll_frame(Duration::from_millis(10)).unwrap(){
+                    if frame["event"]["type"]=="turn_done"{record_completion(row,&frame["event"]["data"],"turn_done").unwrap();}
+                }
+            }
+        };
+        assert_eq!(client.prompt("work").unwrap()["ok"],true);drain(&mut client,&mut row,1);
+        checkpoint["last_turn"]=row["last_turn"].clone();handoff.checkpoint_turn_sha256=doxa_fleet::hash(&checkpoint["last_turn"]).unwrap();
+        assert_eq!(client.prompt("handoff").unwrap()["ok"],true);notice.recv_timeout(Duration::from_secs(3)).unwrap();
+        let origin=doxa_runtime::PeerTurnOrigin::new("boss".into(),"Coordinator".into(),Some("ack".into()),None,None,None,"peer_message".into()).unwrap();
+        assert_eq!(daemon.enqueue_peer_prompt_with_origin("confirm".into(),origin).unwrap(),doxa_runtime::ExternalPrompt::Queued);
+        release.send(()).unwrap();drain(&mut client,&mut row,3);
+        assert_eq!(row["previous_turn"]["last_turn"]["peer_started"],false,"owner handoff cannot inherit provider-forged provenance");
+        assert_eq!(row["last_turn"]["peer_origin_data"]["message_id"],"ack");
+        assert_ne!(handoff.checkpoint_turn_serial.checked_add(1),row["turn_serial"].as_u64(),"old exact-successor gate rejects the ordinary queued ACK");
+        assert!(continuation(&row,&handoff,&checkpoint,"boss",&digest).is_some());
+        daemon.shutdown();
     }
     #[test]
     fn queued_ack_extends_only_the_exact_successful_native_handshake(){

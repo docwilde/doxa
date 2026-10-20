@@ -419,6 +419,22 @@ mod peer_tests {
         ToolCall { id:"provider-call".into(), name:name.into(), arguments:arguments.as_object().unwrap().clone() }
     }
     #[test]
+    fn native_action_audit_binds_actual_send_results_and_includes_nonpeer_tools(){
+        let dir=tempfile::tempdir().unwrap();std::fs::write(dir.path().join("README.md"),"fixture").unwrap();
+        let handler:doxa_runtime::PeerToolHandler=Arc::new(|method,_|{assert_eq!(method,"msg");Ok(json!({"message_id":"actual-message","delivered_to":["boss"],"failed":[]}))});
+        let desk=Arc::new(PeerDesk::default());let displayed=RefCell::new(Vec::new());
+        let emit=|event|displayed.borrow_mut().push(event);let scrub=|text:&str|Ok(text.to_owned());
+        let mut gate=NativeVendorGate::new(dir.path(),true,Some(handler),desk.clone(),&scrub,&emit,Arc::new(Mutex::new(Vec::new())));
+        let audit=gate.audit_handle();let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let read=peer_call("workspace_read",json!({"path":"README.md"}));runtime.block_on(gate.execute(&read)).unwrap();
+        let send=peer_call(doxa_engines::peer_tools::SEND,json!({"target":"boss","text":"fixture","fleet_kind":"handoff","artifact_refs":["checkpoint"]}));
+        let execution=gate.execute(&send);let ask=displayed.borrow().iter().find(|row|row["type"]=="needs_input").unwrap()["data"].clone();
+        desk.answer(ask["id"].as_str().unwrap(),&json!({"decision":"allow"})).unwrap();runtime.block_on(execution).unwrap();
+        let receipt=audit.lock().unwrap();assert_eq!(receipt["actions"][0]["operation"],"other");
+        assert_eq!(receipt["actions"][1]["message_id"],"actual-message");assert_eq!(receipt["actions"][1]["success"],true);
+        assert_eq!(receipt["actions"][1]["request"]["fleet_kind"],"handoff");assert!(!receipt.to_string().contains("fixture"));
+    }
+    #[test]
     fn malformed_peer_handoff_is_a_scrubbed_model_refusal_without_backend_or_approval(){
         let dir=tempfile::tempdir().unwrap();let calls=Arc::new(AtomicUsize::new(0));let called=calls.clone();
         let handler:doxa_runtime::PeerToolHandler=Arc::new(move|_,_|{called.fetch_add(1,Ordering::SeqCst);Ok(json!({}))});

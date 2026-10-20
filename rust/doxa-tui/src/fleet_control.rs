@@ -1436,10 +1436,7 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
                     Some("turn_start") => slot.busy = true,
                     Some(kind @ ("turn_done" | "turn_refused")) => {
                         milestone=true;slot.busy=false;
-                        let serial=value["slots"][index]["turn_serial"].as_u64().unwrap_or(0).checked_add(1).ok_or_else(||invalid("host turn serial exhausted"))?;
-                        value["slots"][index]["previous_turn"]=json!({"turn_serial":value["slots"][index]["turn_serial"],"last_turn_kind":value["slots"][index]["last_turn_kind"],"last_turn":value["slots"][index]["last_turn"]});
-                        value["slots"][index]["turn_serial"]=json!(serial);
-                        value["slots"][index]["last_turn"]=data.clone();value["slots"][index]["last_turn_kind"]=json!(kind);
+                        let serial=handoff_proof::record_completion(&mut value["slots"][index],data,kind)?;
                         if kind=="turn_done"{queue_auto_test(value,index)?;}
                         else if value["spec"]["auto_test"]==true && value["slots"][index]["role"]=="worker" {
                             value["slots"][index]["auto_test"]=json!({"state":"skipped","turn_serial":serial,"reason":"worker turn was refused"});

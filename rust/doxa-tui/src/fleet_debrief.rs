@@ -198,7 +198,7 @@ mod tests {
         let mut confirm = trace("worker-one", "coordinator", 4, Kind::Confirm, Some("ack"));
         confirm.handoff_response = Some(HandoffResponse { agrees: true, correction: None });
         state.traces.insert("confirm".into(), confirm);
-        state.dependency_releases.insert("run-1".into(), DependencyRelease { assignment_id: "run-1".into(), handoff_id: "handoff".into(),
+        state.dependency_releases.insert("run-1".into(), DependencyRelease { continuation:None, assignment_id: "run-1".into(), handoff_id: "handoff".into(),
             artifact_refs: vec![], checkpoint_id: String::new(), checkpoint_turn_serial: 0, checkpoint_turn_sha256: String::new(),
             turn_serial: 0, last_turn_sha256: String::new(), at: 1 });
         state.observations.push(json!({"event":"admission","admission":{"delivered":false,"reason":"semantic review requires human review","message_id":"held"},"body":"secret peer text"}));

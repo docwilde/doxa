@@ -55,6 +55,7 @@ wasmparser = { version = "=0.261.0", default-features = false, features = ["std"
 wasmi = { version = "=2.0.0", default-features = false, features = ["std", "stable", "validate", "auto-dispatch", "extra-checks"] }
 
 [dev-dependencies]
+doxa-runtime = { path = "../doxa-runtime" }
 tempfile = "3"
 wat = "=1.261.0"
 
