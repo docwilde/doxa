@@ -184,3 +184,13 @@ fn read_image(cancel:&AtomicBool)->io::Result<Option<doxa_input::Attachment>>{
     let raw=read_command_bytes(&mut command,cancel,Duration::from_secs(2),doxa_input::MAX_SOURCE)?;
     doxa_input::Attachment::from_source("clipboard.png",raw).map(Some)
 }
+
+#[cfg(test)]mod image_tests {
+    use super::*;
+    #[test]fn binary_reader_keeps_image_bytes_and_enforces_a_separate_limit(){
+        let mut command=Command::new("/usr/bin/python3");command.args(["-c","import sys;sys.stdout.buffer.write(b'\\x89PNG\\r\\n\\x1a\\n')"]);
+        let bytes=read_command_bytes(&mut command,&AtomicBool::new(false),Duration::from_secs(1),1024).unwrap();assert_eq!(bytes,b"\x89PNG\r\n\x1a\n");
+        let mut command=Command::new("/usr/bin/python3");command.args(["-c","import sys;sys.stdout.buffer.write(b'x'*1025)"]);
+        assert!(read_command_bytes(&mut command,&AtomicBool::new(false),Duration::from_secs(1),1024).is_err());
+    }
+}

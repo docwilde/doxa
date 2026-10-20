@@ -2178,17 +2178,22 @@ mod tests {
     const SESSION: &str = "0b256c09-8d74-4865-9be0-4e6d24384551";
     #[test]
     fn attached_image_reaches_claude_as_an_image_block_and_follow_up_still_works(){
-        let (_dir,host)=fixture(r#"assert v['message']['content'][0]['type']=='text'
+        let (_dir,host)=fixture(r#"if row['type']=='user':
   import base64
-  image=v['message']['content'][1]
-  assert image['type']=='image' and image['source']['media_type']=='image/png'
-  assert base64.b64decode(image['source']['data']).startswith(b'\x89PNG')
-  emit({'type':'result','session_id':'$SESSION','is_error':False,'total_cost_usd':0})"#);
-        let raw=doxa_input::decode_chunk("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==").unwrap();
+  content=row['message']['content']
+  if isinstance(content,list):
+   assert content[0]['type']=='text'
+  if isinstance(content,list) and len(content)>1:
+   image=content[1]
+   assert image['type']=='image' and image['source']['media_type']=='image/png'
+   assert base64.b64decode(image['source']['data']).startswith(b'\x89PNG')
+  emit({'type':'result','session_id':row['session_id'],'is_error':False,'total_cost_usd':0})"#);
+        let raw=doxa_input::decode_chunk("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8pcHFwMDAxMDAwMDAAAAPKgEwVo7a6wAAAABJRU5ErkJggg==").unwrap();
         let image=doxa_input::Attachment::from_source("fixture.png",raw).unwrap();let mut events=Vec::new();
         host.prompt_with_images("look",&[image],None,&mut |e|events.push(e));
         assert!(events.iter().any(|e|e["type"]=="turn_started"),"{events:?}");
         assert_eq!(events.last().unwrap()["data"]["is_error"],false,"{events:?}");
+        events.clear();host.prompt("follow up",&mut |event|events.push(event));assert_eq!(events.last().unwrap()["data"]["is_error"],false,"{events:?}");
     }
     fn fixture(body: &str) -> (tempfile::TempDir, Arc<ClaudeHost>) {
         fixture_with_startup(

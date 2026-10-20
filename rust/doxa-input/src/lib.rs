@@ -54,6 +54,7 @@ impl Attachment {
             };
             return Ok(Self{name:name.into(),mime:mime.into(),bytes:Arc::new(bytes)});
         }
+        if raw.starts_with(b"%PDF-"){return Err(invalid("PDF attachment input is not supported yet"));}
         let text=std::str::from_utf8(&raw).map_err(|_|invalid("Use an image or UTF-8 text file; other binary files are unsupported"))?;
         if raw.len()>MAX_TEXT||text.chars().any(|c|c.is_control()&&!matches!(c,'\n'|'\r'|'\t')) {return Err(invalid("Text attachment must be UTF-8, without binary controls, and at most 64 KiB"));}
         Ok(Self{name:name.into(),mime:"text/plain".into(),bytes:Arc::new(raw)})
