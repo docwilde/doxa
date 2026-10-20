@@ -28,6 +28,7 @@ pub enum WorkerCommand {
     Attach(String, usize),
     AttachRuntime(String, usize, PathBuf),
     Prompt(String, String),
+    PromptAttachments(String, String, Vec<doxa_input::Attachment>),
     Answer(String, String, Value),
     Peers(String),
     Message(String, String, String),
@@ -262,7 +263,7 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
                 other => other,
             };
             let id = match &command {
-                WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
+                WorkerCommand::Prompt(id, _) | WorkerCommand::PromptAttachments(id, _, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _) | WorkerCommand::SetEffort(id, _)
                 | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::SetIsolation(id, _) | WorkerCommand::QueueList(id) | WorkerCommand::ContextDetail(id) | WorkerCommand::Status(id)
                 | WorkerCommand::Branch(id, _) | WorkerCommand::RefreshBilling(id)
@@ -306,6 +307,7 @@ pub(crate) fn rejection_frame(command: WorkerCommand, message: &str) -> WorkerFr
         WorkerCommand::Launch(_, _, group) => WorkerFrame::Launch { group,
             result: LaunchResult::Failed { message: message.into(), started_session: None } },
         WorkerCommand::Attach(session_id, group) | WorkerCommand::AttachRuntime(session_id,group,_) => WorkerFrame::Attach { session_id, group, result: Err(message.into()) },
+        WorkerCommand::PromptAttachments(session_id,text,attachments)=>WorkerFrame::AttachmentFailed{session_id,text,attachments,message:message.into(),delivery:PromptDelivery::Rejected},
         WorkerCommand::Prompt(session_id, text) => WorkerFrame::PromptFailed { session_id, text,
             message: message.into(), delivery: PromptDelivery::Rejected },
         WorkerCommand::Answer(session_id, request_id, _) => command_frame(session_id,
@@ -723,6 +725,17 @@ fn worker_loop(
                     };
                     if frames.send(command_frame(id, reply)).is_err() { return; }
                     if matches!(result, Err(TransportError::Closed)) { return; }
+                }
+                Ok(WorkerCommand::PromptAttachments(id,text,attachments))=>{
+                    if id!=session_id{let _=frames.send(WorkerFrame::AttachmentFailed{session_id:id,text,attachments,message:"Prompt target is not attached".into(),delivery:PromptDelivery::Rejected});continue;}
+                    let result=client.prompt_attachments(&text,&attachments);
+                    match result {
+                        Ok(reply) if reply["ok"]==true=>{if frames.send(WorkerFrame::Daemon{session_id:id,frame:reply}).is_err(){return;}}
+                        Ok(reply)=>{let _=frames.send(WorkerFrame::AttachmentFailed{session_id:id,text,attachments,message:reply["error"].as_str().unwrap_or("Attachment prompt refused").into(),delivery:PromptDelivery::Rejected});}
+                        Err(error)=>{let closed=matches!(error,TransportError::Closed);let delivery=if matches!(error,TransportError::FrameTooLarge|TransportError::RequestIdsExhausted){PromptDelivery::Rejected}else{PromptDelivery::Uncertain};
+                            let _=frames.send(WorkerFrame::AttachmentFailed{session_id:id,text,attachments,message:"Attachment delivery failed or unconfirmed; inspect session before retrying".into(),delivery});if closed{return;}}
+                    }
+                    cursor.store(client.cursor, Ordering::Relaxed);
                 }
                 Ok(WorkerCommand::Prompt(id, text)) => {
                     if id != session_id {

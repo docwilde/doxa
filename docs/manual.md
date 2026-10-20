@@ -2009,3 +2009,7 @@ See the [LORE evaluation workflow](https://github.com/docwilde/LORE/blob/v0.62.2
 for the corpus format, immutable evidence, answer/growth checks and limits.
 The included deterministic fixture validates the mechanism; a real task
 corpus and model adapter are needed to measure skill quality.
+
+Prompt files and image clipboard input: use the **Attach** chip, **Attach files**
+in the command menu, or **Alt+A**. Review/remove files before Enter submits.
+[Formats, limits, clipboard helpers and provider coverage](terminal-images.md#prompt-attachments).

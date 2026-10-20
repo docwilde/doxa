@@ -168,6 +168,10 @@ impl App {
         use crate::worker_frames::{CommandResult, WorkerFrame};
         let before = self.prompt_owner();
         let changed = match frame {
+            WorkerFrame::AttachmentFailed{session_id,text,attachments,message,delivery}=>{
+                self.rejected_attachment_prompts.entry(session_id).or_default().push((text,attachments));
+                self.notice=format!("{} · {} · Alt+Up restores prompt and files",safe_label(&message),if delivery==crate::worker_frames::PromptDelivery::Uncertain{"delivery unconfirmed; inspect session before retrying"}else{"not submitted"});true
+            }
             WorkerFrame::Command {
                 session_id,
                 result:

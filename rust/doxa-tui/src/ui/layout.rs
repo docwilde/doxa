@@ -860,6 +860,7 @@ impl App {
                 chips.push(("balance", format!("Balance {balance}")));
             }
         }
+        if let Some(id)=id{let count=self.prompt_attachments.get(&(index,id.to_owned())).map_or(0,Vec::len);chips.push(("attachments",if count==0{"Attach".into()}else{format!("Files {count}")}));}
         chips
     }
 
@@ -1016,6 +1017,7 @@ impl App {
 
     pub(super) fn activate_chip(&mut self, kind: &'static str, group: usize) {
         match kind {
+            "attachments"=>self.open_attachments(),
             "permission" => self.open_permission_picker(),
             "engine" => self.open_engine_picker(),
             "model" => self.open_model_picker(),
@@ -1199,7 +1201,8 @@ impl App {
     }
 
     pub(super) fn link_interaction_blocked(&self) -> bool {
-        self.active_chooser_rect().is_some()
+        self.attachment_picker.is_some()
+            || self.active_chooser_rect().is_some()
             || self.active_request_index().is_some()
             || self.map_modal
             || self.diff_modal

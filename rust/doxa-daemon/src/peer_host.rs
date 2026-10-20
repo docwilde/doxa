@@ -658,11 +658,11 @@ impl PeerHost {
         Some((format!("{origin}{review}\n{body}"), origin))
     }
 
-    fn execute_prompt(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+    fn execute_prompt(&self, text: &str, origin: Option<&PeerTurnOrigin>, images: &[doxa_input::Attachment], emit: &mut dyn FnMut(Value)) {
         let current=if self.fleet_owner().ok().flatten().is_some(){
             format!("Host runtime internet policy: {}. Offline workers request research via peer_send question from an owner-approved online coordinator; offline coordinators escalate to the owner. This policy does not change the frozen task or grant approval.\n\n{text}",if doxa_isolation::task_internet_allowed().unwrap_or(false){"direct internet is enabled by the owner"}else{"direct internet and web searches are disabled"})
         }else{text.into()};
-        self.inner.prompt_with_peer_origin(&current, origin, &mut |event| {
+        self.inner.prompt_with_images(&current, images, origin, &mut |event| {
             let terminal=matches!(event["type"].as_str(),Some("turn_done"|"turn_refused"));
             emit(event);
             if terminal{self.cancel_spawns(false);}
@@ -671,6 +671,11 @@ impl PeerHost {
 }
 
 impl Host for PeerHost {
+    fn supports_images(&self)->bool{self.inner.supports_images()}
+    fn prompt_with_images(&self,text:&str,images:&[doxa_input::Attachment],origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){
+        self.prompt_with_origin_images(text,origin,images,emit);
+    }
+
     fn isolation_status(&self) -> Option<Value> { self.inner.isolation_status() }
     fn has_active_work(&self) -> bool { self.inner.has_active_work() || self.spawner.lock().map_or(true,|manager|manager.as_ref().is_some_and(|manager|manager.is_active())) }
     fn peer_tools_ready(&self) -> bool { self.agent_tools_enabled && self.inner.peer_tools_ready() }
@@ -712,6 +717,9 @@ impl Host for PeerHost {
 
 impl PeerHost {
     fn prompt_with_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt_with_origin_images(text,origin,&[],emit);
+    }
+    fn prompt_with_origin_images(&self, text: &str, origin: Option<&PeerTurnOrigin>, images: &[doxa_input::Attachment], emit: &mut dyn FnMut(Value)) {
         if self.owner_isolation_active().map(|request|request.is_some()).unwrap_or(true){
             emit(json!({"type":"turn_refused","data":{"error":"Owner isolation change holds prompt admission"}}));return;
         }
@@ -723,7 +731,7 @@ impl PeerHost {
         let pending: Vec<Value> = self.pending.lock().unwrap_or_else(|poison| poison.into_inner())
             .drain(..).collect();
         if pending.is_empty() {
-            self.execute_prompt(text, origin, emit);
+            self.execute_prompt(text, origin, images, emit);
             return;
         }
         let mut peer_block = format!("{PEER_UNTRUSTED_INTRO}\n\n");
@@ -740,7 +748,7 @@ impl PeerHost {
             format!("{peer_block}\n\n{text}")
         };
         let mut refused = false;
-        self.execute_prompt(&full, origin, &mut |event| {
+        self.execute_prompt(&full, origin, images, &mut |event| {
             if event["type"] == "turn_refused" { refused = true; }
             let terminal=matches!(event["type"].as_str(),Some("turn_done"|"turn_refused"));
             emit(event);

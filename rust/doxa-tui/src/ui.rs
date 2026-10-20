@@ -1,5 +1,6 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 mod actions;
+mod attachments;
 mod bars;
 mod commands;
 mod choice_dropdown;
@@ -595,6 +596,7 @@ struct ChipInfo {
 
 fn chip_hint(kind: &str) -> &'static str {
     match kind {
+        "attachments" => "Attach images and UTF-8 files · Alt+A",
         "remote" => "Session is controlled through a private DOXA hub",
         "remote_engine" => "Engine reported by the remote session host",
         "remote_model" => "Model reported by the remote session host",
@@ -1570,6 +1572,12 @@ pub struct App {
     pub focus: Focus,
     pub input: String,
     input_cursor: usize,
+    prompt_attachments: HashMap<(usize,String),Vec<doxa_input::Attachment>>,
+    pending_prompt_attachments: HashMap<usize,Vec<doxa_input::Attachment>>,
+    rejected_attachment_prompts: HashMap<String,Vec<(String,Vec<doxa_input::Attachment>)>>,
+    attachment_picker: Option<attachments::Picker>,
+    attachment_file_job: Option<attachments::FileJob>,
+    clipboard_image_job: Option<crate::clipboard::ImageJob>,
     input_drafts: HashMap<(usize, String), (String, usize)>,
     moved_active_tab: bool,
     installation: crate::installation::Snapshot,
@@ -1896,6 +1904,8 @@ impl Default for App {
             focus: Focus::Prompt,
             input: String::new(),
             input_cursor: 0,
+            prompt_attachments: HashMap::new(),pending_prompt_attachments:HashMap::new(),rejected_attachment_prompts:HashMap::new(),
+            attachment_picker:None,attachment_file_job:None,clipboard_image_job:None,
             input_drafts: HashMap::new(),
             moved_active_tab: false,
             installation: crate::installation::Snapshot::default(),

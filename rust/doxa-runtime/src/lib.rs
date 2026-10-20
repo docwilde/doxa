@@ -1,6 +1,8 @@
 //! Native DOXA protocol v1 socket foundation. The engine is supplied by `Host`.
 //! No Python engine, registry, persistence, or LORE integration is implied here.
 
+mod attachments;
+
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -87,6 +89,8 @@ fn valid_peer_session_id(value: &str) -> bool {
         && value.bytes().skip(1).all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
+pub use doxa_input::Attachment;
+
 pub trait Host: Send + Sync + 'static {
     fn isolation_status(&self) -> Option<Value> { None }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value));
@@ -95,6 +99,11 @@ pub trait Host: Send + Sync + 'static {
     /// the typed origin alongside the exact user record.
     fn prompt_with_peer_origin(&self, text: &str, _origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
         self.prompt(text, emit)
+    }
+    fn supports_images(&self) -> bool { false }
+    fn prompt_with_images(&self, text: &str, images: &[Attachment], origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        if images.is_empty() { self.prompt_with_peer_origin(text, origin, emit); }
+        else { emit(json!({"type":"turn_refused","data":{"message":"This provider does not accept image attachments"}})); }
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String>;
     fn initial_model(&self) -> Option<String> { None }
@@ -149,7 +158,7 @@ pub struct Session {
     pub doxa_version: String,
 }
 
-struct Prompt { text: String, public_text: String, queue_id: String, peer_origin: Option<PeerTurnOrigin> }
+struct Prompt { display_text: Option<String>, images: Vec<Attachment>, text: String, public_text: String, queue_id: String, peer_origin: Option<PeerTurnOrigin> }
 
 fn queue_preview(text: &str) -> String { text.chars().take(QUEUE_PREVIEW_CHARS).collect() }
 
@@ -337,7 +346,7 @@ impl DaemonHandle {
             let queue_id = format!("q{}", state.next_queue_id);
             state.next_queue_id += 1;
             let position = state.prompts.len() + 1;
-            state.prompts.push_back(Prompt { text, public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: Some(origin.clone()) });
+            state.prompts.push_back(Prompt { display_text:None, images:Vec::new(), text, public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: Some(origin.clone()) });
             drop(state);
             self.inner.publish(None, json!({"type":"prompt_queued","data":{
                 "id":queue_id,"text":display,"position":position,
@@ -418,8 +427,19 @@ impl Inner {
     }
 
     fn start_turn(self: &Arc<Self>, text: String, turn: String, peer_origin: Option<PeerTurnOrigin>) {
+        self.start_turn_images(text, turn, peer_origin, Vec::new(), None);
+    }
+    fn start_turn_images(self: &Arc<Self>, text: String, turn: String, peer_origin: Option<PeerTurnOrigin>, images: Vec<Attachment>, display_text: Option<String>) {
         let inner = self.clone();
         thread::spawn(move || {
+            // Refresh the display scrub at execution, just like queued prompt
+            // previews. Keep file contents in provider input and persistence;
+            // only bounded owner text and labels belong in live event frames.
+            let display = display_text.as_deref().map(|text|
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(||inner.host.public_prompt(text)))
+                    .ok().and_then(Result::ok));
+            let display_failed=matches!(display,Some(None));
+            let display=display.flatten().map(|text|doxa_input::event_display(&text));
             // The terminal event is an idle/readiness boundary for clients.
             // Keep it until the host returns and the admission state advances;
             // otherwise a client can see turn_done and immediately have its
@@ -432,7 +452,9 @@ impl Inner {
                 if matches!(event["type"].as_str(), Some("peer_message" | "peer_sent")) { return; }
                 let is_turn_boundary = matches!(event["type"].as_str(), Some("turn_started" | "turn_refused"));
                 if !event["data"].is_object() { event["data"] = json!({}); }
+                let started=event["type"]=="turn_started";
                 if let Some(data) = event.get_mut("data").and_then(Value::as_object_mut) {
+                    if started {if let Some(display)=&display{data.insert("prompt".into(),json!(display));}}
                     // These fields are reserved for host admission. Clear any
                     // provider or middleware values on every frame, then add
                     // them only to the turn boundary events that display them.
@@ -455,8 +477,10 @@ impl Inner {
                     inner.publish(Some(&turn), event);
                 }
             };
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-                inner.host.prompt_with_peer_origin(&text, peer_origin.as_ref(), &mut emit)));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if display_failed{emit(json!({"type":"turn_refused","data":{"reason":"scrub","message":"Attachment prompt could not be scrubbed"}}));}
+                else{inner.host.prompt_with_images(&text, &images, peer_origin.as_ref(), &mut emit);}
+            }));
             let terminal = terminal.unwrap_or_else(|| if result.is_err() {
                 json!({"type":"turn_done", "data":{"is_error":true,"error":"host panicked"}})
             } else { json!({"type":"turn_done", "data":{}}) });
@@ -478,13 +502,14 @@ impl Inner {
             };
             if let Some((prompt, turn)) = next {
                 let display = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-                    inner.host.public_prompt(&prompt.text)
+                    inner.host.public_prompt(prompt.display_text.as_deref().unwrap_or(&prompt.text))
                 )).ok().and_then(Result::ok)
                     .unwrap_or_else(|| "[redacted: prompt unavailable]".to_owned());
+                let display=if prompt.display_text.is_some(){doxa_input::event_display(&display)}else{display};
                 inner.publish(None, json!({"type":"prompt_dequeued","data":{"id":prompt.queue_id,"text":display,
                     "peer_started":prompt.peer_origin.is_some(),"peer_origin":prompt.peer_origin.as_ref().map(PeerTurnOrigin::display_label),
                     "peer_origin_data":prompt.peer_origin.as_ref().map(PeerTurnOrigin::to_value)}}));
-                inner.start_turn(prompt.text, turn, prompt.peer_origin);
+                inner.start_turn_images(prompt.text, turn, prompt.peer_origin, prompt.images, prompt.display_text);
             }
         });
     }
@@ -546,6 +571,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
     let mut reader = BufReader::new(stream);
     let mut line = Vec::new();
+    let mut uploads = attachments::Uploads::default();
     while !inner.stopping.load(Ordering::Acquire) {
         match read_bounded(&mut reader, &mut line) {
             Ok(0) => break,
@@ -572,7 +598,16 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             Some("prompt") | Some("call") if !inner.state.lock().unwrap().clients.contains_key(&id) => {
                 send(&tx, json!({"type":"reply","id":frame["id"],"ok":false,"error":"attach required"}));
             }
-            Some("prompt") => handle_prompt(&inner, &tx, &frame),
+            Some("prompt") => {
+                match uploads.resolve(&frame["attachments"]) {
+                    Ok(attachments) => { if handle_prompt_attachments(&inner, &tx, &frame, attachments) { uploads.clear(); } }
+                    Err(error) => { send(&tx,json!({"type":"reply","id":frame["id"],"ok":false,"error":error})); }
+                }
+            }
+            Some("call") if frame["method"].as_str().is_some_and(|method|method.starts_with("attachment_")) => {
+                let result=uploads.call(frame["method"].as_str().unwrap(), &frame["params"], inner.host.supports_images());
+                send(&tx,match result {Ok(value)=>json!({"type":"reply","id":frame["id"],"ok":true,"result":value}),Err(error)=>json!({"type":"reply","id":frame["id"],"ok":false,"error":error})});
+            }
             Some("call") => handle_call(&inner, &tx, &frame),
             _ => {}
         }
@@ -630,46 +665,57 @@ fn attach_client_with_identity(inner: &Inner, id: u64, cursor: Option<u64>, tx: 
     true
 }
 
+#[cfg(test)]
 fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
-    let Some(req_id) = frame["id"].as_u64() else { return; };
+    handle_prompt_attachments(inner,tx,frame,Vec::new());
+}
+fn handle_prompt_attachments(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value, attachments: Vec<Attachment>) -> bool {
+    let Some(req_id) = frame["id"].as_u64() else { return false; };
     let Some(text) = frame["text"].as_str() else {
-        send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"invalid prompt"})); return;
+        send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"invalid prompt"})); return false;
     };
-    if text.trim().is_empty() {
-        send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"empty prompt"})); return;
+    if attachments.iter().any(Attachment::is_image) && !inner.host.supports_images() {
+        send(tx,json!({"type":"reply","id":req_id,"ok":false,"error":"This provider does not accept image attachments"}));return false;
     }
+    if text.trim().is_empty() && attachments.is_empty() {
+        send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"empty prompt"})); return false;
+    }
+    let display_text=(!attachments.is_empty()).then(||doxa_input::display_text(text,&attachments));
     let display = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-        inner.host.public_prompt(text)
+        inner.host.public_prompt(display_text.as_deref().unwrap_or(text))
     )) {
         Ok(Ok(display)) => display,
         _ => {
             send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"prompt could not be scrubbed"}));
-            return;
+            return false;
         }
     };
+    let display=if display_text.is_some(){doxa_input::event_display(&display)}else{display};
+    let text=doxa_input::prompt_text(text,&attachments);
+    let images:Vec<_>=attachments.into_iter().filter(Attachment::is_image).collect();
     // Admit prompts in the same order as permission changes. Scrubbing runs
     // before this lock so a slow sidecar cannot block unrelated controls.
     let _control_guard = inner.controls.lock().unwrap();
     let mut state = inner.state.lock().unwrap();
     if inner.stopping.load(Ordering::Acquire) {
-        send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"daemon is stopping"})); return;
+        send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"daemon is stopping"})); return false;
     }
     // The bridge checks its policy before forwarding, then the daemon checks
     // again under the same admission lock as permission changes. A local UI
     // cannot raise access between the bridge's status read and this prompt.
     if frame["remote"] == true && matches!(state.permission_mode.as_str(), "bypassPermissions" | "dontAsk" | "full-access")
         && frame["remote_allow_unrestricted"] != true {
-        send(tx,json!({"type":"reply","id":req_id,"ok":false,"error":"remote prompt refused in unrestricted permission mode"}));return;
+        send(tx,json!({"type":"reply","id":req_id,"ok":false,"error":"remote prompt refused in unrestricted permission mode"}));return false;
     }
     if state.busy {
         if state.prompts.len() == PROMPT_QUEUE_CAPACITY {
-            send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"prompt queue full"})); return;
+            send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"prompt queue full"})); return false;
         }
         let queue_id = format!("q{}", state.next_queue_id);
         state.next_queue_id += 1;
         let position = state.prompts.len() + 1;
-        if !send(tx, json!({"type":"reply","id":req_id,"ok":true,"queued":true,"position":position,"queue_id":queue_id})) { return; }
-        state.prompts.push_back(Prompt { text: text.to_owned(), public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: None });
+        if !send(tx, json!({"type":"reply","id":req_id,"ok":true,"queued":true,"position":position,"queue_id":queue_id})) { return false; }
+        state.prompts.push_back(Prompt { display_text, images, text: text.to_owned(), public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: None });
         drop(state);
         // The reply acknowledges admission; the event also lets the origin
         // display the queued prompt alongside every other attached client.
@@ -677,12 +723,13 @@ fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         inner.publish(None, event);
     } else {
         let turn = format!("r{:011}", state.next_turn_id);
-        if !send(tx, json!({"type":"reply","id":req_id,"ok":true,"turn":turn})) { return; }
+        if !send(tx, json!({"type":"reply","id":req_id,"ok":true,"turn":turn})) { return false; }
         state.busy = true;
         state.next_turn_id += 1;
         drop(state);
-        inner.start_turn(text.to_owned(), turn, None);
+        inner.start_turn_images(text.to_owned(), turn, None, images, display_text);
     }
+    true
 }
 
 fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
@@ -960,7 +1007,7 @@ mod tests {
         {
             let mut state = daemon.inner.state.lock().unwrap();
             state.busy = false;
-            state.prompts.push_back(Prompt { text: "queued".into(), public_text: "queued".into(),
+            state.prompts.push_back(Prompt { display_text:None, images: Vec::new(), text: "queued".into(), public_text: "queued".into(),
                 queue_id: "q1".into(), peer_origin: None });
         }
         handle_call(&daemon.inner, &tx, &call);

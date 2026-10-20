@@ -619,6 +619,9 @@ mod tests {
 
 impl CodexHost {
     fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl_images(text,&[],peer_origin,emit);
+    }
+    fn prompt_impl_images(&self,text:&str,images:&[doxa_input::Attachment],peer_origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){
         if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
             emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Invalid host peer provenance"}}));
             return;
@@ -852,8 +855,8 @@ impl CodexHost {
                             active.as_mut().expect("spawn succeeded").set_permission(options.permission);
                             let outcome = if compaction {
                                 runtime.block_on(active.as_mut().expect("spawn succeeded").compact(&token, &mut handle_event))
-                            } else { runtime.block_on(active.as_mut().expect("spawn succeeded").run_turn_controlled(
-                                &provider_prompt, &token, &mut handle_event,
+                            } else { runtime.block_on(active.as_mut().expect("spawn succeeded").run_turn_controlled_images(
+                                &provider_prompt, images, &token, &mut handle_event,
                                 |frame| {
                                     let scrub = |text: &str| {
                                     self.lore.lock().unwrap().scrub(text).unwrap_or_else(|_| {
@@ -1036,6 +1039,9 @@ impl CodexHost {
 }
 
 impl Host for CodexHost {
+    fn supports_images(&self)->bool{self.transport=="app-server"}
+    fn prompt_with_images(&self,text:&str,images:&[doxa_input::Attachment],origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){self.prompt_impl_images(text,images,origin,emit);}
+
     fn has_active_work(&self) -> bool { self.active.try_lock().map_or(true, |active| active.is_some()) }
     fn peer_tools_ready(&self) -> bool {
         self.peer_tools_allowed && self.peer_tools.lock().unwrap().is_some()

@@ -10,7 +10,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-pub const MAX_CLI_FRAME: usize = 1024 * 1024;
+pub const MAX_CLI_FRAME: usize = 8 * 1024 * 1024;
 pub struct CliOptions<'a> {
     pub executable: &'a Path,
     pub cwd: &'a Path,
@@ -234,6 +234,11 @@ impl Cli {
     }
     pub fn prompt(&mut self, text: &str, session: &str) -> Result<(), Error> {
         self.send(json!({"type":"user","session_id":session,"message":{"role":"user","content":text},"parent_tool_use_id":null}))
+    }
+    pub fn prompt_with_images(&mut self,text:&str,images:&[doxa_input::Attachment],session:&str)->Result<(),Error>{
+        if images.is_empty(){return self.prompt(text,session);}
+        let mut content=vec![json!({"type":"text","text":text})];content.extend(images.iter().map(doxa_input::Attachment::claude_block));
+        self.send(json!({"type":"user","session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null}))
     }
     pub fn recv(&mut self, timeout: Duration) -> Result<Value, Error> {
         self.frames.recv_timeout(timeout).map_err(|e| match e {

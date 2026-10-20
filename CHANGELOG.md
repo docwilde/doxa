@@ -5,6 +5,19 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.63 — 2026-10-20
+
+**Prompt attachments**
+
+- Add **`App::open_attachments`** through the Attach chip, command menu and **Alt+A**. Keep **4 files / 4 MiB** on their original draft; preserve bytes through queue pressure and **Alt+Up** recovery.
+- Send image blocks through Claude stream-json and Codex app-server, including Docker. Include **64 KiB UTF-8 files** as quoted source; refuse unsupported images before submission.
+- Bound image sources to **8 MiB / 32 million pixels**, strip metadata and fit **2048×2048**. Limit each normalized image to **1 MiB**. PDF, other binary documents and remote attachment input remain unsupported.
+
+**Clipboard input**
+
+- Detect PNG clipboard content on explicit **Ctrl+V** with Linux **`xclip` / `wl-paste`**. Search fixed system and user-local helper paths; keep credential paste text-only and terminal text paste available.
+- Keep image paste on its captured pane/session draft and discard stale results. Copy retains desktop-helper and **OSC 52** paths; macOS image input uses files.
+
 ## 2.0.0-beta.62 — 2026-10-20
 
 **Session sidebar**

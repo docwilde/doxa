@@ -1,6 +1,6 @@
 [package]
 name = "doxa-tui"
-version = "2.0.0-beta.62"
+version = "2.0.0-beta.63"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -14,6 +14,7 @@ name = "doxa-plugin-worker"
 path = "src/bin/plugin_worker.rs"
 
 [dependencies]
+doxa-input = { path = "../doxa-input" }
 doxa-codegraph = { path = "../doxa-codegraph" }
 doxa-fleet = { path = "../doxa-fleet" }
 doxa-isolation = { path = "../doxa-isolation" }
