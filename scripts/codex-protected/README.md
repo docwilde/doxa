@@ -26,7 +26,14 @@ The private `doxaAuto` live update only tightens on-request approval to never.
 It cannot be mixed with environment/model/reviewer updates, change the sandbox
 or alter thread defaults. Already captured steps observe the tightening;
 pending escalation approvals and permission grants cannot authorize new access.
-Managed policy restrictions remain authoritative.
+Final permission responses are sanitized and grants recorded while holding the
+same active-turn lock that publishes the tightening, including stale Guardian
+responses. Managed policy restrictions remain authoritative.
+
+DOXA also disables native Codex agents with `agents.enabled=false` and
+`features.multi_agent_v2=false`. Protected startup checks the effective settings
+before opening a thread. DOXA peer tools still provide coordination through
+visible DOXA sessions; native hidden agent creation cannot bypass fleet limits.
 
 ## Credential-free checks
 
@@ -39,6 +46,12 @@ cargo test --locked --profile dev-small -p codex-hooks --lib doxa_required_hook_
 python3 scripts/codex-protected/verify_automatic.py --server PRIVATE_SERVER --scratch PRIVATE_SCRATCH
 python3 scripts/codex-protected/verify_code_mode.py --server PRIVATE_SERVER --scratch PRIVATE_SCRATCH
 ```
+
+List each Rust filter first and require a nonzero inventory: the current source
+has seven core guard tests and one hook guard test. The originating-turn,
+environment-keyed permission-grant and strict Guardian review baselines must
+also remain passing. These focused checks do not replace the complete upstream
+test suite.
 
 The async guard test explicitly enables upstream's feature and exercises
 scheduled/direct pre-turn, mid-turn and post-turn routes against a loopback
