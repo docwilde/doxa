@@ -32,6 +32,12 @@ class GitHub:
         return update.api(self.base + path, data, method, token=self.token)
 
 
+def whitespace_check(root):
+    # Unified patches need literal space-only context lines. Canonical apply
+    # verification covers that file; normal whitespace rules cover everything else.
+    return update.run("git", "diff", "--check", "--", ".", ":(exclude)scripts/codex-protected/precompact.patch", cwd=root)
+
+
 def not_found(github, path):
     try:
         return github.call(path)
@@ -154,6 +160,7 @@ def publish(root, directory, github):
         raise ValueError("main advanced; rebuild the update against its new base")
     require_protection(github)
     require_compiled_receipt(github, metadata)
+    update.verify_gate_receipt(directory, metadata, os.environ["EXPECTED_CANDIDATE_SHA"], os.environ["EXPECTED_PROOF_SHA"])
     branch = update.BRANCH + metadata["pin"]["version"]
     existing = github.call("/pulls?state=all&head=docwilde:" + branch + "&per_page=100")
     if existing:
@@ -167,7 +174,10 @@ def publish(root, directory, github):
     for name, digest in metadata["files"].items():
         if update.digest(update.read(root / name)) != digest:
             raise ValueError("publication bytes changed after reconstruction")
-    update.run("git", "diff", "--check", cwd=root)
+    # A unified patch must retain its literal space-only context lines. Exact
+    # git-apply and canonical-diff checks cover that one file; all other source
+    # still receives the ordinary whitespace check.
+    whitespace_check(root)
     update.run("git", "checkout", "-b", branch, cwd=root)
     update.run("git", "add", "--", *metadata["files"], cwd=root)
     title = f"release: {metadata['doxa_version']} — protected Codex {metadata['pin']['version']}"
@@ -183,6 +193,9 @@ def publish(root, directory, github):
             "The carried protection patch and credential-free compiled compaction/helper/permission gates passed. "
             "Full Linux/macOS PR CI must pass before the protected merge.\n\n"
             + "Candidate SHA256: " + update.digest(update.read(directory / "candidate.json")) + "\n\n"
+            + "Compiled proof SHA256: " + os.environ["EXPECTED_PROOF_SHA"] + "\n\n"
+            + "Upstream diff SHA256: " + metadata["upstream_review"]["diff_sha256"] + "\n\n"
+            + "Upstream changed paths: " + ", ".join(metadata["upstream_review"]["changed_paths"])[:3000] + "\n\n"
             + "Automation run: " + os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"]
             + "/actions/runs/" + os.environ["GITHUB_RUN_ID"] + "\n")
     pr = github.call("/pulls", {"title": title, "body": body, "head": branch, "base": "main"}, "POST")
@@ -203,6 +216,10 @@ def finish(root, directory, github, number, head=None, branch=None):
     marker = "Candidate SHA256: " + update.digest(update.read(directory / "candidate.json"))
     if marker not in pr.get("body", ""):
         raise ValueError("PR is not bound to this verified candidate")
+    proofs = re.findall(r"(?m)^Compiled proof SHA256: ([0-9a-f]{64})$", pr.get("body", ""))
+    if len(proofs) != 1:
+        raise ValueError("PR lacks its original compiled proof digest")
+    update.verify_gate_receipt(directory, metadata, update.digest(update.read(directory / "candidate.json")), proofs[0])
     files = github.call(f"/pulls/{number}/files?per_page=100")
     if {row["filename"] for row in files} != set(metadata["files"]):
         raise ValueError("PR file inventory changed")

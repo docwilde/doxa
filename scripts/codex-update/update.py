@@ -32,6 +32,46 @@ PIN = "scripts/codex-protected/pin.json"
 BRANCH = "automation/codex-protected-"
 MAX_FILE = 4 * 1024 * 1024
 
+# Only these current executable pins and active contract fixtures may advance.
+# Comments, historical examples, unsupported-version probes and migration paths
+# are not a substitute inventory of currently trusted provider identities.
+PYTHON_PINS = {
+    "scripts/install_codex_protected.py": {"SOURCE", "SOURCE_TAG", "PROVIDER", "PATCH_SHA256", "AGENT_PREFIX"},
+    "scripts/build-session-image.py": {"SOURCE", "PATCH"},
+    "scripts/codex-protected/verify_code_mode.py": {"AGENT_PREFIX"},
+}
+OTHER_PINS = {
+    "scripts/codex-protected/verify_automatic.py": ('.startswith("doxa_codex_rs/',),
+    "rust/doxa-engines/src/codex_compact.rs": ('pub const SUPPORTED_VERSION:', 'pub const PROTECTED_AGENT_PREFIX:'),
+    "rust/doxa-engines/src/bin/doxa-codex-protected.rs": ('const SOURCE:', 'const PATCH:'),
+    "rust/doxa-engines/tests/codex_launcher.rs": ('const PATCH:', '"source_commit":', '"code_mode_host_source_commit":'),
+    "rust/doxa-engines/src/compact_hook.rs": ('"version":',),
+    "rust/doxa-engines/src/codex_appserver.rs": ('let desktop =', 'assert_eq!(provider_version("codex_cli_rs/'),
+    "rust/doxa-engines/tests/fixtures/codex_protected_fixture.rs": ('agent=', 'CompactGate::prepare('),
+}
+
+
+def rewrite_pins(name, raw, old, new):
+    changed = []
+    for line in raw.decode().splitlines(keepends=True):
+        stripped = line.lstrip()
+        allowed = False
+        if not stripped.startswith(("#", "//", "/*", "*")):
+            assignment = re.match(r"([A-Z_]+)\s*=", stripped)
+            allowed = bool(assignment and assignment[1] in PYTHON_PINS.get(name, set()))
+            allowed |= any(marker in line for marker in OTHER_PINS.get(name, ()))
+        if allowed:
+            for key in ("source_commit", "patch_sha256", "provider", "tag", "version"):
+                if key not in old or key not in new:
+                    continue
+                before, after = old[key], new[key]
+                # A version suffix/prefix such as 0.163.01 or x0.163.0 is not
+                # the reviewed version literal. Never rename it by prefix.
+                line = re.sub(r"(?<![A-Za-z0-9_.])" + re.escape(before) + r"(?![A-Za-z0-9_.])",
+                              lambda _: after, line)
+        changed.append(line)
+    return "".join(changed).encode()
+
 
 def unique(pairs):
     value = {}
@@ -171,18 +211,32 @@ def next_version(value):
     return f"{major}.{minor}.{patch}-beta.{int(beta)+1}" if beta else f"{major}.{minor}.{int(patch)+1}"
 
 
+def sensitive_changes(status_lines):
+    sensitive = []
+    prefixes = ("codex-rs/core/src/session/", "codex-rs/core/src/tools/", "codex-rs/core/src/unified_exec/",
+                "codex-rs/hooks/", "codex-rs/app-server/src/request_processors/turn",
+                "codex-rs/app-server-protocol/src/protocol/v2/turn")
+    manifests = {"codex-rs/core/Cargo.toml", "codex-rs/hooks/Cargo.toml", "codex-rs/app-server/Cargo.toml",
+                 "codex-rs/core/src/lib.rs", "codex-rs/protocol/src/protocol.rs"}
+    for row in status_lines:
+        fields = row.split("\t")
+        for name in fields[1:]:
+            if (name in manifests or name.startswith(prefixes)
+                    or (name.startswith("codex-rs/") and name.endswith(".rs")
+                        and (fields[0].startswith(("A", "R"))
+                             or re.search(r"compact|permission|sandbox|approv|exec|turn|hook|session", name, re.I)))):
+                sensitive.append(name)
+    return sorted(set(sensitive))
+
+
 def replacement_files(root, old, new, patch, release_date=None):
     """Reconstruct the bounded publication from the trusted base, not an artifact."""
     result = {}
-    for name in run("git", "ls-files", cwd=root).splitlines():
-        # Historical docs and legacy migration paths retain their old identity.
-        if (not name.endswith((".rs", ".py")) or name == "rust/doxa-tui/src/launch.rs"
-                or name.startswith("scripts/codex-update/")):
+    for name in sorted(set(PYTHON_PINS) | set(OTHER_PINS)):
+        if not (root / name).is_file():
             continue
         raw = read(root / name)
-        revised = raw.replace(old["source_commit"].encode(), new["source_commit"].encode())
-        revised = revised.replace(old["patch_sha256"].encode(), new["patch_sha256"].encode())
-        revised = revised.replace(old["version"].encode(), new["version"].encode())
+        revised = rewrite_pins(name, raw, old, new)
         if revised != raw:
             result[name] = revised
     installer_path = "scripts/install_codex_protected.py"
@@ -273,6 +327,19 @@ def prepare(root, directory, tag=None, release_date=None):
     run("git", "clone", "--depth", "1", "--branch", tag, "https://github.com/openai/codex.git", str(source))
     if run("git", "rev-parse", "HEAD", cwd=source) != commit:
         raise ValueError("fetched upstream release moved")
+    run("git", "fetch", "--depth", "1", "origin", "tag", old["tag"], cwd=source)
+    if run("git", "rev-parse", old["tag"] + "^{commit}", cwd=source) != old["source_commit"]:
+        raise ValueError("the reviewed upstream baseline tag moved")
+    status = run("git", "diff", "--name-status", "--no-renames", old["source_commit"], commit, cwd=source).splitlines()
+    upstream_diff = subprocess.check_output(["git", "diff", "--binary", old["source_commit"], commit], cwd=source)
+    sensitive = sensitive_changes(status)
+    review = {"source_before": old["source_commit"], "source_after": commit,
+              "diff_sha256": digest(upstream_diff), "changed_paths": [row.split("\t")[-1] for row in status],
+              "sensitive_paths": sensitive}
+    (directory / "upstream-review.json").write_bytes(encode(review))
+    if sensitive:
+        raise ValueError("upstream safety entrypoints changed; semantic review required; diff_sha256="
+                         + review["diff_sha256"] + "; paths=" + ", ".join(sensitive[:12]))
     version = tag.removeprefix("rust-v")
     patch = patch_version(read(root / "scripts/codex-protected/precompact.patch"), old["version"], version)
     patch_path = directory / "carried.patch"
@@ -289,6 +356,7 @@ def prepare(root, directory, tag=None, release_date=None):
                 "old_pin": old, "pin": new, "doxa_version": doxa_version, "notes": entry,
                 "release_date": release_date, "release_id": release["id"],
                 "verification_run_id": os.environ.get("CODEX_UPDATE_ORIGINAL_RUN", os.environ.get("GITHUB_RUN_ID", "local")),
+                "upstream_review": review,
                 "files": {name: digest(raw) for name, raw in files.items()}}
     for name, raw in files.items():
         target = directory / "files" / name
@@ -320,16 +388,40 @@ def materialize(root, directory):
     return metadata
 
 
-def validate_artifact(root, directory, reconstruction):
+def verify_gate_receipt(directory, metadata, expected_candidate, expected_proof):
+    for value in (expected_candidate, expected_proof):
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("compiled gate job-output digest is missing")
+    candidate = read(directory / "candidate.json")
+    raw = read(directory / "compiled-gates.json")
+    proof = load(raw)
+    pin = metadata["pin"]
+    expected = {"schema": 1, "compiled_gates": "passed", "paid_requests": 0,
+                "candidate_sha256": digest(candidate), "pin_sha256": digest(encode(pin)),
+                "source_commit": pin["source_commit"], "patch_sha256": pin["patch_sha256"],
+                "base_sha": metadata["base_sha"], "verification_run_id": metadata["verification_run_id"],
+                "memory_max_bytes": 8*1024**3, "memory_swap_max_bytes": 0}
+    if (digest(candidate) != expected_candidate or digest(raw) != expected_proof
+            or any(proof.get(key) != value for key, value in expected.items())
+            or proof.get("artifacts", {}).get("source_commit") != pin["source_commit"]
+            or proof.get("artifacts", {}).get("patch_sha256") != pin["patch_sha256"]):
+        raise ValueError("compiled gate receipt does not bind this exact candidate/pin/job")
+    return raw
+
+
+def validate_artifact(root, directory, reconstruction, expected_candidate=None, expected_proof=None):
     """The write-token job recreates everything without running upstream code."""
     supplied = load(read(directory / "candidate.json"))
+    receipt = verify_gate_receipt(directory, supplied, expected_candidate, expected_proof)
     expected = prepare(root, reconstruction, supplied["pin"]["tag"], supplied["release_date"])
     if supplied != expected:
         raise ValueError("artifact differs from independent official-source reconstruction")
     for name in expected["files"]:
         if read(directory / "files" / name) != read(reconstruction / "files" / name):
             raise ValueError("artifact code differs from independent reconstruction")
-    return materialize(root, reconstruction)
+    result = materialize(root, reconstruction)
+    (reconstruction / "compiled-gates.json").write_bytes(receipt)
+    return result
 
 
 def main():
@@ -339,13 +431,16 @@ def main():
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--tag")
     parser.add_argument("--reconstruction", type=Path)
+    parser.add_argument("--expected-candidate-sha", default=os.environ.get("EXPECTED_CANDIDATE_SHA"))
+    parser.add_argument("--expected-proof-sha", default=os.environ.get("EXPECTED_PROOF_SHA"))
     args = parser.parse_args()
     if args.command == "identity":
         value = baseline(args.root)
     elif args.command == "prepare":
         value = prepare(args.root, args.directory.absolute(), args.tag)
     elif args.command == "validate-artifact":
-        value = validate_artifact(args.root, args.directory.absolute(), args.reconstruction.absolute())
+        value = validate_artifact(args.root, args.directory.absolute(), args.reconstruction.absolute(),
+                                  args.expected_candidate_sha, args.expected_proof_sha)
     else:
         value = materialize(args.root, args.directory.absolute())
     print(json.dumps(value, sort_keys=True))

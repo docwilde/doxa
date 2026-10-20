@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import publish
 import update
+import verify
 
 
 class UpdateTests(unittest.TestCase):
@@ -75,7 +76,7 @@ class UpdateTests(unittest.TestCase):
             expected=dict(pin={'tag':'rust-v0.164.0'},release_date='2026-10-20',files={'a.py':'safe'})
             tampered=dict(expected,files={'a.py':'evil'})
             (supplied/'candidate.json').write_bytes(update.encode(tampered))
-            with patch.object(update,'prepare',return_value=expected), patch.object(update,'materialize') as materialize:
+            with patch.object(update,'verify_gate_receipt',return_value=b'fixture gate'), patch.object(update,'prepare',return_value=expected), patch.object(update,'materialize') as materialize:
                 with self.assertRaises(ValueError):
                     update.validate_artifact(root,supplied,root/'reconstructed')
                 materialize.assert_not_called()
@@ -89,11 +90,11 @@ class UpdateTests(unittest.TestCase):
                 (place/'files').mkdir(parents=True)
                 (place/'files/a.py').write_bytes(raw)
             (incoming/'candidate.json').write_bytes(update.encode(metadata))
-            with patch.object(update,'prepare',return_value=metadata), patch.object(update,'materialize',return_value='ok') as apply:
+            with patch.object(update,'verify_gate_receipt',return_value=b'fixture gate'), patch.object(update,'prepare',return_value=metadata), patch.object(update,'materialize',return_value='ok') as apply:
                 self.assertEqual('ok',update.validate_artifact(root,incoming,recreated))
                 apply.assert_called_once_with(root,recreated)
             (incoming/'files/a.py').write_bytes(b'tampered same name')
-            with patch.object(update,'prepare',return_value=metadata), patch.object(update,'materialize') as apply:
+            with patch.object(update,'verify_gate_receipt',return_value=b'fixture gate'), patch.object(update,'prepare',return_value=metadata), patch.object(update,'materialize') as apply:
                 with self.assertRaises(ValueError):
                     update.validate_artifact(root,incoming,recreated)
                 apply.assert_not_called()
@@ -125,6 +126,86 @@ class UpdateTests(unittest.TestCase):
             self.assertNotIn('scripts/codex-update/test_update.py',revised)
             self.assertIn(b'2.0.0-beta.65',revised['Cargo.lock'])
             self.assertTrue(notes.startswith('## 2.0.0-beta.65 — 2026-10-20\n'))
+
+    def test_scoped_pin_rewrite_preserves_prefix_and_historical_markers(self):
+        old={'version':'0.163.0','tag':'rust-v0.163.0','provider':'codex-0.163.0-precompact-v1','source_commit':'a'*40,'patch_sha256':'b'*64}
+        new=dict(old,version='0.164.0',tag='rust-v0.164.0',provider='codex-0.164.0-precompact-v1')
+        raw=(b'SOURCE_TAG = "rust-v0.163.0"\n'
+             b'AGENT_PREFIX = "doxa_codex_rs/0.163.01 (prefix fixture)"\n'
+             b'HISTORICAL_RELEASE = "0.163.0"\n'
+             b'# SOURCE_TAG = "rust-v0.163.0" historical observation\n')
+        revised=update.rewrite_pins('scripts/install_codex_protected.py',raw,old,new)
+        self.assertIn(b'SOURCE_TAG = "rust-v0.164.0"',revised)
+        self.assertIn(b'doxa_codex_rs/0.163.01',revised)
+        self.assertIn(b'HISTORICAL_RELEASE = "0.163.0"',revised)
+        self.assertIn(b'# SOURCE_TAG = "rust-v0.163.0" historical observation',revised)
+        self.assertEqual(raw,update.rewrite_pins('tests/fixtures/historical_provider.py',raw,old,new))
+
+    def test_new_or_changed_upstream_safety_paths_require_semantic_review(self):
+        rows=['M\tcodex-rs/core/src/session/brand_new_inference.rs',
+              'A\tcodex-rs/new-module/src/innocent_name.rs',
+              'M\tcodex-rs/hooks/src/events/compact.rs','M\tREADME.md']
+        self.assertEqual(sorted(row.split('\t')[1] for row in rows[:3]),update.sensitive_changes(rows))
+        self.assertEqual([],update.sensitive_changes(['M\tREADME.md','M\tcodex-rs/tui/src/colors.rs']))
+
+    def test_guard_crates_inventory_and_inherited_memory_scope(self):
+        mapping=dict((name,package) for package,name in verify.GUARD_TESTS)
+        self.assertEqual('codex-hooks',mapping['doxa_required_hook_rejects_infrastructure_and_invalid_output'])
+        for name,package in mapping.items():
+            command=verify.guard_command('cargo',package,name)
+            self.assertEqual(package,command[command.index('-p')+1])
+            self.assertEqual([name],verify.checked_inventory(name+': test\n',name))
+            with self.assertRaises(ValueError):
+                verify.checked_inventory('0 tests, 0 benchmarks\n',name)
+        prefix=['systemd-run','--user','--scope','-q','-p','MemoryMax=8G','-p','MemorySwapMax=0']
+        self.assertEqual(['cargo','build'],verify.inherited_scope(prefix+['cargo','build']))
+        with self.assertRaises(ValueError):
+            verify.inherited_scope(['systemd-run','--scope','cargo','build'])
+        with self.assertRaises(ValueError):
+            verify.inherited_scope([part.replace('MemoryMax=8G','MemoryMax=12G') for part in prefix]+['cargo','build'])
+
+    def test_exact_candidate_receipt_refuses_swap_at_same_base_and_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            pin={'source_commit':'a'*40,'patch_sha256':'b'*64}
+            meta={'pin':pin,'base_sha':'c'*40,'verification_run_id':'100','files':{}}
+            raw=update.encode(meta); (root/'candidate.json').write_bytes(raw)
+            proof=dict(schema=1,compiled_gates='passed',paid_requests=0,candidate_sha256=update.digest(raw),
+                pin_sha256=update.digest(update.encode(pin)),source_commit=pin['source_commit'],patch_sha256=pin['patch_sha256'],
+                base_sha=meta['base_sha'],verification_run_id='100',memory_max_bytes=8*1024**3,memory_swap_max_bytes=0,
+                artifacts=dict(pin))
+            proven=update.encode(proof); (root/'compiled-gates.json').write_bytes(proven)
+            self.assertEqual(proven,update.verify_gate_receipt(root,meta,update.digest(raw),update.digest(proven)))
+            changed=dict(meta,pin=dict(pin,source_commit='d'*40))
+            changed_raw=update.encode(changed); (root/'candidate.json').write_bytes(changed_raw)
+            with self.assertRaises(ValueError):
+                update.verify_gate_receipt(root,changed,update.digest(changed_raw),update.digest(proven))
+
+    def test_candidate_source_change_is_detected_after_compiled_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); candidate=root/'candidate'; (candidate/'files').mkdir(parents=True)
+            pin={'source_commit':'a'*40,'patch_sha256':'b'*64}
+            metadata={'pin':pin,'base_sha':'c'*40,'verification_run_id':'100','files':{'payload.py':update.digest(b'before')}}
+            (candidate/'candidate.json').write_bytes(update.encode(metadata))
+            (root/'payload.py').write_bytes(b'before'); (candidate/'files/payload.py').write_bytes(b'before')
+            with patch.object(update,'baseline',return_value=pin):
+                verify.candidate_binding(root,candidate)
+                (root/'payload.py').write_bytes(b'changed after tests')
+                with self.assertRaises(ValueError):
+                    verify.candidate_binding(root,candidate)
+
+    def test_whitespace_exception_covers_only_the_literal_patch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); patchfile=root/'scripts/codex-protected/precompact.patch'
+            patchfile.parent.mkdir(parents=True); patchfile.write_text('baseline\n')
+            other=root/'ordinary.py'; other.write_text('baseline\n')
+            subprocess.run(['git','init','-q',str(root)],check=True)
+            subprocess.run(['git','-C',str(root),'add','.'],check=True)
+            patchfile.write_text('baseline\n \n')
+            publish.whitespace_check(root)
+            other.write_text('baseline\nbad \n')
+            with self.assertRaises(subprocess.CalledProcessError):
+                publish.whitespace_check(root)
 
 
 class FakeGitHub:

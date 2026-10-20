@@ -31,6 +31,8 @@ jobs:
       contents: read
     outputs:
       action: ${{ steps.prepare.outputs.action }}
+      candidate_sha: ${{ steps.compile.outputs.candidate_sha256 }}
+      proof_sha: ${{ steps.compile.outputs.proof_sha256 }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -56,11 +58,14 @@ jobs:
         if: steps.prepare.outputs.action == 'propose'
         run: python3 scripts/codex-update/update.py materialize --directory "$RUNNER_TEMP/codex-candidate"
       - name: Build and test the actual protected server and helper
+        id: compile
         if: steps.prepare.outputs.action == 'propose'
         run: |
           set -euo pipefail
           python3 -W error::ResourceWarning -m unittest discover -s scripts/codex-update -p 'test_*.py' -v
-          python3 scripts/codex-update/verify.py --root "$GITHUB_WORKSPACE" --cache "$RUNNER_TEMP/codex-build"
+          systemd-run --user --scope -q -p MemoryMax=8G -p MemorySwapMax=0 \
+            python3 scripts/codex-update/verify.py --root "$GITHUB_WORKSPACE" --cache "$RUNNER_TEMP/codex-build" \
+              --candidate-directory "$RUNNER_TEMP/codex-candidate" --job-output "$GITHUB_OUTPUT"
       - name: Export only bounded source proposal
         if: steps.prepare.outputs.action == 'propose'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -68,6 +73,7 @@ jobs:
           name: protected-codex-candidate
           path: |
             ${{ runner.temp }}/codex-candidate/candidate.json
+            ${{ runner.temp }}/codex-candidate/compiled-gates.json
             ${{ runner.temp }}/codex-candidate/files
           if-no-files-found: error
           retention-days: 90
@@ -93,12 +99,17 @@ jobs:
           name: protected-codex-candidate
           path: ${{ runner.temp }}/candidate-input
       - name: Reconstruct all candidate bytes independently
+        env:
+          EXPECTED_CANDIDATE_SHA: ${{ needs.verify.outputs.candidate_sha }}
+          EXPECTED_PROOF_SHA: ${{ needs.verify.outputs.proof_sha }}
         run: |
           python3 scripts/codex-update/update.py validate-artifact \
             --directory "$RUNNER_TEMP/candidate-input" --reconstruction "$RUNNER_TEMP/reconstructed"
       - name: Wait for real PR gates then merge, annotate and release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_CANDIDATE_SHA: ${{ needs.verify.outputs.candidate_sha }}
+          EXPECTED_PROOF_SHA: ${{ needs.verify.outputs.proof_sha }}
         run: python3 scripts/codex-update/publish.py publish --directory "$RUNNER_TEMP/reconstructed"
 
   blocked:
@@ -153,6 +164,7 @@ jobs:
       - name: Reconstruct from the original trusted base without executing it
         env:
           CODEX_UPDATE_ORIGINAL_RUN: ${{ inputs.resume_run_id }}
+          ORIGINAL_PR: ${{ inputs.resume_pr }}
         run: |
           python3 - <<'PY'
           import importlib.util, os, pathlib, re, subprocess, sys
@@ -165,7 +177,11 @@ jobs:
           subprocess.run(['git','merge-base','--is-ancestor',meta['base_sha'],'HEAD'],check=True)
           base = pathlib.Path(os.environ['RUNNER_TEMP']) / 'original-base'
           subprocess.run(['git','worktree','add','--detach',str(base),meta['base_sha']],check=True)
-          update.validate_artifact(base,incoming,pathlib.Path(os.environ['RUNNER_TEMP'])/'reconstructed')
+          pr = update.api('https://api.github.com/repos/docwilde/doxa/pulls/'+os.environ['ORIGINAL_PR'])
+          candidates = re.findall(r'(?m)^Candidate SHA256: ([0-9a-f]{64})$',pr.get('body',''))
+          proofs = re.findall(r'(?m)^Compiled proof SHA256: ([0-9a-f]{64})$',pr.get('body',''))
+          assert len(candidates)==len(proofs)==1
+          update.validate_artifact(base,incoming,pathlib.Path(os.environ['RUNNER_TEMP'])/'reconstructed',candidates[0],proofs[0])
           PY
       - name: Resume exact protected merge/tag/release transaction
         env:

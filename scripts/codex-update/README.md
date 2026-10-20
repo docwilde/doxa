@@ -3,8 +3,12 @@
 `codex-update.yml` follows published, non-prerelease `rust-vX.Y.Z` releases
 from `openai/codex`. Every candidate resolves its official tag to an exact
 peeled commit. It carries the existing reviewed protection patch forward;
-it cannot invent a semantic port. Patch conflicts, a changed release-stamping
-shape or a missing guard test stop the update and open/update a visible
+it cannot invent a semantic port. Upstream changes to compaction, session-turn,
+hook, approval, permission, execution surfaces or new Rust modules require
+semantic review even when the old patch applies. The upstream diff and changed
+path inventory are hashed; compatible proposals include that identity. Patch
+conflicts, a changed release-stamping shape or a missing guard test also stop
+the update and open/update a visible
 **Protected Codex update blocked** issue. The installed provider stays pinned.
 
 The workflow is disabled until the repository variable
@@ -26,7 +30,9 @@ receipt pins rotate exactly one generation for activation and rollback.
 
 The candidate job has read-only repository permissions and no provider account
 state. Its builder uses a fresh private home, one Cargo job, the installer's
-pinned Rust/V8 inputs and bounded user-systemd build scopes. It builds the real
+pinned Rust/V8 inputs and one verified **8 GiB / no-swap** user-systemd scope
+covering the entire verifier and its children. Installer build commands inherit
+that scope instead of creating sibling scopes. It builds the real
 protected server and helper, verifies their build fingerprints, runs every
 reviewed compaction test family with a nonzero test inventory, runs compiled
 automatic-compaction refusal/default-window proofs, and exercises the actual
@@ -35,14 +41,26 @@ Native engine permission/launcher/provenance tests also run. These tests use
 synthetic local Responses fixtures; they are not real account availability,
 billing or model-quality evidence and never submit a paid model request.
 
-Only bounded source files and a hashed candidate recipe cross to a fresh
+The exact recipe, source files, source commit, patch and pin hashes are checked
+before and after compiled verification. A final receipt binds those values to
+the original verifier run. Its digest and the candidate digest cross the job
+boundary as Actions outputs, independently of the source artifact. Publisher
+and recovery validate this binding; a successful job for another candidate is
+insufficient.
+
+Only bounded source files, this receipt and a hashed candidate recipe cross to a fresh
 publisher. Trusted base-branch Python independently clones the official tag,
 reapplies the same reviewed patch and recreates every proposed byte before it
 uses a write token. No artifact program or upstream build script runs there.
-The diff is limited to protection version/source/patch bindings, the manifest,
+The diff is limited to explicitly listed active pin files/literals with exact
+version boundaries, the manifest,
 all internal DOXA package versions/the matching lock entries and a short
 CHANGELOG entry. Historical docs and legacy installation paths retain their
-old identity. Publication refuses a changed base or an existing proposal.
+old identity, including prefix-colliding version examples. Ordinary whitespace
+checks exclude only `scripts/codex-protected/precompact.patch`: its literal
+space-only context lines are required by unified-diff syntax and validated by
+exact patch application and canonical regeneration. Other whitespace errors
+still block publication. Publication refuses a changed base or an existing proposal.
 
 The publisher uses only the ephemeral `GITHUB_TOKEN`, with scoped Actions,
 contents, PR and issue permissions. It never copies an owner PAT. It creates a
