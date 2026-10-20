@@ -1146,16 +1146,7 @@ impl VendorHost {
             }
             Err(error) => {
                 self.estimated_cost.lock().unwrap().complete = false;
-                emit(done(match error {
-                Error::Cancelled => "Vendor turn cancelled",
-                Error::Timeout => "Vendor turn timed out",
-                Error::MissingCredential(_) => "Vendor credential unavailable",
-                Error::MissingReasoningHistory => "DeepSeek reasoning history unavailable; start a new session or restart with --effort none",
-                Error::UnexpectedToolCall | Error::InvalidToolCall => {
-                    "Vendor offered an unavailable tool"
-                }
-                _ => "Vendor turn failed",
-                }));
+                emit(done_vendor_error(&error));
             },
         }
 
@@ -1296,6 +1287,35 @@ impl Host for VendorHost {
     }
 }
 
+/// Fixed diagnostic labels never include provider bodies, error codes, keys or URLs.
+fn done_vendor_error(error:&Error)->Value {
+    let category=match error {
+        Error::MissingCredential(_)=>"missing_credential",Error::CredentialStore=>"credential_store",
+        Error::InvalidEffort=>"invalid_effort",Error::InvalidEndpoint=>"invalid_endpoint",
+        Error::Transport=>"transport",Error::Timeout=>"timeout",Error::Cancelled=>"cancelled",
+        Error::Http{status:401|403,..}=>"http_auth",Error::Http{status:402,..}=>"http_payment",
+        Error::Http{status:429,..}=>"http_rate_limit",Error::Http{status:500..=599,..}=>"http_service",
+        Error::Http{..}=>"http_other",Error::StreamLineTooLarge=>"stream_line_limit",
+        Error::StreamBodyTooLarge=>"stream_body_limit",Error::ToolArgumentsTooLarge=>"tool_arguments_limit",
+        Error::InvalidToolArguments=>"tool_arguments_invalid",Error::TooManyToolCalls=>"tool_call_limit",
+        Error::IncompleteStream=>"incomplete_stream",Error::InvalidUtf8=>"invalid_utf8",
+        Error::InvalidToolCall|Error::UnexpectedToolCall=>"tool_unavailable",Error::ToolLimit=>"tool_step_limit",
+        Error::OutputLimit=>"output_token_limit",Error::RequestTooLarge=>"request_bytes_limit",
+        Error::ToolFailed=>"tool_failed",Error::InvalidToolDefinitions=>"tool_definitions_invalid",
+        Error::HistoryTooLarge=>"history_limit",Error::MissingReasoningHistory=>"reasoning_history_missing",
+        Error::ToolResultTooLarge=>"tool_result_limit",Error::UsageOverflow=>"usage_overflow",
+        Error::AdmissionDenied=>"admission_denied",
+    };
+    let message=match error {
+        Error::Cancelled=>"Vendor turn cancelled",Error::Timeout=>"Vendor turn timed out",
+        Error::MissingCredential(_)=>"Vendor credential unavailable",
+        Error::MissingReasoningHistory=>"DeepSeek reasoning history unavailable; start a new session or restart with --effort none",
+        Error::UnexpectedToolCall|Error::InvalidToolCall=>"Vendor offered an unavailable tool",
+        _=>"Vendor turn failed",
+    };
+    let mut event=done(&format!("{message} ({category})"));event["data"]["failure_category"]=json!(category);event
+}
+
 fn done(message: &str) -> Value {
     json!({"type":"turn_done","data":{"is_error":true,"error":message,
         "cost_usd":null,"session_cost_usd":null}})
@@ -1304,6 +1324,17 @@ fn done(message: &str) -> Value {
 #[cfg(test)]
 mod stream_tests {
     use super::*;
+    #[test]
+    fn vendor_error_cards_keep_closed_categories_without_provider_error_text(){
+        for (error,category) in [
+            (Error::Http{status:401,code:Some("secret-key https://private.example invalid-args".into())},"http_auth"),
+            (Error::OutputLimit,"output_token_limit"),(Error::RequestTooLarge,"request_bytes_limit"),
+            (Error::ToolLimit,"tool_step_limit"),(Error::IncompleteStream,"incomplete_stream")]{
+            let event=done_vendor_error(&error);assert_eq!(event["data"]["failure_category"],category);
+            let encoded=event.to_string();assert!(!encoded.contains("secret-key"));assert!(!encoded.contains("private.example"));
+            assert_eq!(event["data"]["cost_usd"],Value::Null);assert_eq!(event["data"]["is_error"],true);
+        }
+    }
     #[test]
     fn glm_reporting_defaults_and_monitor_do_not_select_plan_inference() {
         use doxa_vendors::glm_billing::Profile;
