@@ -28,8 +28,9 @@ impl IsolationHost {
 mod tests{
     use super::*;
     use std::{fs,sync::atomic::{AtomicUsize,Ordering}};
-    struct Checkpoint{path:PathBuf,stops:AtomicUsize}
+    struct Checkpoint{path:PathBuf,stops:AtomicUsize,audit:Mutex<Option<Value>>}
     impl Host for Checkpoint{
+        fn take_native_tool_audit(&self)->Option<Value>{self.audit.lock().ok()?.take()}
         fn prompt(&self,_:&str,_:&mut dyn FnMut(Value)){}
         fn call(&self,method:&str,_:&Value)->Result<Value,String>{assert_eq!(method,"stop");self.stops.fetch_add(1,Ordering::SeqCst);Ok(json!({}))}
         fn transcript_snapshot(&self)->io::Result<Option<(PathBuf,u64)>>{Ok(Some((self.path.clone(),fs::metadata(&self.path)?.len())))}
@@ -39,7 +40,8 @@ mod tests{
         let dir=tempfile::tempdir().unwrap();let root=fs::canonicalize(dir.path()).unwrap();let source=root.join("source");fs::create_dir(&source).unwrap();
         let path=root.join("transcript.jsonl");fs::write(&path,"old\n").unwrap();
         let runtime=Arc::new(Mutex::new(Runtime::prepare(&root.join("home"),"session",&source,Some(Profile::Native),false,None).unwrap()));
-        let checkpoint=Arc::new(Checkpoint{path:path.clone(),stops:AtomicUsize::new(0)});let host=IsolationHost::new(checkpoint.clone(),runtime.clone(),json!({"engine":"codex"}));
+        let checkpoint=Arc::new(Checkpoint{path:path.clone(),stops:AtomicUsize::new(0),audit:Mutex::new(Some(json!({"version":1,"complete":true,"actions":[]})))});let host=IsolationHost::new(checkpoint.clone(),runtime.clone(),json!({"engine":"codex"}));
+        assert_eq!(host.take_native_tool_audit().unwrap()["complete"],true);assert!(host.take_native_tool_audit().is_none(),"isolation forwards native evidence without duplicating it");
         let stale=host.call("isolation_migration_plan",&json!({})).unwrap();fs::write(&path,"new\n").unwrap();
         assert!(host.call("isolation_migration_stop",&json!({"confirmed":true,"expected":stale})).is_err());
         let current=host.call("isolation_migration_plan",&json!({})).unwrap();
@@ -50,6 +52,7 @@ mod tests{
     }
 }
 impl Host for IsolationHost {
+    fn take_native_tool_audit(&self)->Option<Value>{self.inner.take_native_tool_audit()}
     fn supports_images(&self)->bool{self.inner.supports_images()}
     fn prompt_with_images(&self,text:&str,images:&[doxa_input::Attachment],origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){
         self.prompt_with_origin_images(text,origin,images,emit);
