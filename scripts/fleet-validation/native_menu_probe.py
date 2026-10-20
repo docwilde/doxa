@@ -39,7 +39,7 @@ def probe(binary, env, repo, root, state):
     config=state/'menu-router.json';config.write_text(json.dumps(value));config.chmod(0o600)
     down=b'\x1b[B';left=b'\x1b[D';enter=b'\r';erase=b'\x7f'
     script=[
-        (b'\x10', 'palette'),(b'fleet start', 'palette-query'),(enter, 'open-menu'),
+        (b'\x1b', 'close-onboarding'),(b'\x10', 'palette'),(b'fleet start', 'palette-query'),(enter, 'open-menu'),
         (enter+b'Disposable menu review only; no model calls'+enter, 'task'),
         (down*2+left, 'worker-router'),(down+enter+b'glm-small'+enter,'worker-pin'),
         (down+enter+erase+b'1'+enter,'worker-count'),(down+left*2,'coordinator-router'),
@@ -59,6 +59,10 @@ def probe(binary, env, repo, root, state):
         text=terminal.get_text_format(Vte.Format.TEXT)
         if active['index']<len(script):
             data,label=script[active['index']]
+            expected='Commands' if label in ('palette-query','open-menu') else ('New fleet' if label not in ('close-onboarding','palette') else None)
+            if expected and expected not in text:
+                (output/'terminal.txt').write_text(text)
+                failure.append('Unexpected UI before '+label+'; no text entered');Gtk.main_quit();return False
             terminal.feed_child(data);steps.append(label);active['index']+=1;active['sent_at']=now;return True
         if not active['review']:
             (output/'terminal.txt').write_text(text)
