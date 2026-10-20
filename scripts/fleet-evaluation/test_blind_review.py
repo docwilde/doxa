@@ -1,4 +1,7 @@
 import copy
+import os
+from pathlib import Path
+import tempfile
 import unittest
 import blind_review as review
 
@@ -44,6 +47,25 @@ class BlindReviewTests(unittest.TestCase):
         second["split"] = "holdout"
         with self.assertRaises(ValueError):
             review.validate_source(rows + [second])
+
+    def test_duplicate_json_cannot_silently_replace_provenance(self):
+        with self.assertRaises(ValueError):
+            review.rows(b'{"origin":"synthetic","origin":"real"}\n')
+
+    def test_private_input_refuses_loose_permissions_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "source.jsonl"
+            file.write_text('{}\n')
+            file.chmod(0o600)
+            self.assertEqual(review.read_private(file), b'{}\n')
+            file.chmod(0o644)
+            with self.assertRaises(ValueError):
+                review.read_private(file)
+            file.chmod(0o600)
+            link = Path(directory) / "link.jsonl"
+            os.symlink(file, link)
+            with self.assertRaises(OSError):
+                review.read_private(link)
 
 
 if __name__ == "__main__":

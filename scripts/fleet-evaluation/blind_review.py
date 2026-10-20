@@ -27,7 +27,14 @@ def read_private(path):
 
 
 def rows(raw):
-    values = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON field")
+            result[key] = value
+        return result
+    values = [json.loads(line, object_pairs_hook=unique_object) for line in raw.decode("utf-8").splitlines() if line.strip()]
     if not 1 <= len(values) <= 10000:
         raise ValueError("need 1–10000 rows")
     return values
@@ -119,6 +126,8 @@ def main():
         raw = read_private(args.source)
         values = validate_source(rows(raw))
         directory = args.new_directory
+        if not directory.is_absolute():
+            raise ValueError("use an absolute private output directory")
         directory.mkdir(mode=0o700)
         private_directory(directory)
         write_new(directory / "sealed-source.jsonl", values)
