@@ -418,8 +418,12 @@ mod tests {
     }
     #[test]
     fn executable_view_reads_fresh_proc_exe_with_openat2_denied() {
+        // The debug test executable is larger than a shipped worker. Hashing
+        // it can exceed three seconds on a CPU-throttled CI runner; this is a
+        // fixture allowance, independent of production authority deadlines.
+        let hash_allowance = std::time::Duration::from_secs(30);
         let expected=hash_file(&File::open("/proc/self/exe").unwrap(),MAX_ARTIFACT,
-            Instant::now()+std::time::Duration::from_secs(3)).unwrap();
+            Instant::now()+hash_allowance).unwrap();
         let directory=tempfile::tempdir().unwrap();let new_file=directory.path().join("must-not-exist");
         let name=CString::new(new_file.as_os_str().as_bytes()).unwrap();
         let child=unsafe{libc::fork()};assert!(child>=0);
@@ -428,7 +432,7 @@ mod tests {
                 ||readonly_filter(false).is_err(){unsafe{libc::_exit(2);}}
             let fd=unsafe{libc::openat(libc::AT_FDCWD,name.as_ptr(),libc::O_RDONLY|libc::O_CREAT,0o600)};
             let mut ok=fd<0&&io::Error::last_os_error().raw_os_error()==Some(libc::EPERM);
-            let fact=perform(Prepared::Executable{init:unsafe{libc::getpid()}},Instant::now()+std::time::Duration::from_secs(3));
+            let fact=perform(Prepared::Executable{init:unsafe{libc::getpid()}},Instant::now()+hash_allowance);
             ok&=fact.is_ok_and(|fact|fact.regular()&&fact.sha256.as_ref()==Some(&expected));
             unsafe{libc::_exit(if ok{0}else{3});}
         }

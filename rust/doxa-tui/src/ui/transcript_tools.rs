@@ -15,6 +15,7 @@ use super::tool_cards::ToolCard;
 
 pub(super) const SHELL_PREFIX: &str = "\u{001e}DOXA_LOCAL_SHELL:";
 pub(super) const REASONING_PREFIX: &str = "\u{001e}DOXA_REASONING:";
+pub(super) const ERROR_PREFIX: &str = "\u{001e}DOXA_ERROR:";
 pub(crate) const TOOL_ID_PREFIX: &str = "\u{001f}DOXA_TOOL_ID:";
 pub(crate) const RESTORED_TOOL_PREFIX: &str = "\u{001e}DOXA_RESTORED_TOOL:";
 
@@ -142,6 +143,7 @@ fn mermaid_sources_with_work(source: &str) -> (Vec<String>, usize) {
 
 enum Block<'a> {
     Prose(&'a str),
+    Error(String),
     Message(super::transcript_messages::Message),
     Image { source: String, alt: String },
     Mermaid { raw: String, key: String },
@@ -480,6 +482,16 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                     }
                 }
             }
+            Block::Error(text) => {
+                flush_prose(&mut prose, lines, links, speaker);
+                lines.push(Line::styled(" ! Error", Style::default().fg(theme::ERROR).add_modifier(Modifier::BOLD)));
+                for mut line in markdown::render(&text, width.saturating_sub(2).max(1)) {
+                    line.spans.insert(0, ratatui::text::Span::raw("│ "));
+                    for span in &mut line.spans { span.style = Style::default().fg(theme::ERROR); }
+                    lines.push(line);
+                }
+                lines.push(Line::default());
+            }
             Block::Shell(result) => {
                 flush_prose(&mut prose, lines, links, speaker);
                 let index = section_index.expect("shell blocks have an identity");
@@ -614,6 +626,10 @@ pub(super) fn render_with_media_style(
             tool_index = None;
             if let Ok(result) = serde_json::from_str(paragraph.strip_prefix(SHELL_PREFIX).unwrap()) { blocks.push(Block::Shell(result)); }
             else { blocks.push(Block::Prose("Local shell output unavailable")); }
+        } else if fence.is_none() && paragraph.starts_with(ERROR_PREFIX) {
+            if let Ok(text) = serde_json::from_str::<String>(paragraph.strip_prefix(ERROR_PREFIX).unwrap()) {
+                blocks.push(Block::Error(text));
+            } else { blocks.push(Block::Error("Error details unavailable".into())); }
         } else if fence.is_none() && paragraph.starts_with(REASONING_PREFIX) {
             blocks.push(reasoning_block(paragraph).unwrap_or(Block::Prose("Reasoning unavailable")));
         } else if fence.is_none() && paragraph.starts_with(super::transcript_messages::PREFIX) {

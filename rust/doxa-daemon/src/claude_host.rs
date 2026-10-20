@@ -35,6 +35,7 @@ struct Shared {
     store: TranscriptStore,
     enabled: bool,
     failed: AtomicBool,
+    failure_reason: Mutex<Option<&'static str>>,
     active: AtomicBool,
     closing: AtomicBool,
     cancelled: AtomicBool,
@@ -53,20 +54,28 @@ struct Shared {
     routed: bool,
 }
 impl Shared {
+    fn fail(&self, reason: &'static str) {
+        let mut first = self.failure_reason.lock().unwrap_or_else(|error| error.into_inner());
+        first.get_or_insert(reason);
+        self.failed.store(true, Ordering::Release);
+    }
+    fn failure_reason(&self) -> Option<&'static str> {
+        *self.failure_reason.lock().unwrap_or_else(|error| error.into_inner())
+    }
     fn scrub(&self, text: &str) -> Result<String, String> {
         self.lore
             .lock()
             .map_err(|_| "LORE scrub unavailable")?
             .scrub(text)
             .map_err(|_| {
-                self.failed.store(true, Ordering::Release);
+                self.fail("LORE scrub failed; Claude data withheld");
                 "LORE scrub failed; Claude data withheld".into()
             })
     }
     fn clean(&self, value: &Value) -> Result<Value, String> {
         let mut value = value.clone();
         doxa_vendors::credentials::redact_json(&mut value).map_err(|_| {
-            self.failed.store(true, Ordering::Release);
+            self.fail("Claude structured credential scrub failed; data withheld");
             "Claude structured credential scrub failed; data withheld".to_owned()
         })?;
         self.clean_scrubbed(&value)
@@ -113,7 +122,7 @@ impl Shared {
             self.store.try_append_with_peer_origin(record, "claude", &origin.to_value(), &mut scrub)
         } else { self.store.try_append(record, "claude", &mut scrub) };
         result.map_err(|_| {
-                self.failed.store(true, Ordering::Release);
+                self.fail("Claude transcript write failed");
                 "Claude transcript write failed".into()
             })
     }
@@ -125,7 +134,7 @@ impl Shared {
                 self.scrub(s).map_err(io::Error::other)
             })
             .map_err(|_| {
-                self.failed.store(true, Ordering::Release);
+                self.fail("Claude checkpoint write failed");
                 "Claude checkpoint write failed".into()
             })
     }
@@ -418,6 +427,7 @@ impl ClaudeHost {
             store,
             enabled,
             failed: AtomicBool::new(false),
+            failure_reason: Mutex::new(None),
             active: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
@@ -501,7 +511,7 @@ impl ClaudeHost {
             .send(Command::Rpc(method.into(), params, tx))
             .map_err(|_| "Claude CLI closed")?;
         rx.recv_timeout(RPC_TIMEOUT)
-            .map_err(|_| "Claude control timed out")?
+            .map_err(|_| control_timeout(method, &self.shared))?
     }
     pub fn shutdown(&self) -> bool {
         self.shared.closing.store(true, Ordering::Release);
@@ -532,7 +542,7 @@ impl ClaudeHost {
         let text = match doxa_vendors::credentials::redact(text) {
             Ok(text) => text,
             Err(_) => {
-                self.shared.failed.store(true, Ordering::Release);
+                self.shared.fail("Claude credential scrub failed; prompt withheld");
                 emit(done("Claude credential scrub failed; prompt withheld"));
                 return;
             }
@@ -542,10 +552,13 @@ impl ClaudeHost {
         let (ack, answer) = mpsc::channel();
         {
             let _guard = self.admission.lock().unwrap();
-            if self.shared.closing.load(Ordering::Acquire)
-                || self.shared.failed.load(Ordering::Acquire)
-            {
-                emit(done("Claude session unavailable"));
+            if self.shared.closing.load(Ordering::Acquire) {
+                emit(done("Claude session is closing"));
+                return;
+            }
+            if self.shared.failed.load(Ordering::Acquire) {
+                let reason = self.shared.failure_reason().unwrap_or("Claude host failed; recovery requires a verified session restart");
+                emit(done(&format!("Claude session unavailable: {reason}")));
                 return;
             }
             if self.shared.active.swap(true, Ordering::AcqRel) {
@@ -741,6 +754,25 @@ struct Operation {
     reply: Reply,
     deadline: Instant,
     verify: bool,
+}
+impl Operation {
+    fn expire(self, shared: &Shared) {
+        let _ = self.reply.send(Err(control_timeout(&self.method, shared).into()));
+    }
+}
+fn control_timeout(method: &str, shared: &Shared) -> &'static str {
+    // A missing telemetry reply says nothing about the next turn's safety.
+    // Apply the mutation guard at both the broker and caller deadline, before
+    // the caller releases admission and can submit a follow-up prompt.
+    match method {
+        "set_model" | "set_effort" | "set_permission_mode" | "isolation_transport_reset" => {
+            let reason = "Claude control timed out; effective state is unknown";
+            shared.fail(reason);
+            reason
+        }
+        "context_detail" | "list_models" => "Claude telemetry query timed out",
+        _ => "Claude control timed out",
+    }
 }
 enum PendingInput {
     Tool(Value),
@@ -1343,7 +1375,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                             cli = fresh;
                             Ok(json!({"reset":true}))
                         })();
-                        if result.is_err() { shared.failed.store(true, Ordering::Release); }
+                        if result.is_err() { shared.fail("Claude isolation transport restart failed"); }
                         let _ = reply.send(result);
                         continue;
                     }
@@ -1440,10 +1472,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
             .collect();
         for id in expired {
             if let Some(op) = operations.remove(&id) {
-                let _ = op.reply.send(Err(
-                    "Claude control timed out; effective state is unknown".into()
-                ));
-                shared.failed.store(true, Ordering::Release);
+                op.expire(&shared);
             }
         }
         if turn_deadline.is_some_and(|deadline| now >= deadline) {
@@ -1451,8 +1480,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
             send_event(
                 &events,
                 done(
-                    provider_failure
-                        .as_deref()
+                    shared.failure_reason().or(provider_failure.as_deref())
                         .unwrap_or("Claude cancellation deadline expired; provider terminated"),
                 ),
             );
@@ -1466,8 +1494,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                 send_event(
                     &events,
                     done(
-                        provider_failure
-                            .as_deref()
+                        shared.failure_reason().or(provider_failure.as_deref())
                             .unwrap_or("Claude CLI stream closed"),
                     ),
                 );
@@ -1496,7 +1523,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                 frame["type"].as_str(),
                 Some("control_request" | "control_response" | "rate_limit_event")
             ) {
-                shared.failed.store(true, Ordering::Release);
+                shared.fail("Resumed Claude provider identity was not confirmed; output withheld");
                 shared.active.store(false, Ordering::Release);
                 send_event(
                     &events,
@@ -1646,7 +1673,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                             if resumed {
                                 Ok(json!({"mode":mode}))
                             } else {
-                                shared.failed.store(true, Ordering::Release);
+                                shared.fail("Claude mode changed but pending permission requests could not be resumed");
                                 Err("Claude mode changed but pending permission requests could not be resumed".into())
                             }
                         }
@@ -1730,7 +1757,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                         if request["callback_id"] == "doxa_pre_compact"
                             && durable.flush(&shared, false).is_err()
                         {
-                            shared.failed.store(true, Ordering::Release);
+                            shared.fail("Canonical Claude durable transcript framing failed");
                             let _ = cli.respond(&id, Ok(json!({"decision":"block","reason":"Canonical durable transcript framing failed"})));
                             continue;
                         }
@@ -1820,7 +1847,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                             streams.len() - 1
                         }
                         None => {
-                            shared.failed.store(true, Ordering::Release);
+                            shared.fail("Claude stream channel bound exceeded; data withheld");
                             let _ = cli.control(json!({"subtype":"interrupt"}));
                             continue;
                         }
@@ -1833,7 +1860,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                         Ok(text) if text.is_empty() => true,
                         Ok(text) => !overflow && send_event(&events, stream.event(text)),
                         Err(_) => {
-                            shared.failed.store(true, Ordering::Release);
+                            shared.fail("Claude stream scrub framing failed; data withheld");
                             false
                         }
                     };
@@ -1853,7 +1880,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                             .any(|b| matches!(b["type"].as_str(), Some("tool_use" | "tool_result")))
                     });
                 if has_tools && !flush_streams(&mut streams, &shared, &events, true) {
-                    shared.failed.store(true, Ordering::Release);
+                    shared.fail("Claude stream could not be flushed safely before tool output");
                     let _ = cli.control(json!({"subtype":"interrupt"}));
                     turn_deadline = Some(Instant::now() + Duration::from_secs(5));
                 }
@@ -1872,7 +1899,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                             !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking"))
                         });
                     }
-                    if durable.stage(json!({"type":kind,"message":message,"parent_tool_use_id":frame["parent_tool_use_id"],"sessionId":shared.session,"cwd":shared.cwd,"timestamp":crate::iso_now()}), &shared).is_err(){shared.failed.store(true, Ordering::Release); let _=cli.control(json!({"subtype":"interrupt"})); turn_deadline=Some(Instant::now()+Duration::from_secs(5));}
+                    if durable.stage(json!({"type":kind,"message":message,"parent_tool_use_id":frame["parent_tool_use_id"],"sessionId":shared.session,"cwd":shared.cwd,"timestamp":crate::iso_now()}), &shared).is_err(){shared.fail("Claude durable transcript could not be staged safely"); let _=cli.control(json!({"subtype":"interrupt"})); turn_deadline=Some(Instant::now()+Duration::from_secs(5));}
                     for block in frame["message"]["content"].as_array().into_iter().flatten() {
                         let event = match block["type"].as_str() {
                             Some("tool_use") => Some(
@@ -1893,12 +1920,12 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
             }
             Some("result") => {
                 if durable.flush(&shared, true).is_err() {
-                    shared.failed.store(true, Ordering::Release);
+                    shared.fail("Claude durable transcript could not be finalized safely");
                 }
                 if !flush_streams(&mut streams, &shared, &events, false) {
-                    shared.failed.store(true, Ordering::Release);
+                    shared.fail("Claude stream could not be finalized safely");
                 }
-                let error = frame["is_error"] == true
+                let mut error = frame["is_error"] == true
                     || provider_failure.is_some()
                     || overflow
                     || shared.failed.load(Ordering::Acquire);
@@ -1912,16 +1939,16 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                     );
                 }
                 if !error && shared.checkpoint(false).is_err() {
-                    shared.failed.store(true, Ordering::Release);
+                    error = true;
                 }
                 let usage = &frame["usage"];
-                let reason = if overflow {
+                let reason = if let Some(reason) = shared.failure_reason() {
+                    Some(reason)
+                } else if overflow {
                     Some("Claude event stream overflowed; turn cancelled")
                 } else if error {
                     Some(
-                        provider_failure
-                            .as_deref()
-                            .unwrap_or("Claude turn failed or was interrupted"),
+                        provider_failure.as_deref().unwrap_or("Claude turn failed or was interrupted"),
                     )
                 } else {
                     None
@@ -2192,6 +2219,7 @@ for line in sys.stdin:
             store,
             enabled: false,
             failed: AtomicBool::new(false),
+            failure_reason: Mutex::new(None),
             active: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
@@ -2245,6 +2273,65 @@ for line in sys.stdin:
             admission: Mutex::new(()),
         });
         (dir, host)
+    }
+    #[test]
+    fn expired_telemetry_after_peer_turn_does_not_block_the_next_prompt() {
+        let body = format!(r#"if row['type']=='user':
+  emit({{'type':'result','session_id':'{SESSION}','is_error':False}})
+"#);
+        for method in ["context_detail", "list_models", "interrupt"] {
+            let (_dir, host) = fixture(&body);
+            let mut events = Vec::new();
+            host.prompt("completed peer exchange", &mut |event| events.push(event));
+            assert_eq!(events.last().unwrap()["data"]["is_error"], false);
+            let (reply, response) = mpsc::channel();
+            Operation { method: method.into(), params: json!({}), reply,
+                deadline: Instant::now(), verify: false }.expire(&host.shared);
+            assert!(response.recv().unwrap().is_err());
+            assert!(!host.shared.failed.load(Ordering::Acquire), "{method}");
+            events.clear();
+            host.prompt("next user prompt", &mut |event| events.push(event));
+            assert!(events.iter().any(|event| event["type"] == "turn_started"), "{events:?}");
+            assert_eq!(events.last().unwrap()["data"]["is_error"], false);
+            host.shutdown();
+        }
+    }
+    #[test]
+    fn unacknowledged_setting_changes_still_block_followup_with_the_original_reason() {
+        for method in ["set_model", "set_effort", "set_permission_mode", "isolation_transport_reset"] {
+            let (_dir, host) = fixture("pass");
+            let (reply, response) = mpsc::channel();
+            Operation { method: method.into(), params: json!({}), reply,
+                deadline: Instant::now(), verify: false }.expire(&host.shared);
+            let reason = response.recv().unwrap().unwrap_err();
+            assert!(reason.contains("effective state is unknown"));
+            host.shared.fail("later cleanup failure must not hide the cause");
+            let mut events = Vec::new();
+            host.prompt("must not replay", &mut |event| events.push(event));
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["data"]["is_error"], true);
+            assert_eq!(events[0]["data"]["error"], format!("Claude session unavailable: {reason}"));
+            host.shutdown();
+        }
+    }
+    #[test]
+    fn terminal_checkpoint_failure_is_reported_on_the_completed_turn_and_followup() {
+        let body = format!(r#"if row['type']=='user':
+  path=os.path.join(os.path.dirname(__file__),'project','{SESSION}.codex.json')
+  os.unlink(path);os.mkdir(path)
+  emit({{'type':'result','session_id':'{SESSION}','is_error':False}})
+"#);
+        let (_dir, host) = fixture(&body);
+        let mut events = Vec::new();
+        host.prompt("finish the peer turn", &mut |event| events.push(event));
+        let done = events.last().unwrap();
+        assert_eq!(done["data"]["is_error"], true);
+        assert_eq!(done["data"]["error"], "Claude checkpoint write failed");
+        events.clear();
+        host.prompt("next user prompt", &mut |event| events.push(event));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["data"]["error"], "Claude session unavailable: Claude checkpoint write failed");
+        host.shutdown();
     }
     #[test]
     fn isolation_restart_retires_old_transport_and_preserves_selection_and_session() {
