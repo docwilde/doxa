@@ -134,7 +134,7 @@ def scenario(binary, scratch, mode, *, default_window=False):
             ['model_context_window=100000', 'model_auto_compact_token_limit=100'])
         config = '\n'.join(['model="gpt-5.5"', 'model_provider="doxa_fixture"',
             *compact_config,
-            'model_post_turn_compact_threshold_percent=0', '[features]', 'codex_hooks=true', 'token_budget=false', 'async_compaction=false',
+            'model_post_turn_compact_threshold_percent=0', '[agents]', 'enabled=false', '[features]', 'codex_hooks=true', 'token_budget=false', 'async_compaction=false', 'multi_agent_v2=false',
             '[model_providers.doxa_fixture]', 'name="DOXA loopback fixture"',
             f'base_url="http://127.0.0.1:{server.server_port}/v1"', 'wire_api="responses"',
             'requires_openai_auth=false', 'request_max_retries=0', 'stream_max_retries=0', 'supports_websockets=false'])

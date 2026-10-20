@@ -424,7 +424,7 @@ def configure(root, peer):
     home.mkdir(mode=0o700)
     config = '\n'.join(['model="gpt-6-sol"', 'model_provider="doxa_fixture"',
         'model_auto_compact_token_limit=100000000', 'model_post_turn_compact_threshold_percent=0',
-        '[features]', 'codex_hooks=true', 'token_budget=false', 'async_compaction=false', 'code_mode_only=true',
+        '[agents]', 'enabled=false', '[features]', 'codex_hooks=true', 'token_budget=false', 'async_compaction=false', 'multi_agent_v2=false', 'code_mode_only=true',
         '[model_providers.doxa_fixture]', 'name="Owned code mode proof"',
         f'base_url="http://127.0.0.1:{peer.server.server_port}/v1"', 'wire_api="responses"',
         'requires_openai_auth=false', 'request_max_retries=0', 'stream_max_retries=0', 'supports_websockets=false'])
@@ -469,6 +469,8 @@ def provider_turn(server, root, peer, token, launcher=None):
         config = rpc.request("config/read", {"cwd": str(root / "workspace"), "includeLayers": False})
         assert config["config"]["features"]["token_budget"] is False
         assert config["config"]["features"]["async_compaction"] is False
+        assert config["config"]["agents"]["enabled"] is False
+        assert config["config"]["features"]["multi_agent_v2"] is False
         assert config["config"]["features"]["code_mode_only"] is True
         inventory = rpc.request("hooks/list", {"cwds": [str(root / "workspace")]})
         hooks = [hook for row in inventory.get("data", []) for hook in row.get("hooks", [])
@@ -580,13 +582,15 @@ def scenario(server, scratch, daemon=None, launcher=None, lore=None, missing_hel
                 "first_request_token_absent": peer.first_request_token_absent,
                 "matching_tool_output_seen": peer.output_seen, "helper_read_verified": peer.read_verified,
                 "tool_output_error_tags": peer.output_error_tags, "fixture_unchanged": fixture.read_bytes() == before})
+            assert not set(peer.tool_names).intersection({"spawn_agent", "send_message", "list_agents", "wait_agent", "followup_task", "interrupt_agent"}), "native agent tools bypass visible session control"
             passed = (not peer.failed and peer.requests == 2 and peer.first_request_token_absent
                       and peer.code_mode_only and peer.read_verified
                       and report.get("command_read_verified") and report.get("final_token_matches")
                       and report.get("turn_status") == "completed" and report["fixture_unchanged"])
             if missing_helper:
                 report["transport"] = "compiled-provider-missing-helper"
-                passed = (not peer.failed and peer.requests == 2 and peer.first_request_token_absent
+                assert not set(peer.tool_names).intersection({"spawn_agent", "send_message", "list_agents", "wait_agent", "followup_task", "interrupt_agent"}), "native agent tools bypass visible session control"
+            passed = (not peer.failed and peer.requests == 2 and peer.first_request_token_absent
                           and peer.code_mode_only and peer.output_seen and not peer.read_verified
                           and not report.get("command_read_verified") and not report.get("final_token_matches")
                           and "host" in peer.output_error_tags and report["fixture_unchanged"])
