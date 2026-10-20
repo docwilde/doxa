@@ -39,14 +39,20 @@ class Client:
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--state',type=Path,required=True)
-    p.add_argument('--binary',type=Path,default=Path.home()/'.local/bin/doxa');p.add_argument('--prior-reserved-usd',type=float,default=0.0);p.add_argument('--case-id',default='fleet-pilot-01');args=p.parse_args()
-    if not 0<=args.prior_reserved_usd<.20:raise RuntimeError('Prior holds must leave a positive review allocation')
-    run_budget=.90-args.prior_reserved_usd;review_budget=.20-args.prior_reserved_usd
+    p.add_argument('--binary',type=Path,default=Path.home()/'.local/bin/doxa');p.add_argument('--prior-held-usd','--prior-reserved-usd',dest='prior_reserved_usd',type=float,default=0.0);p.add_argument('--case-id',default='fleet-pilot-01');p.add_argument('--review-budget',type=float,default=None);p.add_argument('--context-tokens',type=int,default=32768);p.add_argument('--output-tokens',type=int,default=4096);p.add_argument('--input-rate',type=int,default=300000);p.add_argument('--output-rate',type=int,default=1200000);args=p.parse_args()
+    if not 0<=args.prior_reserved_usd<.90:raise RuntimeError('Prior holds must leave a positive allocation')
+    run_budget=.90-args.prior_reserved_usd;review_budget=args.review_budget if args.review_budget is not None else .20-args.prior_reserved_usd
+    if not 0<review_budget<run_budget:raise RuntimeError('Review allocation must leave a positive worker allocation')
+    if args.input_rate<150000 or args.output_rate<500000:raise RuntimeError('Rates cannot be below the verified exact-model registry')
+    request_bytes=args.context_tokens-args.output_tokens
+    worker_hold_micros=(request_bytes*25*args.input_rate+args.output_tokens*args.output_rate+999999)//1000000
+    slot_micros=int(round((run_budget-review_budget)*1000000))//3
+    if worker_hold_micros>slot_micros:raise RuntimeError('Worst-case worker request hold exceeds its disjoint slot allocation')
     state=args.state.resolve();state.mkdir(mode=0o700,parents=True,exist_ok=False)
     if len(str(state))>42:raise RuntimeError('Use a short real-disk state path')
     home,root,repo=(state/n for n in ('h','f','repo'))
     for path in (home,root,repo):path.mkdir(mode=0o700)
-    private_write(repo/'README.md','# Disposable live fleet pilot\nCase fleet-pilot-01. The fixed public evidence URL is https://example.com/.\nNo implementation changes are requested.\n')
+    private_write(repo/'README.md','# Disposable live fleet pilot\nCase '+args.case_id+'. The fixed public evidence URL is https://example.com/.\nNo implementation changes are requested.\n')
     subprocess.run(['git','init','-q',str(repo)],check=True)
     subprocess.run(['git','-C',str(repo),'add','README.md'],check=True)
     subprocess.run(['git','-C',str(repo),'-c','user.name=DOXA acceptance','-c','user.email=acceptance@localhost','commit','-q','-m','test: seed disposable live fleet pilot'],check=True)
@@ -58,7 +64,7 @@ def main():
         DOXA_DOCKER_HOST=ENGINE,DOCKER_HOST=ENGINE,DOXA_DOCKER_IMAGE=IMAGE,DOXA_LORE='0',DOXA_WORKTREE='1',
         DOXA_VENDOR_TOOLS='workspace-read',TMPDIR='/home/docwilde/.t',LORE_ROOT=str(state/'lore'),LORE_PROJECTS_DIR=str(state/'projects'),LORE_CODEX_SESSIONS_DIR=str(state/'codex-sessions'),LORE_DISABLE_SYNC='1',LORE_DISABLE_REVIEW='1')
     candidate={'id':'glm-small','provider':'glm','model':'glm-5.3-flash','effort':'low','description':'Owner pinned low-cost GLM pilot target; no automatic routing.',
-        'context_tokens':32768,'max_output_tokens':4096,'supports_tools':True,'input_usd_micros_per_million':300000,'output_usd_micros_per_million':1200000}
+        'context_tokens':args.context_tokens,'max_output_tokens':args.output_tokens,'supports_tools':True,'input_usd_micros_per_million':args.input_rate,'output_usd_micros_per_million':args.output_rate}
     config={'version':1,'jev_model':'jev-1.13.0','criteria_version':'fleet-pilot-20261020','candidates':[candidate,{**candidate,'id':'glm-backup'}],
         'fallback_id':'glm-small','confidence_threshold':.75,'max_calls':3,'max_spend_usd_micros':3,'max_input_bytes':24576,'deadline_ms':1000}
     conf=state/'router.json';private_write(conf,json.dumps(config,indent=2)+'\n')
@@ -83,8 +89,8 @@ def main():
         '--approve','peer','--approval-grace','0']
     binary=args.binary.resolve(strict=True);base=[str(binary),'fleet'];manifest_path=root/'pilot/manifest.json';report={'case_id':args.case_id,'group_id':'live-pilot-20261020',
         'human_labels':False,'started_at':time.time(),'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'image':IMAGE,'engine':ENGINE,
-        'limits':{'total_usd':run_budget,'review_usd':review_budget,'prior_retained_usd':args.prior_reserved_usd,'combined_usd':.90,'router_slots':3,'slot_usd_floor':.233333,'request_bytes':28672,'output_tokens_per_turn':4096,
-            'max_tool_requests_per_turn':25,'worker_hold_usd':.2199552,'review_max_calls':12,'review_output_tokens':512,'review_input_usd_mtok':1,'review_output_usd_mtok':4},'steps':[]}
+        'limits':{'total_usd':run_budget,'review_usd':review_budget,'prior_retained_usd':args.prior_reserved_usd,'combined_usd':.90,'router_slots':3,'slot_usd_floor':slot_micros/1000000,'request_bytes':request_bytes,'output_tokens_per_turn':args.output_tokens,
+            'max_tool_requests_per_turn':25,'worker_hold_usd':worker_hold_micros/1000000,'input_usd_mtok':args.input_rate/1000000,'output_usd_mtok':args.output_rate/1000000,'review_max_calls':12,'review_output_tokens':512,'review_input_usd_mtok':1,'review_output_usd_mtok':4},'steps':[]}
     def run(extra,timeout=30):
         r=subprocess.run(base+extra,env=env,cwd=repo,text=True,capture_output=True,timeout=timeout)
         return {'returncode':r.returncode,'stdout':r.stdout,'stderr':r.stderr}
