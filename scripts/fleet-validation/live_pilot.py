@@ -180,8 +180,16 @@ def main():
         report['steps'].append({'stage':'supervisor_only_network_optin','manifest':m,'at':time.time()});save()
         report['continue']=run(['continue','pilot',m['supervision']['context']['charter_sha256'],'--root',str(root)]);save()
         require_known()
+        if report['continue']['returncode']!=0 or guard().get('paused'):
+            raise RuntimeError('Owner continue did not clear the reviewed isolation hold')
         prompt(1,'Owner follow-up within frozen task: send one peer question to the coordinator asking for the actual title at https://example.com/ and explaining that your own internet is disabled. Do not fetch it yourself. Coordinator should answer once with real evidence or explicitly report that no approved fetch tool is configured.')
         wait_idle('offline_worker_research_request',timeout=90)
+        report['research_messages']=guard().get('recent_messages',[])
+        if not any(row.get('kind')=='question' for row in report['research_messages']):
+            raise RuntimeError('No real worker research question was delivered')
+        if not any(row.get('kind')=='evidence' for row in report['research_messages']):
+            raise RuntimeError('No real coordinator evidence/unavailable reply was delivered')
+        save()
         # Only owned controller is killed. No prompts are replayed by resume.
         m=snapshot();before=[row['session_id'] for row in m['slots']];serials=[row.get('turn_serial') for row in m['slots']];child.kill();child.wait(timeout=10)
         child=subprocess.Popen(base+['resume','pilot','--root',str(root)],env=env,cwd=repo,stdin=subprocess.DEVNULL,stdout=log,stderr=log)
