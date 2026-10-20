@@ -4039,7 +4039,7 @@ for line in sys.stdin:
         let ready = HashSet::from([transcript_tools::mermaid_key(body)]);
         cached.update_media(&source, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 1, Some(&ready));
         assert_eq!(cached.mermaids.len(), 1);
-        assert!(!cached.lines.iter().any(|line| line.to_string().contains("graph TD")));
+        assert!(cached.lines.iter().any(|line| line.to_string().contains("graph TD")));
         assert_eq!(cached.links[0].url.as_ref(), "https://example.com");
         assert_eq!(cached.lines[cached.links[0].row].to_string().trim(), "Next");
     }

@@ -397,13 +397,15 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
             Block::Mermaid { raw, key } => {
                 if image_rows > 0 && ready_mermaids.is_some_and(|ready| ready.contains(&key)) {
                     flush_prose(&mut prose, lines, links, speaker);
-                    lines.push(Line::styled(" Mermaid diagram", Style::default().fg(theme::SECONDARY)));
+                    lines.push(Line::styled(" Mermaid overview", Style::default().fg(theme::SECONDARY)));
                     mermaids.push(MermaidPlacement { row: lines.len(), key });
                     lines.extend((0..image_rows).map(|_| Line::default()));
-                } else {
-                    if !prose.is_empty() { prose.push_str("\n\n"); }
-                    prose.push_str(&raw);
                 }
+                // Four halfblock rows contain only eight vertical samples.
+                // Keep labels/edges readable and copyable even after a render
+                // succeeds; the preview supplements the source fence.
+                if !prose.is_empty() { prose.push_str("\n\n"); }
+                prose.push_str(&raw);
             }
             Block::Tools(tools) => {
                 flush_prose(&mut prose, lines, links, speaker);
@@ -737,6 +739,8 @@ mod tests {
             render_with_media(source, 40, None, None, &[], IMAGE_ROWS, 0, Some(&ready));
         assert_eq!(placements, vec![MermaidPlacement { row: 1, key }]);
         assert!(lines[1..=4].iter().all(|line| line.spans.is_empty()));
+        assert!(lines.iter().skip(5).any(|line| line.to_string().contains("graph TD")));
+        assert!(lines.iter().skip(5).any(|line| line.to_string().contains("A-->B")));
         assert_eq!(lines[links[0].row].to_string().trim(), "See details.");
         assert_eq!(links[0].url.as_ref(), "https://example.com");
         let (text, _, _, _, placements) =
