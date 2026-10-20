@@ -4,6 +4,7 @@ mod mcp;
 mod claude_host;
 mod recovery_context;
 mod budget_host;
+mod account_turn_host;
 mod codex_host;
 mod peer_host;
 mod peer_wake;
@@ -575,6 +576,12 @@ fn run() -> io::Result<()> {
         }
         _ => None,
     };
+    let account_turn_limit=env::var("DOXA_ACCOUNT_TURN_LIMIT").ok().filter(|value|!value.trim().is_empty())
+        .map(|value|value.parse::<u64>().map_err(|_|invalid("invalid account turn limit"))).transpose()?;
+    if account_turn_limit.is_some_and(|limit|!(1..=32).contains(&limit)||options.engine!=Engine::Codex||ceiling.is_some()
+        ||env::var("DOXA_ACCOUNT_TURN_SCOPE").ok().as_deref()!=Some("fleet_supervisor")){
+        return Err(invalid("account turn allowance requires an explicit native Codex fleet supervisor outside the API dollar budget"));
+    }
     let router_ceiling=if options.engine==Engine::Router {
         env::var("DOXA_SESSION_BUDGET_USD").ok().filter(|raw|!raw.trim().is_empty())
             .map(|raw|doxa_router::usd_micros(&raw)).transpose()?
@@ -739,12 +746,12 @@ fn run() -> io::Result<()> {
         Some(runtime) => Arc::new(isolation_host::IsolationHost::new(host, runtime.clone(),json!({
             "engine":options.engine.name(),"runtime":options.runtime,"linger":options.linger.as_secs_f64(),
             "router_config":options.router_config,"router_config_sha256":router_config_hash,
-            "home":isolation_home,"environment":(["DOXA_HOME","DOXA_PEER_LEDGER","DOXA_AGENT_PEER_SEND","LORE_STORE_DIR","LORE_DATA_DIR","LORE_RUNTIME_DIR"].into_iter().filter_map(|key|env::var(key).ok().map(|value|(key.to_owned(),json!(value)))).collect::<serde_json::Map<_,_>>()),
+            "home":isolation_home,"environment":(["DOXA_HOME","DOXA_PEER_LEDGER","DOXA_AGENT_PEER_SEND","LORE_STORE_DIR","LORE_DATA_DIR","LORE_RUNTIME_DIR","DOXA_ACCOUNT_TURN_LIMIT","DOXA_ACCOUNT_TURN_SCOPE"].into_iter().filter_map(|key|env::var(key).ok().map(|value|(key.to_owned(),json!(value)))).collect::<serde_json::Map<_,_>>()),
             "claude_home":doxa_claude::isolation::config_dir(),
             "codex_bin":options.codex_bin,"claude_bin":options.claude_bin,"sandbox":if options.engine==Engine::Codex {Some(match options.sandbox {
                 SandboxMode::ReadOnly=>"read-only",SandboxMode::WorkspaceWrite=>"workspace-write",SandboxMode::DangerFullAccess=>"danger-full-access"})}else{None},
             "spawn_depth":options.spawn_depth,"parent_session_id":options.parent_session_id,
-            "inbound":inbound_turns,"ceiling":ceiling,"lore":doxa_state::lore_enabled_default()}))),
+            "inbound":inbound_turns,"ceiling":ceiling,"account_turn_limit":account_turn_limit,"lore":doxa_state::lore_enabled_default()}))),
         None => host,
     };
     let host: Arc<dyn Host> = match ceiling.filter(|_|options.engine!=Engine::Router) {
@@ -759,6 +766,11 @@ fn run() -> io::Result<()> {
         },
         None => host,
     };
+    let host:Arc<dyn Host>=if let Some(limit)=account_turn_limit {
+        let identity=json!({"session_id":options.session_id,"engine":"codex","role":"coordinator","model":options.model,"cwd":doxa_isolation::context_cwd(&options.cwd)?});
+        Arc::new(account_turn_host::AccountTurnHost::new(host,budget_home.join("account-turns").join(format!("{}.json",options.session_id)),identity,limit,options.resume)?)
+    }else{host};
+
     let repo_root = if profile.docker() || retained_private_checkout { Some(doxa_peers::scope_for_cwd(&options.cwd)?) }
         else { session_title::repo_root(&options.cwd) };
     let base_title = session_title::base(host.initial_model().as_deref().or(options.model.as_deref()),

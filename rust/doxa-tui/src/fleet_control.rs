@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --router-config ABSOLUTE_PATH        Reviewed Router pool config; call/spend limits split across slots\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Acting coordinator; task may be interactive\n  --alignment-supervisor PROVIDER:MODEL Independent read-only alignment model (jev:jev-1.13.0 or subq:subq-snap-preview)\n  --supervision-mode shadow|enforce     Independent review action (default enforce)\n  --message-review off|shadow|enforce   Fast semantic admission mode\n  --message-judge llm:PROVIDER:MODEL | jev:MODEL | subq:MODEL\n  --review-budget USD                  Reserved from the total run budget\n  --review-max-calls N --review-interval SECONDS\n  --review-input-price USD_PER_MTOK --review-output-price USD_PER_MTOK\n  --review-threshold PROBABILITY        Message risk / decision Choice confidence guard\n  --strict-unreviewed                  Hold every message if its judge is unavailable\n  --allowed-path RELATIVE_PREFIX       Approved scope (repeatable; default repository)\n  --worker-task INDEX:TEXT             Frozen task for each worker (1-based; specify all)\n  --worker-path INDEX:RELATIVE_PREFIX  Narrow one worker's approved paths (repeatable)\n  --worker-after INDEX:PREDECESSOR    Wait for an earlier worker (repeatable)\n  --test-recipe ABSOLUTE_JSON_PATH    Frozen offline Docker test command\n  --auto-test                         Collect host receipts after worker turns\n  --worker-isolation PROFILE          Workers: docker-offline by default\n  --supervisor-isolation PROFILE      Coordinator: docker-offline by default\n  --allow-worker-internet             Owner opt-in for worker task internet\n  --allow-supervisor-internet         Owner opt-in for coordinator task internet\n  --confirm-native-workers            Confirm workers have owner host access\n  --confirm-native-supervisor         Confirm coordinator has owner host access\n  --isolation native|docker-open|docker-offline\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, debrief RUN, test RUN SLOT, resume, continue RUN CHARTER_HASH, dependency-evidence, dependency-review, dependency-release, review, answer, attach, stop\n  calibrate LABELED_JSONL               Offline threshold metrics; no model calls\n  evaluate-development PRIVATE_JSONL --message-judge PROVIDER:MODEL\n                                       Development-only metrics and identity before holdout\n  evaluate-messages PRIVATE_JSONL --message-judge PROVIDER:MODEL [--gate PRIVATE_JSON]\n                                       Offline holdout metrics or fixed gate; no model calls\n";
+pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --router-config ABSOLUTE_PATH        Reviewed Router pool config; call/spend limits split across slots\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Acting coordinator; task may be interactive\n  --alignment-supervisor PROVIDER:MODEL Independent read-only alignment model (jev:jev-1.13.0 or subq:subq-snap-preview)\n  --supervision-mode shadow|enforce     Independent review action (default enforce)\n  --message-review off|shadow|enforce   Fast semantic admission mode\n  --message-judge llm:PROVIDER:MODEL | jev:MODEL | subq:MODEL\n  --review-budget USD                  Reserved from the total run budget\n  --review-max-calls N --review-interval SECONDS\n  --review-input-price USD_PER_MTOK --review-output-price USD_PER_MTOK\n  --review-threshold PROBABILITY        Message risk / decision Choice confidence guard\n  --strict-unreviewed                  Hold every message if its judge is unavailable\n  --allowed-path RELATIVE_PREFIX       Approved scope (repeatable; default repository)\n  --worker-task INDEX:TEXT             Frozen task for each worker (1-based; specify all)\n  --worker-path INDEX:RELATIVE_PREFIX  Narrow one worker's approved paths (repeatable)\n  --worker-after INDEX:PREDECESSOR    Wait for an earlier worker (repeatable)\n  --test-recipe ABSOLUTE_JSON_PATH    Frozen offline Docker test command\n  --auto-test                         Collect host receipts after worker turns\n  --worker-isolation PROFILE          Workers: docker-offline by default\n  --supervisor-isolation PROFILE      Coordinator: docker-offline by default\n  --allow-worker-internet             Owner opt-in for worker task internet\n  --allow-supervisor-internet         Owner opt-in for coordinator task internet\n  --confirm-native-workers            Confirm workers have owner host access\n  --confirm-native-supervisor         Confirm coordinator has owner host access\n  --isolation native|docker-open|docker-offline\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --supervisor-account-turn-limit N    Native Codex only: 1..32 account attempts; unknown account charges excluded from API USD\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, debrief RUN, test RUN SLOT, resume, continue RUN CHARTER_HASH, dependency-evidence, dependency-review, dependency-release, review, answer, attach, stop\n  calibrate LABELED_JSONL               Offline threshold metrics; no model calls\n  evaluate-development PRIVATE_JSONL --message-judge PROVIDER:MODEL\n                                       Development-only metrics and identity before holdout\n  evaluate-messages PRIVATE_JSONL --message-judge PROVIDER:MODEL [--gate PRIVATE_JSON]\n                                       Offline holdout metrics or fixed gate; no model calls\n";
 
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message.into()) }
 fn now() -> String { OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default() }
@@ -81,6 +81,7 @@ pub struct Spec {
     preflight: fleet_plan::Preflight, access:crate::fleet_policy::Policy, pool: Vec<Choice>, prompt: String, cwd: PathBuf,
     review: doxa_fleet::ReviewConfig, allowed_paths:Vec<String>, worker_tasks:Vec<String>, worker_paths:Vec<Vec<String>>, worker_after:Vec<Vec<usize>>, test_recipe:Option<doxa_fleet::evidence::TestRecipe>, auto_test:bool, seed: u64, timeout: Option<Duration>, quiet: Duration, dry_run: bool, memory_off: u64, lore_enabled: bool,
     router_config: Option<doxa_router::Config>,
+    supervisor_account_turn_limit:Option<u64>,
 }
 impl Spec {
     pub fn parse(args: &[String]) -> io::Result<Self> {
@@ -104,6 +105,7 @@ impl Spec {
         let mut task_options=Vec::new(); let mut path_options=Vec::new(); let mut after_options=Vec::new();
         let mut base = Vec::new(); let mut pool = None; let mut prompt = String::new(); let mut prompt_file = None; let mut test_recipe = None; let mut router_path = None;
         let mut cwd = std::env::current_dir()?; let mut seed = 0; let mut timeout = None;
+        let mut supervisor_account_turn_limit=None;
         let mut quiet = Duration::from_secs(20); let mut dry_run = false; let mut auto_test=false; let mut memory_off = 0; let mut index = 0;
         while index < args.len() {
             let key = args[index].as_str();
@@ -149,6 +151,7 @@ impl Spec {
                     },
                     "--pool" => pool = Some(value.split(',').map(choice).collect::<io::Result<Vec<_>>>()?),
                     "--router-config" => router_path=Some(PathBuf::from(value)),
+                    "--supervisor-account-turn-limit"=>{if supervisor_account_turn_limit.is_some(){return Err(invalid("duplicate supervisor account allowance"));}supervisor_account_turn_limit=Some(value.parse::<u64>().map_err(|_|invalid("invalid supervisor account turn limit"))?);},
                     "--prompt" => prompt = value.clone(), "--prompt-file" => prompt_file = Some(PathBuf::from(value)),
                     "--cwd" => cwd = PathBuf::from(value),
                     "--seed" => seed = value.parse::<u64>().or_else(|_| value.parse::<i64>().map(|seed| seed as u64)).map_err(|_| invalid("fleet seed must be a signed or unsigned 64-bit integer"))?,
@@ -242,19 +245,28 @@ impl Spec {
             return Err(invalid("worker dependencies require Docker-isolated fleet sessions; native workers can invoke owner-local release commands"));
         }
         memory_off = memory_off.min(preflight.sessions);
-        let spec=Self { review, allowed_paths, worker_tasks, worker_paths, worker_after, test_recipe, auto_test, preflight, access, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default(),router_config };
+        let spec=Self { supervisor_account_turn_limit,review, allowed_paths, worker_tasks, worker_paths, worker_after, test_recipe, auto_test, preflight, access, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default(),router_config };
+        if let Some(limit)=spec.supervisor_account_turn_limit {
+            let supervisor=spec.preflight.supervisor.as_deref().map(choice).transpose()?.ok_or_else(||invalid("account allowance needs a native Codex coordinator"))?;
+            if !(1..=32).contains(&limit)||supervisor.engine!=launch::Engine::Codex
+                ||supervisor.model.as_deref().is_none_or(|model|!model.starts_with("gpt-")||model.len()>128)
+                ||spec.preflight.run_budget_usd.is_none()||spec.pool.iter().any(|row|row.engine!=launch::Engine::Router)
+                ||spec.router_config.as_ref().is_none_or(|config|config.candidates.iter().any(|candidate|candidate.provider.is_cli())) {
+                return Err(invalid("account turn allowance requires an exact native Codex coordinator and separately budgeted API Router workers"));
+            }
+        }
         spec.router_slot_configs(&spec.assignments()?)?;
         Ok(spec)
     }
     /// Complete validation and a readable launch review without provider
     /// discovery, session creation, prompt text or filesystem mutations.
     pub fn review(&self) -> io::Result<Value> {
-        let preflight = fleet_plan::check(&self.preflight, fleet_plan::available_memory_mb())?;
+        let preflight = self.preflight_note()?;
         let assignments = self.assignments()?;
         Ok(json!({"review_version":1,"isolation":self.access.workers.key(),"access":self.access.review(self.preflight.supervisor.is_some()),"independent_review":self.review,"allowed_paths":self.allowed_paths,"test_recipe":self.test_recipe,"auto_test":self.auto_test,"test_recipe_sha256":self.test_recipe_review_hash()?,"prompt_sha256":format!("{:x}", Sha256::digest(self.prompt.as_bytes())),"assignments_sha256":self.assignment_plan_hash()?,"run_id":self.preflight.run_id,"root":self.preflight.root,"cwd":self.cwd,
             "mode":if self.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
             "interactive":self.preflight.supervisor.is_some() && self.prompt.trim().is_empty(),
-            "workers":self.preflight.sessions,"sessions":assignments.len(),"run_budget_usd":self.preflight.run_budget_usd,
+            "workers":self.preflight.sessions,"sessions":assignments.len(),"run_budget_usd":self.preflight.run_budget_usd,"supervisor_account_policy":self.supervisor_account_turn_limit.map(|limit|json!({"turn_limit":limit,"provider_charge_usd":null,"outside_api_usd_budget":true})),
             "router_config_sha256":self.router_config.as_ref().map(doxa_router::Config::hash).transpose()?,
             "router_allocations":self.router_slot_configs(&assignments)?.iter().map(|(index,config)|json!({"slot":index,"config_sha256":config.hash().ok(),"routing_calls":config.max_calls,"routing_spend_usd_micros":config.max_spend_usd_micros})).collect::<Vec<_>>(),
             "allow_unbudgeted":self.preflight.allow_unbudgeted,"approval_policy":self.preflight.approve,
@@ -268,9 +280,18 @@ impl Spec {
             })).collect::<Vec<_>>()}))
     }
     fn assignment_plan_hash(&self)->io::Result<String>{
-        // Bind owner review to role isolation as well as tasks and routing.
-        doxa_fleet::hash(&(&self.worker_tasks,&self.worker_paths,&self.worker_after,
-            &self.router_config,self.access.review(self.preflight.supervisor.is_some())))
+        let original=doxa_fleet::hash(&(&self.worker_tasks,&self.worker_paths,&self.worker_after,
+            &self.router_config,self.access.review(self.preflight.supervisor.is_some())))?;
+        if let Some(limit)=self.supervisor_account_turn_limit {doxa_fleet::hash(&(original,"native_codex_account_turns",limit))}else{Ok(original)}
+    }
+    fn preflight_note(&self)->io::Result<String>{
+        let original=fleet_plan::check(&self.preflight,fleet_plan::available_memory_mb())?;
+        if let Some(limit)=self.supervisor_account_turn_limit {
+            let mut lines=original.lines().filter(|line|!line.contains("per session")).map(str::to_owned).collect::<Vec<_>>();
+            lines.push(format!("Native Codex supervisor: at most {limit} provider-account dispatch attempts; charges unknown and outside the API dollar allowance. Cancelled/refused attempts are consumed."));
+            lines.push(format!("API allowance: ${:.6} after independent review, divided across {} API workers",self.preflight.run_budget_usd.unwrap()-if self.review.enabled(){self.review.budget_usd}else{0.0},self.preflight.sessions));
+            Ok(lines.join("\n"))
+        }else{Ok(original)}
     }
     fn test_recipe_review_hash(&self)->io::Result<String>{doxa_fleet::hash(&(&self.test_recipe,self.auto_test))}
     fn router_slot_configs(&self,assignments:&[Choice])->io::Result<Vec<(usize,doxa_router::Config)>> {
@@ -514,6 +535,29 @@ fn resumed_session(runtime:&Path,id:&str,socket:&Path)->io::Result<discovery::Se
         .ok_or_else(||invalid("fleet live registry identity changed; resume withheld"))
 }
 
+fn slot_api_budget(total:Option<f64>,review:f64,count:usize,account:Option<u64>,index:usize)->io::Result<Option<f64>>{
+    if account.is_some()&&index==0{return Ok(None);}
+    let count=count.checked_sub(usize::from(account.is_some())).filter(|count|*count>0).ok_or_else(||invalid("API fleet allocation has no workers"))?;
+    total.map(|total|{let value=(total-review)/count as f64;if !value.is_finite()||value<=0.0{Err(invalid("API fleet allowance must remain positive"))}else{Ok(value)}}).transpose()
+}
+fn manifest_account_limit(value:&Value)->io::Result<Option<u64>>{
+    let field=&value["spec"]["supervisor_account_turn_limit"];if field.is_null(){return Ok(None);}
+    let limit=field.as_u64().filter(|limit|(1..=32).contains(limit)).ok_or_else(||invalid("invalid fleet supervisor account limit"))?;
+    let rows=value["slots"].as_array().ok_or_else(||invalid("fleet slots unavailable"))?;
+    if value["mode"]!="supervisor"||rows.first().is_none_or(|row|row["engine"]!="codex"||row["account_turn_limit"]!=limit)
+        ||rows.iter().skip(1).any(|row|row["engine"]!="router"||!row["account_turn_limit"].is_null()) {return Err(invalid("fleet supervisor account role policy changed"));}
+    Ok(Some(limit))
+}
+fn verify_account_allowance(hello:&Value,expected:Option<u64>,busy:bool)->io::Result<()>{
+    let allowance=&hello["billing"]["account_turn_allowance"];
+    if let Some(limit)=expected {
+        if hello["engine"]!="codex"||allowance["limit"]!=limit||allowance["durable"]!=true||allowance["outside_api_usd_budget"]!=true
+            ||allowance.get("provider_charge_usd")!=Some(&Value::Null)||allowance["used"].as_u64().is_none_or(|used|used>limit)
+            ||(!busy&&allowance["pending"]!=false)||!hello["billing"]["budget"].is_null(){return Err(invalid("native Codex account allowance could not be verified"));}
+    }else if !allowance.is_null(){return Err(invalid("unreviewed native account allowance appeared"));}
+    Ok(())
+}
+
 pub fn resume(root: &Path, id: &str) -> io::Result<()> {
     let _signals = Signals::install()?;
     let initial = snapshot(root, id)?;
@@ -529,7 +573,7 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
     if total_budget.is_some_and(|budget| !budget.is_finite() || budget <= 0.0) ||
         (total_budget.is_none() && value["spec"]["allow_unbudgeted"] != true) { return Err(invalid("fleet resume budget is not verifiable")); }
     let review_budget = value["supervision"]["context"]["review"]["budget_usd"].as_f64().unwrap_or(0.0);
-    let budget = total_budget.map(|total| (total-review_budget) / rows.len() as f64);
+    let account_limit=manifest_account_limit(&value)?;
     let has_dependencies=value["supervision"]["context"]["assignments"].as_array()
         .is_some_and(|assignments|assignments.iter().any(|row|row["depends_on"].as_array().is_some_and(|deps|!deps.is_empty())));
     let mut slots = Vec::new();
@@ -542,7 +586,9 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
         assigned.lore = row["lore"].as_bool();
         let session = resumed_session(&root.join(id).join("rt"), &session_id, &socket)?;
         let cursor=saved_event_cursor(row)?;
+        let budget=slot_api_budget(total_budget,review_budget,rows.len(),account_limit,index)?;
         let mut slot = connect_from(session, &assigned, budget, row["isolation"].as_str().or_else(||value["spec"]["isolation"].as_str()).map(doxa_isolation::Profile::parse).transpose()?,row["router_config_sha256"].as_str(),cursor)?;
+        if index==0{verify_account_allowance(&slot.client.hello,account_limit,slot.busy)?;}
         resumable_slot_phase(row,slot.busy)?;
         if has_dependencies{verify_dependency_container(&root.join(value["run_id"].as_str().ok_or_else(||invalid("fleet run identity unavailable"))?),&slot.session.id)?;}
         if value["ledger_path"].is_string() {
@@ -704,7 +750,7 @@ pub fn start(args: &[String]) -> io::Result<()> {
         let actual=spec.test_recipe_review_hash()?;
         if expected.to_str()!=Some(actual.as_str()){return Err(invalid("fleet automatic test choice or frozen recipe changed after review"));}
     }
-    let note = fleet_plan::check(&spec.preflight, fleet_plan::available_memory_mb())?;
+    let note = spec.preflight_note()?;
     let assigned = spec.assignments()?;
     println!("{note}");
     for (index, row) in assigned.iter().enumerate() { println!("slot {index}: {}:{} · memory {}", engine_name(row.engine), row.model.as_deref().unwrap_or("default"), if row.lore == Some(false) { "off" } else { "on" }); }
@@ -727,12 +773,12 @@ pub fn start(args: &[String]) -> io::Result<()> {
         trusted_dir(&directory)?.sync_all()?;
     }
     let review_budget=if spec.review.enabled(){spec.review.budget_usd}else{0.0};
-    let budget = spec.preflight.run_budget_usd.map(|total| (total-review_budget) / assigned.len() as f64);
+
     let mut value = json!({"native_version":1,"run_id":spec.preflight.run_id,"ledger_path":ledger_home.join("peers/messages.jsonl"),"started_at":now(),"heartbeat_at":now(),
         "live":true,"phase":"starting","mode":if spec.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
         "interactive":spec.preflight.supervisor.is_some() && spec.prompt.trim().is_empty(),
         "spec":{"isolation":spec.access.workers.key(),"access":spec.access.review(spec.preflight.supervisor.is_some()),"auto_test":spec.auto_test,"n":spec.preflight.sessions,"sessions":assigned.len(),"memory_off":spec.memory_off,"lore_enabled":spec.lore_enabled,"memory_sampler":"splitmix64-memory-v1","seed":spec.seed,"sampler":"splitmix64-v1","run_budget_usd":spec.preflight.run_budget_usd,
-            "allow_unbudgeted":spec.preflight.allow_unbudgeted,"cwd":spec.cwd,"quiescence_timeout_s":spec.timeout.map(|duration| duration.as_secs_f64()),"quiet_dwell_s":spec.quiet.as_secs_f64(),"quiescence_grace_s":spec.quiet.as_secs_f64()},
+            "allow_unbudgeted":spec.preflight.allow_unbudgeted,"supervisor_account_turn_limit":spec.supervisor_account_turn_limit,"cwd":spec.cwd,"quiescence_timeout_s":spec.timeout.map(|duration| duration.as_secs_f64()),"quiet_dwell_s":spec.quiet.as_secs_f64(),"quiescence_grace_s":spec.quiet.as_secs_f64()},
         "approvals":{"policy":spec.preflight.approve,"grace_s":spec.preflight.approval_grace_s,"asked":0,"auto_approved":0,"answered":0,"refused":0},"auto_test_runs":0,"slots":[]});
     store.save(&value)?;
     let mut slots = Vec::new();
@@ -740,12 +786,13 @@ pub fn start(args: &[String]) -> io::Result<()> {
         for (index, assigned) in assigned.iter().enumerate() {
             ensure_active(&store)?;
             let isolation=spec.access.slot(spec.preflight.supervisor.is_some() && index==0);
-            let options = launch::LaunchOptions { isolation:Some(isolation), engine: assigned.engine, model: assigned.model.clone(), cwd: Some(spec.cwd.clone()),router_config:router_paths.get(&index).cloned(),
+            let budget=slot_api_budget(spec.preflight.run_budget_usd,review_budget,assigned.len(),spec.supervisor_account_turn_limit,index)?;
+            let options = launch::LaunchOptions { account_turn_limit:if index==0{spec.supervisor_account_turn_limit}else{None},isolation:Some(isolation), engine: assigned.engine, model: assigned.model.clone(), cwd: Some(spec.cwd.clone()),router_config:router_paths.get(&index).cloned(),
                 linger: Some(60.0), ..Default::default() };
             let session = launch::spawn_fleet(&options, &runtime, budget, assigned.engine != launch::Engine::Fixture, assigned.lore.unwrap_or(spec.lore_enabled))?;
             // Publish the started identity before attachment can fail.
             value["slots"].as_array_mut().unwrap().push(json!({"index":index,"isolation":isolation.key(),"task_internet":crate::fleet_policy::task_internet(isolation),"role":if spec.preflight.supervisor.is_some() && index == 0 { "supervisor" } else { "worker" },
-                "engine":engine_name(assigned.engine),"model":assigned.model,"router_config":router_paths.get(&index),"router_config_sha256":configs.iter().find(|(slot,_)|*slot==index).and_then(|(_,config)|config.hash().ok()),"event_cursor":0,"lore":assigned.lore,"phase":"started","session_id":session.id,"socket_path":session.socket,"pending_asks":[],"approvals":[],
+                "account_turn_limit":if index==0{spec.supervisor_account_turn_limit}else{None},"engine":engine_name(assigned.engine),"model":assigned.model,"router_config":router_paths.get(&index),"router_config_sha256":configs.iter().find(|(slot,_)|*slot==index).and_then(|(_,config)|config.hash().ok()),"event_cursor":0,"lore":assigned.lore,"phase":"started","session_id":session.id,"socket_path":session.socket,"pending_asks":[],"approvals":[],
                 "task":index.checked_sub(usize::from(spec.preflight.supervisor.is_some())).and_then(|worker|spec.worker_tasks.get(worker)),
                 "allowed_paths":index.checked_sub(usize::from(spec.preflight.supervisor.is_some())).and_then(|worker|spec.worker_paths.get(worker)).filter(|paths|!paths.is_empty()).unwrap_or(&spec.allowed_paths),
                 "depends_on":index.checked_sub(usize::from(spec.preflight.supervisor.is_some())).and_then(|worker|spec.worker_after.get(worker)).cloned().unwrap_or_default()}));
@@ -753,6 +800,7 @@ pub fn start(args: &[String]) -> io::Result<()> {
             ensure_active(&store)?;
             let router_hash=configs.iter().find(|(slot,_)|*slot==index).map(|(_,config)|config.hash()).transpose()?;
             let mut slot = connect(session, assigned, budget, Some(isolation),router_hash.as_deref())?;
+            if index==0{verify_account_allowance(&slot.client.hello,spec.supervisor_account_turn_limit,false)?;}
             if spec.worker_after.iter().any(|row|!row.is_empty()){verify_dependency_container(&store.run,&slot.session.id)?;}
             if spec.preflight.supervisor.is_some() {
                 let capability = rpc(&mut slot.client, "peer_tools_status", json!({}))?;

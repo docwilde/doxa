@@ -55,7 +55,7 @@ fn resume(plan:&Value,manifest:&Manifest)->io::Result<DaemonClient>{
         if client.hello["session_id"]!=manifest.session_id||client.hello["isolation"]["profile"]!=manifest.profile.key()
             ||client.hello["isolation"]["state"]!="ready"{return Err(invalid("resumed daemon did not verify its session and isolation identity"));}
         let resumed=call(&mut client,"isolation_migration_plan",json!({}))?;
-        for key in ["transcript_path","transcript_bytes","transcript_sha256","model","effort","permission_mode","router_checkpoint"]{
+        for key in ["transcript_path","transcript_bytes","transcript_sha256","model","effort","permission_mode","router_checkpoint","account_turn_allowance"]{
             if resumed[key]!=plan[key]{return Err(invalid(format!("resumed conversation changed {key}")));}
         }
         if plan["launch"]["engine"]=="codex"{

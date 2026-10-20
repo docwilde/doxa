@@ -105,6 +105,7 @@ fn apply(store:&Store,value:&mut Value,slots:&mut [Slot],request:&IsolationReque
     let (session,resumed)=reconnect(&store.run.join("rt"),&request.session_id)?;
     if session.scope_key!=slots[index].session.scope_key{return Err(invalid("replacement fleet project scope changed"));}
     if resumed.hello["session_id"]!=request.session_id||resumed.hello["isolation"]["state"]!="ready"{return Err(invalid("isolation transition lost its verified session; stopping fleet"));}
+    if index==0{super::verify_account_allowance(&resumed.hello,super::manifest_account_limit(value)?,false)?;}
     let actual=Profile::parse(resumed.hello["isolation"]["profile"].as_str().ok_or_else(||invalid("isolation transition status unavailable"))?)?;
     if actual!=request.expected_profile&&actual!=request.target{return Err(invalid("isolation transition reached an unapproved profile; stopping fleet"));}
     let mut resumed=resumed;
