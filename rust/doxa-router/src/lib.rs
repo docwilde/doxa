@@ -42,6 +42,9 @@ pub struct Candidate {
     pub description: String,
     pub context_tokens: u64,
     pub max_output_tokens: u64,
+    /// Optional hard HTTP request count per API turn; absent preserves the historical 25.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub max_tool_requests:Option<u8>,
     pub supports_tools: bool,
     // Absent for CLI account targets; zero is an absence sentinel, never a price.
     #[serde(default, skip_serializing_if = "zero")]
@@ -267,6 +270,7 @@ impl Config {
                 || !matches!(row.effort.as_str(), "none" | "low" | "medium" | "high" | "xhigh" | "max")
                 || !bounded(&row.description, 1200) || !(1..=2_000_000).contains(&row.context_tokens)
                 || row.max_output_tokens == 0 || row.max_output_tokens > row.context_tokens
+                || row.max_tool_requests.is_some_and(|limit|!(1..=25).contains(&limit)||row.provider.is_cli())
                 || row.provider.is_cli() != (row.billing == Billing::CliAccount)
                 || (row.billing == Billing::Api && (row.input_usd_micros_per_million == 0
                     || row.input_usd_micros_per_million > 1_000_000_000 || row.output_usd_micros_per_million == 0

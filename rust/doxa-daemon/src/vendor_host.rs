@@ -430,7 +430,7 @@ impl VendorHost {
         let history_bytes = serde_json::to_vec(&self.context_messages(&history)).map_err(|_| "Router history cannot be measured")?.len();
         let request_bytes = usize::try_from(input_bound).map_err(|_| "Router input bound overflow")?.saturating_sub(history_bytes);
         let budget = crate::recovery_context::Budget::api("router","router-conversation-v1",
-            Some(doxa_vendors::TurnLimits {input_bytes:input_cap,output_tokens:0}));
+            Some(doxa_vendors::TurnLimits {max_requests:None,input_bytes:input_cap,output_tokens:0}));
         let plan = crate::recovery_context::assess(&self.store,budget,request_bytes,
             Some((history_bytes,"serialized_router_request_byte_bound"))).map_err(|error| error.to_string())?;
         if let Some(context) = &plan.context { *self.compact_context.lock().unwrap() = Some((history.len(),context.clone())); }

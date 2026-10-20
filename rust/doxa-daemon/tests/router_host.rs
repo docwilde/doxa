@@ -54,7 +54,7 @@ mod tests {
     fn config() -> Config {
         let candidate = |id:&str,provider:Provider,model:&str,effort:&str,input,output| Candidate {
             id:id.into(),provider,billing:doxa_router::Billing::Api,model:model.into(),effort:effort.into(),description:format!("Reviewed {id} test target"),
-            context_tokens:131072,max_output_tokens:512,supports_tools:true,
+            context_tokens:131072,max_output_tokens:512,max_tool_requests:None,supports_tools:true,
             input_usd_micros_per_million:input,output_usd_micros_per_million:output };
         Config {version:1,jev_model:doxa_router::JEV_MODEL.into(),criteria_version:"fixture-v1".into(),auto_compact_percent:None,
             candidates:vec![candidate("ds",Provider::Deepseek,"deepseek-flash","none",300000,1200000),

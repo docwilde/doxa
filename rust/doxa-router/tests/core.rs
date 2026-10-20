@@ -7,6 +7,15 @@ fn input()->RoutingInput {RoutingInput {summary:"Format a synthetic mapping as J
 fn response()->Value {json!({"model":JEV_MODEL,"answers":{"target":{"type":"choice","choice":"fast","probabilities":{"fast":0.9,"deliberate":0.1},"confidence":0.8}},"usage":{"input_tokens":100,"output_tokens":20}})}
 
 #[test]
+fn optional_api_request_limit_is_reviewed_bounded_and_absence_preserves_old_identity(){
+    let mut cfg=config();let original=cfg.hash().unwrap();
+    assert!(serde_json::to_value(&cfg).unwrap()["candidates"][0].get("max_tool_requests").is_none());
+    cfg.candidates[0].max_tool_requests=Some(6);cfg.validate().unwrap();assert_ne!(cfg.hash().unwrap(),original);
+    for invalid in [0,26,255]{cfg.candidates[0].max_tool_requests=Some(invalid);assert!(cfg.validate().is_err());}
+    cfg.candidates[0].max_tool_requests=None;assert_eq!(cfg.hash().unwrap(),original);
+}
+
+#[test]
 fn reviewed_micro_dollar_ceilings_round_trip_exactly_and_never_round_up() {
     for micros in [1,29000,251455,508081,1234567,u64::MAX] {
         let usd=format!("{}.{:06}",micros/1_000_000,micros%1_000_000);assert_eq!(usd_micros(&usd).unwrap(),micros);
