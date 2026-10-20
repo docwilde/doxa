@@ -75,8 +75,12 @@ overview is coarse; use the accompanying source for labels and edges.
 The same four fixtures also passed actual Kitty 0.45.0 graphics display in
 both `kgp` and `probe` modes. Kitty preserves more detail, but four-row
 sequence/class labels remain small; the source stays available. Sixel and
-iTerm2 display remain unverified. macOS keeps source visible because the
-current renderer requires Linux bubblewrap.
+iTerm2-protocol display also passed all four fixtures in actual Xterm 407 and
+WezTerm 20240203-110809-5046fc22 respectively, in both forced and `probe` modes.
+These Linux trials do not establish actual iTerm2 app or Retina behavior.
+macOS keeps source visible because the current renderer requires Linux
+bubblewrap; the [macOS isolation design](plans/mermaid-macos-isolation.md) is
+scoped but unimplemented, with no Mac host acceptance.
 
 Run `doxa doctor` to check a configured renderer. It validates the executable
 and canonical package root against the same path policy as the TUI, including

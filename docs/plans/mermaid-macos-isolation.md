@@ -104,5 +104,6 @@ supported architecture and minimum OS release:
    from the isolation evidence. Test scrolling/clipping and font changes.
 
 Linux protocol tests can prepare fixtures and verify framing, but cannot close
-these Mac hardware, signing, containment or display gates. Until a Mac host is
-available, this design is ready for implementation review only.
+these Mac hardware, signing, containment or display gates. No Mac host was
+available for the 2026-10-20 acceptance run. This design is ready for
+implementation review only.

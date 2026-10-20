@@ -69,8 +69,9 @@ DOXA_MERMAID_RENDERER_ROOT="$root" DOXA_IMAGE_MODE=halfblock \
 ```
 
 Repeat with `sequence`, `class`, or `gantt`. Ctrl+C closes the fixture.
-`DOXA_IMAGE_MODE=text` checks source-only behavior. On a real Kitty terminal,
-repeat with `DOXA_IMAGE_MODE=probe` or `kgp` to exercise pixel graphics. Forced
+`DOXA_IMAGE_MODE=text` checks source-only behavior. On a supported graphics
+terminal, repeat with `DOXA_IMAGE_MODE=probe`, or its actual supported protocol:
+`kgp` for Kitty, `sixel` for Sixel-enabled Xterm, or `iterm2` for WezTerm. Forced
 graphics uses reported terminal pixel dimensions; when they are unknown it
 shows a notice and falls back to halfblocks. These commands do not start
 a provider session or use the clipboard. `TMPDIR` must remain private.
@@ -123,8 +124,41 @@ Sequence and class labels remain small within four rows, so source retention
 is still needed. Owner image-mode settings and the Mint/VTE fallback did not
 change.
 
-Sixel and iTerm2 display quality remains untested: no corresponding supported
-emulator is available on this host. macOS rendering remains disabled because
-the production isolation boundary requires Linux bubblewrap; macOS needs a
-separately reviewed implementation. No protocol or macOS result is inferred
-from PNG decoding, the VTE trial or Kitty graphics. No Mermaid CLI was installed globally.
+The beta.64 fixture was then built from `d9a4c12d` in release mode and copied
+to private task storage. It exercised two more actual emulators under private
+Xvfb; no installed DOXA binary or owner image-mode setting changed:
+
+| Actual Linux emulator | Authenticated private package | Modes | Four-row preview |
+| --- | --- | --- | --- |
+| [Xterm 407](https://invisible-island.net/xterm/manpage/xterm.html), Sixel enabled with VT340 emulation | Ubuntu `407-1ubuntu1` plus xbitmaps; 949,294 bytes downloaded | `sixel`, `probe` | Reported 17×33 pixel cells; 132 pixels high |
+| [WezTerm 20240203-110809-5046fc22](https://wezterm.org/imgcat.html), iTerm2 inline-image protocol | [Official signed apt repository](https://wezterm.org/install/linux.html); 34,300,188 bytes downloaded | `iterm2`, `probe` | Reported 16×32 pixel cells; 128 pixels high |
+
+Packages were SHA-256 checked against authenticated apt indexes and extracted
+only into task storage; no maintainer scripts or system installation ran. All
+native libraries were already available. Both terminals used DejaVu Sans Mono,
+125 columns × 33 rows, on a 2304×1344 private display.
+
+All four families passed in each mode: **16 final native captures**. Transparent
+PTY recording retained timestamped real device replies and actual Sixel DCS or
+iTerm2 OSC 1337 PNG payloads, with zero halfblock cells. For every family,
+forced/probe protocol payloads and the transcript screenshot region were
+identical. All eight forced-mode images were visually inspected: diagrams
+rendered without obscuring their source; simple flowchart labels were readable,
+while dense sequence/class labels remained small. No production change was
+needed. These trials did not include tmux or SSH transport.
+
+The private acceptance archive records the source/binary hashes, signed-package
+receipts, capture hashes, raw replies and image comparisons. It contains only
+synthetic fixtures, with no provider or owner session data. The initial capture
+harness was corrected to wait for stable image payloads rather than stable raw
+byte counts, and the final display includes the entire terminal window.
+
+[WezTerm documents inline-image support](https://wezterm.org/imgcat.html) for
+the [iTerm2 protocol](https://iterm2.com/documentation-images.html). This is
+Linux protocol display evidence, not actual iTerm2 app acceptance.
+No Mac was available. macOS rendering remains disabled because the production
+isolation boundary requires Linux bubblewrap. The
+[macOS design](../../docs/plans/mermaid-macos-isolation.md) now scopes a dedicated
+networkless VM and explicit host acceptance gates; implementation, actual Mac
+containment, iTerm2 app and Retina validation remain open. No Mermaid CLI was
+installed globally.
