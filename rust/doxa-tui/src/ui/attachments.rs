@@ -8,7 +8,7 @@ use ratatui::{Frame,layout::Rect,style::{Style,Modifier},widgets::{Block,Borders
 use std::{path::PathBuf,sync::mpsc};
 
 #[derive(Debug)]
-pub(super) struct Picker {owner:(usize,String),pub path:String,selected:usize,list:bool}
+pub(super) struct Picker {pub(super) owner:(usize,String),pub path:String,selected:usize,list:bool}
 #[derive(Debug)]
 pub(super) struct FileJob {target:Target,rx:mpsc::Receiver<std::io::Result<Attachment>>}
 impl App {
@@ -144,5 +144,22 @@ impl App {
         app.prompt_attachments.insert((0,"saved".into()),vec![Attachment::from_source("source.txt",b"text".to_vec()).unwrap()]);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)));
         assert_eq!(app.input,"look");assert_eq!(app.prompt_attachments[&(0,"saved".into())].len(),1);assert!(app.pending_launches.is_empty());assert!(app.pending_prompts.is_empty());
+    }
+}
+
+#[cfg(test)]mod pane_tests {
+    use super::*;
+    use crossterm::event::Event;
+    #[test]fn attach_chip_in_an_inactive_pane_opens_that_panes_draft_on_first_click(){
+        let mut app=App::default();app.size=Rect::new(0,0,520,40);app.rail_visible=false;
+        for id in ["a","b"]{app.apply_daemon_frame(&serde_json::json!({"type":"hello","session_id":id,"engine":"codex","model":"fixture"}));}
+        app.groups[0].tabs=vec!["a".into()];app.groups[1].tabs=vec!["b".into()];app.active_group=0;app.split=super::super::Split::Vertical;app.split_requested=true;
+        app.input="left draft".into();app.input_cursor=10;app.input_drafts.insert((1,"b".into()),("right draft".into(),11));
+        let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(520,40)).unwrap();terminal.draw(|frame|app.draw(frame)).unwrap();
+        let panes=app.layout(app.size).panes.unwrap();let strip=app.pane_regions(1,panes[1])[3];let chips=app.chip_window(1,usize::from(strip.width));
+        assert!(chips.iter().any(|(kind,_)|*kind=="attachments"));
+        let offset=chips.iter().take_while(|(kind,_)|*kind!="attachments").map(|(kind,label)|unicode_width::UnicodeWidthStr::width(super::super::chip_text(kind,label).as_str())as u16+1).sum::<u16>();
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Down(MouseButton::Left),column:strip.x+offset+1,row:strip.y,modifiers:KeyModifiers::NONE}));
+        assert_eq!(app.active_group,1);assert_eq!(app.attachment_picker.as_ref().unwrap().owner,(1,"b".into()));assert_eq!(app.input,"right draft");assert_eq!(app.input_drafts[&(0,"a".into())].0,"left draft");assert!(app.pending_prompts.is_empty());
     }
 }

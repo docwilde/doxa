@@ -261,7 +261,7 @@ impl App {
             self.retire_operations(); self.chip_info = None;
         }
         if before != after {
-            self.attachment_picker=None;
+            if self.attachment_picker.as_ref().is_some_and(|picker|picker.owner!=after){self.attachment_picker=None;}
             self.mcp_secret=None;
             self.retire_mcp_if_changed();
             self.branch_picker = None;
