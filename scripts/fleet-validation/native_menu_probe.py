@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Drive real Start Fleet menu through review in private GTK/VTE, no launch.
+"""Drive the real Start Fleet menu in private GTK/VTE.
 
 Requires an existing isolated runtime-probe slot. Native terminal screenshots
 and text are recorded; no owner terminal, display, clipboard or sessions used.
+The default stops at review. The caller's explicit live=True mode confirms a
+bounded $0.10 provider run, observes a known-usage worker turn and stops it.
 """
 import json
 import os
@@ -31,7 +33,7 @@ def probe(binary, env, repo, root, state, live=False):
     if live:local_env.update(DOXA_FLEET_REVIEW_INPUT_PRICE='1',DOXA_FLEET_REVIEW_OUTPUT_PRICE='4',DOXA_FLEET_SUPERVISION_MODE='shadow')
     # Existing reviewed JSON is purely configuration, no secrets.
     candidate={'id':'glm-small','provider':'glm','model':'glm-5.3-flash','effort':'low',
-        'description':'Menu-only review fixture; launch is never confirmed.',
+        'description':'Explicitly bounded live GLM menu target.' if live else 'Menu-only review fixture; launch is never confirmed.',
         'context_tokens':24576 if live else 32768,'max_output_tokens':4096,'supports_tools':True,
         'input_usd_micros_per_million':150000 if live else 300000,'output_usd_micros_per_million':500000 if live else 1200000}
     value={'version':1,'jev_model':'jev-1.13.0','criteria_version':'native-menu-review',

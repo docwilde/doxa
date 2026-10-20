@@ -64,7 +64,7 @@ The host-specific harnesses are under `scripts/fleet-validation/`:
   $0.08 for one pinned GLM API worker and $0.02 for stateless DeepSeek review.
   It confirms a real launch and requires a known-usage successful turn before
   stopping the fleet. The private receipt records both successes and failures.
-- `live_pilot.py` creates a separate supervised dependency case. It validates the
+- `live_pilot.py --live` explicitly creates a paid, separately budgeted supervised dependency case. Without `--live` it refuses before state creation or provider calls. It validates the
   worst-case 25-request worker reservation against each disjoint slot allocation
   before launch. Prior retained holds must be deducted explicitly. It stops on
   unknown usage and never retries that call or clears its journal.

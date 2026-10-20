@@ -39,8 +39,9 @@ class Client:
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--state',type=Path,required=True)
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--live',action='store_true',help='Explicitly opt this bounded new case into paid provider calls');p.add_argument('--state',type=Path,required=True)
     p.add_argument('--binary',type=Path,default=Path.home()/'.local/bin/doxa');p.add_argument('--prior-held-usd','--prior-reserved-usd',dest='prior_reserved_usd',type=float,default=0.0);p.add_argument('--case-id',default='fleet-pilot-01');p.add_argument('--review-budget',type=float,default=None);p.add_argument('--context-tokens',type=int,default=32768);p.add_argument('--output-tokens',type=int,default=4096);p.add_argument('--input-rate',type=int,default=300000);p.add_argument('--output-rate',type=int,default=1200000);args=p.parse_args()
+    if not args.live:p.error('Provider pilot requires explicit --live; no state or calls were created')
     if not 0<=args.prior_reserved_usd<.90:raise RuntimeError('Prior holds must leave a positive allocation')
     run_budget=.90-args.prior_reserved_usd;review_budget=args.review_budget if args.review_budget is not None else .20-args.prior_reserved_usd
     if not 0<review_budget<run_budget:raise RuntimeError('Review allocation must leave a positive worker allocation')
