@@ -32,6 +32,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     execute!(std::io::stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     app.configure_terminal_images(&mode);
+    if let Some(note) = app.terminal_images_notice() {
+        app.notice.push_str(" · ");
+        app.notice.push_str(note);
+    }
     loop {
         app.poll_terminal_images();
         terminal.draw(|frame| app.draw(frame))?;

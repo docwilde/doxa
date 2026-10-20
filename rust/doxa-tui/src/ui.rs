@@ -1832,6 +1832,12 @@ impl App {
         self.mermaid_store.borrow_mut().clear();
     }
 
+    /// Explain a requested pixel backend falling back because terminal metrics
+    /// are unavailable, without asserting a guessed pixel cell size.
+    pub fn terminal_images_notice(&self) -> Option<&'static str> {
+        self.image_store.borrow().configuration_note()
+    }
+
     /// Apply completed image previews before the next frame.
     pub fn poll_terminal_images(&self) -> bool {
         self.image_store.borrow_mut().poll() | self.mermaid_store.borrow_mut().poll()

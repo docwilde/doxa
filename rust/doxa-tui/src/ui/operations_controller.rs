@@ -698,6 +698,10 @@ impl App {
                         menu.edits.clear();
                         self.notice =
                             "Settings saved · session defaults apply to new sessions".into();
+                        if let Some(note) = self.terminal_images_notice() {
+                            self.notice.push_str(" · ");
+                            self.notice.push_str(note);
+                        }
                     }
                     Err(error) => {
                         self.notice = format!(

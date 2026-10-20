@@ -384,6 +384,10 @@ fn run_loop_with_remote(
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
     terminal.draw(|frame| app.draw(frame))?;
     app.configure_terminal_images(app.preferences.value("image_mode"));
+    if let Some(note) = app.terminal_images_notice() {
+        app.notice = if app.notice.is_empty() { note.into() }
+            else { format!("{note} · {}", app.notice) };
+    }
     terminal.draw(|frame| app.draw(frame))?;
     let mut pointer_on_link = false;
     let mut remote_connector: Option<RemoteConnector> = None;

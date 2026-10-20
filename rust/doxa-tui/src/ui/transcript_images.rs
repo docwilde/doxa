@@ -34,6 +34,7 @@ enum State {
 pub(super) struct Store {
     picker: Option<Picker>,
     previews: Vec<Preview>,
+    configuration_note: Option<&'static str>,
 }
 
 impl std::fmt::Debug for Store {
@@ -50,27 +51,21 @@ impl Store {
 
     pub fn picker(&self) -> Option<Picker> { self.picker.clone() }
 
+    pub fn configuration_note(&self) -> Option<&'static str> { self.configuration_note }
+
     pub fn configure(&mut self, mode: &str) {
         self.previews.clear();
+        self.configuration_note = None;
         if matches!(mode, "text" | "off") {
             self.picker = None;
             return;
         }
         // Probe only on explicit request, after the first alternate-screen
         // frame and before the terminal event reader begins.
-        let mut picker = if mode == "probe" {
-            Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize((8, 16)))
-        } else {
-            Picker::from_fontsize((8, 16))
-        };
-        let forced = match mode {
-            "kgp" => Some(ProtocolType::Kitty),
-            "sixel" => Some(ProtocolType::Sixel),
-            "iterm2" => Some(ProtocolType::Iterm2),
-            "halfblock" | "" => Some(ProtocolType::Halfblocks),
-            _ => Some(ProtocolType::Halfblocks),
-        };
-        if let Some(protocol) = forced { picker.set_protocol_type(protocol); }
+        let queried = (mode == "probe").then(|| Picker::from_query_stdio().ok()).flatten();
+        let metrics = crossterm::terminal::window_size().ok().as_ref().and_then(cell_size);
+        let (mut picker, note) = select_picker(mode, metrics, queried);
+        self.configuration_note = note;
         picker.set_background_color(image::Rgba([0x17, 0x15, 0x12, 0xff]));
         self.picker = Some(picker);
     }
@@ -138,6 +133,32 @@ impl Store {
     }
 }
 
+fn cell_size(size: &crossterm::terminal::WindowSize) -> Option<(u16, u16)> {
+    if size.columns == 0 || size.rows == 0 { return None; }
+    let (width, height) = (size.width / size.columns, size.height / size.rows);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+fn select_picker(mode: &str, metrics: Option<(u16, u16)>, queried: Option<Picker>)
+    -> (Picker, Option<&'static str>) {
+    // A negotiated picker already carries its real protocol and cell metrics.
+    // Applying the generic fallback below would silently undo a successful probe.
+    if mode == "probe" {
+        if let Some(picker) = queried { return (picker, None); }
+    }
+    let forced = match mode {
+        "kgp" => Some(ProtocolType::Kitty),
+        "sixel" => Some(ProtocolType::Sixel),
+        "iterm2" => Some(ProtocolType::Iterm2),
+        _ => None,
+    };
+    let mut picker = Picker::from_fontsize(metrics.unwrap_or((8, 16)));
+    let unknown = forced.is_some() && metrics.is_none();
+    picker.set_protocol_type(if unknown { ProtocolType::Halfblocks }
+        else { forced.unwrap_or(ProtocolType::Halfblocks) });
+    (picker, unknown.then_some("Terminal pixel size unknown · using halfblock images; try image mode=probe"))
+}
+
 fn paint_fallback(frame: &mut Frame, area: Rect, label: &str) {
     let label = label.chars().take(usize::from(area.width)).collect::<String>();
     frame.render_widget(Paragraph::new(label).style(Style::default().fg(theme::MUTED)), area);
@@ -201,6 +222,35 @@ pub(super) fn decode_file(mut file: File, width: u16, picker: &Picker) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn successful_probe_retains_protocol_and_real_cell_metrics() {
+        let mut negotiated = Picker::from_fontsize((16, 32));
+        negotiated.set_protocol_type(ProtocolType::Kitty);
+        let (picker, note) = select_picker("probe", None, Some(negotiated));
+        assert_eq!(picker.protocol_type(), ProtocolType::Kitty);
+        assert_eq!(picker.font_size(), (16, 32));
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn forced_graphics_uses_pixel_metadata_and_reports_unknown_metrics() {
+        let size = crossterm::terminal::WindowSize { columns: 125, rows: 37,
+            width: 2000, height: 1184 };
+        assert_eq!(cell_size(&size), Some((16, 32)));
+        for (mode, protocol) in [("kgp", ProtocolType::Kitty),
+            ("sixel", ProtocolType::Sixel), ("iterm2", ProtocolType::Iterm2)] {
+            let (picker, note) = select_picker(mode, cell_size(&size), None);
+            assert_eq!(picker.protocol_type(), protocol);
+            assert_eq!(picker.font_size(), (16, 32));
+            assert!(note.is_none());
+            let (fallback, note) = select_picker(mode, None, None);
+            assert_eq!(fallback.protocol_type(), ProtocolType::Halfblocks);
+            assert!(note.unwrap().contains("pixel size unknown"));
+        }
+        assert!(cell_size(&crossterm::terminal::WindowSize { width: 0, ..size }).is_none());
+        assert!(cell_size(&crossterm::terminal::WindowSize { rows: 0, ..size }).is_none());
+    }
+
     #[test]
     fn rejects_missing_and_oversized_sources() {
         let mut picker = Picker::from_fontsize((8, 16));
