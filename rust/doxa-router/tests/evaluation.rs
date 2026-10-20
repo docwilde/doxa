@@ -1,4 +1,4 @@
-use doxa_router::{Config,evaluation,Reason};
+use doxa_router::{Config,evaluation,FailureCategory,Reason};
 use serde_json::{json,Value};
 use std::sync::atomic::AtomicBool;
 fn config()->Config {serde_json::from_str(include_str!("../fixtures/config.example.json")).unwrap()}
@@ -52,4 +52,54 @@ fn captured_jev_wire_replays_with_bound_provenance_and_observed_usage() {
     assert!(report.results.iter().all(|row|row.outcome.reason==Reason::Selected && row.outcome.verified_response.is_some()));
     assert!(!report.real_quality_validated);
     assert!(report.worker_execution_cost_usd_micros.is_none() && report.total_cost_usd_micros.is_none());
+}
+
+#[test]
+fn closed_failure_diagnostics_survive_recording_replay_and_observed_journal() {
+    let cfg=config();let recorded=evaluation::fixture_recordings(&cfg,cases()).unwrap();
+    assert!(!recorded.contains("failure_category"),"old successful recording shape changed");
+    for (category,reason) in [(FailureCategory::Authentication,Reason::Unavailable),
+        (FailureCategory::PaymentRequired,Reason::Unavailable),(FailureCategory::RateLimited,Reason::Unavailable),
+        (FailureCategory::Overloaded,Reason::Unavailable),(FailureCategory::OtherHttp,Reason::Unavailable),
+        (FailureCategory::Timeout,Reason::Unavailable),(FailureCategory::Transport,Reason::Unavailable),
+        (FailureCategory::InvalidJson,Reason::InvalidResponse),(FailureCategory::ResponseTooLarge,Reason::InvalidResponse),
+        (FailureCategory::InvalidSchema,Reason::InvalidResponse)] {
+        let mut rows=evaluation::parse_cases(&recorded).unwrap();
+        let first=rows[0].recording.as_mut().unwrap();first.response=None;
+        first.transport_error=Some(reason.clone());first.failure_category=Some(category);
+        let text=rows.iter().map(|row|serde_json::to_string(row).unwrap()).collect::<Vec<_>>().join("\n");
+        let reparsed=evaluation::parse_cases(&text).unwrap();
+        assert_eq!(reparsed[0].recording.as_ref().unwrap().failure_category,Some(category));
+        let mut journal=Vec::new();
+        let report=evaluation::evaluate_observed(&cfg,&text,false,None,&AtomicBool::new(false),|ledger,hold,outcome| {
+            journal.push(json!({"ledger":ledger,"reservation":hold,"outcome":outcome}));Ok(())
+        }).unwrap();
+        assert_eq!(report.results[0].outcome.reason,reason);
+        assert_eq!(report.results[0].outcome.failure_category,Some(category));
+        assert!(report.results[0].outcome.attempted);
+        assert!(report.ledger.accounting_unknown);assert_eq!(report.ledger.calls,1);
+        assert!(report.router_cost_usd_micros.is_none());
+        assert!(report.results.iter().skip(1).all(|row|row.outcome.reason==Reason::AccountingUnknown
+            && !row.outcome.attempted && row.outcome.failure_category.is_none()));
+        assert!(journal[0]["reservation"].is_object() && journal[0]["outcome"].is_null());
+        assert_eq!(journal[1]["outcome"]["failure_category"],serde_json::to_value(category).unwrap());
+        assert_eq!(journal[1]["ledger"]["accounting_unknown"],true);
+        assert_eq!(journal[0]["ledger"]["reserved_usd_micros"],journal[1]["ledger"]["reserved_usd_micros"]);
+    }
+}
+
+#[test]
+fn diagnostic_categories_cannot_contradict_recorded_reason_attempt_or_success() {
+    let cfg=config();let recorded=evaluation::fixture_recordings(&cfg,cases()).unwrap();
+    for variant in ["success","not_attempted","wrong_reason","unknown_category"] {
+        let mut rows=evaluation::parse_cases(&recorded).unwrap();
+        let first=rows[0].recording.as_mut().unwrap();
+        first.failure_category=Some(FailureCategory::Authentication);
+        if variant!="success" {first.response=None;first.transport_error=Some(Reason::Unavailable);}
+        if variant=="not_attempted" {first.attempted=false;}
+        if variant=="wrong_reason" {first.transport_error=Some(Reason::InvalidResponse);}
+        let text=rows.iter().map(|row|serde_json::to_string(row).unwrap()).collect::<Vec<_>>().join("\n");
+        let text=if variant=="unknown_category" {text.replace("\"failure_category\":\"authentication\"","\"failure_category\":\"untrusted-private-text\"")}else{text};
+        assert!(evaluation::evaluate(&cfg,&text,false,None,&AtomicBool::new(false)).is_err(),"{variant}");
+    }
 }
