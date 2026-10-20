@@ -26,7 +26,7 @@ import tempfile
 import threading
 import time
 
-AGENT_PREFIX = "doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; "
+AGENT_PREFIX = "doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; "
 MAX_BYTES = 8 * 1024 * 1024
 DEADLINE = 45
 CALL_ID = "owned-code-mode-read"

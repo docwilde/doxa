@@ -9,8 +9,8 @@ use std::io::Write;
 #[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
 
-pub const SUPPORTED_VERSION: &str = "0.156.1";
-pub const PROTECTED_AGENT_PREFIX: &str = "doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; ";
+pub const SUPPORTED_VERSION: &str = "0.163.0";
+pub const PROTECTED_AGENT_PREFIX: &str = "doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; ";
 pub const HOOK_TIMEOUT: u64 = 240;
 pub const HOOK_KEY: &str = "/<session-flags>/config.toml:pre_compact:0:0";
 const MATCHER: &str = "^(auto|manual)$";
@@ -126,7 +126,7 @@ impl CompactGate {
         let group = format!("{{matcher={},hooks=[{{type=\"command\",command={},timeout={},async=false}}]}}",
             string(MATCHER), string(&self.command), HOOK_TIMEOUT);
         let state = format!("{}={{enabled=true,trusted_hash={}}}", string(HOOK_KEY), string(&self.hash));
-        vec!["features.codex_hooks=true".into(), "features.token_budget=false".into(), format!("hooks={{PreCompact=[{group}],state={{{state}}}}}")]
+        vec!["features.codex_hooks=true".into(), "features.token_budget=false".into(), "features.async_compaction=false".into(), format!("hooks={{PreCompact=[{group}],state={{{state}}}}}")]
     }
     /// Call `hooks/list` after initialize and BEFORE starting/resuming a thread.
     /// Failure means this provider must not claim protected compaction.

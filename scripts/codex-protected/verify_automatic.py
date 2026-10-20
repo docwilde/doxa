@@ -145,7 +145,7 @@ def scenario(binary, scratch, mode, *, default_window=False):
         rpc = Rpc([str(binary), "--listen", "stdio://"] + hook_overrides(mode), environment, root)
         try:
             initialized = rpc.request("initialize", {"clientInfo": {"name": "doxa_fault_fixture", "version": "1"}, "capabilities": {"experimentalApi": True}})
-            assert initialized["userAgent"].startswith("doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; ")
+            assert initialized["userAgent"].startswith("doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; ")
             rpc.send({"method": "initialized"})
             inventory = rpc.request("hooks/list", {"cwds": [str(root)]})
             hooks = [hook for entry in inventory["data"] for hook in entry["hooks"] if hook["eventName"] == "preCompact" and hook["source"] == "sessionFlags"]

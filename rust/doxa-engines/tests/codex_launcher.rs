@@ -2,7 +2,7 @@
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
-const PATCH: &str = "23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d";
+const PATCH: &str = "59a0bf33195f71fa9f792c5d65e89105414fbb3c2536d87f59334ff12a8e13d3";
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -38,8 +38,8 @@ fn fixture() -> tempfile::TempDir {
     )
     .unwrap();
     fs::write(dir.path().join("receipt.json"),json!({"contract":"doxa-precompact-fail-closed-v1",
-        "source_commit":"b412ff32c417f855c2b2d1581b77058eed87c84b","patch_sha256":PATCH,
-        "code_mode_host_source_commit":"b412ff32c417f855c2b2d1581b77058eed87c84b",
+        "source_commit":"83086188ae0614bd882818ff1aa23f3194962012","patch_sha256":PATCH,
+        "code_mode_host_source_commit":"83086188ae0614bd882818ff1aa23f3194962012",
         "code_mode_host_sha256":format!("{:x}",Sha256::digest(fs::read("/usr/bin/true").unwrap())),
         "code_mode_host_dispatcher_sha256":format!("{:x}",Sha256::digest(fs::read(env!("CARGO_BIN_EXE_doxa-codex-protected")).unwrap())),
         "binary_sha256":format!("{:x}",Sha256::digest(fs::read("/usr/bin/true").unwrap())),"official_cli":"/usr/bin/printf"}).to_string()).unwrap();
@@ -156,10 +156,10 @@ fn version_identifies_checked_protected_payload_instead_of_newer_official_cli() 
     let dir = fixture();
     let official = dir.path().join("official-codex");
     let marker = dir.path().join("executed");
-    fs::write(&official, b"#!/bin/sh\nprintf 'official' >> \"$DOXA_VERSION_TEST_MARKER\"\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.163.0\\n'; else printf 'official:%s\\n' \"$*\"; fi\n").unwrap();
+    fs::write(&official, b"#!/bin/sh\nprintf 'official' >> \"$DOXA_VERSION_TEST_MARKER\"\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.164.0\\n'; else printf 'official:%s\\n' \"$*\"; fi\n").unwrap();
     fs::set_permissions(&official, fs::Permissions::from_mode(0o700)).unwrap();
     let payload = dir.path().join("codex-app-server");
-    fs::write(&payload, b"#!/bin/sh\nprintf 'payload' >> \"$DOXA_VERSION_TEST_MARKER\"\nprintf 'codex-app-server 0.156.1\\n'\n").unwrap();
+    fs::write(&payload, b"#!/bin/sh\nprintf 'payload' >> \"$DOXA_VERSION_TEST_MARKER\"\nprintf 'codex-app-server 0.163.0\\n'\n").unwrap();
     let receipt = dir.path().join("receipt.json");
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
     value["official_cli"] = json!(official);
@@ -167,15 +167,15 @@ fn version_identifies_checked_protected_payload_instead_of_newer_official_cli() 
     fs::write(&receipt, value.to_string()).unwrap();
     let direct = Command::new(&official).arg("--version")
         .env("DOXA_VERSION_TEST_MARKER", &marker).output().unwrap();
-    assert!(direct.status.success());assert_eq!(direct.stdout, b"codex-cli 0.163.0\n");
+    assert!(direct.status.success());assert_eq!(direct.stdout, b"codex-cli 0.164.0\n");
     fs::remove_file(&marker).unwrap();
     for flag in ["--version", "-V"] {
         let result = Command::new(dir.path().join("codex")).arg(flag)
             .env("DOXA_VERSION_TEST_MARKER", &marker).output().unwrap();
         assert!(result.status.success());
         let report = String::from_utf8(result.stdout).unwrap();
-        assert_eq!(report, "doxa-codex-protected 0.156.1 (provider codex-0.156.1-precompact-v1; upstream b412ff32c417f855c2b2d1581b77058eed87c84b; contract doxa-precompact-fail-closed-v1)\n");
-        assert!(!report.contains("0.163.0"));assert!(!marker.exists());
+        assert_eq!(report, "doxa-codex-protected 0.163.0 (provider codex-0.163.0-precompact-v1; upstream 83086188ae0614bd882818ff1aa23f3194962012; contract doxa-precompact-fail-closed-v1)\n");
+        assert!(!report.contains("0.164.0"));assert!(!marker.exists());
     }
     let login = Command::new(dir.path().join("codex")).args(["login", "status"])
         .env("DOXA_VERSION_TEST_MARKER", &marker).output().unwrap();
