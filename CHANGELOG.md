@@ -10,12 +10,12 @@ the stable 2.0 release has not been cut.
 **Fleet controls and accounting**
 
 - Fix **`dependency_review`** to accept a queued ACK confirmation only with canonical message ancestry, successful native tool receipts and an unchanged source snapshot.
-- Add CLI-only native Codex supervisor attempt limits and an explicit command sandbox. Freeze both across resume and isolation changes; keep unknown account charges outside worker API dollars.
+- Add CLI **`--supervisor-account-turn-limit`** and **`--supervisor-sandbox`** for native Codex coordinators. Preserve both across resume and isolation changes; keep unknown account charges outside worker API dollars.
 - Add reviewed **`Candidate.max_tool_requests`** to cap API generation requests, including the final answer. Omission retains the existing **25-request** default and config identity.
 
 **Provider identity and diagnostics**
 
-- Upgrade the verified protected payload to **0.163.0** and report it in **`--version`**. Preserve synchronous compaction and live permission guards; disable unreviewed background compaction.
+- Upgrade the verified protected payload to **0.163.0** and report it in **`--version`**. Preserve compaction and live permission guards; disable background compaction and route agent spawning through DOXA.
 - Add guarded stable Codex updates through protected PR checks, verified helper provenance and annotated releases. Changed protection surfaces require review; incompatible updates stop visibly.
 - Retain closed **`Outcome.failure_category`** values for routing transport, HTTP and schema failures. Preserve fallback, private error handling and unknown reservations without retry.
 
