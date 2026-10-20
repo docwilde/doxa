@@ -285,8 +285,8 @@ fn saved_account_turn_limit(session_id:&str)->io::Result<Option<u64>>{
     let root=doxa_isolation::home()?.join("account-turns");let path=root.join(format!("{session_id}.json"));let policy=root.join(format!("{session_id}.policy.json"));
     let present=|path:&Path|match fs::symlink_metadata(path){Ok(_)=>Ok(true),Err(error)if error.kind()==io::ErrorKind::NotFound=>Ok(false),Err(error)=>Err(error)};
     if !present(&path)?&&!present(&policy)?{return Ok(None);}
-    let record:serde_json::Value=serde_json::from_slice(&doxa_router::read_private(&path,8192).map_err(|_|invalid("account turn record unavailable; resume withheld"))?)?;
-    let original:serde_json::Value=serde_json::from_slice(&doxa_router::read_private(&policy,8192).map_err(|_|invalid("account turn policy unavailable; resume withheld"))?)?;
+    let record:serde_json::Value=serde_json::from_str(&doxa_router::read_private(&path,8192).map_err(|_|invalid("account turn record unavailable; resume withheld"))?)?;
+    let original:serde_json::Value=serde_json::from_str(&doxa_router::read_private(&policy,8192).map_err(|_|invalid("account turn policy unavailable; resume withheld"))?)?;
     let limit=record["limit"].as_u64().filter(|limit|(1..=32).contains(limit)).ok_or_else(||invalid("invalid saved account turn limit"))?;
     if record["version"]!=1||record["identity"]["session_id"]!=session_id||record["identity"]["engine"]!="codex"||record["identity"]["role"]!="coordinator"
         ||record["pending"]!=false||record["used"].as_u64().is_none_or(|used|used>limit)

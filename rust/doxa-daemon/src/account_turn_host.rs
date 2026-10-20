@@ -2,42 +2,106 @@
 use doxa_runtime::{Host,PeerTurnOrigin};
 use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
-use std::{fs,io::{self,Read,Write},os::{fd::AsRawFd,unix::fs::{DirBuilderExt,MetadataExt,OpenOptionsExt,PermissionsExt}},path::PathBuf,sync::{Arc,Mutex}};
+use std::{fs,io::{self,Read,Write},os::{fd::{AsRawFd,FromRawFd},unix::{ffi::OsStrExt,fs::{DirBuilderExt,MetadataExt,OpenOptionsExt,PermissionsExt}}},path::{Path,PathBuf,Component},sync::{Arc,Mutex}};
 
 #[derive(Clone,Debug,PartialEq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {version:u8,identity:Value,limit:u64,used:u64,pending:bool,last_outcome:String}
-struct Journal {path:PathBuf,policy:PathBuf,_lock:fs::File}
+/// The canonical directory is pinned for descriptor-relative journal I/O. Root
+/// owned OS aliases (for example macOS /var) and root-owned sticky temporary
+/// ancestors are allowed; owner aliases and shared writable ancestors refuse.
+struct PrivateDirectory { original:PathBuf, canonical:PathBuf, file:fs::File, dev:u64, ino:u64 }
+fn trusted_chain(path:&Path)->io::Result<()> {
+    if !path.is_absolute(){return Err(denied("account journal parent must be absolute"));}
+    let mut current=PathBuf::new();
+    for component in path.components(){
+        match component{Component::RootDir=>current.push(component),Component::Normal(part)=>current.push(part),_=>return Err(denied("account journal parent has noncanonical components"))}
+        let meta=match fs::symlink_metadata(&current){Ok(meta)=>meta,Err(error)if error.kind()==io::ErrorKind::NotFound=>break,Err(error)=>return Err(error)};
+        if meta.file_type().is_symlink(){
+            let parent=fs::metadata(current.parent().ok_or_else(||denied("account journal alias parent unavailable"))?)?;
+            if meta.uid()!=0||parent.uid()!=0||parent.mode()&0o022!=0{return Err(denied("account journal owner or shared alias is unsafe"));}
+            // Check the resolved OS path too, so an allowed alias cannot hide
+            // an owner-controlled or shared-writable directory.
+            let resolved=fs::canonicalize(&current)?;trusted_canonical_chain(&resolved)?;
+        }else{trusted_directory_meta(&meta)?;}
+    }
+    Ok(())
+}
+fn trusted_directory_meta(meta:&fs::Metadata)->io::Result<()> {
+    let root_sticky=meta.uid()==0&&meta.mode()&0o1000!=0;
+    if !meta.is_dir()||![0,unsafe{libc::geteuid()}].contains(&meta.uid())||meta.mode()&0o022!=0&&!root_sticky{return Err(denied("account journal ancestor is not trusted"));}Ok(())
+}
+fn trusted_canonical_chain(path:&Path)->io::Result<()> {
+    for ancestor in path.ancestors(){let meta=fs::symlink_metadata(ancestor)?;if meta.file_type().is_symlink(){return Err(denied("account journal canonical ancestor changed"));}trusted_directory_meta(&meta)?;}Ok(())
+}
+impl PrivateDirectory {
+    fn open(parent:&Path,create:bool)->io::Result<Self>{
+        trusted_chain(parent)?;
+        if create{fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;}
+        trusted_chain(parent)?;let canonical=fs::canonicalize(parent)?;trusted_canonical_chain(&canonical)?;
+        let file=fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&canonical)?;
+        let meta=file.metadata()?;
+        if meta.uid()!=unsafe{libc::geteuid()}||meta.mode()&0o077!=0{return Err(denied("account journal parent must be private and owned"));}
+        let result=Self{original:parent.into(),canonical,file,dev:meta.dev(),ino:meta.ino()};result.verify()?;Ok(result)
+    }
+    fn verify(&self)->io::Result<()> {
+        trusted_chain(&self.original)?;
+        if fs::canonicalize(&self.original)?!=self.canonical{return Err(denied("account journal parent changed"));}
+        trusted_canonical_chain(&self.canonical)?;
+        let meta=fs::symlink_metadata(&self.canonical)?;let held=self.file.metadata()?;
+        if meta.dev()!=self.dev||meta.ino()!=self.ino||held.dev()!=self.dev||held.ino()!=self.ino||meta.uid()!=unsafe{libc::geteuid()}||meta.mode()&0o077!=0{return Err(denied("account journal parent identity changed"));}Ok(())
+    }
+    fn open_file(&self,name:&std::ffi::CStr,flags:i32)->io::Result<fs::File>{
+        self.verify()?;
+        let fd=unsafe{libc::openat(self.file.as_raw_fd(),name.as_ptr(),flags|libc::O_NOFOLLOW|libc::O_NONBLOCK|libc::O_CLOEXEC,0o600)};
+        if fd<0{return Err(io::Error::last_os_error());}let file=unsafe{fs::File::from_raw_fd(fd)};self.verify()?;Ok(file)
+    }
+}
+struct Journal {path:PathBuf,policy:PathBuf,directory:PrivateDirectory,_lock:fs::File}
 pub struct AccountTurnHost {inner:Arc<dyn Host>,journal:Journal,state:Mutex<Record>}
 fn denied(message:&str)->io::Error{io::Error::other(message)}
+fn basename(path:&Path)->io::Result<std::ffi::CString>{std::ffi::CString::new(path.file_name().ok_or_else(||denied("account journal name missing"))?.as_bytes()).map_err(|_|denied("invalid account journal name"))}
 impl Journal {
-    fn read(&self)->io::Result<Record>{Self::read_path(&self.path)}
-    fn read_path(path:&std::path::Path)->io::Result<Record>{
-        let mut file=fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path)?;
+    fn read(&self)->io::Result<Record>{self.read_named(&self.path)}
+    fn read_named(&self,path:&Path)->io::Result<Record>{
+        let mut file=self.directory.open_file(&basename(path)?,libc::O_RDONLY)?;let record=Self::decode(&mut file)?;self.directory.verify()?;Ok(record)
+    }
+    fn read_path(path:&Path)->io::Result<Record>{
+        let directory=PrivateDirectory::open(path.parent().ok_or_else(||denied("account journal parent unavailable"))?,false)?;
+        let mut file=directory.open_file(&basename(path)?,libc::O_RDONLY)?;let record=Self::decode(&mut file)?;directory.verify()?;Ok(record)
+    }
+    fn decode(file:&mut fs::File)->io::Result<Record>{
         let meta=file.metadata()?;
         if !meta.is_file()||meta.nlink()!=1||meta.uid()!=unsafe{libc::geteuid()}||meta.mode()&0o077!=0||meta.len()>8192{return Err(denied("unsafe account turn journal"));}
-        let mut bytes=Vec::new();Read::by_ref(&mut file).take(8193).read_to_end(&mut bytes)?;
+        let mut bytes=Vec::new();Read::by_ref(file).take(8193).read_to_end(&mut bytes)?;
         if bytes.len()>8192{return Err(denied("account turn journal exceeds bound"));}
         serde_json::from_slice(&bytes).map_err(|_|denied("invalid account turn journal"))
     }
-    fn write(&self,value:&Record,new:bool)->io::Result<()>{
-        let parent=self.path.parent().ok_or_else(||denied("account journal parent unavailable"))?;
+    fn write(&self,value:&Record,new:bool)->io::Result<()>{self.write_named(&self.path,value,new)}
+    fn write_named(&self,path:&Path,value:&Record,new:bool)->io::Result<()>{
+        self.directory.verify()?;let name=basename(path)?;
         let bytes=serde_json::to_vec(value)?;if bytes.len()>8192{return Err(denied("account journal exceeds bound"));}
         if new {
-            let mut file=fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&self.path)?;
+            let mut file=self.directory.open_file(&name,libc::O_WRONLY|libc::O_CREAT|libc::O_EXCL)?;
             file.write_all(&bytes)?;file.sync_all()?;
         }else{
-            let mut file=tempfile::Builder::new().prefix(".account-").tempfile_in(parent)?;
-            file.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
-            file.write_all(&bytes)?;file.as_file().sync_all()?;file.persist(&self.path).map_err(|error|error.error)?;
+            static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+            let temporary=std::ffi::CString::new(format!(".account-{}-{}",std::process::id(),NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed))).unwrap();
+            let result=(||->io::Result<()>{
+                let mut file=self.directory.open_file(&temporary,libc::O_WRONLY|libc::O_CREAT|libc::O_EXCL)?;file.write_all(&bytes)?;file.sync_all()?;
+                self.directory.verify()?;
+                if unsafe{libc::renameat(self.directory.file.as_raw_fd(),temporary.as_ptr(),self.directory.file.as_raw_fd(),name.as_ptr())}!=0{return Err(io::Error::last_os_error());}Ok(())
+            })();
+            if result.is_err(){unsafe{libc::unlinkat(self.directory.file.as_raw_fd(),temporary.as_ptr(),0)};}result?;
         }
-        fs::File::open(parent)?.sync_all()
+        self.directory.file.sync_all()?;self.directory.verify()
     }
 }
 /// Startup must enforce persisted account policy even when a caller clears
 /// its environment. A frontend hint is never authority to remove an allowance.
 pub fn preflight(path:&std::path::Path,requested:Option<u64>,resume:bool,session:&str,model:Option<&str>)->io::Result<()>{
     let policy=path.with_extension("policy.json");
+    if requested.is_some(){trusted_chain(path.parent().ok_or_else(||denied("account journal parent unavailable"))?)?;}
     let present=|path:&std::path::Path|match fs::symlink_metadata(path){Ok(_)=>Ok(true),Err(error)if error.kind()==io::ErrorKind::NotFound=>Ok(false),Err(error)=>Err(error)};
     let existing=present(path)?||present(&policy)?;
     if !existing&&requested.is_none(){return Ok(());}
@@ -56,31 +120,28 @@ impl AccountTurnHost {
         if !(1..=32).contains(&limit)||identity["engine"]!="codex"||identity["role"]!="coordinator"
             ||identity["model"].as_str().is_none_or(|model|!model.starts_with("gpt-")||model.len()>128){return Err(denied("account turn allowance requires an exact native Codex coordinator"));}
         let parent=path.parent().ok_or_else(||denied("account journal parent unavailable"))?;
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;
-        let meta=fs::symlink_metadata(parent)?;
-        if !meta.is_dir()||meta.file_type().is_symlink()||meta.uid()!=unsafe{libc::geteuid()}||meta.mode()&0o077!=0{return Err(denied("account journal parent must be private and owned"));}
-        let lock=fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path.with_extension("lock"))?;
+        let directory=PrivateDirectory::open(parent,true)?;
+        let lock=directory.open_file(&basename(&path.with_extension("lock"))?,libc::O_RDWR|libc::O_CREAT)?;
         let meta=lock.metadata()?;
         if !meta.is_file()||meta.nlink()!=1||meta.uid()!=unsafe{libc::geteuid()}||meta.mode()&0o077!=0
             ||unsafe{libc::flock(lock.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)}!=0{return Err(denied("account journal is unsafe or already active"));}
         let policy=path.with_extension("policy.json");
-        let journal=Journal{path,policy,_lock:lock};
+        let journal=Journal{path,policy,directory,_lock:lock};
         let original=Record{version:1,identity:identity.clone(),limit,used:0,pending:false,last_outcome:"new".into()};
         let state=if resume {
-            if Journal::read_path(&journal.policy)?!=original{return Err(denied("account turn policy changed or missing"));}
+            if journal.read_named(&journal.policy)?!=original{return Err(denied("account turn policy changed or missing"));}
             let row=journal.read()?;
             if row.version!=1||row.identity!=identity||row.limit!=limit||row.used>limit||row.pending
                 ||!matches!(row.last_outcome.as_str(),"new"|"completed"|"refused"|"error") {return Err(denied("account turn identity or settlement changed; allowance withheld"));}row
         }else{
-            let mut policy=fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&journal.policy)?;
-            policy.write_all(&serde_json::to_vec(&original)?)?;policy.sync_all()?;journal.write(&original,true)?;original
+            journal.write_named(&journal.policy,&original,true)?;journal.write(&original,true)?;original
         };
         Ok(Self{inner,journal,state:Mutex::new(state)})
     }
     fn reserve(&self)->io::Result<()>{
         let mut state=self.state.lock().map_err(|_|denied("account turn state unavailable"))?;
         let original=Record{version:1,identity:state.identity.clone(),limit:state.limit,used:0,pending:false,last_outcome:"new".into()};
-        if Journal::read_path(&self.journal.policy)?!=original||self.journal.read()?!=*state||state.pending||state.used>=state.limit{return Err(denied("account turn allowance exhausted, unsettled or changed"));}
+        if self.journal.read_named(&self.journal.policy)?!=original||self.journal.read()?!=*state||state.pending||state.used>=state.limit{return Err(denied("account turn allowance exhausted, unsettled or changed"));}
         let mut next=state.clone();next.used+=1;next.pending=true;next.last_outcome="pending".into();
         if let Err(error)=self.journal.write(&next,false){state.pending=true;return Err(error);}
         *state=next;Ok(())
@@ -179,6 +240,32 @@ mod tests {
     }
     fn identity()->Value{json!({"session_id":"session","engine":"codex","role":"coordinator","model":"gpt-fixture","cwd":"/fixture"})}
     fn fixture(root:&std::path::Path)->Arc<Fixture>{Arc::new(Fixture{path:root.join("account/session.json"),calls:AtomicUsize::new(0),images:AtomicUsize::new(0)})}
+    #[test]
+    fn account_directory_rejects_shared_alias_and_swapped_parent_before_dispatch(){
+        for scenario in ["shared","alias","swapped","replaced_alias","chmod"] {
+            let dir=tempfile::tempdir().unwrap();let root=dir.path().join("owned");fs::create_dir(&root).unwrap();
+            fs::set_permissions(&root,fs::Permissions::from_mode(0o700)).unwrap();
+            if scenario=="shared"{fs::set_permissions(&root,fs::Permissions::from_mode(0o770)).unwrap();}
+            let exposed=if scenario=="alias"{let alias=dir.path().join("alias");std::os::unix::fs::symlink(&root,&alias).unwrap();alias}else{root.clone()};
+            let fixture=fixture(&exposed);
+            if matches!(scenario,"shared"|"alias") {
+                assert!(AccountTurnHost::new(fixture.clone(),fixture.path.clone(),identity(),2,false).is_err());
+                assert!(preflight(&fixture.path,Some(2),false,"session",Some("gpt-fixture")).is_err());
+            }else{
+                let host=AccountTurnHost::new(fixture.clone(),fixture.path.clone(),identity(),2,false).unwrap();
+                let parent=fixture.path.parent().unwrap();let original=fs::read(&fixture.path).unwrap();
+                if scenario=="chmod"{fs::set_permissions(&root,fs::Permissions::from_mode(0o770)).unwrap();}
+                else{let moved=root.join("moved");fs::rename(parent,&moved).unwrap();
+                    if scenario=="replaced_alias"{std::os::unix::fs::symlink(&moved,parent).unwrap();}
+                    else{fs::create_dir(parent).unwrap();fs::set_permissions(parent,fs::Permissions::from_mode(0o700)).unwrap();fs::write(&fixture.path,&original).unwrap();fs::write(fixture.path.with_extension("policy.json"),fs::read(moved.join("session.policy.json")).unwrap()).unwrap();}
+                }
+                let mut events=Vec::new();host.prompt("must-refuse",&mut|event|events.push(event));
+                assert_eq!(events.last().unwrap()["type"],"turn_refused","{scenario}");
+                assert_eq!(host.allowance()["used"],0,"{scenario}");
+            }
+            assert_eq!(fixture.calls.load(Ordering::SeqCst),0,"{scenario}");
+        }
+    }
     #[test]
     fn account_attempts_include_peer_attachment_compaction_refusal_and_error_without_refunds(){
         let dir=tempfile::tempdir().unwrap();let fixture=fixture(dir.path());

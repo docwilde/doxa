@@ -784,11 +784,12 @@ pub fn start(args: &[String]) -> io::Result<()> {
         "approvals":{"policy":spec.preflight.approve,"grace_s":spec.preflight.approval_grace_s,"asked":0,"auto_approved":0,"answered":0,"refused":0},"auto_test_runs":0,"slots":[]});
     store.save(&value)?;
     let mut slots = Vec::new();
+    let slot_count=assigned.len();
     let result = (|| -> io::Result<()> {
         for (index, assigned) in assigned.iter().enumerate() {
             ensure_active(&store)?;
             let isolation=spec.access.slot(spec.preflight.supervisor.is_some() && index==0);
-            let budget=slot_api_budget(spec.preflight.run_budget_usd,review_budget,assigned.len(),spec.supervisor_account_turn_limit,index)?;
+            let budget=slot_api_budget(spec.preflight.run_budget_usd,review_budget,slot_count,spec.supervisor_account_turn_limit,index)?;
             let options = launch::LaunchOptions { account_turn_limit:if index==0{spec.supervisor_account_turn_limit}else{None},isolation:Some(isolation), engine: assigned.engine, model: assigned.model.clone(), cwd: Some(spec.cwd.clone()),router_config:router_paths.get(&index).cloned(),
                 linger: Some(60.0), ..Default::default() };
             let session = launch::spawn_fleet(&options, &runtime, budget, assigned.engine != launch::Engine::Fixture, assigned.lore.unwrap_or(spec.lore_enabled))?;
