@@ -26,7 +26,7 @@ def probe(binary, env, repo, root, state):
     output=state/'native-menu';output.mkdir(mode=0o700)
     window=Gtk.Window();window.set_decorated(False);window.set_default_size(2400,1600)
     terminal=Vte.Terminal();terminal.set_font(Pango.FontDescription('DejaVu Sans Mono 12'));window.add(terminal);window.show_all()
-    child=[];failure=[];start=time.monotonic();steps=[];active={'index':0,'sent_at':start,'review':False}
+    child=[];failure=[];start=time.monotonic();steps=[];active={'index':0,'sent_at':start,'review':False,'pages':[]}
     local_env=dict(env,DISPLAY=display_name,TERM='xterm-256color',COLORTERM='truecolor',LC_ALL='C.UTF-8',DOXA_NERD_FONT='off',DOXA_KEY_NOTICE='0')
     # Existing reviewed JSON is purely configuration, no secrets.
     candidate={'id':'glm-small','provider':'glm','model':'glm-5.3-flash','effort':'low',
@@ -65,9 +65,14 @@ def probe(binary, env, repo, root, state):
                 failure.append('Unexpected UI before '+label+'; no text entered');Gtk.main_quit();return False
             terminal.feed_child(data);steps.append(label);active['index']+=1;active['sent_at']=now;return True
         if not active['review']:
-            (output/'terminal.txt').write_text(text)
+            active['pages'].append(text)
+            joined='\n'.join(active['pages'])
+            if len(active['pages'])<10:
+                terminal.feed_child(b'\x1b[6~');active['sent_at']=now;return True
+            (output/'terminal.txt').write_text(joined)
+            (output/'terminal-pages.json').write_text(json.dumps(active['pages']))
             required=['Start fleet','router:glm-small','docker-offline','Reviewed Router config SHA256']
-            if any(value not in text for value in required):
+            if any(value not in joined for value in required):
                 failure.append('Native menu did not reach expected Router launch review');Gtk.main_quit();return False
             subprocess.run(['ffmpeg','-loglevel','error','-y','-f','x11grab','-draw_mouse','0','-video_size','2400x1600','-i',display_name+'.0','-frames:v','1',str(output/'review.png')],check=True)
             active['review']=True
