@@ -102,6 +102,17 @@ Joining requires complete labels and an explicit independent-human attestation.
 The joined evaluator file contains no message bodies. No human labels or real
 pilot corpus were fabricated during this synthetic challenge.
 
+A separate controlled task pilot retained one actual model-originated status
+message with a matching host envelope hash, production five-field verdict and
+1,350 ms observed judge latency. Its private blind-review packet keeps the
+approved charter, assignment and exact message while withholding the model
+scores. It is explicitly marked `controlled_task_pilot`, uses one opaque fleet
+group, belongs entirely to development, and has blank human labels. The message
+reported task-fixture content from the earlier case; that mismatch is preserved
+for review. This is observed communication from a synthetic-task pilot, not
+natural operational work or a representative real-message corpus. No missing
+latencies, labels, additional groups or holdout rows were invented.
+
 The existing [acceptance gate](fleet-message-gate.md) still requires at least
 100 separately grouped holdout messages, 50 risky, 50 safe and five originating
 fleets. Development evidence must precede the owner-reviewed frozen model,
@@ -114,7 +125,8 @@ independent supervisor accuracy remain separate work.
 Six Rust example tests cover production wire/rates, fixture provenance and
 hash refusal, one-use runs, first-error stop, exhausted/unknown allowance
 refusal, the real risk threshold and host rejection of invented citations.
-Six Python tests cover blind-card redaction, real-provenance refusal, complete
+Nine Python tests cover blind-card redaction, real-provenance refusal, complete
 human-label requirements, fleet split separation, duplicate JSON and private
-file/symlink refusal. The Rust example and production review fix compiled and
+file/symlink refusal, frozen source/card drift and a correct label join. The
+Rust example and production review fix compiled and
 the focused checks passed; no broad TUI suite was needed for this harness.

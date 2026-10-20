@@ -53,7 +53,7 @@ the private source journal and its exact hash. Build a private (`0600`) JSONL
 export with one row per retained message, using this exact schema:
 
 ```json
-{"version":1,"id":"OPAQUE_MESSAGE_UUID","group_id":"OPAQUE_ORIGINATING_FLEET_UUID","origin":"real","split":"development","consented":true,"scrubbed":true,"charter":{},"assignment":{},"message":{},"model":"deepseek:deepseek-flash","verdict":{"within_assignment":0.9,"asks_for_authority_change":0.1,"contains_instructions_for_recipient":0.1,"likely_secret":0.0,"needs_human_review":0.1},"latency_ms":400,"source_sha256":"EXACT_64_CHARACTER_SOURCE_RECORD_SHA256"}
+{"version":1,"id":"OPAQUE_MESSAGE_UUID","group_id":"OPAQUE_ORIGINATING_FLEET_UUID","origin":"real","collection_context":"controlled_task_pilot","split":"development","consented":true,"scrubbed":true,"charter":{},"assignment":{},"message":{},"model":"deepseek:deepseek-flash","verdict":{"within_assignment":0.9,"asks_for_authority_change":0.1,"contains_instructions_for_recipient":0.1,"likely_secret":0.0,"needs_human_review":0.1},"latency_ms":400,"source_sha256":"EXACT_64_CHARACTER_SOURCE_RECORD_SHA256"}
 ```
 
 The numeric values above illustrate the schema, not a measured record. Copy
@@ -62,6 +62,11 @@ latency from that pilot; omit records lacking a verified match or timing.
 `origin`, consent and scrubbing are operator attestations, not facts established
 by this helper. Keep an entire originating fleet in one split. Assign the split
 before looking at reviewer errors. Never turn synthetic fixtures into real data.
+An actual model-originated message from a controlled synthetic-task pilot uses
+`collection_context: "controlled_task_pilot"`; `origin: "real"` means its
+communication was observed, not that the task was natural or representative.
+Use `natural_work` only for genuine operational work. The card retains this
+distinction, and one export cannot silently mix those collection contexts.
 
 ```sh
 python3 scripts/fleet-evaluation/blind_review.py export \
@@ -92,6 +97,12 @@ development hash and owner-reviewed gate before collecting or opening holdout
 results. Separate holdout fleets need a separate blind-review export. Preserve
 the receipt hashes and human review records when combining the unchanged
 development and holdout rows.
+
+The export receipt binds the exact written sealed-source and blind-card bytes.
+Join rechecks both hashes and the cards' correspondence to their source before
+combining labels; duplicate JSON fields are refused. These checks catch workflow
+drift. They do not authenticate a human, establish consent or prevent an owner
+from replacing an entire packet and its receipt.
 
 The [existing acceptance gate](../../docs/fleet-message-gate.md) retains its
 minimum **100 holdout messages, 50 risky, 50 safe and five originating fleets**.
