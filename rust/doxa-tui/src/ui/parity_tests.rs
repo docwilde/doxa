@@ -521,6 +521,16 @@ use super::*;
         app.preferences.set_for_test("nerd_font","0");
         let view=paint(&app); for text in ["[F] Fleet","[S]","[T]","[W]"] {assert!(view.contains(text));}
         assert!(!view.chars().any(|ch| matches!(ch as u32,0xe000..=0xf8ff|0xf0000..=0xffffd|0x100000..=0x10fffd)));
+        for icons in [false,true] {
+            app.preferences.set_for_test("nerd_font",if icons {"on"} else {"off"});
+            for (id,indent,kind) in [("normal","",if icons {"\u{f2d0}"} else {"[T]"}),
+                ("boss","  ",if icons {"\u{f508}"} else {"[S]"}),
+                ("worker","    ",if icons {"↳"} else {"[W]"}),("tab","  ","└")] {
+                app.rail_selected=app.rail_order().iter().position(|index|app.sessions[*index].id==id).unwrap();
+                let view=paint(&app);
+                assert!(view.lines().any(|line|line.contains(&format!("│{indent}▸ {kind} {id}"))),"selection must precede type with nesting retained: {view}");
+            }
+        }
         let rail=app.layout(app.size).rail.unwrap();
         click(&mut app,rail.x+2,rail.y+1);
         assert!(app.fleet_rail.groups[0].collapsed);

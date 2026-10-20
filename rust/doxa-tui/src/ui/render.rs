@@ -2171,7 +2171,9 @@ impl App {
                     } else {
                         style
                     };
-                    lines.push(Line::styled(format!("{fleet_prefix}{tab_prefix}{mark} {title}{badge}"), style));
+                    let prefix=format!("{fleet_prefix}{tab_prefix}");
+                    let (indent,kind)=prefix.split_at(prefix.len()-prefix.trim_start_matches(' ').len());
+                    lines.push(Line::styled(format!("{indent}{mark} {kind}{title}{badge}"), style));
                 }
             }
         }
