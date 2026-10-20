@@ -12,10 +12,13 @@ pub const MAX_IMAGE: usize = 1024 * 1024;
 pub const MAX_SOURCE: usize = 8 * 1024 * 1024;
 pub const MAX_TEXT: usize = 64 * 1024;
 pub const CHUNK: usize = 24 * 1024;
-const MAX_PIXELS: u64 = 8_000_000;
+const MAX_PIXELS: u64 = 32_000_000;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Attachment { pub name: String, pub mime: String, pub bytes: Arc<Vec<u8>> }
+impl std::fmt::Debug for Attachment {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.debug_struct("Attachment").field("name",&self.name).field("mime",&self.mime).field("bytes",&self.bytes.len()).finish()}
+}
 fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
@@ -38,7 +41,7 @@ impl Attachment {
             let mut reader = ImageReader::with_format(Cursor::new(&raw), format);
             let mut limits=image::Limits::default(); limits.max_alloc=Some(128*1024*1024); reader.limits(limits);
             let (width,height)=ImageReader::with_format(Cursor::new(&raw),format).into_dimensions().map_err(|_|invalid("Invalid image header"))?;
-            if width==0||height==0||u64::from(width)*u64::from(height)>MAX_PIXELS {return Err(invalid("Image exceeds 8 million pixels"));}
+            if width==0||height==0||u64::from(width)*u64::from(height)>MAX_PIXELS {return Err(invalid("Image exceeds 32 million pixels"));}
             let decoded=reader.decode().map_err(|_|invalid("Image could not be decoded"))?;
             // Canonical encoding strips metadata and freezes the first frame.
             let mut image=if width>2048||height>2048 {decoded.resize(2048,2048,image::imageops::FilterType::Lanczos3)}else{decoded};
@@ -67,7 +70,7 @@ impl Attachment {
         let expected=match mime {"image/png"=>ImageFormat::Png,"image/jpeg"=>ImageFormat::Jpeg,_=>return Err(invalid("Unsupported image media type"))};
         if image::guess_format(&bytes).ok()!=Some(expected){return Err(invalid("Attachment media type does not match its content"));}
         let (w,h)=ImageReader::with_format(Cursor::new(&bytes),expected).into_dimensions().map_err(|_|invalid("Invalid image"))?;
-        if w==0||h==0||u64::from(w)*u64::from(h)>MAX_PIXELS{return Err(invalid("Image exceeds 8 million pixels"));}
+        if w==0||h==0||u64::from(w)*u64::from(h)>MAX_PIXELS{return Err(invalid("Image exceeds 32 million pixels"));}
         let mut reader=ImageReader::with_format(Cursor::new(&bytes),expected);let mut limits=image::Limits::default();limits.max_alloc=Some(128*1024*1024);reader.limits(limits);
         reader.decode().map_err(|_|invalid("Invalid image"))?;
         Ok(Self{name:name.into(),mime:mime.into(),bytes:Arc::new(bytes)})

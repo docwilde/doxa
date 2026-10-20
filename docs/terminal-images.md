@@ -82,6 +82,50 @@ using the same fixed sample as `doxa doctor`. Settings shows a static failure
 reason without using or displaying transcript diagram source. If you edit a
 renderer value after the check, run it again; the old result is marked stale.
 
-Provider binary attachments, screenshots pasted into the prompt and remote
-image URLs still need separate input paths. Terminal protocol quality depends
-on the emulator, tmux and SSH path; halfblock is the portable fallback.
+Terminal protocol quality depends on the emulator, tmux and SSH path;
+halfblock is the portable fallback. Input attachment support is described below.
+
+## Prompt attachments
+
+Click the **Attach** / **Files N** chip, choose **Attach files** from the
+command menu, or press **Alt+A**. Enter a local path (relative paths use the
+session workspace), then press Enter or click **Add**. Spaces are accepted,
+including quoted paths from terminal drag/drop. Tab switches to the attached
+file list; select a file and press Delete or click **Remove**. **Done** / Esc
+returns to the original prompt. Adding or pasting content never submits it.
+
+Each pane/session draft owns its attachments. Changing tabs keeps them on the
+original draft; moving a tab carries them with it. Enter submits the draft and
+its files together. A rejected or uncertain delivery keeps the exact content
+for **Alt+Up** recovery; inspect the session before retrying an uncertain turn.
+Unsent attachments are held in TUI memory and are not saved across TUI exits.
+
+PNG, JPEG, GIF and WebP inputs are decoded on a worker, with an 8 MiB source
+limit and 32 million pixel limit. DOXA strips image metadata, freezes the first
+frame, fits it within 2048×2048 pixels and sends a bounded PNG or JPEG (at most
+1 MiB). At most four files and 4 MiB of normalized content accompany a prompt.
+UTF-8 text files up to 64 KiB are included as quoted source data. PDF, other
+binary documents, remote URLs and remote-hub attachment submission are not yet
+supported. A selected file must be regular; symlinks are refused.
+
+Images reach Claude stream-json and Codex app-server as native image content,
+including Docker sessions. Bounded socket chunks carry bytes without adding
+host mounts or enabling network access. GLM, DeepSeek, Router and legacy Codex
+exec accept text files and explicitly refuse image attachments. Provider/model
+errors remain possible if the selected model does not support images. DOXA's
+transcript records attachment labels; the provider keeps its own image history.
+
+**Ctrl+V** checks for PNG clipboard content before falling back to text on
+Linux. It requires `wl-paste` (Wayland, package `wl-clipboard`) or `xclip`
+(X11). Install the appropriate desktop helper if missing. File attachment works
+without a clipboard helper. macOS currently uses file attachment for images;
+its existing `pbpaste` text path remains available. Credential editors only
+request text. Clipboard content is read only after an explicit paste action.
+Terminal **Ctrl+Shift+V** pastes text through bracketed paste; it does not carry
+image bytes. Copy selected transcript text with **Ctrl+C**; without a selection
+Ctrl+C keeps its cancel behavior. Desktop copy uses a helper where available,
+with OSC 52 as a terminal-dependent fallback.
+
+The provider image formats follow the installed Codex schema,
+[Codex app-server](https://developers.openai.com/codex/app-server/) and
+[Claude streaming input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode).

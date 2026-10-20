@@ -718,7 +718,6 @@ impl App {
         }
         let telemetry = id.and_then(|id| self.session_telemetry.get(id));
         let mut chips = Vec::new();
-        if let Some(id)=id{let count=self.prompt_attachments.get(&(index,id.to_owned())).map_or(0,Vec::len);chips.push(("attachments",if count==0{"Attach".into()}else{format!("Files {count}")}));}
         // Display the provider-reported permission policy even when this
         // engine does not expose a mutable mode control.
         if let Some(mode) = id.and_then(|id| self.permission_modes.get(id)) {
@@ -861,6 +860,7 @@ impl App {
                 chips.push(("balance", format!("Balance {balance}")));
             }
         }
+        if let Some(id)=id{let count=self.prompt_attachments.get(&(index,id.to_owned())).map_or(0,Vec::len);chips.push(("attachments",if count==0{"Attach".into()}else{format!("Files {count}")}));}
         chips
     }
 

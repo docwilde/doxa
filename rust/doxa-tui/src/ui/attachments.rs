@@ -2,6 +2,7 @@
 use super::{App, Focus, safe_label};
 use crate::clipboard::Target;
 use crossterm::event::{KeyCode,KeyEvent,KeyModifiers};
+use crossterm::event::{MouseEvent,MouseEventKind,MouseButton};
 use doxa_input::Attachment;
 use ratatui::{Frame,layout::Rect,style::{Style,Modifier},widgets::{Block,Borders,Clear,Paragraph}};
 use std::{path::PathBuf,sync::mpsc};
@@ -11,6 +12,24 @@ pub(super) struct Picker {owner:(usize,String),pub path:String,selected:usize,li
 #[derive(Debug)]
 pub(super) struct FileJob {target:Target,rx:mpsc::Receiver<std::io::Result<Attachment>>}
 impl App {
+    fn attachment_rect(area:Rect)->Option<Rect>{
+        let width=area.width.saturating_sub(4).min(90);let height=area.height.saturating_sub(2).min(17);
+        (width>=20&&height>=5).then(||Rect::new(area.x+(area.width-width)/2,area.y+(area.height-height)/2,width,height))
+    }
+    pub(super) fn attachment_mouse(&mut self,mouse:MouseEvent)->bool{
+        if self.attachment_picker.is_none(){return false;}
+        let Some(rect)=Self::attachment_rect(self.size)else{return true;};
+        if mouse.kind!=MouseEventKind::Down(MouseButton::Left)||!rect.contains(ratatui::layout::Position::new(mouse.column,mouse.row)){return true;}
+        let x=mouse.column.saturating_sub(rect.x+1);let y=mouse.row.saturating_sub(rect.y+1);
+        if y==rect.height.saturating_sub(4){
+            if x<7{self.attachment_picker.as_mut().unwrap().list=false;return self.attachment_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));}
+            if x<18{self.attachment_picker.as_mut().unwrap().list=true;return self.attachment_key(KeyEvent::new(KeyCode::Delete,KeyModifiers::NONE));}
+            self.attachment_picker=None;return true;
+        }
+        let picker=self.attachment_picker.as_mut().unwrap();
+        if y==3{picker.list=false;}else if y>=5{let index=usize::from(y-5);if index<self.prompt_attachments.get(&picker.owner).map_or(0,Vec::len){picker.list=true;picker.selected=index;}}
+        true
+    }
     pub(super) fn open_attachments(&mut self){
         let owner=self.prompt_owner();
         if owner.1.is_empty()||self.active_remote()||self.offline_ids.contains(&owner.1)||self.active_request_index().is_some(){self.notice="Attachments require an attached local session prompt".into();return;}
@@ -75,14 +94,15 @@ impl App {
     }
     pub(super) fn draw_attachments(&self,frame:&mut Frame,area:Rect){
         let Some(picker)=&self.attachment_picker else{return;};
-        let width=area.width.saturating_sub(4).min(90);let height=area.height.saturating_sub(2).min(17);
-        if width<20||height<5{return;}
-        let rect=Rect::new(area.x+(area.width-width)/2,area.y+(area.height-height)/2,width,height);
+        let Some(rect)=Self::attachment_rect(area)else{return;};
         let mut lines=vec!["Local image (PNG/JPEG/GIF/WebP) or UTF-8 file".to_owned(),"Enter adds · Tab switches to files · Delete removes · Esc closes".into(),String::new(),format!("{} Path: {}",if picker.list{" "}else{">"},safe_label(&picker.path)),String::new()];
         if let Some(values)=self.prompt_attachments.get(&picker.owner){for(index,value)in values.iter().enumerate(){lines.push(format!("{} {} · {} KiB",if picker.list&&picker.selected==index{">"}else{" "},safe_label(&value.name),(value.bytes.len()+1023)/1024));}}
         if lines.len()==5{lines.push("No attachments yet".into());}
-        lines.push(String::new());lines.push(safe_label(&self.notice));
         frame.render_widget(Clear,rect);frame.render_widget(Paragraph::new(lines.join("\n")).style(Style::default().fg(crate::theme::TEXT).bg(crate::theme::RAISED)).block(Block::default().title(" Attach files · Alt+A ").borders(Borders::ALL).border_style(Style::default().fg(crate::theme::ACCENT).add_modifier(Modifier::BOLD))),rect);
+        if rect.height>=13{
+            frame.render_widget(Paragraph::new("[Add]  [Remove]   [Done]").style(Style::default().fg(crate::theme::ACCENT)),Rect::new(rect.x+1,rect.bottom()-3,rect.width-2,1));
+            frame.render_widget(Paragraph::new(safe_label(&self.notice)).style(Style::default().fg(crate::theme::SECONDARY)),Rect::new(rect.x+1,rect.bottom()-2,rect.width-2,1));
+        }
     }
 }
 

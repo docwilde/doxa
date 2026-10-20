@@ -2239,6 +2239,7 @@ impl App {
         false
     }
     pub(super) fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.attachment_mouse(mouse){return true;}
         if self.choice_dropdown.is_some() {
             if self.active_request_index().is_none() && self.delete_confirmation.is_none()
                 && self.stop_confirmation.is_none() && !self.diff_modal && !self.map_modal {

@@ -177,6 +177,9 @@ fn read_image(cancel:&AtomicBool)->io::Result<Option<doxa_input::Attachment>>{
     }else if std::env::var_os("DISPLAY").is_some()&&Path::new("/usr/bin/xclip").is_file(){
         ("/usr/bin/xclip",&["-selection","clipboard","-target","TARGETS","-out"],&["-selection","clipboard","-target","image/png","-out"])
     }else{return Ok(None);};
+    read_image_commands(path,list,args,cancel)
+}
+fn read_image_commands(path:&str,list:&[&str],args:&[&str],cancel:&AtomicBool)->io::Result<Option<doxa_input::Attachment>>{
     let mut types=Command::new(path);types.args(list);
     let available=match read_command(&mut types,cancel,Duration::from_secs(1)){Ok(value)=>value,Err(_)=>return Ok(None)};
     if !available.lines().any(|line|line.trim()=="image/png"){return Ok(None);}
@@ -187,6 +190,15 @@ fn read_image(cancel:&AtomicBool)->io::Result<Option<doxa_input::Attachment>>{
 
 #[cfg(test)]mod image_tests {
     use super::*;
+    #[test]
+    #[ignore = "requires explicitly provisioned private Xvfb display and xclip fixture"]
+    fn private_x11_clipboard_image_uses_mime_and_binary_reader(){
+        let path=std::env::var("DOXA_TEST_XCLIP").expect("private helper path");
+        assert!(std::env::var("DOXA_TEST_PRIVATE_DISPLAY").is_ok());
+        assert_eq!(std::env::var("DISPLAY").unwrap(),std::env::var("DOXA_TEST_PRIVATE_DISPLAY").unwrap());
+        let image=read_image_commands(&path,&["-selection","clipboard","-target","TARGETS","-out"],&["-selection","clipboard","-target","image/png","-out"],&AtomicBool::new(false)).unwrap().unwrap();
+        assert_eq!(image.mime,"image/png");assert!(image.bytes.starts_with(b"\x89PNG"));
+    }
     #[test]fn binary_reader_keeps_image_bytes_and_enforces_a_separate_limit(){
         let mut command=Command::new("/usr/bin/python3");command.args(["-c","import sys;sys.stdout.buffer.write(b'\\x89PNG\\r\\n\\x1a\\n')"]);
         let bytes=read_command_bytes(&mut command,&AtomicBool::new(false),Duration::from_secs(1),1024).unwrap();assert_eq!(bytes,b"\x89PNG\r\n\x1a\n");
