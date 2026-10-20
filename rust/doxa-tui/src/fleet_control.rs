@@ -555,6 +555,7 @@ fn verify_account_allowance(hello:&Value,expected:Option<u64>,busy:bool)->io::Re
     if let Some(limit)=expected {
         if hello["engine"]!="codex"||allowance["limit"]!=limit||allowance["durable"]!=true||allowance["outside_api_usd_budget"]!=true
             ||allowance.get("provider_charge_usd")!=Some(&Value::Null)||allowance["used"].as_u64().is_none_or(|used|used>limit)
+            ||allowance["remaining"].as_u64()!=allowance["used"].as_u64().and_then(|used|limit.checked_sub(used))||allowance["pending"].as_bool().is_none()
             ||(!busy&&allowance["pending"]!=false)||!hello["billing"]["budget"].is_null(){return Err(invalid("native Codex account allowance could not be verified"));}
     }else if !allowance.is_null(){return Err(invalid("unreviewed native account allowance appeared"));}
     Ok(())
@@ -1598,7 +1599,7 @@ mod tests {
         for invalid in ["claude:sonnet","router:auto","codex"]{args[supervisor]=invalid.into();assert!(Spec::parse(&args).is_err());}
         let mut manifest=json!({"mode":"supervisor","spec":{"supervisor_account_turn_limit":12},"slots":[{"engine":"codex","account_turn_limit":12},{"engine":"router"},{"engine":"router"},{"engine":"router"}]});
         assert_eq!(manifest_account_limit(&manifest).unwrap(),Some(12));manifest["slots"][1]["account_turn_limit"]=json!(12);assert!(manifest_account_limit(&manifest).is_err());
-        let good=json!({"engine":"codex","billing":{"budget":null,"account_turn_allowance":{"limit":12,"used":1,"pending":false,"durable":true,"provider_charge_usd":null,"outside_api_usd_budget":true}}});
+        let good=json!({"engine":"codex","billing":{"budget":null,"account_turn_allowance":{"limit":12,"used":1,"remaining":11,"pending":false,"durable":true,"provider_charge_usd":null,"outside_api_usd_budget":true}}});
         assert!(verify_account_allowance(&good,Some(12),false).is_ok());assert!(verify_account_allowance(&good,None,false).is_err());
         for (key,value) in [("limit",json!(13)),("used",json!(13)),("pending",json!(true)),("durable",json!(false)),("provider_charge_usd",json!(0)),("outside_api_usd_budget",json!(false))]{let mut changed=good.clone();changed["billing"]["account_turn_allowance"][key]=value;assert!(verify_account_allowance(&changed,Some(12),false).is_err(),"{key}");}
         let mut running=good;running["billing"]["account_turn_allowance"]["pending"]=json!(true);assert!(verify_account_allowance(&running,Some(12),true).is_ok());

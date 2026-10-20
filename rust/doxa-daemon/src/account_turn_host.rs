@@ -2,7 +2,7 @@
 use doxa_runtime::{Host,PeerTurnOrigin};
 use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
-use std::{fs,io::{self,Read,Write},os::{fd::{AsRawFd,FromRawFd},unix::{ffi::OsStrExt,fs::{DirBuilderExt,MetadataExt,OpenOptionsExt,PermissionsExt}}},path::{Path,PathBuf,Component},sync::{Arc,Mutex}};
+use std::{fs,io::{self,Read,Write},os::{fd::{AsRawFd,FromRawFd},unix::{ffi::OsStrExt,fs::{DirBuilderExt,MetadataExt,OpenOptionsExt}}},path::{Path,PathBuf,Component},sync::{Arc,Mutex}};
 
 #[derive(Clone,Debug,PartialEq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -216,6 +216,7 @@ impl Host for AccountTurnHost {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize,Ordering};
+    use std::os::unix::fs::PermissionsExt;
     struct Fixture {path:PathBuf,calls:AtomicUsize,images:AtomicUsize}
     impl Host for Fixture {
         fn prompt(&self,text:&str,emit:&mut dyn FnMut(Value)){
@@ -224,6 +225,7 @@ mod tests {
             self.calls.fetch_add(1,Ordering::SeqCst);
             if text=="panic"{panic!("fixture provider panic");}
             if text=="missing"{return;}
+            if text=="two-terminals"{emit(json!({"type":"turn_done","data":{}}));}
             emit(json!({"type":if text=="refuse"{"turn_refused"}else{"turn_done"},"data":{"is_error":text=="error","cost_usd":99999}}));
         }
         fn prompt_with_images(&self,text:&str,images:&[doxa_input::Attachment],_:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){
@@ -299,11 +301,12 @@ mod tests {
     }
     #[test]
     fn incomplete_crashed_missing_corrupt_and_duplicate_records_fail_closed(){
-        for scenario in ["missing","panic","remove","corrupt","duplicate"] {
+        for scenario in ["missing","panic","two-terminals","remove","corrupt","duplicate"] {
             let dir=private_temp();let fixture=fixture(dir.path());let path=fixture.path.clone();
             let host=AccountTurnHost::new(fixture.clone(),path.clone(),identity(),2,false).unwrap();
             match scenario {
                 "missing"=>host.prompt("missing",&mut|_|{}),
+                "two-terminals"=>{let mut terminal=None;host.prompt("two-terminals",&mut|event|terminal=Some(event));assert_eq!(terminal.unwrap()["data"]["failure_category"],"account_turn_unsettled");},
                 "panic"=>{let _=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||host.prompt("panic",&mut|_|{})));},
                 "remove"=>{fs::remove_file(&path).unwrap();host.prompt("withheld",&mut|_|{});assert_eq!(fixture.calls.load(Ordering::SeqCst),0);},
                 "corrupt"=>{fs::write(&path,b"{}").unwrap();host.prompt("withheld",&mut|_|{});assert_eq!(fixture.calls.load(Ordering::SeqCst),0);},
