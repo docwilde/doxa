@@ -36,11 +36,15 @@ cargo build --locked
 
 Claude needs a signed-in Claude Code CLI. Codex needs a signed-in CLI and the protected provider build. Add DeepSeek or z.ai keys with `/setup` or `DEEPSEEK_API_KEY` / `ZAI_API_KEY`. DOXA stores setup keys in an owner-only credentials file; they override inherited environment keys and are never copied from project `.env` files. [Engine capability matrix](../docs/engine-capabilities.md).
 
+Startup and New Session show local Claude/Codex login warnings before a prompt. An expired access token with a refresh credential is marked as needing recovery; its recovery is unverified. Credentials present on disk do not prove server validity. The background scan makes no provider requests or refresh attempts. A session's actual authentication rejection stays visible until that session completes a successful turn, even if the host login changes.
+
 ## Start and recover sessions
 
 `doxa` restores this project's saved tabs or starts the configured engine. `doxa new --engine codex|claude|deepseek|glm` always starts another session; `doxa list`, `attach`, and `stop` manage live daemons. Use `--model` and supported `--effort` choices. Titles default to `model@repo:branch` in Git and can be renamed.
 
 `/resume [query]` opens verified saved state; `/attach` lists live daemons. Closing a tab leaves its daemon running. Ctrl+Q closes the window while all running sessions stay detached. Saved split layouts and drafts restore on launch. Typing into a saved tab starts verified continuation and retains the draft on failure. Verified older Codex exec checkpoints use the protected app-server transport; `DOXA_CODEX_MIGRATE_APPSERVER=0` keeps the explicit legacy refusal. Continuation measures history plus the new request against reported context or a conservative bound. Fitting history and reviewed summaries remain intact; overflow keeps marked recent context while preserving full originals, permission policy and budget ledger. Historical data that the provider never stored cannot be reconstructed; unsafe or incomplete recovery reports a specific refusal.
+
+New and explicitly attached sessions save their recovery identity before the first response. Their daemons run independently of the terminal, so quitting or closing its window during a turn leaves the work running. Restart reattaches the same session without resubmitting the pending prompt. An explicit attachment reopens that saved tab; unrelated closed tabs and other windows' layouts remain preserved. If the recovery checkpoint cannot be saved, DOXA reports the running session ID for attachment.
 
 Git sessions normally get managed linked worktrees. `DOXA_WORKTREE=0` or `worktree_per_session=false` disables them. `new --branch NAME` selects a base; `/branch [name]` changes an idle, clean worktree. `/diff`, F2 and F4 toggle a bounded vertical diff split inside the active session window, retaining its prompt and neighboring windows. A narrow window asks to be widened. `worktrees list` previews orphans; `worktrees cleanup FULL_ID --confirm` deletes only after ownership and Git state are rechecked. [Lifecycle contract](../docs/worktree-lifecycle.md).
 
