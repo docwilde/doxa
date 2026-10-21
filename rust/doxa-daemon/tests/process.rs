@@ -3709,15 +3709,16 @@ fn claude_long_native_title_wakes_idle_and_detached_busy_codex_then_accepts_foll
         }
         doxa_state::save_config(&root.join("home/config.toml"),&"peer_inbound_turns = true\nagent_peer_send = true".parse().unwrap()).unwrap();
         let codex=root.join("codex-fixture");let capture=root.join("provider-input");let release=root.join("release");let held=root.join("held");
+        if busy{fs::write(root.join("hold-first"),b"hold first synthetic provider turn").unwrap();}
         executable(&codex,&format!(r#"#!/bin/sh
 text=$(cat)
 printf '%s\n' "$text" >> '{}'
-if [ "$text" = 'owner hold' ]; then
+if [ -f '{}' ] && [ ! -f '{}' ]; then
   touch '{}'
   while [ ! -f '{}' ]; do sleep .01; done
 fi
 echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
-"#,capture.display(),held.display(),release.display()));
+"#,capture.display(),root.join("hold-first").display(),release.display(),held.display(),release.display()));
         let mut recipient=Process::start_codex_at_checkout(root,&codex,None,true);
         let (mut reader,mut socket)=recipient.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
         if busy {
@@ -3742,12 +3743,15 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         let done=claude_receive_until(&mut from_reader,|row|row["event"]["type"]=="turn_done");assert_eq!(done["event"]["data"]["is_error"],false,"{done}");
         let delivery:Value=serde_json::from_slice(&fs::read(root.join("peer-delivery.json")).unwrap()).unwrap();
         assert_eq!(delivery["wake_receipts"]["codex-session"]["state"],if busy{"queued"}else{"started"});
+        assert_eq!(delivery["wake_receipts"]["codex-session"]["message_id"],delivery["message_id"]);
         // Replay the actual detached recipient ring rather than inventing a receipt.
         let (mut reader,mut socket)=recipient.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":0}));
         let peer=claude_receive_until(&mut reader,|row|row["event"]["type"]=="peer_message");assert_eq!(peer["event"]["data"]["wake_policy"],"enabled");
+        assert_eq!(peer["event"]["data"]["message_id"],delivery["message_id"]);
         if busy {let queued=claude_receive_until(&mut reader,|row|row["event"]["type"]=="prompt_queued");assert_eq!(queued["event"]["data"]["peer_started"],true);fs::write(&release,b"go").unwrap();}
         let started=claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_started"&&row["event"]["data"]["peer_started"]==true);
         assert_eq!(started["event"]["data"]["peer_origin_data"]["sender_session_id"],CLAUDE_SESSION);assert!(started["event"]["data"]["peer_origin_data"]["sender_title"].as_str().unwrap().len()<=128);
+        assert_eq!(started["event"]["data"]["peer_origin_data"]["message_id"],delivery["message_id"]);
         let done=claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_done");assert_ne!(done["event"]["data"]["is_error"],true,"{done}");
         assert!(fs::read_to_string(&capture).unwrap().contains("Public peer status"));
         send(&mut socket,json!({"type":"prompt","id":4,"text":"ordinary owner follow-up"}));let done=claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_done");assert_ne!(done["event"]["data"]["is_error"],true);

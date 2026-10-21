@@ -499,6 +499,7 @@ impl PeerHost {
             kind,
             None,
             in_reply_to,
+            fleet_message_id.as_deref(),
             &self.limiter,
             &self.ledger,
             &move |text: &str| {
@@ -531,10 +532,11 @@ impl PeerHost {
             "ledger_error":result.ledger_error}))
     }
 
-    pub fn inbound_event(&self, frame: PeerFrame) -> Result<Value, String> {
+    pub fn inbound_event(&self, frame: PeerFrame,message_id:Option<&str>) -> Result<Value, String> {
+        if message_id.is_some_and(|id|!delivery::valid_reply_reference(id)){return Err("Invalid peer transport message identity".into());}
         let sender=frame.from_id.chars().take(128).collect::<String>();let body_hash=doxa_fleet::hash(&frame.body).unwrap_or_default();
         let context=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.clone();
-        let result=self.inbound_checked(frame);
+        let result=self.inbound_checked(frame,message_id);
         if let Ok(event) = &result { self.persist_peer_event_best_effort("peer_message", &event["data"]); }
         if let Err(reason)=&result {
             let reason=reason.chars().take(512).collect::<String>();
@@ -545,10 +547,10 @@ impl PeerHost {
         }
         result
     }
-    fn inbound_checked(&self, frame: PeerFrame) -> Result<Value, String> {
+    fn inbound_checked(&self, frame: PeerFrame, transport_message_id:Option<&str>) -> Result<Value, String> {
         // Keep the peer inbox wire unchanged for mixed beta47 senders and
         // receivers. This local ID is only a UI/journal deduplication key.
-        let message_id = delivery::new_message_id();
+        let message_id = transport_message_id.map(str::to_owned).unwrap_or_else(delivery::new_message_id);
         if frame.from_id == self.session_id {
             return Err("self peer frame".into());
         }
@@ -558,6 +560,7 @@ impl PeerHost {
         let fleet_context=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.clone();
         let parsed_envelope=if let Some(context)=fleet_context.as_ref(){
             let envelope=doxa_fleet::Envelope::parse(&frame.body).map_err(|error|error.to_string())?;
+            if transport_message_id.is_some_and(|id|id!=envelope.message_id){return Err("Peer transport message identity differs from fleet envelope".into());}
             if envelope.from_session!=frame.from_id{return Err("Fleet serialized sender differs from transport sender".into());}
             let pid=frame.authenticated_pid.ok_or("Fleet kernel sender identity unavailable")?;
             doxa_fleet::validate_before_review(context,&envelope,&self.session_id,pid).map_err(|error|error.to_string())?;

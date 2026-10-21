@@ -28,10 +28,10 @@ fn receipt_test_frame()->PeerFrame {
 fn same_socket_receipt_confirms_admission_without_claiming_provider_completion()->io::Result<()> {
     for state in [WakeState::Started,WakeState::Queued,WakeState::Disabled,WakeState::Rejected] {
         let temp=tempfile::tempdir()?;let _registry=Registry::open(temp.path())?;let inbox=Inbox::bind(temp.path(),"recipient")?;let path=inbox.path().to_owned();
-        let expected=WakeReceipt{reason:if state==WakeState::Disabled{WakeReason::OwnerOptInRequired}else if state==WakeState::Rejected{WakeReason::AdmissionRejected}else{WakeReason::Admitted},retained:state==WakeState::Disabled,state,message_id:Some(new_message_id())};
+        let mut expected=WakeReceipt{reason:if state==WakeState::Disabled{WakeReason::OwnerOptInRequired}else if state==WakeState::Rejected{WakeReason::AdmissionRejected}else{WakeReason::Admitted},retained:state==WakeState::Disabled,state,message_id:None};
         let worker=thread::spawn(move||send_with_receipt(&path,&receipt_test_frame()));let deadline=Instant::now()+Duration::from_secs(3);
         let received=loop {if let Some(received)=inbox.poll_receive_with_receipt(&|s:&str|s.to_owned())?{break received;}assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(2));};
-        assert_eq!(received.frame.body,"Public fixture status");received.acknowledge(expected.clone())?;
+        assert_eq!(received.frame.body,"Public fixture status");expected.message_id=received.message_id.clone();assert!(expected.message_id.as_deref().is_some_and(valid_reply_reference));received.acknowledge(expected.clone())?;
         assert_eq!(worker.join().unwrap()?,Some(expected));
     }
     Ok(())
@@ -55,12 +55,12 @@ fn legacy_sender_can_use_receipt_aware_inbox_without_a_new_response()->io::Resul
 
 #[test]
 fn malformed_unbound_or_oversized_receipts_remain_unconfirmed_without_retry()->io::Result<()> {
-    for malformed in [0,1,2,3] {
+    for malformed in 0..7 {
         let temp=tempfile::tempdir()?;let path=temp.path().join("recipient.sock");let listener=UnixListener::bind(&path)?;fs::set_permissions(&path,fs::Permissions::from_mode(0o600))?;
         let worker=thread::spawn(move||->io::Result<()>{
             use std::io::BufRead;let (mut socket,_)=listener.accept()?;let mut request=String::new();std::io::BufReader::new(socket.try_clone()?).read_line(&mut request)?;let request:serde_json::Value=serde_json::from_str(&request)?;
-            let mut reply=serde_json::json!({"version":1,"request_id":request["doxa_peer_receipt_id"],"receipt":{"state":"started","reason":"admitted","retained":false,"message_id":new_message_id()}});
-            match malformed {0=>reply["request_id"]=serde_json::json!(new_message_id()),1=>reply["receipt"]["state"]=serde_json::json!("provider_completed"),2=>reply["receipt"]["message_id"]=serde_json::json!("bad/id"),_=>reply["extra"]=serde_json::json!("x".repeat(2048)),}
+            let mut reply=serde_json::json!({"version":1,"request_id":request["doxa_peer_receipt_id"],"receipt":{"state":"started","reason":"admitted","retained":false,"message_id":request["doxa_peer_receipt_id"]}});
+            match malformed {0=>reply["request_id"]=serde_json::json!(new_message_id()),1=>reply["receipt"]["state"]=serde_json::json!("provider_completed"),2=>reply["receipt"]["message_id"]=serde_json::json!("bad/id"),3=>reply["receipt"]["message_id"]=serde_json::json!(new_message_id()),4=>reply["extra"]=serde_json::json!("x".repeat(2048)),5=>reply["receipt"]["message_id"]=serde_json::Value::Null,_=>reply["version"]=serde_json::json!(2),}
             let mut raw=serde_json::to_vec(&reply)?;raw.push(b'\n');socket.write_all(&raw)?;drop(socket);listener.set_nonblocking(true)?;assert!(listener.accept().is_err(),"an uncertain receipt must never trigger resend");Ok(())
         });
         assert_eq!(send_with_receipt(&path,&receipt_test_frame())?,None);worker.join().unwrap()?;

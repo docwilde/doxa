@@ -36,10 +36,11 @@ pub struct WakeReceipt { pub state:WakeState, pub reason:WakeReason, pub retaine
 struct ReceiptEnvelope { version:u8, request_id:String, receipt:WakeReceipt }
 #[derive(Deserialize)]
 struct ReceiptRequest { doxa_peer_receipt_id:Option<String> }
-pub struct ReceivedFrame { pub frame:PeerFrame, reply:Option<(UnixStream,String)> }
+pub struct ReceivedFrame { pub frame:PeerFrame, pub message_id:Option<String>, reply:Option<(UnixStream,String)> }
 impl ReceivedFrame {
     pub fn acknowledge(self,receipt:WakeReceipt)->io::Result<()> {
         let Some((mut stream,request_id))=self.reply else{return Ok(());};
+        if receipt.message_id.as_deref()!=Some(request_id.as_str()){return Err(invalid("peer admission receipt identity differs from message"));}
         let mut raw=serde_json::to_vec(&ReceiptEnvelope{version:1,request_id,receipt}).map_err(io::Error::other)?;raw.push(b'\n');
         if raw.len()>MAX_RECEIPT_BYTES{return Err(invalid("peer admission receipt too large"));}
         stream.set_nonblocking(false)?;stream.set_write_timeout(Some(Duration::from_millis(250)))?;stream.write_all(&raw)
@@ -187,8 +188,8 @@ impl Inbox {
                     Ok(mut frame) => {
                         let request:ReceiptRequest=serde_json::from_slice(&bytes).map_err(|_|invalid("invalid peer receipt request"))?;
                         if request.doxa_peer_receipt_id.as_deref().is_some_and(|id|!valid_reply_reference(id)){return Err(invalid("invalid peer receipt identity"));}
-                        let reply=request.doxa_peer_receipt_id.map(|id|(received.stream,id));
-                        frame.authenticated_pid = authenticated_pid;Ok(Some(ReceivedFrame{frame:frame.scrub(scrubber),reply}))
+                        let message_id=request.doxa_peer_receipt_id;let reply=message_id.clone().map(|id|(received.stream,id));
+                        frame.authenticated_pid = authenticated_pid;Ok(Some(ReceivedFrame{frame:frame.scrub(scrubber),message_id,reply}))
                     },
                     Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
                     Err(error) => Err(error),
@@ -349,7 +350,11 @@ pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
 /// A completed write with no valid bounded acknowledgement is unconfirmed,
 /// including legacy receivers, timeout and malformed replies. Never resend.
 pub fn send_with_receipt(path:&Path,frame:&PeerFrame)->io::Result<Option<WakeReceipt>> {
-    let request_id=new_message_id();let (mut stream,deadline)=transmit(path,frame,Some(&request_id))?;
+    send_with_receipt_id(path,frame,&new_message_id())
+}
+fn send_with_receipt_id(path:&Path,frame:&PeerFrame,request_id:&str)->io::Result<Option<WakeReceipt>> {
+    if !valid_reply_reference(request_id){return Err(invalid("invalid outgoing peer receipt identity"));}
+    let (mut stream,deadline)=transmit(path,frame,Some(request_id))?;
     let receipt=(||->io::Result<WakeReceipt>{
         stream.shutdown(std::net::Shutdown::Write)?;
         let mut bytes=Vec::new();
@@ -363,7 +368,7 @@ pub fn send_with_receipt(path:&Path,frame:&PeerFrame)->io::Result<Option<WakeRec
         }
         if bytes.last()!=Some(&b'\n')||bytes[..bytes.len()-1].contains(&b'\n'){return Err(invalid("invalid peer admission receipt frame"));}
         let reply:ReceiptEnvelope=serde_json::from_slice(&bytes).map_err(|_|invalid("invalid peer admission receipt"))?;
-        if reply.version!=1||reply.request_id!=request_id||reply.receipt.message_id.as_deref().is_some_and(|id|!valid_reply_reference(id)){return Err(invalid("peer admission receipt binding mismatch"));}
+        if reply.version!=1||reply.request_id!=request_id||reply.receipt.message_id.as_deref()!=Some(request_id){return Err(invalid("peer admission receipt binding mismatch"));}
         Ok(reply.receipt)
     })();
     Ok(receipt.ok())
@@ -529,17 +534,18 @@ pub fn deliver(registry: &Registry, sender: &PeerRecord, recipients: &[String], 
 /// Thread evidence is appended by the same charged delivery path, only after delivery.
 pub fn deliver_with_reply(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
     turn_id: Option<&str>, in_reply_to: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {
-    deliver_internal(registry,sender,recipients,body,kind,turn_id,in_reply_to,limiter,ledger,scrubber,false)
+    deliver_internal(registry,sender,recipients,body,kind,turn_id,in_reply_to,limiter,ledger,scrubber,false,None)
 }
 pub fn deliver_with_receipts(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
-    turn_id: Option<&str>, in_reply_to: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {
-    deliver_internal(registry,sender,recipients,body,kind,turn_id,in_reply_to,limiter,ledger,scrubber,true)
+    turn_id: Option<&str>, in_reply_to: Option<&str>, message_id:Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {
+    deliver_internal(registry,sender,recipients,body,kind,turn_id,in_reply_to,limiter,ledger,scrubber,true,message_id)
 }
 fn deliver_internal(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
-    turn_id: Option<&str>, in_reply_to: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber, receipts:bool) -> io::Result<DeliveryResult> {
+    turn_id: Option<&str>, in_reply_to: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber, receipts:bool, message_id:Option<&str>) -> io::Result<DeliveryResult> {
     if body.trim().is_empty() || body.chars().count() > MAX_BODY_CHARS { return Err(invalid("invalid peer body")); }
     if !matches!(kind, "direct" | "broadcast") { return Err(invalid("invalid peer kind")); }
     if in_reply_to.is_some_and(|id|Uuid::parse_str(id).is_err()) { return Err(invalid("invalid peer reply reference")); }
+    if message_id.is_some_and(|id|!valid_reply_reference(id)){return Err(invalid("invalid peer message identity"));}
     let peers = registry.scoped(sender.scope_key(), Some(&sender.session_id), scrubber, true)?;
     let mut targets = Vec::new();
     for id in recipients {
@@ -548,14 +554,14 @@ fn deliver_internal(registry: &Registry, sender: &PeerRecord, recipients: &[Stri
     }
     limiter.lock().map_err(|_| io::Error::other("peer rate limiter poisoned"))?
         .charge(turn_id, targets.len())?;
-    let message_id = new_message_id();
+    let message_id = message_id.map(str::to_owned).unwrap_or_else(new_message_id);
     let frame = PeerFrame { authenticated_pid: None, from_id: sender.session_id.clone(), from_title: sender.title.clone(), sent_at: now(), body: body.to_owned(),
         from_repo: Some(sender.scope_key().to_owned()), kind: (kind != "direct").then(|| kind.to_owned()) }.scrub(scrubber);
     let mut result = DeliveryResult { delivered: Vec::new(), failed: Vec::new(), message_id: Some(message_id.clone()), record: None, ledger_error: None, wake_receipts:Default::default() };
     for peer in targets {
         let path = Path::new(&peer.socket_path);
         let sent=if path.parent()!=Some(registry.runtime()){Err(invalid("peer socket outside runtime"))}
-            else if receipts{send_with_receipt(path,&frame)}else{send(path,&frame).map(|_|None)};
+            else if receipts{send_with_receipt_id(path,&frame,&message_id)}else{send(path,&frame).map(|_|None)};
         match sent {
             Ok(receipt)=>{result.delivered.push(peer.session_id.clone());if receipts{result.wake_receipts.insert(peer.session_id.clone(),receipt);}},
             Err(_)=>result.failed.push(peer.session_id.clone()),

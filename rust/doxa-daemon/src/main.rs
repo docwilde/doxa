@@ -869,7 +869,7 @@ fn run() -> io::Result<()> {
             handle.publish(event);
         }
         if let Ok(Some(received)) = inbox.poll_receive_with_receipt(&|s: &str| s.to_owned()) {
-            let receipt=if let Ok(mut event) = peer_host.inbound_event(received.frame.clone()) {
+            let receipt=if let Ok(mut event) = peer_host.inbound_event(received.frame.clone(),received.message_id.as_deref()) {
                 let wake_enabled = options.engine != Engine::Fixture && inbound_policy.enabled();
                 event["data"]["wake_policy"] = json!(if wake_enabled { "enabled" } else { "disabled" });
                 handle.publish(event.clone());
@@ -896,7 +896,7 @@ fn run() -> io::Result<()> {
                         "message":"Peer message did not start or queue a turn; inspect recipient admission and retained messages"}}));
                 }
                 WakeReceipt{state:if !accepted&&!retained{WakeState::Dropped}else{state},reason:if !accepted&&!retained{WakeReason::PendingFull}else{reason},retained,message_id}
-            } else {WakeReceipt{state:WakeState::Rejected,reason:WakeReason::AdmissionRejected,retained:false,message_id:None}};
+            } else {WakeReceipt{state:WakeState::Rejected,reason:WakeReason::AdmissionRejected,retained:false,message_id:received.message_id.clone()}};
             let _=received.acknowledge(receipt);
         }
         if TERMINATE.load(Ordering::Acquire) || handle.is_stopping() {
