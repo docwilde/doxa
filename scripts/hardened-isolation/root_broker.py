@@ -60,6 +60,10 @@ class GatewayExited(Refused):
     """Socket capture raced the exit of the retained gateway PIDFD."""
 
 
+# Canonical LORE review bounds; transport frames and partial windows stay small.
+MAX_PROVIDER_SOURCE_BYTES = 256*1024*1024
+MAX_PROVIDER_LINE_BYTES = 8*1024*1024
+
 def require(condition, reason):
     if not condition:
         raise Refused(reason)
@@ -1522,7 +1526,7 @@ class Broker:
                 fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parentfd)
                 before = os.fstat(fd)
                 require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == self.policy["engine"]["uid"]
-                        and 0 < before.st_size <= 32*1024*1024, "actual provider source owner/type/link/size differs")
+                        and 0 < before.st_size <= MAX_PROVIDER_SOURCE_BYTES, "actual provider source owner/type/link/size differs")
                 fsx = bytearray(28)
                 fcntl.ioctl(fd, 0x801c581f, fsx, True)
                 require(struct.unpack_from("I", fsx, 12)[0] == quota["project_id"], "transcript escaped installed project quota")
@@ -1530,7 +1534,7 @@ class Broker:
                 while chunk := os.read(fd, MAX_FRAME):
                     client.deadline.check()
                     data.extend(chunk)
-                    require(len(data) <= 32*1024*1024, "provider transcript grew beyond snapshot bound")
+                    require(len(data) <= MAX_PROVIDER_SOURCE_BYTES, "provider transcript grew beyond snapshot bound")
                 after = os.fstat(fd)
                 facts = lambda meta: (meta.st_dev, meta.st_ino, meta.st_size, meta.st_ctime_ns, meta.st_mtime_ns, meta.st_nlink, meta.st_uid, meta.st_mode)
                 require(facts(before) == facts(after) and len(data) == before.st_size, "actual provider source changed during snapshot")
@@ -1539,7 +1543,7 @@ class Broker:
                 if parentfd is not None: os.close(parentfd)
                 os.close(rootfd)
             first = bytes(data).split(b"\n", 1)[0]
-            require(len(first) <= 1024*1024, "provider transcript header bound")
+            require(len(first) <= MAX_PROVIDER_LINE_BYTES, "provider transcript header bound")
             header = strict_json(first)
             require(type(header) is dict, "provider transcript header object required")
             if family == "codex":
@@ -1566,8 +1570,8 @@ class Broker:
                 result["matches"] = True
                 client.json_frame(TAG_JSON, result)
                 return
-            offset, limit = request.get("offset", 0), request.get("limit", 32*1024*1024)
-            require(integer(offset, 0, before.st_size) and integer(limit, 1, 8*1024*1024 if offset else 32*1024*1024), "snapshot byte window bound")
+            offset, limit = request.get("offset", 0), request.get("limit", MAX_PROVIDER_SOURCE_BYTES)
+            require(integer(offset, 0, before.st_size) and integer(limit, 1, 8*1024*1024 if offset else MAX_PROVIDER_SOURCE_BYTES), "snapshot byte window bound")
             selected = bytes(data[offset:offset+limit])
             result.update(offset=offset, bytes=len(selected), chunk_sha256=sha(selected))
         # Source bytes are frozen; slow client draining does not hold the state lock.
@@ -2594,7 +2598,7 @@ def authenticated_client(session_id, seconds):
         raise
 
 
-def client_exec(op, session_id, family=None, argv=(), envnames=(), cwd=".", checkout=None, home_files=(), callback_socket=None, callback_pid=None, capability=None, relative=None, thread=None, offset=0, limit=32*1024*1024, snapshot_destination=None, expect_file=None):
+def client_exec(op, session_id, family=None, argv=(), envnames=(), cwd=".", checkout=None, home_files=(), callback_socket=None, callback_pid=None, capability=None, relative=None, thread=None, offset=0, limit=MAX_PROVIDER_SOURCE_BYTES, snapshot_destination=None, expect_file=None):
     """Typed caller CLI: secrets read by name and sent only over root-pinned IPC."""
     require(op in OPS, "unknown client operation")
     channel, pidfd, policy = authenticated_client(session_id, 120)
@@ -2681,7 +2685,7 @@ def read_client_private(path):
 
 
 def receive_client_snapshot(channel, metadata, destination):
-    require(metadata.get("status") == "snapshot" and integer(metadata.get("bytes"), 0, 32*1024*1024)
+    require(metadata.get("status") == "snapshot" and integer(metadata.get("bytes"), 0, MAX_PROVIDER_SOURCE_BYTES)
             and hash_value(metadata.get("chunk_sha256")), "root snapshot metadata malformed")
     destination = client_private_parent(destination)
     fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -2817,7 +2821,7 @@ def main():
     client.add_argument("--relative")
     client.add_argument("--thread")
     client.add_argument("--offset", type=int, default=0)
-    client.add_argument("--limit", type=int, default=32*1024*1024)
+    client.add_argument("--limit", type=int, default=MAX_PROVIDER_SOURCE_BYTES)
     client.add_argument("--snapshot-destination", type=Path)
     client.add_argument("--expect-file", type=Path)
     client.add_argument("--capability-env", help="explicit environment name holding a 48-hex callback capability")

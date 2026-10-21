@@ -15,14 +15,31 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 const MAX_DIR_ENTRIES: usize = 512;
-const MAX_META_BYTES: usize = 64 * 1024;
+const MAX_META_BYTES: usize = doxa_isolation::MAX_PROVIDER_REVIEW_LINE_BYTES + 1;
 const MAX_NEW_BYTES: u64 = 8 * 1024 * 1024;
 const BASELINE_TOKENS: u64 = 12_000; // Codex TUI's effective context reserve.
 
 fn codex_sessions() -> Option<PathBuf> {
-    let home = std::env::var_os("CODEX_HOME").map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?;
+    let home = match doxa_isolation::active().ok()? {
+        Some(scope) => scope.private_home.join("codex"),
+        None => std::env::var_os("CODEX_HOME").map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?,
+    };
     Some(home.join("sessions"))
+}
+
+fn mapped_rollout(path: &Path, sessions: &Path, isolated: bool) -> PathBuf {
+    if isolated {
+        if let Ok(relative) = path.strip_prefix("/home/doxa/codex/sessions") { return sessions.join(relative); }
+    }
+    path.to_owned()
+}
+
+fn host_paths(path: &Path) -> Option<(PathBuf,PathBuf)> {
+    let sessions = codex_sessions()?;
+    let isolated = doxa_isolation::active().ok()?.is_some();
+    let path = mapped_rollout(path, &sessions, isolated);
+    Some((sessions,path))
 }
 
 fn safe_dir(path: &Path) -> bool {
@@ -132,7 +149,7 @@ pub(crate) fn size(path: &Path, thread_id: &str) -> Option<u64> {
                 || !doxa_isolation::verify_provider_snapshot(&snapshot).ok()? { return None; }
             Some(size)
         },
-        None => size_in(path, thread_id, &codex_sessions()?),
+        None => { let (sessions,path) = host_paths(path)?; size_in(&path, thread_id, &sessions) },
     }
 }
 
@@ -149,10 +166,10 @@ pub(crate) fn read_since(path: &Path, thread_id: &str, before: u64) -> Option<Va
     if !doxa_engines::codex_driver::valid_thread_id(thread_id) { return None; }
     match doxa_isolation::snapshot_provider_file(path, before, MAX_NEW_BYTES as usize, Some(thread_id)).ok()? {
         Some(snapshot) => {
-            let context = appended_context(&snapshot.bytes, before, snapshot.proof["size"].as_u64()?)?;
+            let context = parsed_context(&snapshot.bytes, before, snapshot.proof["size"].as_u64()?, Some(thread_id))?;
             doxa_isolation::verify_provider_snapshot(&snapshot).ok()?.then_some(context)
         },
-        None => read_since_in(path, thread_id, before, &codex_sessions()?),
+        None => { let (sessions,path) = host_paths(path)?; read_since_in(&path, thread_id, before, &sessions) },
     }
 }
 
@@ -166,10 +183,54 @@ fn read_since_in(path: &Path, thread_id: &str, before: u64, sessions: &Path) -> 
     file.seek(SeekFrom::Start(before)).ok()?;
     let mut bytes = Vec::with_capacity(appended as usize);
     file.take(appended).read_to_end(&mut bytes).ok()?;
-    appended_context(&bytes, before, after)
+    parsed_context(&bytes, before, after, Some(thread_id))
 }
 
+/// Latest context occupancy is independent of cumulative spend. Resume reads a
+/// bounded tail of the exact owned thread, not the byte size of its full history.
+pub(crate) fn latest(path: &Path, thread_id: &str) -> Option<Value> {
+    if !doxa_engines::codex_driver::valid_thread_id(thread_id) { return None; }
+    match doxa_isolation::snapshot_provider_file(path, 0, MAX_META_BYTES, Some(thread_id)).ok()? {
+        Some(header) => {
+            if !header_matches_thread(&header.bytes, thread_id) { return None; }
+            let size = header.proof["size"].as_u64()?;
+            let offset = size.saturating_sub(MAX_NEW_BYTES);
+            let tail = doxa_isolation::snapshot_provider_file(path, offset, MAX_NEW_BYTES as usize, Some(thread_id)).ok()??;
+            if header.proof["source"] != tail.proof["source"] { return None; }
+            let context = tail_context(&tail.bytes, offset, size, thread_id)?;
+            doxa_isolation::verify_provider_snapshot(&tail).ok()?.then_some(context)
+        },
+        None => { let (sessions,path) = host_paths(path)?; latest_in(&path,thread_id,&sessions) },
+    }
+}
+
+fn latest_in(path: &Path, thread_id: &str, sessions: &Path) -> Option<Value> {
+    if !valid_path_in(path,thread_id,sessions) || fs::canonicalize(sessions).ok()? != sessions { return None; }
+    let mut file = safe_file(path,sessions)?;
+    let before = file.metadata().ok()?;
+    if !matches_thread(&mut file,thread_id) { return None; }
+    let offset = before.len().saturating_sub(MAX_NEW_BYTES);
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut bytes = Vec::new();
+    file.by_ref().take(MAX_NEW_BYTES).read_to_end(&mut bytes).ok()?;
+    let facts = |m:&fs::Metadata| (m.dev(),m.ino(),m.len(),m.ctime(),m.ctime_nsec(),m.mtime(),m.mtime_nsec(),m.nlink(),m.uid());
+    if facts(&before) != facts(&file.metadata().ok()?) || facts(&before) != facts(&fs::symlink_metadata(path).ok()?) { return None; }
+    tail_context(&bytes,offset,before.len(),thread_id)
+}
+
+fn tail_context(bytes:&[u8], offset:u64, size:u64, thread_id:&str) -> Option<Value> {
+    if bytes.len() as u64 != size.checked_sub(offset)? { return None; }
+    // A tail may begin in an image/tool record. Never parse its partial prefix.
+    let skip = if offset == 0 { 0 } else { bytes.iter().position(|b| *b == b'\n')? + 1 };
+    parsed_context(&bytes[skip..],offset+skip as u64,size,Some(thread_id))
+}
+
+#[cfg(test)]
 fn appended_context(bytes: &[u8], before: u64, after: u64) -> Option<Value> {
+    parsed_context(bytes,before,after,None)
+}
+
+fn parsed_context(bytes: &[u8], before: u64, after: u64, thread_id: Option<&str>) -> Option<Value> {
     let appended = after.checked_sub(before)?;
     if appended == 0 || appended > MAX_NEW_BYTES || bytes.len() != appended as usize { return None; }
     let mut latest = None;
@@ -183,6 +244,16 @@ fn appended_context(bytes: &[u8], before: u64, after: u64) -> Option<Value> {
         }
         if frame["type"] == "compacted" {
             latest = None;
+            continue;
+        }
+        if frame["type"] == "token_usage_record" {
+            let payload = &frame["payload"];
+            // Modern records carry per-response, per-turn and lifetime totals.
+            // Only per-response usage measures the current context occupancy.
+            if thread_id.is_none() || payload["thread_id"].as_str() != thread_id { return None; }
+            let tokens = payload["usage"]["total_tokens"].as_u64().filter(|n| *n > 0)?;
+            latest = Some(json!({"raw_context_tokens":tokens,"context_model":model,
+                "ctx_source":"codex_rollout_token_usage_record"}));
             continue;
         }
         if frame["type"] != "event_msg" || frame["payload"]["type"] != "token_count" { continue; }
@@ -204,6 +275,52 @@ fn appended_context(bytes: &[u8], before: u64, after: u64) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modern_context_reads_owned_long_history_tail_without_using_lifetime_spend() {
+        use std::io::Write;
+        let temporary = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        let thread = "01a0da9a-ae05-77f2-8d51-9f3440bc6cfb";
+        let sessions = root.join("codex/sessions"); let day = sessions.join("2026/10/21");
+        fs::create_dir_all(&day).unwrap();
+        let path = day.join(format!("rollout-2026-10-21T00-00-00-{thread}.jsonl"));
+        let mut file = File::create(&path).unwrap();
+        writeln!(file,"{}",json!({"type":"session_meta","payload":{"id":thread,"padding":"x".repeat(2*1024*1024)}})).unwrap();
+        let padding = json!({"type":"world_state","payload":{"padding":"x".repeat(512*1024)}}).to_string();
+        for _ in 0..24 { writeln!(file,"{padding}").unwrap(); }
+        writeln!(file,"{}",json!({"type":"compacted"})).unwrap();
+        writeln!(file,"{}",json!({"type":"turn_context","payload":{"model":"gpt-6-astra"}})).unwrap();
+        let count = json!({"type":"token_usage_record","payload":{"thread_id":thread,
+            "usage":{"total_tokens":23947},"turn_token_usage":{"total_tokens":157249},"thread_token_usage":{"total_tokens":230957}}});
+        writeln!(file,"{count}").unwrap(); file.sync_all().unwrap();
+        let actual = latest_in(&path,thread,&sessions).unwrap();
+        assert_eq!(actual["raw_context_tokens"],23947);
+        assert_eq!(actual["context_model"],"gpt-6-astra");
+        assert!(actual.get("raw_context_window").is_none(),"modern usage did not attest an allocation");
+        assert!(read_since_in(&path,thread,0,&sessions).is_none(),"a long log must not look like a complete bounded append");
+        let worker = Path::new("/home/doxa/codex/sessions/2026/10/21").join(path.file_name().unwrap());
+        assert_eq!(mapped_rollout(&worker,&sessions,true),path);
+        assert_eq!(mapped_rollout(&worker,&sessions,false),worker);
+        let foreign = Path::new("/home/doxa-other/codex/sessions/2026/10/21/log.jsonl");
+        assert_eq!(mapped_rollout(foreign,&sessions,true),foreign);
+        writeln!(file,"{}",json!({"type":"compacted"})).unwrap(); file.sync_all().unwrap();
+        assert!(latest_in(&path,thread,&sessions).is_none(),"compaction invalidates pre-compaction occupancy");
+        writeln!(file,"{count}").unwrap(); file.sync_all().unwrap();
+        assert_eq!(latest_in(&path,thread,&sessions).unwrap()["raw_context_tokens"],23947);
+        writeln!(file,"{}",json!({"type":"token_usage_record","payload":{"thread_id":"foreign","usage":{"total_tokens":1}}})).unwrap();
+        file.sync_all().unwrap();
+        assert!(latest_in(&path,thread,&sessions).is_none(),"foreign usage must not expose a stale smaller count");
+    }
+
+    #[test]
+    fn partial_tail_and_modern_usage_without_thread_proof_never_supply_context() {
+        let record = json!({"type":"token_usage_record","payload":{"thread_id":"thread-1","usage":{"total_tokens":1234}}}).to_string()+"\n";
+        assert!(parsed_context(record.as_bytes(),0,record.len() as u64,None).is_none());
+        let partial = format!("partial record\n{record}"); let offset = 99;
+        assert_eq!(tail_context(partial.as_bytes(),offset,offset+partial.len() as u64,"thread-1").unwrap()["raw_context_tokens"],1234);
+        assert!(tail_context(record.as_bytes(),offset,offset+record.len() as u64,"thread-1").is_none());
+    }
 
     #[test]
     fn bounded_provider_ranges_cannot_reuse_truncated_or_prior_context() {

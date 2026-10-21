@@ -8,7 +8,7 @@ use sha2::{Digest,Sha256};
 use std::{fs::{self,File},io::{self,Read},os::unix::{fs::{MetadataExt,PermissionsExt},net::{UnixListener,UnixStream}},
     path::{Path,PathBuf},sync::{Arc,atomic::{AtomicBool,Ordering}},thread::JoinHandle,time::{Duration,Instant}};
 const MAX_HEADER:usize=65536;
-const MAX_SOURCE:usize=32*1024*1024;
+const MAX_SOURCE:usize=crate::MAX_PROVIDER_REVIEW_BYTES;
 const BLOCKED:&str="DOXA rejected an invalid ROOT compaction callback";
 
 struct Instance {bytes:Vec<u8>,identity:(u64,u64,i64,i64),pid:i32,start:u64,pin:File}
@@ -74,7 +74,7 @@ fn checked_header(header:&Value,raw:&[u8],manifest:&Manifest,capability:&str)->i
         ||header["cid"].as_str()!=manifest.container_id.as_deref()||header["capability"]!=capability||review.is_none()
         ||source.as_object().is_none_or(|m|m.len()!=8)||source["size"].as_u64()!=Some(raw.len() as u64)
         ||source["sha256"]!=format!("{:x}",Sha256::digest(raw))||raw.is_empty()||raw.len()>MAX_SOURCE
-        ||raw.split(|b|*b==b'\n').any(|line|line.len()>1024*1024)
+        ||raw.split(|b|*b==b'\n').any(|line|line.len()>crate::MAX_PROVIDER_REVIEW_LINE_BYTES)
         ||event["hook_event_name"]!="PreCompact"||!matches!(event["trigger"].as_str(),Some("auto"|"manual")) {
         return Err(error("ROOT callback source, capability, or event scope differs"));
     }

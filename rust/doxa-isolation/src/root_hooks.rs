@@ -9,7 +9,7 @@ use std::{ffi::CString, fs::{self, File}, io::{self, Read}, os::{fd::{AsRawFd, F
     thread::JoinHandle, time::{Duration, Instant}};
 
 const MAX_EVENT:usize=65536;
-const MAX_SOURCE:usize=32*1024*1024;
+const MAX_SOURCE:usize=crate::MAX_PROVIDER_REVIEW_BYTES;
 const REVIEW_TIME:Duration=Duration::from_secs(205);
 
 struct Registration { socket:PathBuf, pid:i32, pin:File, identity:(u64,u64), capability:String }
@@ -131,7 +131,7 @@ fn relay(mut stream:UnixStream, authority:&Authority, registration:&Mutex<Option
     authority.require_connector(&stream)?;
     let mut original=source_file(authority,relative)?;
     let(raw,proof)=read_source(&mut original,Instant::now()+Duration::from_secs(5))?;
-    if raw.split(|b|*b==b'\n').any(|line|line.len()>1024*1024){return Err(error("provider JSONL line exceeds limit"));}
+    if raw.split(|b|*b==b'\n').any(|line|line.len()>crate::MAX_PROVIDER_REVIEW_LINE_BYTES){return Err(error("provider JSONL line exceeds limit"));}
     let first:Value=serde_json::from_slice(raw.split(|b|*b==b'\n').next().unwrap_or_default())?;
     if first["type"]!="session_meta"||first["payload"]["id"]!=thread{return Err(error("actual rollout belongs to another provider thread"));}
     let mut callback=reg_socket;

@@ -843,6 +843,31 @@ class HardenedFollowupTests(unittest.TestCase):
                 with self.assertRaisesRegex(b.Refused,"changed after snapshot"):
                     broker.provider_snapshot(verify,Mock(deadline=b.Deadline(1)))
 
+    def test_long_snapshot_and_large_header_use_canonical_review_bounds(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR",str(Path.home()/"ssd-cache/tmp"))) as directory:
+            home=Path(directory); source=home/"codex/sessions/day/log.jsonl"; source.parent.mkdir(parents=True)
+            header=b.compact({"type":"session_meta","payload":{"id":"unit-thread","cwd":"/workspace","padding":"x"*(2*1024*1024)}})+b"\n"
+            with source.open("wb") as file:
+                file.write(header)
+                row=b.compact({"type":"world_state","payload":{"padding":"x"*(512*1024)}})+b"\n"
+                for _ in range(66): file.write(row)
+            self.assertGreater(source.stat().st_size,32*1024*1024)
+            broker=b.Broker.__new__(b.Broker); broker.policy=policy(); broker.policy["engine"]["uid"]=os.geteuid()
+            broker.policy["providers"]["codex"]={}; broker.policy_sha256="3"*64; broker.state_lock=threading.RLock()
+            broker.transport_live=Mock(); broker.stage_check=Mock(); broker.identity=Mock(return_value="2"*64)
+            request={"v":1,"session_id":"unit-scope","op":"provider_snapshot","family":"codex","relative":"codex/sessions/day/log.jsonl","thread":"unit-thread"}
+            quota=b.compact({"session_id":"unit-scope","root":broker.policy["root"],"boot_id":b.boot_id(),"project_id":5004})
+            def project_ioctl(fd,command,buffer,mutate): struct.pack_into("I",buffer,12,5004)
+            with patch.object(b,"policy_paths",return_value={"home":str(home)}),patch.object(b,"read_regular",return_value=quota),patch.object(b.fcntl,"ioctl",side_effect=project_ioctl):
+                client=Mock(deadline=b.Deadline(10)); broker.provider_snapshot(request,client)
+                metadata=client.json_frame.call_args_list[0].args[1]
+                self.assertEqual(metadata["bytes"],source.stat().st_size)
+                self.assertEqual(metadata["source"]["sha256"],b.sha(source.read_bytes()))
+                self.assertEqual(sum(len(call.args[1]) for call in client.frame.call_args_list),source.stat().st_size)
+                # The expanded complete-source bound never expands partial windows.
+                with self.assertRaisesRegex(b.Refused,"snapshot byte window bound"):
+                    broker.provider_snapshot(dict(request,offset=1,limit=8*1024*1024+1),Mock(deadline=b.Deadline(10)))
+
 
 class LifecycleReconciliationTests(unittest.TestCase):
     def stopped_fixture(self):

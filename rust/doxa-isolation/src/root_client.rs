@@ -25,7 +25,7 @@ use std::{
 const PROTOCOL: &str = "doxa-root-session-broker-v1";
 const MAX_POLICY: u64 = 1024 * 1024;
 const MAX_REPLY: u64 = 65536;
-const MAX_SNAPSHOT: u64 = 32 * 1024 * 1024;
+const MAX_SNAPSHOT: u64 = crate::MAX_PROVIDER_REVIEW_BYTES as u64;
 const MAX_HOME_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_HOME_FILES: usize = 20000;
 
