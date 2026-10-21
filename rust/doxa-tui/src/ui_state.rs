@@ -179,7 +179,9 @@ impl UiStateStore {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "session recovery identity mismatch"));
         }
         let _lock = self.mutation_lock()?;
-        let mut record = self.latest_record()?.unwrap_or_else(|| TabSet {
+        let latest = self.latest_record()?;
+        self.preserve_layout_authority(latest.as_ref());
+        let mut record = latest.unwrap_or_else(|| TabSet {
             scope_key: self.scope_key.clone(), active_session_id: Some(session.id.clone()),
             tabs: Vec::new(), raw: Default::default(),
         });
@@ -214,6 +216,15 @@ impl UiStateStore {
             Ok(_) => load_tabset(&self.path, &self.scope_key)
                 .filter(|record| record.scope_key == self.scope_key)
                 .map(Some).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "saved tabset is unavailable; original retained")),
+        }
+    }
+
+    fn preserve_layout_authority(&mut self, latest: Option<&TabSet>) {
+        // An identity-only mutation may merge sibling state, but it cannot
+        // authorize this older window to replace that sibling's geometry.
+        if latest.map(|record| &record.raw) != self.record.as_ref().map(|record| &record.raw)
+            && !additive_recovery(self.record.as_ref(), latest) {
+            self.writable_layout = false;
         }
     }
 
@@ -412,7 +423,9 @@ impl UiStateStore {
     pub fn forget_sessions(&mut self, killed: &HashSet<String>) -> io::Result<()> {
         if killed.is_empty() { return Ok(()); }
         let _lock = self.mutation_lock()?;
-        let Some(mut record) = self.latest_record()? else { return Ok(()); };
+        let latest = self.latest_record()?;
+        self.preserve_layout_authority(latest.as_ref());
+        let Some(mut record) = latest else { return Ok(()); };
         if !record.tabs.iter().any(|tab| killed.contains(&tab.session_id)) { return Ok(()); }
         record.tabs.retain(|tab| !killed.contains(&tab.session_id));
         if record.active_session_id.as_ref().is_some_and(|id| killed.contains(id)) {
@@ -477,7 +490,7 @@ impl UiStateStore {
         if !self.writable_layout {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "saved layout exceeds supported pane bounds",
+                "saved layout changed in another window or exceeds supported pane bounds",
             ));
         }
         // Missing transcripts remain protected even when other saved tabs restore.

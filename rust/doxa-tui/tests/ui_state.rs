@@ -410,3 +410,22 @@ fn explicit_attachment_reopens_only_its_detached_identity_and_vetoes_stale_windo
     attached.remember_session(&recovery_session("stay-closed")).unwrap();
     assert_eq!(fs::read(attached.path()).unwrap(), good);
 }
+
+#[test]
+fn explicit_stop_merges_sibling_identity_without_authorizing_stale_geometry() {
+    let (dir, mut sibling) = seeded(json!({"tabs":[{"session_id":"one"},{"session_id":"two"}],
+        "collections":[{"name":"Old","sessions":["one","two"]}]}));
+    let mut stale = UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+    let mut old = App::default(); stale.restore(&mut old, &live(&["one", "two"]));
+    let mut fresh = App::default(); sibling.restore(&mut fresh, &live(&["one", "two"]));
+    fresh.collections[0].name = "Sibling edit".into(); sibling.save(&fresh).unwrap();
+    let mut killed = std::collections::HashSet::new(); killed.insert("one".into());
+    stale.forget_sessions(&killed).unwrap();
+    let good = fs::read(stale.path()).unwrap();
+    let value: Value = serde_json::from_slice(&good).unwrap();
+    assert_eq!(value["tabs"].as_array().unwrap().len(), 1);
+    assert_eq!(value["collections"][0]["name"], "Sibling edit");
+    old.groups[0].tabs.retain(|id| id != "one");
+    assert!(stale.save(&old).is_err());
+    assert_eq!(fs::read(stale.path()).unwrap(), good);
+}
