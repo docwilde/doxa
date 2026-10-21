@@ -4483,7 +4483,11 @@ fn codex_live_auto_checkpoint_failure_cancels_the_changed_provider() {
         frames.push(receive(&mut reader));
     }
     assert!(frames.iter().any(|row| row["event"]["type"] == "turn_done" && row["event"]["data"]["is_error"] == true));
-    assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 11, "set_permission_mode", json!({"mode":"auto"}), &mut frames)["error"], "Codex persistence failed");
+    assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 11, "set_permission_mode", json!({"mode":"auto"}), &mut frames)["error"],
+        doxa_transcript::CodexContinuationFailure::PermissionUnacknowledged.message());
+    assert!(frames.iter().any(|row| row["event"]["type"] == "turn_done"
+        && row["event"]["data"]["failure_category"] == "permission_update_unacknowledged"
+        && row["event"]["data"]["resume_blocked"] == true));
     assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 12, "stop", json!({}), &mut frames)["ok"], true);
     wait_until(|| process.exited());
     }
