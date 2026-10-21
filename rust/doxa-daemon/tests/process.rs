@@ -3777,6 +3777,7 @@ fn peer_receipts_distinguish_disabled_rejected_and_retained_without_provider_tur
         let dir=tempfile::tempdir().unwrap();let root=dir.path();let codex=root.join("codex-fixture");let captured=root.join("provider-called");
         executable(&codex,&format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"done\"}}}}'\n",captured.display()));
         doxa_state::save_config(&root.join("home/config.toml"),&format!("peer_inbound_turns = {}",scenario!="default_off").parse().unwrap()).unwrap();
+        let original_policy=fs::read(root.join("home/config.toml")).unwrap();
         let (_sender,_)=registry_peer(root,"sender",root.to_str().unwrap(),"Claude teammate");
         let mut process=Process::start_codex_with_wake_override(root,&codex,(scenario=="explicit_off").then_some("off"));
         let path=PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
@@ -3788,6 +3789,7 @@ fn peer_receipts_distinguish_disabled_rejected_and_retained_without_provider_tur
             _=>{assert_eq!(receipt.state,WakeState::Disabled);assert_eq!(receipt.reason,WakeReason::OwnerOptInRequired);assert!(receipt.retained);},
         }
         assert!(!captured.exists(),"a denied/retained/rejected receipt must not imply provider execution");
+        assert_eq!(fs::read(root.join("home/config.toml")).unwrap(),original_policy,"receipts never grant or change the recipient policy");
         let(mut reader,mut socket)=process.connect();receive(&mut reader);
         send(&mut socket,json!({"type":"call","id":1,"method":"get_state","params":{}}));let state=receive(&mut reader);assert_eq!(state["running"],false);assert_eq!(state["queued"],0);
         send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());
