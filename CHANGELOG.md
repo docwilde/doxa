@@ -9,7 +9,7 @@ the stable 2.0 release has not been cut.
 
 **Isolated Codex review**
 
-- Fix **`compact_hook`** host/container path mismatches. Map session metadata in a private review copy; keep the complete provider log unchanged and bind approval to both source proofs.
+- Fix **`compact_hook`** host/container path mismatches. Map session metadata in a sealed private review copy; keep the complete provider log unchanged and bind approval to both source proofs.
 - Resolve **`review_worker`** Codex roots from the trusted isolation manifest. Preserve the logical project across isolation migration; foreign threads, paths and replaced sources still fail closed.
 
 **Long sessions**

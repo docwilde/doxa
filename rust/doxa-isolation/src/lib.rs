@@ -64,10 +64,11 @@ pub struct ProviderSnapshot {
 pub struct ProviderReviewFile { pub path: PathBuf, _directory: tempfile::TempDir }
 
 /// Host-only review copies must not enter the provider's session discovery root.
-pub fn codex_review_home(manifest: &Manifest) -> PathBuf { manifest.private_home.join("codex-review") }
+pub fn codex_review_home(manifest: &Manifest) -> PathBuf { manifest.private_home.with_file_name("codex-review") }
 
 pub fn prepare_codex_review_home(manifest: &Manifest) -> io::Result<PathBuf> {
     private_directory(&manifest.private_home, false)?;
+    private_directory(manifest.private_home.parent().ok_or_else(|| error("review home has no private session parent"))?, false)?;
     let home = codex_review_home(manifest);
     for path in [&home, &home.join("sessions"), &home.join("originals")] {
         match fs::DirBuilder::new().mode(0o700).create(path) {

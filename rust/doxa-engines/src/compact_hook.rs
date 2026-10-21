@@ -107,6 +107,7 @@ fn review_job_for_scope(manifest: &Value, event: &Value, isolation: Option<&doxa
     if provider_file.is_none() && !original.starts_with(root.join("sessions")) && !original.starts_with(root.join("archived_sessions")) { return Ok(None); }
     let mut review_directory = None;
     let mut original_proof = None;
+    let mut projected_proof = None;
     let review_source = if let Some(scope) = isolation {
         if !scope.profile.docker() || scope.session_id != session
             || scope.context_cwd.as_deref().unwrap_or(&scope.checkout) != Path::new(cwd) || scope.private_home.join("codex") != root {
@@ -121,13 +122,22 @@ fn review_job_for_scope(manifest: &Value, event: &Value, isolation: Option<&doxa
         let directory = tempfile::Builder::new().permissions(fs::Permissions::from_mode(0o700)).prefix(".doxa-review-").tempdir_in(&parent)?;
         let path = directory.path().join("rollout.jsonl");
         let mut output = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&path)?;
-        let (_, proof) = rollout::project(original, &mut output, thread, cwd)?;
+        let (_, proof, projected) = rollout::project(original, &mut output, thread, cwd)?;
         output.sync_all()?;
+        let written = output.metadata()?;
+        if written.len() != projected.size || written.nlink() != 1 {
+            return Err(io::Error::other("review projection changed while written"));
+        }
+        projected_proof = Some(SourceProof {sha256:projected.sha256, size:projected.size, device:written.dev(), inode:written.ino(),
+            ctime:written.ctime(), ctime_nsec:written.ctime_nsec(), mtime:written.mtime(), mtime_nsec:written.mtime_nsec()});
         original_proof = Some((original.to_owned(), proof));
         review_directory = Some(directory);
         path
     } else { original.to_owned() };
     let (first, before) = rollout::snapshot(&review_source)?;
+    if projected_proof.as_ref().is_some_and(|expected| expected != &before) {
+        return Err(io::Error::other("review projection differs from the complete original source mapping"));
+    }
     if first["type"] != "session_meta" || first["payload"]["id"] != thread { return Ok(None); }
     let mut metadata = json!({"cwd":cwd,"session_id":session,"provider_thread":thread,"transcript":review_source,
         "older":true,"expected_source":before.json()});
@@ -235,7 +245,7 @@ mod tests {
         let job = review_job_for_scope(&manifest, &event, Some(&scope)).unwrap().unwrap();
         assert_eq!(fs::read(&source).unwrap(), raw);
         let review = fs::read(&job.source).unwrap();
-        assert!(!job.source.starts_with(scope.private_home.join("codex")), "review copy entered provider session discovery");
+        assert!(!job.source.starts_with(&scope.private_home), "review copy entered the worker home mount");
         assert_eq!(raw.splitn(2, |b| *b == b'\n').nth(1), review.splitn(2, |b| *b == b'\n').nth(1));
         let first: Value = serde_json::from_slice(review.split(|b| *b == b'\n').next().unwrap()).unwrap();
         assert_eq!(first["payload"]["cwd"], manifest["cwd"]);
