@@ -165,6 +165,16 @@ impl UiStateStore {
     /// Add only an admitted daemon identity. A partial UI view never supplies
     /// replacement geometry or removes prior tabs, collections or future fields.
     pub fn remember_session(&mut self, session: &crate::discovery::Session) -> io::Result<()> {
+        self.remember_session_inner(session, false)
+    }
+
+    /// A verified explicit attachment reopens a flat detached record. Automatic
+    /// history restoration uses remember_session and cannot change that intent.
+    pub fn reopen_session(&mut self, session: &crate::discovery::Session) -> io::Result<()> {
+        self.remember_session_inner(session, true)
+    }
+
+    fn remember_session_inner(&mut self, session: &crate::discovery::Session, reopen: bool) -> io::Result<()> {
         if !valid_session_id(&session.id) || session.scope_key != self.scope_key {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "session recovery identity mismatch"));
         }
@@ -173,17 +183,20 @@ impl UiStateStore {
             scope_key: self.scope_key.clone(), active_session_id: Some(session.id.clone()),
             tabs: Vec::new(), raw: Default::default(),
         });
-        if record.tabs.iter().any(|tab| tab.session_id == session.id) {
-            self.startup_extra_ids = recovery_tabs(Some(&record));
+        let existing = record.tabs.iter().any(|tab| tab.session_id == session.id);
+        let mut pending = recovery_tabs(Some(&record));
+        if existing && (!reopen || pending.contains(&session.id)) {
+            self.startup_extra_ids = pending;
             self.record = Some(record);
             return Ok(());
         }
-        if record.tabs.len() >= MAX_TABS {
-            return Err(io::Error::new(io::ErrorKind::Unsupported, "session recovery tab bound exceeded"));
+        if !existing {
+            if record.tabs.len() >= MAX_TABS {
+                return Err(io::Error::new(io::ErrorKind::Unsupported, "session recovery tab bound exceeded"));
+            }
+            record.tabs.push(Tab { session_id: session.id.clone(), pinned_name: None, cwd: Some(session.scope_key.clone()) });
         }
-        let mut pending = recovery_tabs(Some(&record));
         pending.push(session.id.clone());
-        record.tabs.push(Tab { session_id: session.id.clone(), pinned_name: None, cwd: Some(session.scope_key.clone()) });
         let native = record.raw.entry("rust_ui").or_insert_with(|| json!({})).as_object_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "unknown native UI metadata"))?;
         native.insert("recovery_open_tabs".into(), json!(pending));

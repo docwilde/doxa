@@ -391,3 +391,22 @@ fn recovery_registration_rejects_wrong_scope_and_malformed_existing_state_withou
     assert!(store.remember_session(&recovery_session("running")).is_err());
     assert_eq!(fs::read(store.path()).unwrap(), b"malformed original");
 }
+
+#[test]
+fn explicit_attachment_reopens_only_its_detached_identity_and_vetoes_stale_window_save() {
+    let (dir, mut attached) = seeded(json!({"tabs":[{"session_id":"open"},{"session_id":"reopened"},{"session_id":"stay-closed"}],
+        "layout":{"kind":"tabs","groups":{"kind":"group","active":0,"tabs":[{"kind":"leaf","session_id":"open"}]}}}));
+    let mut stale = UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+    let ids = live(&["open", "reopened", "stay-closed"]);
+    let mut old = App::default(); stale.restore(&mut old, &ids);
+    assert_eq!(old.groups[0].tabs, ["open"]);
+    attached.reopen_session(&recovery_session("reopened")).unwrap();
+    let good = fs::read(attached.path()).unwrap();
+    assert!(stale.save_if_complete(&old, &Mutex::new(true)).is_err());
+    assert_eq!(fs::read(attached.path()).unwrap(), good);
+    let restored = UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+    let mut app = App::default(); restored.restore(&mut app, &ids);
+    assert_eq!(app.groups[0].tabs, ["open", "reopened"]);
+    attached.remember_session(&recovery_session("stay-closed")).unwrap();
+    assert_eq!(fs::read(attached.path()).unwrap(), good);
+}
