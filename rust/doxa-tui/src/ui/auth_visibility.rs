@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct Status {
     states: HashMap<&'static str, AuthState>,
     pending: Option<Receiver<[(&'static str, AuthState); 2]>>,
@@ -16,7 +16,7 @@ pub(super) struct Status {
     enabled: bool,
     rejected_sessions: HashMap<String, Rejection>,
 }
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Rejection {
     Observed,
     Historical,
