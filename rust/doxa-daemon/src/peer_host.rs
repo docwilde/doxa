@@ -228,6 +228,7 @@ impl PeerHost {
         let original_message_id = clean["message_id"].clone();
         self.with_lore(|lore| { scrub_value(&mut clean, lore)?; Ok(()) })?;
         if event_type == "peer_message" {
+            if let Some(title)=clean["from_title"].as_str(){clean["from_title"]=json!(peer_origin_label(title,128));}
             if clean["from_id"] != original_sender || clean["message_id"] != original_message_id
                 || !clean["from_id"].as_str().is_some_and(doxa_transcript::valid_session_id)
                 || clean["from_title"].as_str().is_none_or(|text|text.is_empty() || text.len()>128)
@@ -633,11 +634,11 @@ impl PeerHost {
         let data = event.get("data")?;
         let origin = PeerTurnOrigin::new(
             data["from_id"].as_str()?.to_owned(),
-            data["from_title"].as_str()?.to_owned(),
+            peer_origin_label(data["from_title"].as_str()?, 128),
             data["message_id"].as_str().map(str::to_owned),
             data["sent_at"].as_str().map(str::to_owned),
-            data["from_repo"].as_str().map(str::to_owned),
-            data["origin"].as_str().map(str::to_owned),
+            data["from_repo"].as_str().map(|text|peer_origin_label(text,512)),
+            data["origin"].as_str().map(|text|peer_origin_label(text,128)),
             "peer_message".to_owned(),
         ).ok()?;
         Some((format!("{PEER_TURN_INTRO}\n\n{PEER_UNTRUSTED_INTRO}\n\n{rendered}\n--- end of peer messages ---"), origin))
@@ -888,6 +889,17 @@ fn target_matches(session_id: &str, target: &str, exact: bool) -> bool {
 
 fn valid_peer_message_id(value: &str) -> bool { delivery::valid_message_id(value) }
 
+// These are display labels only: transport/session identity and the original
+// scope used for authorization remain unchanged. Origin limits count bytes;
+// native model/repo/branch titles count characters and may exceed those limits.
+fn peer_origin_label(text:&str,limit:usize)->String {
+    let text:String=text.chars().map(|ch|if ch.is_control(){' '}else{ch}).collect();
+    if text.trim().is_empty(){return "Unknown peer label".into();}
+    if text.len()<=limit{return text;}
+    let mut end=limit-"…".len();while !text.is_char_boundary(end){end-=1;}
+    format!("{}…",&text[..end])
+}
+
 #[cfg(test)]
 mod provider_target_tests {
     use super::{target_matches, PEER_UNTRUSTED_INTRO};
@@ -940,6 +952,18 @@ mod provider_target_tests {
         assert!(origin.from_repo.as_ref().unwrap().len()<=512&&origin.from_repo.as_ref().unwrap().ends_with('…'));
         assert!(prompt.contains(id)&&prompt.contains(&scope));
         assert_eq!(event["data"]["from_repo"],scope,"only the origin's display label may abbreviate the canonical scope");
+    }
+    #[test]
+    fn peer_origin_labels_keep_utf8_boundaries_without_relaxing_identity_checks() {
+        for text in ["a".repeat(127),"a".repeat(128),"界".repeat(64),format!("{}界","a".repeat(126))]{
+            let label=super::peer_origin_label(&text,128);assert!(label.len()<=128);
+            if text.len()<=128{assert_eq!(label,text);}else{assert!(label.ends_with('…'));}
+        }
+        let mut event=serde_json::json!({"data":{"from_id":"peer","from_title":"","sent_at":"now","body":"status"}});
+        assert!(super::PeerHost::peer_prompt(&event).is_some());
+        for id in ["", "bad/id", "peer\nowner"]{
+            event["data"]["from_id"]=serde_json::json!(id);assert!(super::PeerHost::peer_prompt(&event).is_none());
+        }
     }
     #[test]
     fn fleet_guard_blocks_both_migration_rpcs_before_forwarding_to_the_isolation_host() {
