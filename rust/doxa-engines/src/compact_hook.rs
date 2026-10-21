@@ -218,10 +218,11 @@ mod tests {
     use std::io::Write;
 
     fn isolated_fixture(root: &Path) -> (Value, Value, doxa_isolation::Manifest, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
         let home = root.join("home");
         let sessions = home.join("codex/sessions");
         fs::create_dir_all(&sessions).unwrap();
-        use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
         let source = sessions.join("thread.jsonl");
         let checkout = root.join("checkout");
