@@ -80,7 +80,25 @@ fn review_job_for_scope(manifest: &Value, event: &Value, isolation: Option<&doxa
     let thread = manifest["provider_thread"].as_str().filter(|id| !id.is_empty()).ok_or_else(|| io::Error::other("missing provider thread"))?;
     let session = manifest["doxa_session"].as_str().filter(|id| !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)))
         .ok_or_else(|| io::Error::other("invalid session"))?;
-    let provider = doxa_isolation::snapshot_provider_file(source, 0, MAX_ROLLOUT, Some(thread))?;
+    // Ask for the attested actual size first. Older installed ROOT brokers
+    // retain their 32 MiB ceiling; small sessions must not fail merely because
+    // this client can now review larger histories with an upgraded broker.
+    let provider = match doxa_isolation::snapshot_provider_file(source, 0, MAX_INPUT, Some(thread))? {
+        Some(prefix) => {
+            let size = prefix.proof["size"].as_u64().and_then(|size| usize::try_from(size).ok())
+                .filter(|size| *size > 0 && *size <= MAX_ROLLOUT)
+                .ok_or_else(|| io::Error::other("provider review source exceeds the complete history bound"))?;
+            if prefix.bytes.len() == size { Some(prefix) } else {
+                let full = doxa_isolation::snapshot_provider_file(source, 0, size, Some(thread))?
+                    .ok_or_else(|| io::Error::other("provider source transport changed"))?;
+                if prefix.proof["source"] != full.proof["source"] {
+                    return Err(io::Error::other("provider source changed between size and complete snapshot"));
+                }
+                Some(full)
+            }
+        },
+        None => None,
+    };
     if provider.as_ref().is_some_and(|snapshot| !complete_provider_source(&snapshot.bytes, &snapshot.proof)) {
         return Err(io::Error::other("provider review source is incomplete or differs from its original proof"));
     }
