@@ -1196,6 +1196,11 @@ for line in sys.stdin:
         fs::write(&record, blocked.to_string()).unwrap();
         assert_eq!(resume_fixture(&entry, &script, &root, &temp.path().join("cli-projects")).unwrap_err(),
             doxa_transcript::CodexContinuationFailure::CompactionReviewFailed.message());
+        blocked["session_id"] = serde_json::json!("other");
+        fs::write(&record, blocked.to_string()).unwrap();
+        assert_eq!(resume_fixture(&entry, &script, &root, &temp.path().join("cli-projects")).unwrap_err(),
+            "Codex thread record does not match this session");
+        blocked["session_id"] = serde_json::json!("saved-1");
         // Unknown categories remain blocked and their arbitrary stored prose
         // is never surfaced as a trusted diagnostic.
         blocked["continuation_failure"] = serde_json::json!("untrusted stored failure prose");

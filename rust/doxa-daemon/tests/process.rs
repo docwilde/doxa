@@ -1823,6 +1823,22 @@ fn explicit_codex_resume_requires_matching_thread_metadata() {
         assert!(!project.join("should-not-start").exists());
         assert!(!dir.path().join("registry/codex-session.json").exists());
     }
+    for (session, cwd) in [("other", dir.path()), ("codex-session", Path::new("/wrong"))] {
+        fs::write(&thread, json!({"thread_id":"thread-1","session_id":session,"cwd":cwd,
+            "turn_incomplete":true,"continuation_failure":"compaction_review_failed"}).to_string()).unwrap();
+        let output = run();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("thread record does not match this session"), "{error}");
+        assert!(!error.contains("compaction review hook failed"), "unbound category must not be surfaced");
+    }
+    fs::write(&thread, json!({"thread_id":"thread-1","session_id":"codex-session","cwd":dir.path(),
+        "turn_incomplete":true,"continuation_failure":"untrusted stored failure prose"}).to_string()).unwrap();
+    let unknown = run();
+    assert!(!unknown.status.success());
+    let error = String::from_utf8_lossy(&unknown.stderr);
+    assert!(error.contains("transcript is incomplete"), "{error}");
+    assert!(!error.contains("untrusted stored failure prose"));
     fs::write(&thread, json!({"thread_id":"thread-1","session_id":"codex-session",
         "cwd":dir.path(),"model":null,"turn_incomplete":false}).to_string()).unwrap();
     let mut resumed = daemon_command()

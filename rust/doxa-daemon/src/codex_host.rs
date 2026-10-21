@@ -172,16 +172,16 @@ impl CodexHost {
                 || (!lore_enabled && value["lore_enabled"].as_bool().is_none()) {
                 return Err("Codex resume memory policy differs or is unknown; existing provider context cannot be erased".into());
             }
+            if value["session_id"].as_str() != Some(session_id)
+                || value["cwd"].as_str() != Some(cwd.as_str())
+                || transcript.as_ref().is_none_or(|(_, len)| *len == 0) {
+                return Err("Codex thread record does not match this session".to_owned());
+            }
             if value.get("turn_incomplete") != Some(&Value::Bool(false)) {
                 return Err(match value["continuation_failure"].as_str().and_then(CodexContinuationFailure::from_key) {
                     Some(kind) => format!("Codex transcript is incomplete; {}; refusing to resume the thread", kind.message()),
                     None => "Codex transcript is incomplete; refusing to resume the thread".to_owned(),
                 });
-            }
-            if value["session_id"].as_str() != Some(session_id)
-                || value["cwd"].as_str() != Some(cwd.as_str())
-                || transcript.as_ref().is_none_or(|(_, len)| *len == 0) {
-                return Err("Codex thread record does not match this session".to_owned());
             }
             store.verify_thread_checkpoint(&value).map_err(|_| {
                 "Codex transcript does not match its durable checkpoint; refusing to resume the thread".to_owned()
