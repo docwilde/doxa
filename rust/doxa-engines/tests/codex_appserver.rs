@@ -303,7 +303,11 @@ async fn completed_only_snapshots_and_oversized_item_ids_are_bounded() {
         let result = driver.run_turn("hello", &CancellationToken::new(), |event| {
             if event.kind == "text_delta" { emitted_bytes += event.data["text"].as_str().unwrap().len(); }
         }).await;
-        assert!(matches!(result, Err(doxa_engines::codex_appserver::AppServerError::Protocol(_))));
+        if oversized_id {
+            assert!(matches!(result, Err(doxa_engines::codex_appserver::AppServerError::Protocol("invalid assistant item ID"))));
+        } else {
+            assert!(matches!(result, Err(doxa_engines::codex_appserver::AppServerError::AssistantOutputLimit)));
+        }
         assert!(emitted_bytes <= 8 * 1024 * 1024);
         driver.shutdown().await;
     }
