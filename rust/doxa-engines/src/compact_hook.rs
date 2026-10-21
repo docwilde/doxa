@@ -90,7 +90,8 @@ fn review_job_for_scope(manifest: &Value, event: &Value, isolation: Option<&doxa
     let mut review_directory = None;
     let mut original_proof = None;
     let review_source = if let Some(scope) = isolation {
-        if scope.session_id != session || scope.checkout != Path::new(cwd) || scope.private_home.join("codex") != root {
+        if !scope.profile.docker() || scope.session_id != session
+            || scope.context_cwd.as_deref().unwrap_or(&scope.checkout) != Path::new(cwd) || scope.private_home.join("codex") != root {
             return Err(io::Error::other("review scope differs from the trusted isolation manifest"));
         }
         use std::os::unix::fs::PermissionsExt;
@@ -243,6 +244,19 @@ mod tests {
         let replacement = job.source.with_extension("replacement");
         fs::write(&replacement, fs::read(&job.source).unwrap()).unwrap(); fs::rename(replacement, &job.source).unwrap();
         assert!(!job.unchanged().unwrap(), "same-byte review replacement lost its identity");
+    }
+
+    #[test]
+    fn migrated_isolation_retains_its_host_authorized_logical_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manifest, event, mut scope, _) = isolated_fixture(dir.path());
+        let logical = dir.path().join("original-project"); fs::create_dir(&logical).unwrap();
+        scope.context_cwd = Some(logical.clone()); manifest["cwd"] = json!(logical);
+        let job = review_job_for_scope(&manifest, &event, Some(&scope)).unwrap().unwrap();
+        assert_eq!(job.metadata["cwd"], json!(logical));
+        assert!(job.unchanged().unwrap());
+        manifest["cwd"] = json!(scope.checkout);
+        assert!(review_job_for_scope(&manifest, &event, Some(&scope)).is_err());
     }
 
     #[test]

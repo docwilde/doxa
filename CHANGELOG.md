@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.68 — 2026-10-21
+
+**Isolated Codex review**
+
+- Fix **`compact_hook`** host/container path mismatches. Map session metadata in a private review copy; keep the complete provider log unchanged and bind approval to both source proofs.
+- Resolve **`review_worker`** Codex roots from the trusted isolation manifest. Preserve the logical project across isolation migration; foreign threads, paths and replaced sources still fail closed.
+
+**Long sessions**
+
+- Stream host-owned histories up to **256 MiB**, with **8 MiB** JSONL records, matching canonical LORE review limits. Align ROOT snapshot bounds while retaining bounded frames and partial windows.
+- Keep prior incomplete turns read-only without replay. Tests exercise canonical review of long logs, attachment-sized records and source changes during review.
+
 ## 2.0.0-beta.67 — 2026-10-21
 
 **Codex continuation diagnostics**
