@@ -21,7 +21,7 @@ use claude_host::ClaudeHost;
 use budget_host::BudgetHost;
 use codex_host::CodexHost;
 use doxa_engines::codex_driver::{DriverOptions, SandboxMode};
-use doxa_peers::{delivery::Inbox, new_incarnation};
+use doxa_peers::{delivery::{Inbox,WakeReceipt,WakeState,WakeReason}, new_incarnation};
 use doxa_runtime::{Daemon, ExternalPrompt, Host, PeerTurnOrigin, Session};
 use doxa_vendors::Vendor;
 use peer_host::PeerHost;
@@ -868,26 +868,36 @@ fn run() -> io::Result<()> {
         while let Ok(event) = event_rx.try_recv() {
             handle.publish(event);
         }
-        if let Ok(Some(frame)) = inbox.poll_receive(&|s: &str| s.to_owned()) {
-            if let Ok(mut event) = peer_host.inbound_event(frame) {
+        if let Ok(Some(received)) = inbox.poll_receive_with_receipt(&|s: &str| s.to_owned()) {
+            let receipt=if let Ok(mut event) = peer_host.inbound_event(received.frame.clone()) {
                 let wake_enabled = options.engine != Engine::Fixture && inbound_policy.enabled();
                 event["data"]["wake_policy"] = json!(if wake_enabled { "enabled" } else { "disabled" });
                 handle.publish(event.clone());
-                let accepted = if wake_enabled {
+                let (state,reason) = if wake_enabled {
                     match PeerHost::peer_prompt(&event) {
                         Some((prompt, origin)) => match handle.enqueue_peer_prompt_with_origin(prompt, origin) {
-                            Ok(ExternalPrompt::Started | ExternalPrompt::Queued) => true,
-                            Ok(ExternalPrompt::Full) => false,
-                            Err(_) => false,
+                            Ok(ExternalPrompt::Started) => (WakeState::Started,WakeReason::Admitted),
+                            Ok(ExternalPrompt::Queued) => (WakeState::Queued,WakeReason::Admitted),
+                            Ok(ExternalPrompt::Full) => (WakeState::Retained,WakeReason::QueueFull),
+                            Err(_) => (WakeState::Retained,WakeReason::AdmissionUnavailable),
                         },
-                        None => false,
+                        None => (WakeState::Retained,WakeReason::InvalidProvenance),
                     }
-                } else { false };
-                if !accepted && !peer_host.retain_pending(event) {
+                } else { (WakeState::Disabled,WakeReason::OwnerOptInRequired) };
+                let accepted=matches!(state,WakeState::Started|WakeState::Queued);
+                let message_id=event["data"]["message_id"].as_str().map(str::to_owned);
+                let retained=!accepted&&peer_host.retain_pending(event);
+                if !accepted && !retained {
                     handle.publish(json!({"type":"peer_pending_full","data":{
                         "message":"Peer message was shown but could not be retained for a later turn"}}));
                 }
-            }
+                if state==WakeState::Retained {
+                    handle.publish(json!({"type":"peer_wake_error","data":{"state":state,"reason":reason,"message_id":message_id,
+                        "message":"Peer message did not start or queue a turn; inspect recipient admission and retained messages"}}));
+                }
+                WakeReceipt{state:if !accepted&&!retained{WakeState::Dropped}else{state},reason:if !accepted&&!retained{WakeReason::PendingFull}else{reason},retained,message_id}
+            } else {WakeReceipt{state:WakeState::Rejected,reason:WakeReason::AdmissionRejected,retained:false,message_id:None}};
+            let _=received.acknowledge(receipt);
         }
         if TERMINATE.load(Ordering::Acquire) || handle.is_stopping() {
             break Ok(());

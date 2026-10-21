@@ -3695,6 +3695,10 @@ fn claude_long_native_title_wakes_idle_and_detached_busy_codex_then_accepts_foll
         for args in [vec!["init","-q"],vec!["symbolic-ref","HEAD",&branch]] {
             assert!(Command::new("git").args(args).current_dir(root).status().unwrap().success());
         }
+        fs::write(root.join("README"),"Synthetic peer-wake fixture\n").unwrap();
+        for args in [vec!["add","README"],vec!["-c","user.name=DOXA Test","-c","user.email=doxa@example.test","commit","-qm","test: seed peer wake fixture"]] {
+            assert!(Command::new("git").args(args).current_dir(root).status().unwrap().success());
+        }
         doxa_state::save_config(&root.join("home/config.toml"),&"peer_inbound_turns = true\nagent_peer_send = true".parse().unwrap()).unwrap();
         let codex=root.join("codex-fixture");let capture=root.join("provider-input");let release=root.join("release");let held=root.join("held");
         executable(&codex,&format!(r#"#!/bin/sh
@@ -3728,6 +3732,8 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         send(&mut from_socket,json!({"type":"call","id":2,"method":"set_permission_mode","params":{"mode":"auto"}}));assert_eq!(claude_receive_until(&mut from_reader,|row|row["id"]==2)["ok"],true);
         send(&mut from_socket,json!({"type":"prompt","id":3,"text":"Exercise the canonical peer tool."}));
         let done=claude_receive_until(&mut from_reader,|row|row["event"]["type"]=="turn_done");assert_eq!(done["event"]["data"]["is_error"],false,"{done}");
+        let delivery:Value=serde_json::from_slice(&fs::read(root.join("peer-delivery.json")).unwrap()).unwrap();
+        assert_eq!(delivery["wake_receipts"]["codex-session"]["state"],if busy{"queued"}else{"started"});
         // Replay the actual detached recipient ring rather than inventing a receipt.
         let (mut reader,mut socket)=recipient.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":0}));
         let peer=claude_receive_until(&mut reader,|row|row["event"]["type"]=="peer_message");assert_eq!(peer["event"]["data"]["wake_policy"],"enabled");
@@ -3741,6 +3747,31 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         for (process,reader,socket) in [(&mut recipient,&mut reader,&mut socket),(&mut sender,&mut from_reader,&mut from_socket)] {
             send(socket,json!({"type":"call","id":5,"method":"stop","params":{}}));assert_eq!(claude_receive_until(reader,|row|row["id"]==5)["ok"],true);wait_until(||process.exited());
         }
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn peer_receipts_distinguish_disabled_rejected_and_retained_without_provider_turns() {
+    use doxa_peers::delivery::{send_with_receipt,WakeState,WakeReason};
+    for scenario in ["default_off","explicit_off","invalid_provenance","rejected_sender"] {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();let codex=root.join("codex-fixture");let captured=root.join("provider-called");
+        executable(&codex,&format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"done\"}}}}'\n",captured.display()));
+        doxa_state::save_config(&root.join("home/config.toml"),&format!("peer_inbound_turns = {}",scenario!="default_off").parse().unwrap()).unwrap();
+        let (_sender,_)=registry_peer(root,"sender",root.to_str().unwrap(),"Claude teammate");
+        let mut process=Process::start_codex_with_wake_override(root,&codex,(scenario=="explicit_off").then_some("off"));
+        let path=PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+        let frame=doxa_peers::delivery::PeerFrame{authenticated_pid:None,from_id:if scenario=="rejected_sender"{"unknown"}else{"sender"}.into(),from_title:"Claude teammate".into(),sent_at:if scenario=="invalid_provenance"{"x".repeat(65)}else{peer_now()},body:"Public peer data".into(),from_repo:Some(root.display().to_string()),kind:None};
+        let receipt=send_with_receipt(&path,&frame).unwrap().expect("a new native recipient reports its own actual admission");
+        match scenario {
+            "invalid_provenance"=>{assert_eq!(receipt.state,WakeState::Retained);assert_eq!(receipt.reason,WakeReason::InvalidProvenance);assert!(receipt.retained);},
+            "rejected_sender"=>{assert_eq!(receipt.state,WakeState::Rejected);assert_eq!(receipt.reason,WakeReason::AdmissionRejected);assert!(!receipt.retained);},
+            _=>{assert_eq!(receipt.state,WakeState::Disabled);assert_eq!(receipt.reason,WakeReason::OwnerOptInRequired);assert!(receipt.retained);},
+        }
+        assert!(!captured.exists(),"a denied/retained/rejected receipt must not imply provider execution");
+        let(mut reader,mut socket)=process.connect();receive(&mut reader);
+        send(&mut socket,json!({"type":"call","id":1,"method":"get_state","params":{}}));let state=receive(&mut reader);assert_eq!(state["running"],false);assert_eq!(state["queued"],0);
+        send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());
     }
 }
 
