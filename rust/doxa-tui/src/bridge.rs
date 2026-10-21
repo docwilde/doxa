@@ -378,7 +378,9 @@ pub fn run_socket_expected(path: impl AsRef<Path>, expected: Option<&str>) -> io
         },
         Err(error) => return Err(error),
     };
-    if !session.scope_key.is_empty() {
+    // A fleet inspector has its own saved view; private worker identities must
+    // not become ordinary project tabs just because the operator inspects one.
+    if expected.is_none() && !session.scope_key.is_empty() {
         let home = crate::operations::doxa_home()?;
         let mut store = crate::ui_state::UiStateStore::for_scope(&home, &session.scope_key)?;
         store.reopen_session(&session)?;
