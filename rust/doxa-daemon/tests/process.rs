@@ -3723,7 +3723,14 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         let (mut reader,mut socket)=recipient.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
         if busy {
             send(&mut socket,json!({"type":"prompt","id":1,"text":"owner hold"}));
-            claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_started");wait_until(||held.exists());
+            claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_started");
+            let deadline=Instant::now()+CODEX_PREPARATION_TIMEOUT;
+            while !held.exists(){
+                send(&mut socket,json!({"type":"call","id":90,"method":"get_state","params":{}}));
+                let state=claude_receive_until(&mut reader,|row|{assert_ne!(row["event"]["type"],"turn_done","synthetic held turn completed before its provider marker: {row}");row["id"]==90});
+                assert_eq!(state["running"],true,"synthetic held turn stopped before provider marker: {state}");
+                assert!(Instant::now()<deadline,"fixture hold marker missing; RPCs={:?}",codex_fixture_rpcs(&codex));thread::sleep(Duration::from_millis(20));
+            }
             drop(reader);drop(socket);
             wait_until(||recipient.entry()["clients"]==0&&recipient.entry()["active"]==true);
         }
