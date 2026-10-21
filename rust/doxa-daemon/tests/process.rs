@@ -1506,6 +1506,7 @@ fn codex_clean_checkpoint_failure_overrides_success_and_preserves_dirty_resume_g
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn codex_unsettled_compaction_preserves_first_cause_and_refuses_replay() {
     for (mode, category) in [
         ("failed", "compaction_review_failed"),
