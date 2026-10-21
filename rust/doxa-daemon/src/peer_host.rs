@@ -927,6 +927,21 @@ mod provider_target_tests {
         }
     }
     #[test]
+    fn long_utf8_display_labels_do_not_silently_disable_valid_peer_wake() {
+        let id="a1234567-89ab-4cde-8123-0123456789ab";
+        let title=format!("claude@repo:{}", "Δ".repeat(80));
+        let scope=format!("/project/{}", "界".repeat(200));
+        let event=serde_json::json!({"data":{"from_id":id,"from_title":title,"from_repo":scope,
+            "sent_at":"2026-10-21T10:00:00Z","message_id":"0123456789abcdef0123456789abcdef","body":"Public status"}});
+        let (prompt,origin)=super::PeerHost::peer_prompt(&event).expect("valid long display labels must still wake the recipient");
+        assert!(origin.validate().is_ok());assert_eq!(origin.sender_session_id,id);
+        assert_eq!(origin.message_id.as_deref(),Some("0123456789abcdef0123456789abcdef"));
+        assert!(origin.sender_title.len()<=128&&origin.sender_title.ends_with('…'));
+        assert!(origin.from_repo.as_ref().unwrap().len()<=512&&origin.from_repo.as_ref().unwrap().ends_with('…'));
+        assert!(prompt.contains(id)&&prompt.contains(&scope));
+        assert_eq!(event["data"]["from_repo"],scope,"only the origin's display label may abbreviate the canonical scope");
+    }
+    #[test]
     fn fleet_guard_blocks_both_migration_rpcs_before_forwarding_to_the_isolation_host() {
         use super::*;use std::sync::atomic::{AtomicUsize,Ordering};
         use std::os::unix::fs::PermissionsExt;
