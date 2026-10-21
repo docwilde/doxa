@@ -6900,6 +6900,18 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn peer_wake_admission_error_is_visible_without_accepting_provider_prose() {
+        let mut app=App::default();app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        let frame=|reason|json!({"type":"event","session_id":"s","event":{"type":"peer_wake_error","data":{"reason":reason,"message":"UNTRUSTED DIAGNOSTIC"}}});
+        assert!(app.apply_daemon_frame(&frame("admission_unavailable")));
+        assert!(app.sessions[0].transcript.contains("Peer wake error"));
+        assert!(app.sessions[0].transcript.contains("did not start or queue"));
+        assert!(!app.sessions[0].transcript.contains("UNTRUSTED DIAGNOSTIC"));
+        assert!(!app.apply_daemon_frame(&frame("provider guessed approval")));
+        assert!(!app.session_activity.get("s").is_some_and(|value|value.0));
+    }
+
+    #[test]
     fn peer_prompt_format_keeps_sender_stripe_and_robot_for_receipts_and_queued_turns() {
         use transcript_tools::FoldKey;
         for glyphs in [false, true] {
@@ -8719,4 +8731,30 @@ fn isolation_menu_requires_explicit_confirmation_for_bound_idle_session(){
     while !app.isolation_confirmation.as_ref().unwrap().complete.get(){app.isolation_control_key(KeyEvent::new(KeyCode::PageDown,KeyModifiers::NONE));let _=painted_at(&app,150,42);}
     app.isolation_control_key(KeyEvent::new(KeyCode::Char('Y'),KeyModifiers::SHIFT));
     assert!(matches!(app.pending_queue_commands.as_slice(),[crate::bridge::WorkerCommand::SetIsolation(id,profile)] if id=="isolated"&&profile=="native"));
+}
+
+#[test]
+fn identity_writer_handles_close_reopen_close_and_stop_without_roster_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = crate::ui_state::UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+    let session = crate::discovery::Session { id:"owned".into(), title:"owned".into(), socket:"/unused".into(),
+        scope_key:"/repo".into(), clients:Some(1), started_at:"2026".into() };
+    store.reopen_session(&session).unwrap();
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"owned","engine":"codex"}));
+    let mut seen = std::collections::HashSet::new();
+    app.detach_active_tab();
+    save_identity_intent(&mut app,&mut store,&mut seen);
+    assert!(!store.save_if_complete(&app,&Mutex::new(false)).unwrap());
+    let read = || serde_json::from_slice::<serde_json::Value>(&std::fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(read()["rust_ui"]["recovery_closed_tabs"],json!(["owned"]));
+    app.groups[0].tabs.push("owned".into());
+    save_identity_intent(&mut app,&mut store,&mut seen);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(store.path()).unwrap()).unwrap()["rust_ui"]["recovery_open_tabs"],json!(["owned"]));
+    app.detach_active_tab();
+    save_identity_intent(&mut app,&mut store,&mut seen);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(store.path()).unwrap()).unwrap()["rust_ui"]["recovery_closed_tabs"],json!(["owned"]));
+    app.killed_this_run.insert("owned".into());
+    save_identity_intent(&mut app,&mut store,&mut seen);
+    assert!(store.saved_tabs().unwrap().is_empty());
 }

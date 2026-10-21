@@ -298,6 +298,9 @@ impl Process {
         Self::start_codex_with_wake_override(runtime, codex, inbound.then_some("yes"))
     }
     fn start_codex_with_wake_override(runtime: &Path, codex: &Path, inbound: Option<&str>) -> Self {
+        Self::start_codex_at_checkout(runtime,codex,inbound,false)
+    }
+    fn start_codex_at_checkout(runtime:&Path,codex:&Path,inbound:Option<&str>,owned_checkout:bool)->Self {
         let codex = codex_appserver_fixture(codex);
         let mut command = daemon_command();
         command
@@ -320,6 +323,7 @@ impl Process {
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_CODEX_APPSERVER");
         command.env_remove("DOXA_PEER_INBOUND_TURNS");
+        if owned_checkout{command.env("DOXA_WORKTREE","0");}
         if let Some(inbound) = inbound { command.env("DOXA_PEER_INBOUND_TURNS", inbound); }
         let manifest_path = runtime.join("home/isolation/codex-session/manifest.json");
         match fs::symlink_metadata(&manifest_path) {
@@ -354,6 +358,9 @@ impl Process {
         Self::start_claude_with_budget(runtime, script, None)
     }
     fn start_claude_with_budget(runtime: &Path, script: &Path, budget: Option<&str>) -> Self {
+        Self::start_claude_at_checkout(runtime,script,budget,false)
+    }
+    fn start_claude_at_checkout(runtime:&Path,script:&Path,budget:Option<&str>,owned_checkout:bool)->Self {
         let mut command = daemon_command();
         command
             .args([
@@ -375,6 +382,7 @@ impl Process {
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_SESSION_BUDGET_USD");
         if let Some(budget) = budget { command.env("DOXA_SESSION_BUDGET_USD", budget); }
+        if owned_checkout{command.env("DOXA_WORKTREE","0");}
         let mut child = command.spawn().unwrap();
         let registry = runtime.join("registry").join(format!("{CLAUDE_SESSION}.json"));
         wait_for_registry(&mut child, &registry);
@@ -3683,6 +3691,108 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         send(&mut socket, json!({"type":"call","id":5,"method":"stop","params":{}}));
         assert_eq!(receive(&mut reader)["ok"], true);
         wait_until(|| process.exited());
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn claude_long_native_title_wakes_idle_and_detached_busy_codex_then_accepts_followup() {
+    for busy in [false,true] {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        let branch=format!("refs/heads/{}","Δ".repeat(80));
+        for args in [vec!["init","-q"],vec!["symbolic-ref","HEAD",&branch]] {
+            assert!(Command::new("git").args(args).current_dir(root).status().unwrap().success());
+        }
+        fs::write(root.join("README"),"Synthetic peer-wake fixture\n").unwrap();
+        for args in [vec!["add","README"],vec!["-c","user.name=DOXA Test","-c","user.email=doxa@example.test","commit","-qm","test: seed peer wake fixture"]] {
+            assert!(Command::new("git").args(args).current_dir(root).status().unwrap().success());
+        }
+        doxa_state::save_config(&root.join("home/config.toml"),&"peer_inbound_turns = true\nagent_peer_send = true".parse().unwrap()).unwrap();
+        let codex=root.join("codex-fixture");let capture=root.join("provider-input");let release=root.join("release");let held=root.join("held");
+        if busy{fs::write(root.join("hold-first"),b"hold first synthetic provider turn").unwrap();}
+        executable(&codex,&format!(r#"#!/bin/sh
+text=$(cat)
+printf '%s\n' "$text" >> '{}'
+if [ -f '{}' ] && [ ! -f '{}' ]; then
+  touch '{}'
+  while [ ! -f '{}' ]; do sleep .01; done
+fi
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+"#,capture.display(),root.join("hold-first").display(),release.display(),held.display(),release.display()));
+        let mut recipient=Process::start_codex_at_checkout(root,&codex,None,true);
+        let (mut reader,mut socket)=recipient.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+        if busy {
+            send(&mut socket,json!({"type":"prompt","id":1,"text":"owner hold"}));
+            claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_started");
+            let deadline=Instant::now()+CODEX_PREPARATION_TIMEOUT;
+            while !held.exists(){
+                send(&mut socket,json!({"type":"call","id":90,"method":"get_state","params":{}}));
+                let state=claude_receive_until(&mut reader,|row|{assert_ne!(row["event"]["type"],"turn_done","synthetic held turn completed before its provider marker: {row}");row["id"]==90});
+                assert_eq!(state["running"],true,"synthetic held turn stopped before provider marker: {state}");
+                assert!(Instant::now()<deadline,"fixture hold marker missing; RPCs={:?}",codex_fixture_rpcs(&codex));thread::sleep(Duration::from_millis(20));
+            }
+            drop(reader);drop(socket);
+            wait_until(||recipient.entry()["clients"]==0&&recipient.entry()["active"]==true);
+        }
+        let script=root.join("claude-peer.py");
+        claude_fixture(&script,"",r#"if frame['type']=='user':
+  emit({'type':'control_request','request_id':'peer','request':{'subtype':'mcp_message','server_name':'doxa','message':{'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'peer_send','arguments':{'target':'codex-session','text':'Public peer status'}}}}})
+ elif frame['type']=='control_response':
+  value=frame['response']['response']['mcp_response']['result'];assert not value.get('isError',False),value
+  delivery=json.loads(value['content'][0]['text']);assert delivery['delivered_to']==['codex-session'] and not delivery['failed'],delivery
+  root.joinpath('peer-delivery.json').write_text(json.dumps(delivery));result()
+"#);
+        let mut sender=Process::start_claude_at_checkout(root,&script,None,true);assert!(sender.entry()["title"].as_str().unwrap().len()>128,"fixture must generate a legitimate long native title");
+        let (mut from_reader,mut from_socket)=sender.connect();from_reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+        receive(&mut from_reader);send(&mut from_socket,json!({"type":"attach","cursor":null}));
+        send(&mut from_socket,json!({"type":"call","id":2,"method":"set_permission_mode","params":{"mode":"auto"}}));assert_eq!(claude_receive_until(&mut from_reader,|row|row["id"]==2)["ok"],true);
+        send(&mut from_socket,json!({"type":"prompt","id":3,"text":"Exercise the canonical peer tool."}));
+        let done=claude_receive_until(&mut from_reader,|row|row["event"]["type"]=="turn_done");assert_eq!(done["event"]["data"]["is_error"],false,"{done}");
+        let delivery:Value=serde_json::from_slice(&fs::read(root.join("peer-delivery.json")).unwrap()).unwrap();
+        assert_eq!(delivery["wake_receipts"]["codex-session"]["state"],if busy{"queued"}else{"started"});
+        assert_eq!(delivery["wake_receipts"]["codex-session"]["message_id"],delivery["message_id"]);
+        // Replay the actual detached recipient ring rather than inventing a receipt.
+        let (mut reader,mut socket)=recipient.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":0}));
+        let peer=claude_receive_until(&mut reader,|row|row["event"]["type"]=="peer_message");assert_eq!(peer["event"]["data"]["wake_policy"],"enabled");
+        assert_eq!(peer["event"]["data"]["message_id"],delivery["message_id"]);
+        if busy {let queued=claude_receive_until(&mut reader,|row|row["event"]["type"]=="prompt_queued");assert_eq!(queued["event"]["data"]["peer_started"],true);fs::write(&release,b"go").unwrap();}
+        let started=claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_started"&&row["event"]["data"]["peer_started"]==true);
+        assert_eq!(started["event"]["data"]["peer_origin_data"]["sender_session_id"],CLAUDE_SESSION);assert!(started["event"]["data"]["peer_origin_data"]["sender_title"].as_str().unwrap().len()<=128);
+        assert_eq!(started["event"]["data"]["peer_origin_data"]["message_id"],delivery["message_id"]);
+        let done=claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_done");assert_ne!(done["event"]["data"]["is_error"],true,"{done}");
+        assert!(fs::read_to_string(&capture).unwrap().contains("Public peer status"));
+        send(&mut socket,json!({"type":"prompt","id":4,"text":"ordinary owner follow-up"}));let done=claude_receive_until(&mut reader,|row|row["event"]["type"]=="turn_done");assert_ne!(done["event"]["data"]["is_error"],true);
+        assert_eq!(codex_fixture_rpcs(&codex).iter().filter(|row|row["method"]=="turn/start").count(),if busy{3}else{2});
+        for (process,reader,socket) in [(&mut recipient,&mut reader,&mut socket),(&mut sender,&mut from_reader,&mut from_socket)] {
+            send(socket,json!({"type":"call","id":5,"method":"stop","params":{}}));assert_eq!(claude_receive_until(reader,|row|row["id"]==5)["ok"],true);wait_until(||process.exited());
+        }
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn peer_receipts_distinguish_disabled_rejected_and_retained_without_provider_turns() {
+    use doxa_peers::delivery::{send_with_receipt,WakeState,WakeReason};
+    for scenario in ["default_off","explicit_off","invalid_provenance","rejected_sender"] {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();let codex=root.join("codex-fixture");let captured=root.join("provider-called");
+        executable(&codex,&format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"done\"}}}}'\n",captured.display()));
+        doxa_state::save_config(&root.join("home/config.toml"),&format!("peer_inbound_turns = {}",scenario!="default_off").parse().unwrap()).unwrap();
+        let original_policy=fs::read(root.join("home/config.toml")).unwrap();
+        let (_sender,_)=registry_peer(root,"sender",root.to_str().unwrap(),"Claude teammate");
+        let mut process=Process::start_codex_with_wake_override(root,&codex,(scenario=="explicit_off").then_some("off"));
+        let path=PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+        let frame=doxa_peers::delivery::PeerFrame{authenticated_pid:None,from_id:if scenario=="rejected_sender"{"unknown"}else{"sender"}.into(),from_title:"Claude teammate".into(),sent_at:if scenario=="invalid_provenance"{"now\nforged timestamp".into()}else{peer_now()},body:"Public peer data".into(),from_repo:Some(root.display().to_string()),kind:None};
+        let receipt=send_with_receipt(&path,&frame).unwrap().expect("a new native recipient reports its own actual admission");
+        match scenario {
+            "invalid_provenance"=>{assert_eq!(receipt.state,WakeState::Retained);assert_eq!(receipt.reason,WakeReason::InvalidProvenance);assert!(receipt.retained);},
+            "rejected_sender"=>{assert_eq!(receipt.state,WakeState::Rejected);assert_eq!(receipt.reason,WakeReason::AdmissionRejected);assert!(!receipt.retained);},
+            _=>{assert_eq!(receipt.state,WakeState::Disabled);assert_eq!(receipt.reason,WakeReason::OwnerOptInRequired);assert!(receipt.retained);},
+        }
+        assert!(!captured.exists(),"a denied/retained/rejected receipt must not imply provider execution");
+        assert_eq!(fs::read(root.join("home/config.toml")).unwrap(),original_policy,"receipts never grant or change the recipient policy");
+        let(mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+        send(&mut socket,json!({"type":"call","id":1,"method":"get_state","params":{}}));let state=claude_receive_until(&mut reader,|row|row["id"]==1);assert_eq!(state["running"],false);assert_eq!(state["queued"],0);
+        send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));assert_eq!(claude_receive_until(&mut reader,|row|row["id"]==2)["ok"],true);wait_until(||process.exited());
     }
 }
 

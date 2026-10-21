@@ -19,6 +19,33 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_LEDGER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MAX_BODY_CHARS: usize = 8_000;
 const TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_RECEIPT_BYTES: usize = 1024;
+
+/// Recipient admission only: Started/Queued never assert provider completion.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all="snake_case")]
+pub enum WakeState { Started, Queued, Disabled, Retained, Rejected, Dropped }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all="snake_case")]
+pub enum WakeReason { Admitted, OwnerOptInRequired, QueueFull, InvalidProvenance, AdmissionUnavailable, AdmissionRejected, PendingFull }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WakeReceipt { pub state:WakeState, pub reason:WakeReason, pub retained:bool, pub message_id:Option<String> }
+#[derive(Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiptEnvelope { version:u8, request_id:String, receipt:WakeReceipt }
+#[derive(Deserialize)]
+struct ReceiptRequest { doxa_peer_receipt_id:Option<String> }
+pub struct ReceivedFrame { pub frame:PeerFrame, pub message_id:Option<String>, reply:Option<(UnixStream,String)> }
+impl ReceivedFrame {
+    pub fn acknowledge(self,receipt:WakeReceipt)->io::Result<()> {
+        let Some((mut stream,request_id))=self.reply else{return Ok(());};
+        if receipt.message_id.as_deref()!=Some(request_id.as_str()){return Err(invalid("peer admission receipt identity differs from message"));}
+        let mut raw=serde_json::to_vec(&ReceiptEnvelope{version:1,request_id,receipt}).map_err(io::Error::other)?;raw.push(b'\n');
+        if raw.len()>MAX_RECEIPT_BYTES{return Err(invalid("peer admission receipt too large"));}
+        stream.set_nonblocking(false)?;stream.set_write_timeout(Some(Duration::from_millis(250)))?;stream.write_all(&raw)
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PeerFrame {
@@ -119,6 +146,11 @@ impl Inbox {
     /// Poll one connection without blocking daemon shutdown. Partial frames
     /// are retained across polls; an empty discovery probe has no message.
     pub fn poll_receive(&self, scrubber: &impl Scrubber) -> io::Result<Option<PeerFrame>> {
+        self.poll_receive_with_receipt(scrubber).map(|received|received.map(|received|received.frame))
+    }
+    /// Optional receipt lives on this same authenticated socket. Legacy
+    /// senders/receivers continue to exchange their original one-line frame.
+    pub fn poll_receive_with_receipt(&self, scrubber: &impl Scrubber) -> io::Result<Option<ReceivedFrame>> {
         let mut pending = self.pending.lock().map_err(|_| io::Error::other("peer inbox lock poisoned"))?;
         if pending.is_none() {
             self.listener.set_nonblocking(true)?;
@@ -150,11 +182,15 @@ impl Inbox {
                 return Err(invalid("peer frame too large"));
             }
             if n == 0 || frame.bytes.contains(&b'\n') {
-                let bytes = std::mem::take(&mut frame.bytes);
-                let authenticated_pid = frame.pid;
-                *pending = None;
+                let received=pending.take().expect("complete pending frame");
+                let bytes=received.bytes;let authenticated_pid=received.pid;
                 return match parse_frame(&bytes) {
-                    Ok(mut frame) => { frame.authenticated_pid = authenticated_pid; Ok(Some(frame.scrub(scrubber))) },
+                    Ok(mut frame) => {
+                        let request:ReceiptRequest=serde_json::from_slice(&bytes).map_err(|_|invalid("invalid peer receipt request"))?;
+                        if request.doxa_peer_receipt_id.as_deref().is_some_and(|id|!valid_reply_reference(id)){return Err(invalid("invalid peer receipt identity"));}
+                        let message_id=request.doxa_peer_receipt_id;let reply=message_id.clone().map(|id|(received.stream,id));
+                        frame.authenticated_pid = authenticated_pid;Ok(Some(ReceivedFrame{frame:frame.scrub(scrubber),message_id,reply}))
+                    },
                     Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
                     Err(error) => Err(error),
                 };
@@ -250,11 +286,13 @@ pub(crate) fn probe_socket(path: &Path, roster_deadline: Instant) -> bool {
     connect_before(path, deadline).and_then(|stream| same_user(&stream)).is_ok()
 }
 
-pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
+fn transmit(path: &Path, frame: &PeerFrame, receipt_id:Option<&str>) -> io::Result<(UnixStream,Instant)> {
     let meta = fs::symlink_metadata(path)?;
     if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() }
         || meta.permissions().mode() & 0o077 != 0 { return Err(invalid("unsafe peer socket")); }
-    let mut bytes = serde_json::to_vec(frame).map_err(io::Error::other)?;
+    let mut value=serde_json::to_value(frame).map_err(io::Error::other)?;
+    if let Some(id)=receipt_id{value["doxa_peer_receipt_id"]=serde_json::json!(id);}
+    let mut bytes = serde_json::to_vec(&value).map_err(io::Error::other)?;
     bytes.push(b'\n');
     if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
     let deadline = Instant::now() + TIMEOUT;
@@ -275,6 +313,12 @@ pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
             Err(error) => return Err(io::Error::new(error.kind(), format!("peer write: {error}"))),
         }
     }
+    Ok((stream,deadline))
+}
+
+#[allow(unused_mut,unused_variables)]
+pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
+    let (mut stream,deadline)=transmit(path,frame,None)?;
     #[cfg(target_os = "macos")]
     {
         // LOCAL_PEERPID can become unavailable once the sender closes. Keep
@@ -301,6 +345,33 @@ pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A completed write with no valid bounded acknowledgement is unconfirmed,
+/// including legacy receivers, timeout and malformed replies. Never resend.
+pub fn send_with_receipt(path:&Path,frame:&PeerFrame)->io::Result<Option<WakeReceipt>> {
+    send_with_receipt_id(path,frame,&new_message_id())
+}
+fn send_with_receipt_id(path:&Path,frame:&PeerFrame,request_id:&str)->io::Result<Option<WakeReceipt>> {
+    if !valid_reply_reference(request_id){return Err(invalid("invalid outgoing peer receipt identity"));}
+    let (mut stream,deadline)=transmit(path,frame,Some(request_id))?;
+    let receipt=(||->io::Result<WakeReceipt>{
+        stream.shutdown(std::net::Shutdown::Write)?;
+        let mut bytes=Vec::new();
+        loop {
+            let remaining=deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero(){return Err(io::Error::new(io::ErrorKind::TimedOut,"peer admission receipt timed out"));}
+            stream.set_read_timeout(Some(remaining))?;let mut buf=[0u8;256];let n=stream.read(&mut buf)?;
+            if n==0{return Err(invalid("peer admission receipt unavailable"));}
+            bytes.extend_from_slice(&buf[..n]);if bytes.len()>MAX_RECEIPT_BYTES{return Err(invalid("peer admission receipt too large"));}
+            if bytes.contains(&b'\n'){break;}
+        }
+        if bytes.last()!=Some(&b'\n')||bytes[..bytes.len()-1].contains(&b'\n'){return Err(invalid("invalid peer admission receipt frame"));}
+        let reply:ReceiptEnvelope=serde_json::from_slice(&bytes).map_err(|_|invalid("invalid peer admission receipt"))?;
+        if reply.version!=1||reply.request_id!=request_id||reply.receipt.message_id.as_deref()!=Some(request_id){return Err(invalid("peer admission receipt binding mismatch"));}
+        Ok(reply.receipt)
+    })();
+    Ok(receipt.ok())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -448,7 +519,7 @@ impl RateLimiter {
     }
 }
 
-pub struct DeliveryResult { pub delivered: Vec<String>, pub failed: Vec<String>, pub message_id: Option<String>, pub record: Option<Message>, pub ledger_error: Option<String> }
+pub struct DeliveryResult { pub delivered: Vec<String>, pub failed: Vec<String>, pub message_id: Option<String>, pub record: Option<Message>, pub ledger_error: Option<String>, pub wake_receipts:std::collections::BTreeMap<String,Option<WakeReceipt>> }
 pub fn valid_reply_reference(id: &str) -> bool { Uuid::parse_str(id).is_ok() }
 pub fn new_message_id() -> String { Uuid::new_v4().simple().to_string() }
 pub fn valid_message_id(id: &str) -> bool {
@@ -463,9 +534,18 @@ pub fn deliver(registry: &Registry, sender: &PeerRecord, recipients: &[String], 
 /// Thread evidence is appended by the same charged delivery path, only after delivery.
 pub fn deliver_with_reply(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
     turn_id: Option<&str>, in_reply_to: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {
+    deliver_internal(registry,sender,recipients,body,kind,turn_id,in_reply_to,limiter,ledger,scrubber,false,None)
+}
+pub fn deliver_with_receipts(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
+    turn_id: Option<&str>, in_reply_to: Option<&str>, message_id:Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {
+    deliver_internal(registry,sender,recipients,body,kind,turn_id,in_reply_to,limiter,ledger,scrubber,true,message_id)
+}
+fn deliver_internal(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
+    turn_id: Option<&str>, in_reply_to: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber, receipts:bool, message_id:Option<&str>) -> io::Result<DeliveryResult> {
     if body.trim().is_empty() || body.chars().count() > MAX_BODY_CHARS { return Err(invalid("invalid peer body")); }
     if !matches!(kind, "direct" | "broadcast") { return Err(invalid("invalid peer kind")); }
     if in_reply_to.is_some_and(|id|Uuid::parse_str(id).is_err()) { return Err(invalid("invalid peer reply reference")); }
+    if message_id.is_some_and(|id|!valid_reply_reference(id)){return Err(invalid("invalid peer message identity"));}
     let peers = registry.scoped(sender.scope_key(), Some(&sender.session_id), scrubber, true)?;
     let mut targets = Vec::new();
     for id in recipients {
@@ -474,14 +554,18 @@ pub fn deliver_with_reply(registry: &Registry, sender: &PeerRecord, recipients: 
     }
     limiter.lock().map_err(|_| io::Error::other("peer rate limiter poisoned"))?
         .charge(turn_id, targets.len())?;
-    let message_id = new_message_id();
+    let message_id = message_id.map(str::to_owned).unwrap_or_else(new_message_id);
     let frame = PeerFrame { authenticated_pid: None, from_id: sender.session_id.clone(), from_title: sender.title.clone(), sent_at: now(), body: body.to_owned(),
         from_repo: Some(sender.scope_key().to_owned()), kind: (kind != "direct").then(|| kind.to_owned()) }.scrub(scrubber);
-    let mut result = DeliveryResult { delivered: Vec::new(), failed: Vec::new(), message_id: Some(message_id.clone()), record: None, ledger_error: None };
+    let mut result = DeliveryResult { delivered: Vec::new(), failed: Vec::new(), message_id: Some(message_id.clone()), record: None, ledger_error: None, wake_receipts:Default::default() };
     for peer in targets {
         let path = Path::new(&peer.socket_path);
-        if path.parent() == Some(registry.runtime()) && send(path, &frame).is_ok() { result.delivered.push(peer.session_id.clone()); }
-        else { result.failed.push(peer.session_id.clone()); }
+        let sent=if path.parent()!=Some(registry.runtime()){Err(invalid("peer socket outside runtime"))}
+            else if receipts{send_with_receipt_id(path,&frame,&message_id)}else{send(path,&frame).map(|_|None)};
+        match sent {
+            Ok(receipt)=>{result.delivered.push(peer.session_id.clone());if receipts{result.wake_receipts.insert(peer.session_id.clone(),receipt);}},
+            Err(_)=>result.failed.push(peer.session_id.clone()),
+        }
     }
     if result.delivered.is_empty() { return Err(io::Error::new(io::ErrorKind::NotConnected, "nothing was delivered")); }
     let message = Message { v: 1, id: message_id, ts: now(),

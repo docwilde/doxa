@@ -1,5 +1,6 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 mod actions;
+mod auth_visibility;
 mod attachments;
 mod bars;
 mod commands;
@@ -43,6 +44,7 @@ pub use terminal_loop::{
     run_remote_with_worker_channels,
 };
 pub(crate) use terminal_loop::run_remote_with_worker_channels_layout;
+pub(crate) use terminal_loop::run_with_worker_channels_identity_state;
 mod session_events;
 mod session_telemetry;
 mod glm_account;
@@ -1718,6 +1720,7 @@ pub struct App {
     engine_picker: bool,
     engine_selected: usize,
     new_session: Option<NewSession>,
+    host_auth: auth_visibility::Status,
     docker_setup: Option<docker_setup::Prerequisites>,
     docker_settings_open: bool,
     new_session_catalog_pending: Option<model_controls::CatalogJob>,
@@ -2035,6 +2038,7 @@ impl Default for App {
             engine_picker: false,
             engine_selected: 0,
             new_session: None,
+            host_auth: auth_visibility::Status::default(),
             docker_setup: None,
             docker_settings_open: false,
             new_session_catalog_pending: None,

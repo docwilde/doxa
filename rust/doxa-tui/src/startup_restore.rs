@@ -254,3 +254,20 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+mod closed_identity_tests {
+    use super::*;
+    #[test]
+    fn closed_live_identity_does_not_satisfy_open_startup_roster() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut store=UiStateStore::new(dir.path(),"/project","machine").unwrap();
+        let session=Session{id:"closed".into(),title:"closed".into(),socket:"/unused".into(),scope_key:"/project".into(),clients:Some(0),started_at:"2026".into()};
+        store.reopen_session(&session).unwrap();
+        store.update_tab_intent(&["closed".into()],&[]).unwrap();
+        assert!(!store.has_open_live_session(&[session]));
+        let mut app=crate::ui::App::default();store.restore(&mut app,&["closed".into()]);
+        app.apply_daemon_frame(&serde_json::json!({"type":"hello","session_id":"closed","engine":"codex"}));
+        assert!(app.groups.iter().all(|group|group.tabs.is_empty()));
+    }
+}

@@ -6,6 +6,7 @@ use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::os::unix::process::CommandExt;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -629,6 +630,13 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
         .mode(0o600)
         .open(&stderr_path)?;
     let reaper = daemon_reaper();
+    // Daemons outlive the terminal window. A separate session prevents the
+    // terminal's hangup/foreground process-group signals from cancelling work.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+        });
+    }
     let mut child = match command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -663,6 +671,15 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             // Child has no wait-on-drop behavior. Transfer exact ownership
             // before returning the read-only session identity to the TUI.
             let _ = reaper.send(child);
+            if fleet_runtime.is_none() {
+                let checkpoint = crate::operations::doxa_home().and_then(|home|
+                    crate::ui_state::UiStateStore::for_scope(&home, &session.scope_key)
+                        .and_then(|mut store| store.remember_session(&session)));
+                if checkpoint.is_err() {
+                    return Err(io::Error::other(format!(
+                        "Session {} is running but its recovery checkpoint could not be saved; attach to that ID before closing DOXA", session.id)));
+                }
+            }
             return Ok(session);
         }
         let status = match child.try_wait() {

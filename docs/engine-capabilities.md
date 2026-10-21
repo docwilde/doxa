@@ -41,6 +41,14 @@ its current turn. The saved setting is checked when the message arrives;
 an explicit process/fleet environment override takes precedence. Wake remains
 off by default. Every recipient retains its own permission and budget checks.
 
+Local DOXA peer sends report a bounded recipient admission receipt when supported:
+`started`, `queued`, `disabled`, `retained`, `rejected` or `dropped`. Started and
+queued confirm admission, not provider completion. A missing receipt is
+unconfirmed, including legacy or remote recipients; inspect the recipient before
+retrying an uncertain send. A disabled recipient needs its owner's setting change.
+Long generated titles are abbreviated only in display metadata; exact session
+identity and project authorization scope remain unchanged.
+
 Router Auto is a target-selection choice, separate from permission mode. It does
 not grant permissions. API workers keep their narrower tool surface; native
 Claude/Codex workers use existing protected command/file review controls. Each turn checks configured target

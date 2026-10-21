@@ -5,6 +5,23 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.66 — 2026-10-21
+
+**Session recovery**
+
+- Save new and explicitly attached session identities before the first response. Keep daemons alive after terminal hangup; restart reattaches pending work without replaying the prompt.
+- Lock **`UiStateStore`** mutations and merge recovery identities without replacing another window's layout, archived tabs or collections. Preserve explicit reattachment and stop intent.
+
+**Peer wake-up**
+
+- Fix **`PeerHost::peer_prompt`** silently rejecting long native session titles. Bound UTF-8 display labels while retaining exact message/session identity and authorization scope.
+- Add bounded local recipient admission receipts to peer sends. Distinguish started, queued, disabled and failed wake-up; missing receipts remain unconfirmed and never trigger automatic resend.
+
+**Login visibility**
+
+- Show local Claude/Codex credential warnings at startup and in New Session. Distinguish expired access, possible refresh and unknown validity without contacting providers or refreshing credentials.
+- Retain actual per-session authentication failures until a successful turn proves recovery. Fresh host credentials and reconnects cannot conceal a rejected private session login.
+
 ## 2.0.0-beta.65 — 2026-10-21
 
 **Fleet controls and accounting**

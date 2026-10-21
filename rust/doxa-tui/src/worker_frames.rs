@@ -14,6 +14,7 @@ pub enum WorkerFrame {
         session_id: String,
         markdown: String,
     },
+    NativeAuthHistory {session_id:String},
     RemoteSnapshot {
         session_id: String,
         incarnation: String,
@@ -209,6 +210,7 @@ impl WorkerFrame {
                 markdown,
             } => json!({"type":"event", "session_id":session_id,
                 "event":{"type":"text_delta", "data":{"text":markdown,"snapshot":true}}}),
+            Self::NativeAuthHistory{session_id}=>json!({"type":"native_auth_history","session_id":session_id}),
             Self::RemoteSnapshot { session_id, incarnation: _, markdown, pending_inputs, pending_inputs_complete,before,has_more } =>
                 json!({"type":"remote_snapshot","session_id":session_id,
                     "markdown":markdown,"pending_inputs":pending_inputs,

@@ -72,7 +72,7 @@ impl App {
                 } else {
                     let id = session.id.clone();
                     self.sessions.push(session);
-                    if self.groups[0].tabs.is_empty() {
+                    if self.groups[0].tabs.is_empty() && !self.detached_this_run.contains(&id) {
                         self.groups[0].tabs.push(id);
                     }
                 }
@@ -168,6 +168,7 @@ impl App {
         use crate::worker_frames::{CommandResult, WorkerFrame};
         let before = self.prompt_owner();
         let changed = match frame {
+            WorkerFrame::NativeAuthHistory{session_id}=>self.restore_session_auth_rejection(&session_id),
             WorkerFrame::AttachmentFailed{session_id,text,attachments,message,delivery}=>{
                 self.rejected_attachment_prompts.entry(session_id).or_default().push((text,attachments));
                 self.notice=format!("{} · {} · Alt+Up restores prompt and files",safe_label(&message),if delivery==crate::worker_frames::PromptDelivery::Uncertain{"delivery unconfirmed; inspect session before retrying"}else{"not submitted"});true
@@ -755,6 +756,17 @@ impl App {
                         self.transcript_evicted(&id, clipped);
                         true
                     }
+                    "peer_wake_error" => {
+                        let reason=match data["reason"].as_str(){
+                            Some("invalid_provenance")=>"the peer metadata could not form a valid turn origin",
+                            Some("queue_full")=>"the prompt queue is full",
+                            Some("admission_unavailable")=>"recipient prompt admission or scrubbing is unavailable",
+                            _=>return false,
+                        };
+                        let Some(session)=self.sessions.iter_mut().find(|session|session.id==id)else{return false;};
+                        let clipped=append_transcript(session,&format!("\n\n**Peer wake error:** A received message did not start or queue a turn because {reason}. Inspect retained peer data and recipient policy before retrying.\n"));
+                        self.transcript_evicted(&id,clipped);true
+                    }
                     "peer_sent" => {
                         let Some(message) = super::transcript_messages::Message::sent(data, &id, self.preferences.on("nerd_font")) else { return false; };
                         let Some(index) = self.peer_message_ids.get_mut(&id) else { return false; };
@@ -1024,6 +1036,7 @@ impl App {
                         true
                     }
                     "turn_done" => {
+                        self.observe_session_auth(&id,event_type,data);
                         self.streaming_text.remove(&id);
                         if data["is_error"] == true
                             && self.pending_effort_verifications.remove(&id).is_some()
@@ -1185,6 +1198,7 @@ impl App {
                         self.append_event(&id, event_type, data)
                     }
                     "turn_refused" => {
+                        self.observe_session_auth(&id,event_type,data);
                         self.apply_update(DaemonUpdate::Status {
                             id: id.clone(),
                             text: "Ready".into(),

@@ -385,9 +385,10 @@ impl App {
                 } else { lines.push(Line::from(format!(" Engine: {name}"))); }
             }
             if offset>2 {
-                let note=form.launch_error.as_deref().unwrap_or(&form.catalog_note);
+                let auth=self.host_auth.hint(super::engine_name(form.engine));
+                let note=form.launch_error.as_deref().or(auth.as_deref()).unwrap_or(&form.catalog_note);
                 lines.push(Line::styled(clipped_title(&format!(" {}",safe_label(note)),usize::from(area.width.saturating_sub(3))).0,
-                    Style::default().fg(if form.launch_error.is_some() {theme::ERROR} else {theme::MUTED})));
+                    Style::default().fg(if form.launch_error.is_some() || auth.is_some() {theme::ERROR} else {theme::MUTED})));
             }
             let mut field_lines=Vec::new();
             field_lines.push(Line::styled(
@@ -2800,14 +2801,18 @@ impl App {
             inner[4],
         );
         let status = session.map(|s| s.status.as_str()).unwrap_or("No session");
-        let status_line = if active && !self.notice.is_empty() {
+        let auth = if active { self.host_auth_hint(session.map(|session|session.id.as_str())) } else { None };
+        let status_line = if let Some(auth) = &auth {
+            if self.notice.is_empty() { format!(" {auth} · {status}") }
+            else { format!(" {auth} · {} · {status}",self.notice) }
+        } else if active && !self.notice.is_empty() {
             format!(" {} · {status}", self.notice)
         } else {
             format!(" {status}")
         };
         frame.render_widget(
             Paragraph::new(status_line)
-                .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
+                .style(Style::default().fg(if auth.is_some() {theme::ERROR} else {theme::SECONDARY}).bg(theme::RAISED)),
             Rect {
                 height: 1,
                 ..inner[5]
