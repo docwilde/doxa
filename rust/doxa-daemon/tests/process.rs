@@ -3790,9 +3790,9 @@ fn peer_receipts_distinguish_disabled_rejected_and_retained_without_provider_tur
         }
         assert!(!captured.exists(),"a denied/retained/rejected receipt must not imply provider execution");
         assert_eq!(fs::read(root.join("home/config.toml")).unwrap(),original_policy,"receipts never grant or change the recipient policy");
-        let(mut reader,mut socket)=process.connect();receive(&mut reader);
-        send(&mut socket,json!({"type":"call","id":1,"method":"get_state","params":{}}));let state=receive(&mut reader);assert_eq!(state["running"],false);assert_eq!(state["queued"],0);
-        send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());
+        let(mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+        send(&mut socket,json!({"type":"call","id":1,"method":"get_state","params":{}}));let state=claude_receive_until(&mut reader,|row|row["id"]==1);assert_eq!(state["running"],false);assert_eq!(state["queued"],0);
+        send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));assert_eq!(claude_receive_until(&mut reader,|row|row["id"]==2)["ok"],true);wait_until(||process.exited());
     }
 }
 
