@@ -553,7 +553,7 @@ impl CodexHost {
         let mut app = match active.take() { Some(app) => app, None => spawn(options.clone())? };
         let prepared = (|| {
             let recorded = self.rollout_path.lock().unwrap().clone().or_else(|| app.rollout_path().map(PathBuf::from));
-            let usage = recorded.as_deref().and_then(|path| codex_context::read_since(path, app.thread_id(), 0))
+            let usage = recorded.as_deref().and_then(|path| codex_context::latest(path, app.thread_id()))
                 .filter(|data| data["context_model"].as_str().is_none_or(|model|Some(model)==app.model()));
             let resumed_usage = app.continuation_usage();
             let (configured_window, compact_limit, post_percent) = app.continuation_limits();

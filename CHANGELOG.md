@@ -17,6 +17,10 @@ the stable 2.0 release has not been cut.
 - Stream host-owned histories up to **256 MiB**, with **8 MiB** JSONL records, matching canonical LORE review limits. Align ROOT snapshot bounds while retaining bounded frames and partial windows.
 - Keep prior incomplete turns read-only without replay. Tests exercise canonical review of long logs, attachment-sized records and source changes during review.
 
+**Resume context**
+
+- Fix **`codex_context`** Docker path resolution and Codex 0.163 token records. Read a verified bounded history tail for current occupancy, preserving the provider thread when its compacted context fits.
+
 ## 2.0.0-beta.67 — 2026-10-21
 
 **Codex continuation diagnostics**

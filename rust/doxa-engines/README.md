@@ -30,6 +30,8 @@ For isolated Codex, the trusted session manifest selects the private reviewer ro
 
 Complete histories support LORE's **256 MiB** source and **8 MiB** JSONL-record bounds. Ordinary host-owned histories stream with one bounded record in memory; ROOT snapshots retain their bounded authenticated transport. Oversized, incomplete, changed, linked or foreign-thread sources still block compaction. A prior unsettled turn stays read-only after an upgrade; the fix does not clear its guard or replay it.
 
+On resume, current occupancy comes from the owned thread's latest bounded token records, including Codex 0.163 `token_usage_record` entries. Lifetime and per-turn spend totals never stand in for current context size. Docker paths resolve within the selected private provider home; a compaction marker invalidates older occupancy until a new count appears. Missing allocation data remains unknown and uses the conservative recovery budget.
+
 DOXA disables Codex's internal multi-agent spawning and verifies that policy before starting a protected thread. Fleet/session creation and peer messages go through DOXA so visible identities, review and account limits remain authoritative. Existing injected peer tools remain available.
 
 The private provider makes the decision inside `run_pre_compact_hooks`, before compaction inference or history replacement. Exactly one required synchronous command must return explicit JSON approval. The provider identifies itself as `doxa_codex_rs/0.163.0` and does not impersonate stock Codex. [Earlier 0.156.1 authenticated default-window verification](../../docs/live-default-window-compaction-2026-09-30.md).
