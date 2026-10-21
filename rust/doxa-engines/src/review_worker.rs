@@ -61,7 +61,7 @@ fn review_at(executable: &Path, metadata: &Value, engine: &str, timeout: Duratio
     // user-wide Codex roots cannot redirect an isolated review to another session.
     if engine == "codex" {
         if let Some(scope) = doxa_isolation::active()? {
-            let home = scope.private_home.join("codex");
+            let home = doxa_isolation::codex_review_home(&scope);
             command.env("CODEX_HOME", &home).env("LORE_CODEX_SESSIONS_DIR", home.join("sessions"));
         }
     }

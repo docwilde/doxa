@@ -63,6 +63,22 @@ pub struct ProviderSnapshot {
 
 pub struct ProviderReviewFile { pub path: PathBuf, _directory: tempfile::TempDir }
 
+/// Host-only review copies must not enter the provider's session discovery root.
+pub fn codex_review_home(manifest: &Manifest) -> PathBuf { manifest.private_home.join("codex-review") }
+
+pub fn prepare_codex_review_home(manifest: &Manifest) -> io::Result<PathBuf> {
+    private_directory(&manifest.private_home, false)?;
+    let home = codex_review_home(manifest);
+    for path in [&home, &home.join("sessions"), &home.join("originals")] {
+        match fs::DirBuilder::new().mode(0o700).create(path) {
+            Ok(()) => {}, Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}, Err(e) => return Err(e),
+        }
+        // Check each parent before creating its descendants; never follow a link.
+        private_directory(path, false)?;
+    }
+    Ok(home)
+}
+
 /// Materialize bytes in the caller-owned review home. Its filesystem proof is
 /// separate from `snapshot.proof`, which continues to identify the original
 /// Engine-owned file and is revalidated over ROOT IPC after human review.
@@ -76,7 +92,7 @@ pub fn provider_review_file(snapshot: &ProviderSnapshot) -> io::Result<ProviderR
         || snapshot.proof["sha256"]!=format!("{:x}",Sha256::digest(&snapshot.bytes)) {
         return Err(error("review requires complete bytes matching the original ROOT source proof"));
     }
-    let parent=manifest.private_home.join("codex/sessions");private_directory(&parent,true)?;
+    let parent=prepare_codex_review_home(&manifest)?.join("originals");
     let directory=tempfile::Builder::new().permissions(fs::Permissions::from_mode(0o700)).prefix(".root-review-").tempdir_in(parent)?;
     let path=directory.path().join("rollout.jsonl");
     let mut file=OpenOptions::new().write(true).create_new(true).mode(0o600)

@@ -86,7 +86,7 @@ fn review_job_for_scope(manifest: &Value, event: &Value, isolation: Option<&doxa
     }
     let provider_file = provider.as_ref().map(doxa_isolation::provider_review_file).transpose()?;
     let original = provider_file.as_ref().map(|file|file.path.as_path()).unwrap_or(source);
-    if !original.starts_with(root.join("sessions")) && !original.starts_with(root.join("archived_sessions")) { return Ok(None); }
+    if provider_file.is_none() && !original.starts_with(root.join("sessions")) && !original.starts_with(root.join("archived_sessions")) { return Ok(None); }
     let mut review_directory = None;
     let mut original_proof = None;
     let review_source = if let Some(scope) = isolation {
@@ -95,7 +95,7 @@ fn review_job_for_scope(manifest: &Value, event: &Value, isolation: Option<&doxa
             return Err(io::Error::other("review scope differs from the trusted isolation manifest"));
         }
         use std::os::unix::fs::PermissionsExt;
-        let parent = root.join("sessions");
+        let parent = doxa_isolation::prepare_codex_review_home(scope)?.join("sessions");
         let meta = fs::symlink_metadata(&parent)?;
         if !meta.is_dir() || meta.file_type().is_symlink() || meta.uid() != unsafe {libc::geteuid()} || fs::canonicalize(&parent)? != parent {
             return Err(io::Error::other("unsafe isolated review directory"));
@@ -193,6 +193,8 @@ mod tests {
         let home = root.join("home");
         let sessions = home.join("codex/sessions");
         fs::create_dir_all(&sessions).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
         let source = sessions.join("thread.jsonl");
         let checkout = root.join("checkout");
         fs::create_dir(&checkout).unwrap();
@@ -215,6 +217,7 @@ mod tests {
         let job = review_job_for_scope(&manifest, &event, Some(&scope)).unwrap().unwrap();
         assert_eq!(fs::read(&source).unwrap(), raw);
         let review = fs::read(&job.source).unwrap();
+        assert!(!job.source.starts_with(scope.private_home.join("codex")), "review copy entered provider session discovery");
         assert_eq!(raw.splitn(2, |b| *b == b'\n').nth(1), review.splitn(2, |b| *b == b'\n').nth(1));
         let first: Value = serde_json::from_slice(review.split(|b| *b == b'\n').next().unwrap()).unwrap();
         assert_eq!(first["payload"]["cwd"], manifest["cwd"]);
