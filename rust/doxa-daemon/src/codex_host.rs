@@ -2,7 +2,7 @@ use doxa_engines::codex_driver::{CodexCliDriver, DriverError, DriverOptions};
 use doxa_engines::codex_appserver::{AppServerDriver, AppServerOptions, AppServerError, CodexPermission, LiveAutoRequest};
 use doxa_lore::{LoreClient, LoreError};
 use doxa_runtime::{Host, PeerTurnOrigin};
-use doxa_transcript::TranscriptStore;
+use doxa_transcript::{CodexContinuationFailure, TranscriptStore};
 use serde_json::Map;
 use serde_json::{json, Value};
 use std::cell::Cell;
@@ -56,6 +56,7 @@ pub struct CodexHost {
     agent_tools: Option<Arc<crate::agent_tools::AgentTools>>,
     scrub_failed: Arc<AtomicBool>,
     persistence_failed: AtomicBool,
+    continuation_failure: Mutex<Option<CodexContinuationFailure>>,
     lore: Arc<Mutex<LoreClient>>,
     index_tx: SyncSender<IndexCommand>,
     index_worker: Mutex<Option<thread::JoinHandle<()>>>,
@@ -104,6 +105,23 @@ fn resume_sandbox(record:&Value,configured:doxa_engines::codex_driver::SandboxMo
 }
 fn sandbox_name(sandbox:doxa_engines::codex_driver::SandboxMode)->&'static str{use doxa_engines::codex_driver::SandboxMode;match sandbox{SandboxMode::ReadOnly=>"read-only",SandboxMode::WorkspaceWrite=>"workspace-write",SandboxMode::DangerFullAccess=>"danger-full-access"}}
 impl CodexHost {
+    fn block_continuation(&self, kind: CodexContinuationFailure) {
+        // Preserve the earliest observed cause, including when cancellation or
+        // a later checkpoint write fails as a consequence of that first cause.
+        self.continuation_failure.lock().unwrap().get_or_insert(kind);
+        self.persistence_failed.store(true, Ordering::Release);
+    }
+
+    fn continuation_failure_kind(&self) -> CodexContinuationFailure {
+        self.continuation_failure.lock().unwrap().unwrap_or(CodexContinuationFailure::IncompleteTurn)
+    }
+
+    fn continuation_failure_event(&self) -> Value {
+        let kind = self.continuation_failure_kind();
+        json!({"type":"turn_done","data":{"is_error":true,"error":kind.message(),
+            "failure_category":kind.key(),"resume_blocked":true}})
+    }
+
     // Store only the display event, never the provider frame. try_append
     // scrubs every string again and refuses to write if LORE is unavailable.
     fn persist_tool_event(&self, kind: &str, data: &Value) -> io::Result<()> {
@@ -155,7 +173,10 @@ impl CodexHost {
                 return Err("Codex resume memory policy differs or is unknown; existing provider context cannot be erased".into());
             }
             if value.get("turn_incomplete") != Some(&Value::Bool(false)) {
-                return Err("Codex transcript is incomplete; refusing to resume the thread".to_owned());
+                return Err(match value["continuation_failure"].as_str().and_then(CodexContinuationFailure::from_key) {
+                    Some(kind) => format!("Codex transcript is incomplete; {}; refusing to resume the thread", kind.message()),
+                    None => "Codex transcript is incomplete; refusing to resume the thread".to_owned(),
+                });
             }
             if value["session_id"].as_str() != Some(session_id)
                 || value["cwd"].as_str() != Some(cwd.as_str())
@@ -324,6 +345,7 @@ impl CodexHost {
             session_tools: Mutex::new(None), peer_tools_allowed,
             scrub_failed,
             persistence_failed: AtomicBool::new(false),
+            continuation_failure: Mutex::new(None),
             lore, lore_enabled, agent_tools,
             index_tx,
             index_worker: Mutex::new(Some(index_worker)),
@@ -409,7 +431,7 @@ impl CodexHost {
         } else { self.store.try_append(record, "codex", &mut scrub) };
         if let Err(error) = &result {
             eprintln!("doxa-daemon: transcript append failed: {error}");
-            self.persistence_failed.store(true, Ordering::Release);
+            self.block_continuation(CodexContinuationFailure::TranscriptAppend);
         }
         result
     }
@@ -439,6 +461,12 @@ impl CodexHost {
         let mut fields = Map::new();
         fields.insert("thread_id".into(), json!(thread_id));
         fields.insert("turn_incomplete".into(), json!(turn_incomplete));
+        // Diagnostics never replace or clear the authoritative dirty guard.
+        if turn_incomplete {
+            if let Some(kind) = *self.continuation_failure.lock().unwrap() {
+                fields.insert("continuation_failure".into(), json!(kind.key()));
+            }
+        }
         fields.insert("session_id".into(), json!(self.session_id));
         if self.routed {fields.insert("router_worker".into(),json!(true));}
         let selection = self.selection.lock().unwrap();
@@ -467,7 +495,7 @@ impl CodexHost {
         });
         if let Err(error) = &result {
             eprintln!("doxa-daemon: Codex thread write failed: {error}");
-            self.persistence_failed.store(true, Ordering::Release);
+            self.block_continuation(CodexContinuationFailure::ThreadCheckpoint);
         }
         result
     }
@@ -671,7 +699,7 @@ impl CodexHost {
             emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Reviewed compaction requires an existing native Codex app-server thread"}})); return;
         }
         if self.persistence_failed.load(Ordering::Acquire) {
-            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex persistence failed; session cannot safely continue"}}));
+            emit(self.continuation_failure_event());
             return;
         }
         if self.closing.load(Ordering::Acquire) {
@@ -753,6 +781,7 @@ impl CodexHost {
         let compact_blocked = Cell::new(false);
         let compact_cancelled_before_submission = Cell::new(false);
         let terminal_observed = Cell::new(false);
+        let terminal_failure = Cell::new(None);
         let mut terminal_event = None;
         let mut handle_event = |event: doxa_engines::EngineEvent| {
             if self.scrub_failed.load(Ordering::Acquire)
@@ -764,7 +793,7 @@ impl CodexHost {
                 if event.kind == "text_delta" {
                     if let Some(text) = event.data["text"].as_str() {
                         if assistant_text.len().saturating_add(text.len()) > MAX_ASSISTANT_TURN_BYTES {
-                            self.persistence_failed.store(true, Ordering::Release);
+                            self.block_continuation(CodexContinuationFailure::AssistantLimit);
                             token.cancel();
                             return;
                         }
@@ -918,10 +947,14 @@ impl CodexHost {
                                     "Codex compaction cancelled before submission; existing context retained".to_owned()
                                 },
                                 AppServerError::CompactionBlocked => { compact_blocked.set(true); "LORE review blocked compaction; existing context retained".to_owned() },
+                                AppServerError::CompactionReviewFailed => { terminal_failure.set(Some(CodexContinuationFailure::CompactionReviewFailed)); CodexContinuationFailure::CompactionReviewFailed.message().into() },
+                                AppServerError::CompactionUnreviewed => { terminal_failure.set(Some(CodexContinuationFailure::CompactionUnreviewed)); CodexContinuationFailure::CompactionUnreviewed.message().into() },
+                                AppServerError::AutomaticCompactionBlocked => { terminal_failure.set(Some(CodexContinuationFailure::AutomaticCompactionBlocked)); CodexContinuationFailure::AutomaticCompactionBlocked.message().into() },
+                                AppServerError::AssistantOutputLimit => { terminal_failure.set(Some(CodexContinuationFailure::AssistantLimit)); CodexContinuationFailure::AssistantLimit.message().into() },
                                 AppServerError::Server(message) => message,
-                                AppServerError::Cancelled => "Codex turn cancelled".to_owned(),
-                                AppServerError::TimedOut => "Codex app-server turn timed out".to_owned(),
-                                _ => "Codex app-server protocol or process failed".to_owned(),
+                                AppServerError::Cancelled => { terminal_failure.set(Some(CodexContinuationFailure::TurnCancelled)); "Codex turn cancelled".to_owned() },
+                                AppServerError::TimedOut => { terminal_failure.set(Some(CodexContinuationFailure::TurnTimedOut)); "Codex app-server turn timed out".to_owned() },
+                                _ => { terminal_failure.set(Some(CodexContinuationFailure::ProviderProtocol)); "Codex app-server protocol or process failed".to_owned() },
                             });
                             if let Some(app) = active.as_ref() { self.remember_rollout(app); }
                             if outcome.is_err() && !terminal_observed.get()
@@ -978,6 +1011,10 @@ impl CodexHost {
                 .as_ref()
                 .and_then(|frame| frame["data"]["is_error"].as_bool())
                 == Some(false);
+        let had_thread = self.driver.lock().unwrap().thread_id().is_some();
+        if !turn_settled && had_thread && !thread_write_failed.get() {
+            self.block_continuation(terminal_failure.get().unwrap_or(CodexContinuationFailure::IncompleteTurn));
+        }
         if !self.scrub_failed.load(Ordering::Acquire) {
             if turn_settled
                 && !self.persistence_failed.load(Ordering::Acquire) && !assistant_text.is_empty() {
@@ -999,7 +1036,7 @@ impl CodexHost {
                 // A rejected startup has no provider thread to persist. Keep
                 // its specific compatibility/trust error for the user below.
                 eprintln!("doxa-daemon: Codex turn ended without a thread ID");
-                self.persistence_failed.store(true, Ordering::Release);
+                self.block_continuation(CodexContinuationFailure::MissingThread);
             }
         }
         if self.scrub_failed.load(Ordering::Acquire) {
@@ -1011,11 +1048,11 @@ impl CodexHost {
         }
         if self.persistence_failed.load(Ordering::Acquire) {
             *self.active.lock().unwrap() = None;
-            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex persistence failed; session cannot safely continue"}}));
+            emit(self.continuation_failure_event());
             return;
         }
         if !turn_settled {
-            self.persistence_failed.store(true, Ordering::Release);
+            self.block_continuation(terminal_failure.get().unwrap_or(CodexContinuationFailure::IncompleteTurn));
             *self.active.lock().unwrap() = None;
             let reason = if self.transport == "app-server" {
                 result.as_ref().err().cloned().unwrap_or_else(|| "Codex turn incomplete; session cannot safely continue".to_owned())
@@ -1199,7 +1236,7 @@ impl Host for CodexHost {
                 if self.closing.load(Ordering::Acquire) {
                     return Err("Codex permissions require an idle session; retry after the turn completes".into());
                 }
-                if self.persistence_failed.load(Ordering::Acquire) { return Err("Codex persistence failed".into()); }
+                if self.persistence_failed.load(Ordering::Acquire) { return Err(self.continuation_failure_kind().message().into()); }
                 let mode = params["mode"].as_str().and_then(CodexPermission::from_mode)
                     .ok_or("Unsupported Codex permission mode")?;
                 let active_token = self.active.lock().unwrap().clone();
@@ -1217,7 +1254,7 @@ impl Host for CodexHost {
                         Ok(Ok(thread)) => thread,
                         Ok(Err(reason)) => return Err(reason.into()),
                         Err(_) => {
-                            self.persistence_failed.store(true, Ordering::Release);
+                            self.block_continuation(CodexContinuationFailure::PermissionUnacknowledged);
                             token.cancel();
                             return Err("Codex live permission update was not acknowledged; session cannot safely continue".into());
                         }
@@ -1241,7 +1278,7 @@ impl Host for CodexHost {
                         Ok(())
                     })();
                     if let Err(reason) = saved {
-                        self.persistence_failed.store(true, Ordering::Release);
+                        self.block_continuation(CodexContinuationFailure::PermissionUnacknowledged);
                         token.cancel();
                         return Err(reason);
                     }
@@ -1276,7 +1313,7 @@ impl Host for CodexHost {
                 if self.active.lock().unwrap().is_some() || self.closing.load(Ordering::Acquire) {
                     return Err("Codex settings require an idle session; retry after the turn completes".into());
                 }
-                if self.persistence_failed.load(Ordering::Acquire) { return Err("Codex persistence failed".into()); }
+                if self.persistence_failed.load(Ordering::Acquire) { return Err(self.continuation_failure_kind().message().into()); }
                 let mut catalog = self.catalog.lock().unwrap();
                 if catalog.is_empty() || method == "list_models" {
                     *catalog = self.runtime.lock().unwrap().block_on(async { tokio::time::timeout(

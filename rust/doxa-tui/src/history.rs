@@ -492,8 +492,18 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
         }
         if state["session_id"].as_str() != Some(&entry.id)
             || state["cwd"].as_str() != cwd.to_str()
-            || state.get("turn_incomplete") != Some(&Value::Bool(false))
             || !state["thread_id"].as_str().is_some_and(valid_codex_thread_id) {
+            return Err("Codex thread record does not match this session");
+        }
+        if state.get("turn_incomplete") != Some(&Value::Bool(false)) {
+            // Only a known static category may explain an incomplete saved
+            // session. Stored provider prose cannot become an operator notice.
+            if engine == Engine::Codex {
+                if let Some(kind) = state["continuation_failure"].as_str()
+                    .and_then(doxa_transcript::CodexContinuationFailure::from_key) {
+                    return Err(kind.message());
+                }
+            }
             return Err("Codex thread record does not match this session");
         }
         let model = match state.get("model") {
@@ -1180,6 +1190,18 @@ for line in sys.stdin:
             fs::write(&record, bad.to_string()).unwrap();
             assert!(resume_fixture(&entry, &script, &root, &temp.path().join("cli-projects")).is_err());
         }
+        let mut blocked = state.clone();
+        blocked["turn_incomplete"] = serde_json::json!(true);
+        blocked["continuation_failure"] = serde_json::json!("compaction_review_failed");
+        fs::write(&record, blocked.to_string()).unwrap();
+        assert_eq!(resume_fixture(&entry, &script, &root, &temp.path().join("cli-projects")).unwrap_err(),
+            doxa_transcript::CodexContinuationFailure::CompactionReviewFailed.message());
+        // Unknown categories remain blocked and their arbitrary stored prose
+        // is never surfaced as a trusted diagnostic.
+        blocked["continuation_failure"] = serde_json::json!("untrusted stored failure prose");
+        fs::write(&record, blocked.to_string()).unwrap();
+        assert_eq!(resume_fixture(&entry, &script, &root, &temp.path().join("cli-projects")).unwrap_err(),
+            "Codex thread record does not match this session");
         fs::remove_file(&record).unwrap();
         symlink(temp.path().join("outside"), &record).unwrap();
         assert!(resume_fixture(&entry, &script, &root, &temp.path().join("cli-projects")).is_err());

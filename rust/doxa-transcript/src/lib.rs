@@ -7,6 +7,9 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
+mod codex_failure;
+pub use codex_failure::CodexContinuationFailure;
+
 pub const MAX_TRANSCRIPT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_TRANSCRIPT_LINES: usize = 20_000;
 pub const MAX_METADATA_BYTES: u64 = 64 * 1024;
