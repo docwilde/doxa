@@ -324,6 +324,7 @@ fn run_loop_with_remote(
         ..Default::default()
     };
     app.remote_mode = matches!(receiver, FrameSource::Remote(_));
+    app.poll_host_auth();
     let command_router=if matches!(receiver,FrameSource::Worker(_)) {
         prompt_sender.take().map(CommandRouter::start)
     }else{None};
@@ -646,6 +647,7 @@ fn run_loop_with_remote(
         }
         changed |= app.poll_vendor_catalog();
         changed |= app.poll_new_session_catalog();
+        changed |= app.poll_host_auth();
         changed |= app.poll_router_review();
         changed |= app.poll_mcp_probe();
         changed |= app.poll_mcp_config_view();

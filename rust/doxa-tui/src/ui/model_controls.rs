@@ -596,6 +596,7 @@ impl App {
     }
 
     pub(super) fn refresh_new_session_catalog(&mut self) {
+        self.invalidate_host_auth();
         let Some(engine) = self.new_session.as_ref().filter(|form| !form.catalog_pending).map(|form| form.engine) else { return; };
         self.cancel_new_session_catalog();
         let pending = if matches!(engine, launch::Engine::Codex | launch::Engine::Claude) {

@@ -56,3 +56,5 @@ pub mod installation;
 pub mod selection;
 pub mod clipboard;
 pub mod welcome;
+
+mod provider_auth;

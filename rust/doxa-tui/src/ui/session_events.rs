@@ -1024,6 +1024,7 @@ impl App {
                         true
                     }
                     "turn_done" => {
+                        self.observe_session_auth(&id,event_type,data);
                         self.streaming_text.remove(&id);
                         if data["is_error"] == true
                             && self.pending_effort_verifications.remove(&id).is_some()
@@ -1185,6 +1186,7 @@ impl App {
                         self.append_event(&id, event_type, data)
                     }
                     "turn_refused" => {
+                        self.observe_session_auth(&id,event_type,data);
                         self.apply_update(DaemonUpdate::Status {
                             id: id.clone(),
                             text: "Ready".into(),

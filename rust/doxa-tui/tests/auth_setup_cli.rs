@@ -67,7 +67,7 @@ fn explicit_provider_login_logout_uses_cli_authority_and_filters_private_output(
         let login=fixture.command(&["auth","login",provider]).output().unwrap();
         assert!(login.status.success(),"{}",String::from_utf8_lossy(&login.stderr));
         let output=String::from_utf8_lossy(&login.stdout);
-        assert!(output.contains("completed; authenticated"));assert!(output.contains("redirect_uri=http%3A%2F%2Flocalhost"));assert!(output.contains("ABCD-EFGH"));
+        assert!(output.contains("completed; login unknown"));assert!(output.contains("redirect_uri=http%3A%2F%2Flocalhost"));assert!(output.contains("ABCD-EFGH"));
         assert!(!output.contains("FIXTURE_PRIVATE_CREDENTIAL"));assert!(!String::from_utf8_lossy(&login.stderr).contains("FIXTURE_PRIVATE_CREDENTIAL"));
         let logout=fixture.command(&["auth","logout",provider]).output().unwrap();
         assert!(logout.status.success());assert!(String::from_utf8_lossy(&logout.stdout).contains("not authenticated"));
@@ -165,4 +165,44 @@ fn explicit_device_login_forwards_only_verified_codex_flag() {
         assert!(!fixture.command(&args).output().unwrap().status.success());
     }
     assert_eq!(fs::read_to_string(fixture.root.path().join("calls")).unwrap(),calls,"unsupported options must never invoke a provider CLI");
+}
+
+#[test]
+fn stored_expiry_overrides_successful_cli_status_without_refreshing_or_leaking_credentials() {
+    let fixture=Fixture::new();
+    for provider in ["claude","codex"] {
+        // macOS can prefer keychain over this fallback file. Local-only
+        // inspection deliberately cannot establish the active Claude store.
+        if provider=="claude" && cfg!(target_os="macos") {continue;}
+        fs::write(fixture.root.path().join(format!("{provider}-signed-in")),"fixture").unwrap();
+        let base=fixture.root.path().join(if provider=="claude"{"claude"}else{".codex"});
+        fs::create_dir_all(&base).unwrap();
+        if provider=="codex" {fs::write(base.join("config.toml"),"forced_login_method = 'chatgpt'\n").unwrap();}
+        let path=base.join(if provider=="claude"{".credentials.json"}else{"auth.json"});
+        let expired=if provider=="claude" {serde_json::json!({"claudeAiOauth":{
+            "accessToken":"PRIVATE_ACCESS","refreshToken":"PRIVATE_REFRESH","expiresAt":1000}})}
+            else {serde_json::json!({"auth_mode":"chatgpt","tokens":{
+                "access_token":"a.eyJleHAiOjEwMH0.c","refresh_token":"PRIVATE_REFRESH"}})};
+        fs::write(&path,serde_json::to_vec(&expired).unwrap()).unwrap();
+        let before=fs::read(&path).unwrap();
+        let result=fixture.command(&["auth","status",provider]).env("OPENAI_API_KEY","IGNORED_UNRELATED_FIXTURE_KEY").output().unwrap();
+        assert!(result.status.success());let report=String::from_utf8_lossy(&result.stdout);
+        assert!(report.contains("access token expired")&&report.contains("recovery unverified"),"{report}");
+        assert!(!report.contains("PRIVATE_"));assert_eq!(fs::read(&path).unwrap(),before);
+        // Simulate credentials replaced by an explicit provider reauthentication.
+        let renewed=if provider=="claude" {serde_json::json!({"claudeAiOauth":{
+            "accessToken":"RENEWED_ACCESS","refreshToken":"RENEWED_REFRESH","expiresAt":4102444800000u64}})}
+            else {serde_json::json!({"auth_mode":"chatgpt","tokens":{
+                "access_token":"a.eyJleHAiOjQxMDI0NDQ4MDB9.c","refresh_token":"RENEWED_REFRESH"}})};
+        fs::write(&path,serde_json::to_vec(&renewed).unwrap()).unwrap();
+        let result=fixture.command(&["auth","status",provider]).output().unwrap();
+        let report=String::from_utf8_lossy(&result.stdout);
+        assert!(report.contains("credentials present; server validity unverified"),"{report}");
+        assert!(!report.contains("expired")&&!report.contains("RENEWED_"));
+    }
+    let calls=fs::read_to_string(fixture.root.path().join("calls")).unwrap();
+    for line in calls.lines() {
+        let value:serde_json::Value=serde_json::from_str(line).unwrap();
+        assert!(value[1]==serde_json::json!(["login","status"])||value[1]==serde_json::json!(["auth","status"]));
+    }
 }

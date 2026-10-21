@@ -1,5 +1,5 @@
 //! Native setup and provider authentication operations. Provider CLIs own their credentials; only probe
-//! exit status is observed, and their output is never captured or displayed.
+//! exit status and bounded local expiry hints are observed; CLI output is never displayed.
 
 use std::io;
 use std::sync::atomic::AtomicBool;
@@ -13,13 +13,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthState {
-    Missing,
-    Authenticated,
-    Unauthenticated,
-    TimedOut,
-}
+pub use crate::provider_auth::AuthState;
 
 struct Provider {
     name: &'static str,
@@ -71,17 +65,15 @@ fn locate(binary: &str) -> Option<PathBuf> {
 
 fn provider_state(provider: &Provider) -> AuthState {
     let Some(path) = locate(provider.binary) else { return AuthState::Missing };
-    probe(&path, provider.probe, Duration::from_secs(10))
-}
-
-fn state_text(state: AuthState) -> &'static str {
-    match state {
-        AuthState::Missing => "CLI not installed",
-        AuthState::Authenticated => "authenticated",
-        AuthState::Unauthenticated => "not authenticated",
-        AuthState::TimedOut => "auth status timed out",
+    let local = crate::provider_auth::local(provider.name);
+    if matches!(local, AuthState::Expired | AuthState::RefreshRequired | AuthState::ApiKey) { return local; }
+    match probe(&path, provider.probe, Duration::from_secs(10)) {
+        AuthState::Authenticated => if local == AuthState::Present { local } else { AuthState::Unknown },
+        other => other,
     }
 }
+
+fn state_text(state: AuthState) -> &'static str { state.text() }
 
 pub fn auth_status(name: Option<&str>) -> io::Result<String> {
     let selected: Vec<&Provider> = if let Some(name) = name {
