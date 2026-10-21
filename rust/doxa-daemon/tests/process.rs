@@ -3781,7 +3781,7 @@ fn peer_receipts_distinguish_disabled_rejected_and_retained_without_provider_tur
         let (_sender,_)=registry_peer(root,"sender",root.to_str().unwrap(),"Claude teammate");
         let mut process=Process::start_codex_with_wake_override(root,&codex,(scenario=="explicit_off").then_some("off"));
         let path=PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
-        let frame=doxa_peers::delivery::PeerFrame{authenticated_pid:None,from_id:if scenario=="rejected_sender"{"unknown"}else{"sender"}.into(),from_title:"Claude teammate".into(),sent_at:if scenario=="invalid_provenance"{"x".repeat(65)}else{peer_now()},body:"Public peer data".into(),from_repo:Some(root.display().to_string()),kind:None};
+        let frame=doxa_peers::delivery::PeerFrame{authenticated_pid:None,from_id:if scenario=="rejected_sender"{"unknown"}else{"sender"}.into(),from_title:"Claude teammate".into(),sent_at:if scenario=="invalid_provenance"{"now\nforged timestamp".into()}else{peer_now()},body:"Public peer data".into(),from_repo:Some(root.display().to_string()),kind:None};
         let receipt=send_with_receipt(&path,&frame).unwrap().expect("a new native recipient reports its own actual admission");
         match scenario {
             "invalid_provenance"=>{assert_eq!(receipt.state,WakeState::Retained);assert_eq!(receipt.reason,WakeReason::InvalidProvenance);assert!(receipt.retained);},
