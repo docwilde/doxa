@@ -5,6 +5,8 @@
 //! geometry is readable as flat tabs but deliberately not rewritten.
 use std::collections::HashSet;
 use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -124,12 +126,13 @@ impl UiStateStore {
             .filter(|id|valid_session_id(id)&&record.tabs.iter().any(|tab|tab.session_id==*id)).map(str::to_owned));
         let writable_layout = record.as_ref().is_none_or(|r| supported_layout(&r.raw)
             && (r.tabs.len()<=MAX_TABS || (r.tabs.len()==crate::startup_restore::MAX_STARTUP_TABS && startup_overflow_id.is_some())));
+        let startup_extra_ids = recovery_tabs(record.as_ref());
         Ok(Self {
             path,
             scope_key: scope_key.into(),
             record,
             writable_layout,
-            startup_archives: Vec::new(), startup_extra_ids: Vec::new(), startup_notice: String::new(), startup_failed:false,startup_error:None, startup_overflow_id,
+            startup_archives: Vec::new(), startup_extra_ids, startup_notice: String::new(), startup_failed:false,startup_error:None, startup_overflow_id,
         })
     }
 
@@ -149,13 +152,78 @@ impl UiStateStore {
             .filter(|id|valid_session_id(id)&&record.tabs.iter().any(|tab|tab.session_id==*id)).map(str::to_owned));
         let writable_layout = record.as_ref().is_none_or(|r| supported_layout(&r.raw)
             && (r.tabs.len()<=MAX_TABS || (r.tabs.len()==crate::startup_restore::MAX_STARTUP_TABS && startup_overflow_id.is_some())));
+        let startup_extra_ids = recovery_tabs(record.as_ref());
         Ok(Self {
             path,
             scope_key: scope_key.into(),
             record,
             writable_layout,
-            startup_archives: Vec::new(), startup_extra_ids: Vec::new(), startup_notice: String::new(), startup_failed:false,startup_error:None, startup_overflow_id,
+            startup_archives: Vec::new(), startup_extra_ids, startup_notice: String::new(), startup_failed:false,startup_error:None, startup_overflow_id,
         })
+    }
+
+    /// Add only an admitted daemon identity. A partial UI view never supplies
+    /// replacement geometry or removes prior tabs, collections or future fields.
+    pub fn remember_session(&mut self, session: &crate::discovery::Session) -> io::Result<()> {
+        if !valid_session_id(&session.id) || session.scope_key != self.scope_key {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "session recovery identity mismatch"));
+        }
+        let _lock = self.mutation_lock()?;
+        let mut record = self.latest_record()?.unwrap_or_else(|| TabSet {
+            scope_key: self.scope_key.clone(), active_session_id: Some(session.id.clone()),
+            tabs: Vec::new(), raw: Default::default(),
+        });
+        if record.tabs.iter().any(|tab| tab.session_id == session.id) {
+            self.startup_extra_ids = recovery_tabs(Some(&record));
+            self.record = Some(record);
+            return Ok(());
+        }
+        if record.tabs.len() >= MAX_TABS {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "session recovery tab bound exceeded"));
+        }
+        let mut pending = recovery_tabs(Some(&record));
+        pending.push(session.id.clone());
+        record.tabs.push(Tab { session_id: session.id.clone(), pinned_name: None, cwd: Some(session.scope_key.clone()) });
+        let native = record.raw.entry("rust_ui").or_insert_with(|| json!({})).as_object_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "unknown native UI metadata"))?;
+        native.insert("recovery_open_tabs".into(), json!(pending));
+        record.raw.insert("tabs".into(), tab_rows(&record.tabs));
+        save_tabset(&self.path, &record)?;
+        self.startup_extra_ids = pending;
+        self.record = self.latest_record()?;
+        Ok(())
+    }
+
+    fn latest_record(&self) -> io::Result<Option<TabSet>> {
+        match fs::symlink_metadata(&self.path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+            Ok(_) => load_tabset(&self.path, &self.scope_key)
+                .filter(|record| record.scope_key == self.scope_key)
+                .map(Some).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "saved tabset is unavailable; original retained")),
+        }
+    }
+
+    fn mutation_lock(&self) -> io::Result<File> {
+        if self.path.as_os_str().is_empty() {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "persistent tabset unavailable"));
+        }
+        let parent = self.path.parent().ok_or_else(|| io::Error::other("tabset directory unavailable"))?;
+        if !parent.exists() { fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?; }
+        let directory = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(parent)?;
+        let meta = directory.metadata()?;
+        if meta.uid() != unsafe { libc::geteuid() } || meta.permissions().mode() & 0o022 != 0 {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsafe tabset directory"));
+        }
+        let name = self.path.file_name().ok_or_else(|| io::Error::other("tabset filename unavailable"))?.to_string_lossy();
+        let lock = OpenOptions::new().read(true).write(true).create(true).mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(parent.join(format!(".{name}.lock")))?;
+        let meta = lock.metadata()?;
+        if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1 || meta.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsafe tabset lock"));
+        }
+        doxa_state::lock_exclusive_bounded(&lock)?;
+        Ok(lock)
     }
 
     pub fn saved_tabs(&self) -> Option<&[Tab]> { self.record.as_ref().map(|record| record.tabs.as_slice()) }
@@ -164,7 +232,7 @@ impl UiStateStore {
             .and_then(|layout|layout.get("groups")) else { return !sessions.is_empty(); };
         if !supported_group_tree(groups) { return !sessions.is_empty(); }
         let open = tree_ids(groups);
-        sessions.iter().any(|session|open.contains(session.id.as_str()))
+        sessions.iter().any(|session|open.contains(session.id.as_str()) || self.startup_extra_ids.contains(&session.id))
     }
     pub fn discard_loaded_layout(&mut self) { self.record = None; self.writable_layout = true; self.startup_overflow_id=None; }
 
@@ -272,6 +340,9 @@ impl UiStateStore {
             group.tabs.retain(|id| seen.insert(id.clone()));
             group.active = group.active.min(group.tabs.len().saturating_sub(1));
         }
+        for id in &self.startup_extra_ids {
+            if live.contains(id.as_str()) && seen.insert(id.clone()) { groups[0].tabs.push(id.clone()); }
+        }
         let mut detached = Vec::new();
         for id in ids {
             if seen.insert(id.clone()) {
@@ -289,10 +360,6 @@ impl UiStateStore {
                     app.active_group = index;
                 }
             }
-        }
-        // Fresh usable tab beside an all-readonly restore; saved focus stays put.
-        for id in &self.startup_extra_ids {
-            if live.contains(id.as_str()) && seen.insert(id.clone()) { groups[0].tabs.push(id.clone()); }
         }
         app.groups = groups;
         app.pane_tree = pane_tree;
@@ -330,9 +397,10 @@ impl UiStateStore {
     /// A successful explicit kill vetoes restore without pruning unrelated
     /// offline tabs or changing this window's active prompt/layout.
     pub fn forget_sessions(&mut self, killed: &HashSet<String>) -> io::Result<()> {
-        let Some(old) = self.record.as_ref() else { return Ok(()); };
-        if !old.tabs.iter().any(|tab| killed.contains(&tab.session_id)) { return Ok(()); }
-        let mut record = old.clone();
+        if killed.is_empty() { return Ok(()); }
+        let _lock = self.mutation_lock()?;
+        let Some(mut record) = self.latest_record()? else { return Ok(()); };
+        if !record.tabs.iter().any(|tab| killed.contains(&tab.session_id)) { return Ok(()); }
         record.tabs.retain(|tab| !killed.contains(&tab.session_id));
         if record.active_session_id.as_ref().is_some_and(|id| killed.contains(id)) {
             record.active_session_id = record.tabs.first().map(|tab| tab.session_id.clone());
@@ -360,9 +428,13 @@ impl UiStateStore {
         if let Some(collections) = record.raw.get_mut("collections") { prune(collections, killed); }
         if let Some(titles) = record.raw.get_mut("rust_ui").and_then(|ui|ui.get_mut("default_titles"))
             .and_then(Value::as_object_mut) { titles.retain(|id,_|!killed.contains(id)); }
-        record.raw.insert("tabs".into(), json!(record.tabs.iter().map(|tab| json!({"session_id":tab.session_id,"pinned_name":tab.pinned_name,"cwd":tab.cwd})).collect::<Vec<_>>()));
+        let pending: Vec<_> = recovery_tabs(Some(&record)).into_iter().filter(|id| !killed.contains(id)).collect();
+        if let Some(native) = record.raw.get_mut("rust_ui").and_then(Value::as_object_mut) {
+            native.insert("recovery_open_tabs".into(), json!(pending));
+        }
+        record.raw.insert("tabs".into(), tab_rows(&record.tabs));
         save_tabset(&self.path, &record)?;
-        self.record = Some(record);
+        self.record = self.latest_record()?;
         Ok(())
     }
 
@@ -370,6 +442,14 @@ impl UiStateStore {
     /// for old DOXA readers, and the tree and legacy trees describe the same
     /// geometry. A record with more complex groups is never overwritten.
     pub fn save(&mut self, app: &App) -> io::Result<()> {
+        let _lock = self.mutation_lock()?;
+        let latest = self.latest_record()?;
+        if latest.as_ref().map(|record| &record.raw) != self.record.as_ref().map(|record| &record.raw) {
+            if !additive_recovery(self.record.as_ref(), latest.as_ref()) {
+                return Err(io::Error::new(io::ErrorKind::Unsupported, "saved window changed; reopen before replacing its layout"));
+            }
+            self.record = latest;
+        }
         if self.path.as_os_str().is_empty() {return Err(io::Error::new(io::ErrorKind::PermissionDenied,"persistent tabset unavailable"));}
         if app.has_unverified_archived_tabs() {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unverified archived tabs cannot be persisted"));
@@ -492,6 +572,7 @@ impl UiStateStore {
         object.insert("trees".into(), Value::Array(trees));
         let rust_ui=record.raw.entry("rust_ui").or_insert_with(||json!({})).as_object_mut()
             .ok_or_else(||io::Error::new(io::ErrorKind::Unsupported,"unknown native UI metadata"))?;
+        rust_ui.remove("recovery_open_tabs");
         if let Some(id)=self.startup_overflow_id.as_ref().filter(|id|record.tabs.iter().any(|tab|tab.session_id==**id)) {
             rust_ui.insert("startup_fresh_slot".into(),json!(id));
         }else{rust_ui.remove("startup_fresh_slot");}
@@ -547,9 +628,46 @@ impl UiStateStore {
         // structures above, so set its reference list to the new safe list.
         record.raw.insert("tabs".into(), Value::Array(record.tabs.iter().map(|t| json!({"session_id":t.session_id,"pinned_name":t.pinned_name,"cwd":t.cwd})).collect()));
         save_tabset(&self.path, &record)?;
-        self.record = Some(record);
+        self.record = self.latest_record()?;
         Ok(())
     }
+}
+
+fn additive_recovery(old: Option<&TabSet>, latest: Option<&TabSet>) -> bool {
+    let Some(latest) = latest else { return false; };
+    let pending = recovery_tabs(Some(latest));
+    let Some(old) = old else {
+        return !latest.tabs.is_empty() && latest.tabs.iter().all(|tab| pending.contains(&tab.session_id));
+    };
+    if latest.tabs.len() <= old.tabs.len()
+        || tab_rows(&latest.tabs[..old.tabs.len()]) != tab_rows(&old.tabs)
+        || latest.tabs[old.tabs.len()..].iter().any(|tab| !pending.contains(&tab.session_id)) {
+        return false;
+    }
+    fn baseline(record: &TabSet) -> serde_json::Map<String, Value> {
+        let mut raw = record.raw.clone();
+        raw.remove("tabs");
+        if let Some(layout) = raw.get_mut("layout").and_then(Value::as_object_mut) { layout.remove("tabs"); }
+        if let Some(native) = raw.get_mut("rust_ui").and_then(Value::as_object_mut) {
+            native.remove("recovery_open_tabs");
+            if native.is_empty() { raw.remove("rust_ui"); }
+        }
+        raw
+    }
+    baseline(old) == baseline(latest)
+}
+
+fn tab_rows(tabs: &[Tab]) -> Value {
+    json!(tabs.iter().map(|tab| json!({"session_id":tab.session_id,"pinned_name":tab.pinned_name,"cwd":tab.cwd})).collect::<Vec<_>>())
+}
+
+fn recovery_tabs(record: Option<&TabSet>) -> Vec<String> {
+    let Some(record) = record else { return Vec::new(); };
+    record.raw.get("rust_ui").and_then(|native| native.get("recovery_open_tabs"))
+        .and_then(Value::as_array).filter(|rows| rows.len() <= MAX_TABS)
+        .into_iter().flatten().filter_map(Value::as_str)
+        .filter(|id| valid_session_id(id) && record.tabs.iter().any(|tab| tab.session_id == *id))
+        .map(str::to_owned).collect()
 }
 
 fn empty_group() -> PaneGroup {

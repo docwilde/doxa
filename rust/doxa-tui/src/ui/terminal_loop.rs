@@ -383,6 +383,21 @@ fn run_loop_with_remote(
         }
     }
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
+    // Restoration is a projection, not evidence that this layout was saved.
+    // Checkpoint even an unchanged first frame before accepting terminal input.
+    if let Some((store, _, complete)) = &mut state {
+        match store.save_if_complete(&app, complete) {
+            Ok(true) => {}
+            result => {
+                saved_layout = crate::ui_state::LayoutSignature::capture(&App::default());
+                app.notice = match result {
+                    Ok(false) => "Layout save skipped · live roster incomplete".into(),
+                    Err(error) => format!("Layout save skipped · {}", safe_label(&error.to_string())),
+                    Ok(true) => unreachable!(),
+                };
+            }
+        }
+    }
     terminal.draw(|frame| app.draw(frame))?;
     app.configure_terminal_images(app.preferences.value("image_mode"));
     if let Some(note) = app.terminal_images_notice() {

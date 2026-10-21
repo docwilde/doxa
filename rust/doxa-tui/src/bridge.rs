@@ -378,6 +378,13 @@ pub fn run_socket_expected(path: impl AsRef<Path>, expected: Option<&str>) -> io
         },
         Err(error) => return Err(error),
     };
+    if !session.scope_key.is_empty() {
+        let home = crate::operations::doxa_home()?;
+        let mut store = crate::ui_state::UiStateStore::for_scope(&home, &session.scope_key)?;
+        store.remember_session(&session)?;
+    }
+    // This explicit window has only one verified attachment. Retain its
+    // identity, but do not authorize replacing a whole project's geometry.
     run_sessions(&[session], None)
 }
 
