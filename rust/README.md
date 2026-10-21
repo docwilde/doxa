@@ -36,7 +36,7 @@ cargo build --locked
 
 Claude needs a signed-in Claude Code CLI. Codex needs a signed-in CLI and the protected provider build. Add DeepSeek or z.ai keys with `/setup` or `DEEPSEEK_API_KEY` / `ZAI_API_KEY`. DOXA stores setup keys in an owner-only credentials file; they override inherited environment keys and are never copied from project `.env` files. [Engine capability matrix](../docs/engine-capabilities.md).
 
-Startup and New Session show local Claude/Codex login warnings before a prompt. An expired access token with a refresh credential is marked as needing recovery; its recovery is unverified. Credentials present on disk do not prove server validity. The background scan makes no provider requests or refresh attempts. A session's actual authentication rejection stays visible until that session completes a successful turn, even if the host login changes.
+Startup and New Session show local Claude/Codex login warnings before a prompt. An expired access token with a refresh credential is marked as needing recovery; its recovery is unverified. Credentials present on disk do not prove server validity. The background scan makes no provider requests or refresh attempts. A session's actual authentication rejection stays visible until that session completes a successful turn, even if the host login changes. On restart, retained Codex error records can show a previous authentication failure with recovery unverified; older Claude transcripts lack trusted terminal authentication metadata for that historical warning.
 
 ## Start and recover sessions
 
