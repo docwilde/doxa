@@ -298,6 +298,9 @@ impl Process {
         Self::start_codex_with_wake_override(runtime, codex, inbound.then_some("yes"))
     }
     fn start_codex_with_wake_override(runtime: &Path, codex: &Path, inbound: Option<&str>) -> Self {
+        Self::start_codex_at_checkout(runtime,codex,inbound,false)
+    }
+    fn start_codex_at_checkout(runtime:&Path,codex:&Path,inbound:Option<&str>,owned_checkout:bool)->Self {
         let codex = codex_appserver_fixture(codex);
         let mut command = daemon_command();
         command
@@ -320,6 +323,7 @@ impl Process {
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_CODEX_APPSERVER");
         command.env_remove("DOXA_PEER_INBOUND_TURNS");
+        if owned_checkout{command.env("DOXA_WORKTREE","0");}
         if let Some(inbound) = inbound { command.env("DOXA_PEER_INBOUND_TURNS", inbound); }
         let manifest_path = runtime.join("home/isolation/codex-session/manifest.json");
         match fs::symlink_metadata(&manifest_path) {
@@ -354,6 +358,9 @@ impl Process {
         Self::start_claude_with_budget(runtime, script, None)
     }
     fn start_claude_with_budget(runtime: &Path, script: &Path, budget: Option<&str>) -> Self {
+        Self::start_claude_at_checkout(runtime,script,budget,false)
+    }
+    fn start_claude_at_checkout(runtime:&Path,script:&Path,budget:Option<&str>,owned_checkout:bool)->Self {
         let mut command = daemon_command();
         command
             .args([
@@ -375,6 +382,7 @@ impl Process {
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_SESSION_BUDGET_USD");
         if let Some(budget) = budget { command.env("DOXA_SESSION_BUDGET_USD", budget); }
+        if owned_checkout{command.env("DOXA_WORKTREE","0");}
         let mut child = command.spawn().unwrap();
         let registry = runtime.join("registry").join(format!("{CLAUDE_SESSION}.json"));
         wait_for_registry(&mut child, &registry);
@@ -3710,7 +3718,7 @@ if [ "$text" = 'owner hold' ]; then
 fi
 echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
 "#,capture.display(),held.display(),release.display()));
-        let mut recipient=Process::start_codex(root,&codex,Path::new("python3"));
+        let mut recipient=Process::start_codex_at_checkout(root,&codex,None,true);
         let (mut reader,mut socket)=recipient.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
         if busy {
             send(&mut socket,json!({"type":"prompt","id":1,"text":"owner hold"}));
@@ -3726,7 +3734,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
   delivery=json.loads(value['content'][0]['text']);assert delivery['delivered_to']==['codex-session'] and not delivery['failed'],delivery
   root.joinpath('peer-delivery.json').write_text(json.dumps(delivery));result()
 "#);
-        let mut sender=Process::start_claude(root,&script);assert!(sender.entry()["title"].as_str().unwrap().len()>128,"fixture must generate a legitimate long native title");
+        let mut sender=Process::start_claude_at_checkout(root,&script,None,true);assert!(sender.entry()["title"].as_str().unwrap().len()>128,"fixture must generate a legitimate long native title");
         let (mut from_reader,mut from_socket)=sender.connect();from_reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
         receive(&mut from_reader);send(&mut from_socket,json!({"type":"attach","cursor":null}));
         send(&mut from_socket,json!({"type":"call","id":2,"method":"set_permission_mode","params":{"mode":"auto"}}));assert_eq!(claude_receive_until(&mut from_reader,|row|row["id"]==2)["ok"],true);

@@ -755,6 +755,17 @@ impl App {
                         self.transcript_evicted(&id, clipped);
                         true
                     }
+                    "peer_wake_error" => {
+                        let reason=match data["reason"].as_str(){
+                            Some("invalid_provenance")=>"the peer metadata could not form a valid turn origin",
+                            Some("queue_full")=>"the prompt queue is full",
+                            Some("admission_unavailable")=>"recipient prompt admission or scrubbing is unavailable",
+                            _=>return false,
+                        };
+                        let Some(session)=self.sessions.iter_mut().find(|session|session.id==id)else{return false;};
+                        let clipped=append_transcript(session,&format!("\n\n**Peer wake error:** A received message did not start or queue a turn because {reason}. Inspect retained peer data and recipient policy before retrying.\n"));
+                        self.transcript_evicted(&id,clipped);true
+                    }
                     "peer_sent" => {
                         let Some(message) = super::transcript_messages::Message::sent(data, &id, self.preferences.on("nerd_font")) else { return false; };
                         let Some(index) = self.peer_message_ids.get_mut(&id) else { return false; };

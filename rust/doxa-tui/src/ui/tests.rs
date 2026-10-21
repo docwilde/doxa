@@ -6900,6 +6900,18 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn peer_wake_admission_error_is_visible_without_accepting_provider_prose() {
+        let mut app=App::default();app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        let frame=|reason|json!({"type":"event","session_id":"s","event":{"type":"peer_wake_error","data":{"reason":reason,"message":"UNTRUSTED DIAGNOSTIC"}}});
+        assert!(app.apply_daemon_frame(&frame("admission_unavailable")));
+        assert!(app.sessions[0].transcript.contains("Peer wake error"));
+        assert!(app.sessions[0].transcript.contains("did not start or queue"));
+        assert!(!app.sessions[0].transcript.contains("UNTRUSTED DIAGNOSTIC"));
+        assert!(!app.apply_daemon_frame(&frame("provider guessed approval")));
+        assert!(!app.session_activity.get("s").is_some_and(|value|value.0));
+    }
+
+    #[test]
     fn peer_prompt_format_keeps_sender_stripe_and_robot_for_receipts_and_queued_turns() {
         use transcript_tools::FoldKey;
         for glyphs in [false, true] {

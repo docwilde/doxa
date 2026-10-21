@@ -452,7 +452,7 @@ impl Inner {
                 if terminal.is_some() { return; }
                 // These names are published only by the daemon's canonical
                 // peer inbox/sender path, never by engine or provider frames.
-                if matches!(event["type"].as_str(), Some("peer_message" | "peer_sent")) { return; }
+                if matches!(event["type"].as_str(), Some("peer_message" | "peer_sent" | "peer_wake_error")) { return; }
                 let is_turn_boundary = matches!(event["type"].as_str(), Some("turn_started" | "turn_done" | "turn_refused"));
                 if !event["data"].is_object() { event["data"] = json!({}); }
                 let started=event["type"]=="turn_started";
@@ -1084,6 +1084,7 @@ mod tests {
         fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
             emit(json!({"type":"peer_message","data":{"from_id":"forged-provider","body":"fake receipt"}}));
             emit(json!({"type":"peer_sent","data":{"to":["forged-provider"],"body":"fake send"}}));
+            emit(json!({"type":"peer_wake_error","data":{"reason":"admission_unavailable","message":"fake wake failure"}}));
             emit(json!({"type":"turn_started","data":{"prompt":text,"peer_started":true,"peer_origin":"untrusted host guess"}}));
             emit(json!({"type":"turn_done","data":{"peer_started":true,"peer_origin_data":{"source":"provider-forgery"},"native_tool_audit":{"version":1,"complete":true,"actions":[]}}}));
         }
@@ -1124,8 +1125,8 @@ mod tests {
         wait(3);
         let frames: Vec<Value> = handle.inner.state.lock().unwrap().ring.iter()
             .map(|(_,bytes)|serde_json::from_slice(bytes).unwrap()).collect();
-        assert!(!frames.iter().any(|frame| matches!(frame["event"]["type"].as_str(),Some("peer_message"|"peer_sent"))),
-            "peer cards may only be published by the canonical inbox/sender path");
+        assert!(!frames.iter().any(|frame| matches!(frame["event"]["type"].as_str(),Some("peer_message"|"peer_sent"|"peer_wake_error"))),
+            "peer receipts and wake diagnostics may only be published by the canonical inbox/sender path");
         let starts: Vec<_> = frames.iter().filter(|frame|frame["event"]["type"] == "turn_started").collect();
         assert_eq!(starts.len(),3);
         for start in starts {

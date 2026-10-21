@@ -69,6 +69,18 @@ fn malformed_unbound_or_oversized_receipts_remain_unconfirmed_without_retry()->i
 }
 
 #[test]
+fn missing_receipt_has_a_deadline_and_does_not_replay_a_completed_write()->io::Result<()> {
+    let temp=tempfile::tempdir()?;let path=temp.path().join("recipient.sock");let listener=UnixListener::bind(&path)?;fs::set_permissions(&path,fs::Permissions::from_mode(0o600))?;
+    let (release_tx,release_rx)=mpsc::channel();
+    let worker=thread::spawn(move||->io::Result<()>{
+        use std::io::BufRead;let(socket,_)=listener.accept()?;let mut reader=std::io::BufReader::new(socket);let mut request=String::new();reader.read_line(&mut request)?;
+        assert!(request.contains("Public fixture status"));release_rx.recv_timeout(Duration::from_secs(5)).unwrap();drop(reader);
+        listener.set_nonblocking(true)?;assert!(listener.accept().is_err(),"receipt timeout must not replay provider input");Ok(())
+    });
+    let began=Instant::now();assert_eq!(send_with_receipt(&path,&receipt_test_frame())?,None);assert!(began.elapsed()<Duration::from_secs(4));release_tx.send(()).unwrap();worker.join().unwrap()?;Ok(())
+}
+
+#[test]
 fn local_delivery_scrubs_receive_and_ledger_but_hashes_raw() -> io::Result<()> {
     let temp = tempfile::tempdir()?;
     let runtime = temp.path().join("runtime");
