@@ -46,21 +46,24 @@ fn isolated_canonical_review_accepts_long_source_and_rejects_foreign_cwd_before_
     let digest = format!("{:x}", Sha256::digest(fs::read(daemon).unwrap()));
     let event = json!({"hook_event_name":"PreCompact","trigger":"auto","session_id":"provider-thread","transcript_path":source});
     let carrier = std::env::var_os("DOXA_LORE_RS").unwrap_or_else(|| "lore-rs".into());
-    let run = || {
-        let mut child = Command::new(daemon).args(["__codex-precompact", hook_manifest.to_str().unwrap(), &digest])
+    let run = |native: bool| {
+        let mut command = Command::new(daemon);
+        command.args(["__codex-precompact", hook_manifest.to_str().unwrap(), &digest])
             .env_clear().env("HOME", &root).env("PATH", "/usr/bin:/bin").env("TMPDIR", &root)
-            .env("DOXA_HOME", root.join("doxa")).env("DOXA_ISOLATION_MANIFEST", &isolation)
+            .env("DOXA_HOME", root.join("doxa")).env("DOXA_SESSION_MANIFEST", &isolation)
             // Both inherited roots are deliberately wrong, as in a normal Docker host.
             .env("CODEX_HOME", root.join("owner-codex")).env("LORE_CODEX_SESSIONS_DIR", root.join("owner-codex/sessions"))
-            .env("DOXA_LORE_RS", &carrier).env("LORE_ROOT", root.join("lore")).env("LORE_PROJECTS_DIR", root.join("projects"))
+            .env("DOXA_LORE_RS", &carrier).env("LORE_ROOT", root.join(if native {"native-lore"} else {"lore"})).env("LORE_PROJECTS_DIR", root.join("projects"))
             .env("LORE_DISABLE_SYNC", "1").env("LORE_DISABLE_REVIEW", "0").env("LORE_CLAUDE_BIN", &backend).env("REVIEW_CAPTURE", &capture).env("RAW_REVIEW_SOURCE", &source)
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if !native { command.env("DOXA_ISOLATION_MANIFEST", &isolation); }
+        let mut child = command.spawn().unwrap();
         child.stdin.take().unwrap().write_all((event.to_string()+"\n").as_bytes()).unwrap();
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         serde_json::from_slice::<Value>(&output.stdout).unwrap()
     };
-    assert_eq!(run()["continue"], true);
+    assert_eq!(run(false)["continue"], true);
     let prompt = fs::read_to_string(&capture).unwrap(); assert!(prompt.contains("unresolved enemy occlusion"));
     assert_eq!(fs::read(&source).unwrap(), original);
     fs::remove_file(&capture).unwrap();
@@ -68,11 +71,25 @@ fn isolated_canonical_review_accepts_long_source_and_rejects_foreign_cwd_before_
     let mut file = fs::OpenOptions::new().write(true).open(&source).unwrap();
     let foreign = header.replace("/workspace", "/elsewhere"); assert_eq!(foreign.len(), header.len());
     file.write_all(foreign.as_bytes()).unwrap(); file.sync_all().unwrap();
-    assert_eq!(run()["continue"], false); assert!(!capture.exists());
+    assert_eq!(run(false)["continue"], false); assert!(!capture.exists());
     // A changed raw source during canonical review invalidates approval too.
     drop(file); fs::write(&source, &original).unwrap();
     fs::write(&backend, "#!/bin/sh\ncat > \"$REVIEW_CAPTURE\"\nprintf '%s\\n' '{}' >> \"$RAW_REVIEW_SOURCE\"\nprintf '%s' '{\"memory\":[],\"filemap\":[],\"skills\":[],\"skill_outcomes\":[],\"conclusions\":[]}'\n").unwrap();
-    assert_eq!(run()["continue"], false);
+    assert_eq!(run(false)["continue"], false);
     assert!(capture.exists(), "mutation fixture never reached the canonical reviewer backend");
     assert_eq!(fs::metadata(&source).unwrap().len(), original.len() as u64+3);
+    // Native-to-Docker and Docker-to-native imports retain their original header.
+    // A native imported session has no active Docker manifest at all.
+    let mut scope: Value = serde_json::from_slice(&fs::read(&isolation).unwrap()).unwrap();
+    scope["profile"] = json!("native"); scope["context_cwd"] = json!(checkout);
+    fs::write(&isolation,scope.to_string()).unwrap();
+    let mut header_native: Value = serde_json::from_str(header.trim()).unwrap();
+    header_native["payload"]["cwd"] = json!(checkout);
+    let mut imported = serde_json::to_vec(&header_native).unwrap();
+    imported.extend_from_slice(&original[header.len()-1..]);
+    fs::write(&source,&imported).unwrap(); fs::remove_file(&capture).unwrap();
+    fs::write(&backend,"#!/bin/sh\ncat > \"$REVIEW_CAPTURE\"\nprintf '%s' '{\"memory\":[],\"filemap\":[],\"skills\":[],\"skill_outcomes\":[],\"conclusions\":[]}'\n").unwrap();
+    assert_eq!(run(true)["continue"],true);
+    assert!(fs::read_to_string(&capture).unwrap().contains("unresolved enemy occlusion"));
+    assert_eq!(fs::read(&source).unwrap(),imported);
 }

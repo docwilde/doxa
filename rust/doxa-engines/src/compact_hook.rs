@@ -68,7 +68,7 @@ pub(crate) fn review_job_for_manifest(manifest: &Value, event: &Value) -> io::Re
         || !matches!(event["trigger"].as_str(),Some("auto" | "manual"))
         || manifest["provider_thread"].as_str().is_none_or(str::is_empty) || event["session_id"] != manifest["provider_thread"]
         || manifest["lore_enabled"] != true || crate::review_worker::review_disabled() { return Ok(None); }
-    let isolation = doxa_isolation::active()?;
+    let isolation = doxa_isolation::codex_review_scope()?;
     review_job_for_scope(manifest, event, isolation.as_ref())
 }
 
@@ -108,8 +108,9 @@ fn review_job_for_scope(manifest: &Value, event: &Value, isolation: Option<&doxa
     let mut review_directory = None;
     let mut original_proof = None;
     let mut projected_proof = None;
+    let mut source_cwd = None;
     let review_source = if let Some(scope) = isolation {
-        if !scope.profile.docker() || scope.session_id != session
+        if (!scope.profile.docker() && scope.context_cwd.is_none()) || scope.session_id != session
             || scope.context_cwd.as_deref().unwrap_or(&scope.checkout) != Path::new(cwd) || scope.private_home.join("codex") != root {
             return Err(io::Error::other("review scope differs from the trusted isolation manifest"));
         }
@@ -122,7 +123,15 @@ fn review_job_for_scope(manifest: &Value, event: &Value, isolation: Option<&doxa
         let directory = tempfile::Builder::new().permissions(fs::Permissions::from_mode(0o700)).prefix(".doxa-review-").tempdir_in(&parent)?;
         let path = directory.path().join("rollout.jsonl");
         let mut output = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&path)?;
-        let (_, proof, projected) = rollout::project(original, &mut output, thread, cwd)?;
+        // Migration preserves provider bytes, so a native-origin header can
+        // retain a host path. Only manifest-authorized labels become aliases;
+        // the provider can never select the review's destination project.
+        let mut origins = vec!["/workspace"];
+        if scope.context_cwd.is_some() {
+            origins.extend([Some(cwd),scope.checkout.to_str(),scope.source.to_str()].into_iter().flatten());
+        }
+        let (header, proof, projected) = rollout::project(original, &mut output, thread, cwd, &origins)?;
+        source_cwd = Some(header["payload"]["cwd"].clone());
         output.sync_all()?;
         let written = output.metadata()?;
         if written.len() != projected.size || written.nlink() != 1 {
@@ -143,7 +152,7 @@ fn review_job_for_scope(manifest: &Value, event: &Value, isolation: Option<&doxa
         "older":true,"expected_source":before.json()});
     if let Some(snapshot) = &provider { metadata["origin_source"] = snapshot.proof.clone(); }
     else if let Some((_, proof)) = &original_proof { metadata["origin_source"] = proof.json(); }
-    if original_proof.is_some() { metadata["source_workspace_mapping"] = json!({"provider_cwd":"/workspace","review_cwd":cwd}); }
+    if let Some(cwd_source) = source_cwd { metadata["source_workspace_mapping"] = json!({"provider_cwd":cwd_source,"review_cwd":cwd}); }
     Ok(Some(ReviewJob {source:review_source, proof:before, original:original_proof, provider,
         _provider_file:provider_file, _review_directory:review_directory, metadata}))
 }
@@ -281,12 +290,25 @@ mod tests {
     #[test]
     fn migrated_isolation_retains_its_host_authorized_logical_project() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut manifest, event, mut scope, _) = isolated_fixture(dir.path());
+        let (mut manifest, event, mut scope, source) = isolated_fixture(dir.path());
         let logical = dir.path().join("original-project"); fs::create_dir(&logical).unwrap();
         scope.context_cwd = Some(logical.clone()); manifest["cwd"] = json!(logical);
         let job = review_job_for_scope(&manifest, &event, Some(&scope)).unwrap().unwrap();
         assert_eq!(job.metadata["cwd"], json!(logical));
         assert!(job.unchanged().unwrap());
+        // A native-origin header survives import unchanged in either runtime.
+        let raw = fs::read(&source).unwrap();
+        let end = raw.iter().position(|b| *b == b'\n').unwrap();
+        let mut header: Value = serde_json::from_slice(&raw[..end]).unwrap();
+        header["payload"]["cwd"] = json!(logical);
+        let mut native = serde_json::to_vec(&header).unwrap(); native.extend_from_slice(&raw[end..]);
+        fs::write(&source,&native).unwrap();
+        for profile in [doxa_isolation::Profile::DockerOffline,doxa_isolation::Profile::Native] {
+            scope.profile = profile;
+            let imported = review_job_for_scope(&manifest,&event,Some(&scope)).unwrap().unwrap();
+            assert_eq!(imported.metadata["source_workspace_mapping"]["provider_cwd"],json!(logical));
+            assert!(imported.unchanged().unwrap());
+        }
         manifest["cwd"] = json!(scope.checkout);
         assert!(review_job_for_scope(&manifest, &event, Some(&scope)).is_err());
     }

@@ -14,8 +14,8 @@ pub(super) fn snapshot(path: &Path) -> io::Result<(Value, SourceProof)> {
     Ok((header, proof))
 }
 
-pub(super) fn project(path: &Path, output: &mut fs::File, thread: &str, cwd: &str) -> io::Result<(Value, SourceProof, ProjectionProof)> {
-    let (header, original, projected) = scan(path, Some((output, thread, cwd)))?;
+pub(super) fn project(path: &Path, output: &mut fs::File, thread: &str, cwd: &str, origins: &[&str]) -> io::Result<(Value, SourceProof, ProjectionProof)> {
+    let (header, original, projected) = scan(path, Some((output, thread, cwd, origins)))?;
     Ok((header, original, projected.ok_or_else(|| io::Error::other("missing projection proof"))?))
 }
 
@@ -26,7 +26,7 @@ fn projected_write(output: &mut fs::File, bytes: &[u8], hash: &mut Sha256, size:
     Ok(())
 }
 
-fn scan(path: &Path, mut projection: Option<(&mut fs::File, &str, &str)>) -> io::Result<(Value, SourceProof, Option<ProjectionProof>)> {
+fn scan(path: &Path, mut projection: Option<(&mut fs::File, &str, &str, &[&str])>) -> io::Result<(Value, SourceProof, Option<ProjectionProof>)> {
     if !path.is_absolute() || fs::canonicalize(path)? != path { return Err(io::Error::other("noncanonical review source")); }
     let file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let before = file.metadata()?;
@@ -53,8 +53,8 @@ fn scan(path: &Path, mut projection: Option<(&mut fs::File, &str, &str)>) -> io:
         hash.update(&line);
         if header.is_none() {
             let value: Value = serde_json::from_slice(&line)?;
-            if let Some((output, thread, cwd)) = projection.as_mut() {
-                if value["type"] != "session_meta" || value["payload"]["id"] != *thread || value["payload"]["cwd"] != "/workspace" {
+            if let Some((output, thread, cwd, origins)) = projection.as_mut() {
+                if value["type"] != "session_meta" || value["payload"]["id"] != *thread || value["payload"]["cwd"].as_str().is_none_or(|cwd| !origins.contains(&cwd)) {
                     return Err(io::Error::other("isolated review source thread or workspace differs"));
                 }
                 let mut mapped = value.clone();
@@ -63,7 +63,7 @@ fn scan(path: &Path, mut projection: Option<(&mut fs::File, &str, &str)>) -> io:
                 if line.ends_with(b"\n") { projected_write(output, b"\n", &mut projected_hash, &mut projected_size)?; }
             }
             header = Some(value);
-        } else if let Some((output, _, _)) = projection.as_mut() {
+        } else if let Some((output, _, _, _)) = projection.as_mut() {
             projected_write(output, &line, &mut projected_hash, &mut projected_size)?;
         }
     }
@@ -90,7 +90,7 @@ mod tests {
             json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"actual-message"}]}}));
         fs::write(&original,&raw).unwrap();
         let mut file = fs::File::create(&copy).unwrap();
-        let (_, original_proof, written) = project(&original,&mut file,"thread","/host/project").unwrap();
+        let (_, original_proof, written) = project(&original,&mut file,"thread","/host/project",&["/workspace"]).unwrap();
         file.sync_all().unwrap();
         assert_eq!(snapshot(&copy).unwrap().1.sha256,written.sha256);
         assert_eq!(fs::metadata(&copy).unwrap().len(),written.size);

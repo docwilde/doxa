@@ -64,6 +64,13 @@ pub struct ProviderSnapshot {
 pub struct ProviderReviewFile { pub path: PathBuf, _directory: tempfile::TempDir }
 
 /// Host-only review copies must not enter the provider's session discovery root.
+/// Imported native contexts keep a host-only session manifest even without an
+/// active Docker backend. Fresh ordinary native sessions retain their user root.
+pub fn codex_review_scope() -> io::Result<Option<Manifest>> {
+    if let Some(scope) = active()? { return Ok(Some(scope)); }
+    Ok(session_manifest()?.filter(|scope| scope.context_cwd.is_some()))
+}
+
 pub fn codex_review_home(manifest: &Manifest) -> PathBuf { manifest.private_home.with_file_name("codex-review") }
 
 pub fn prepare_codex_review_home(manifest: &Manifest) -> io::Result<PathBuf> {
