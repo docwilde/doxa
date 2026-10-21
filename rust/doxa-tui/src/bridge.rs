@@ -436,6 +436,8 @@ fn worker_loop(
         return;
     }
     if let Some(snapshot) = snapshot {
+        if crate::provider_auth::historical_rejection(&snapshot,client.hello["engine"].as_str().unwrap_or(""))
+            && frames.send(WorkerFrame::NativeAuthHistory{session_id:session_id.clone()}).is_err() {return;}
         let markdown = history::render(&snapshot);
         if !markdown.is_empty() && frames.send(WorkerFrame::SnapshotText { session_id: session_id.clone(), markdown }).is_err() {
             return;
@@ -855,6 +857,30 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn fresh_restore_reports_bound_historical_auth_failure_when_old_events_are_skipped(){
+        let dir=tempfile::tempdir().unwrap();let socket=dir.path().join("daemon.sock");
+        let transcript=dir.path().join("transcript.jsonl");
+        let bytes=serde_json::to_vec(&json!({"type":"doxa_provider_error","sessionId":"retained","data":{"is_error":true,"error":"Your access token has expired. PRIVATE_DIAGNOSTIC"}})).unwrap();
+        fs::write(&transcript,&bytes).unwrap();
+        let listener=UnixListener::bind(&socket).unwrap();
+        let server=thread::spawn(move||{
+            let(mut socket,_)=listener.accept().unwrap();socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            writeln!(socket,"{}",json!({"type":"hello","proto":1,"session_id":"retained","engine":"codex","cwd":"/private/fixture","next_seq":7,
+                "transcript_seq":7,"transcript_path":transcript,"transcript_bytes":bytes.len()})).unwrap();
+            let mut line=String::new();BufReader::new(socket).read_line(&mut line).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&line).unwrap(),json!({"type":"attach","cursor":7}));
+        });
+        let(client,snapshot)=DaemonClient::connect_for_restore(&socket).unwrap();
+        assert!(snapshot.is_some());
+        let(frames,commands,worker)=spawn_worker_with_snapshot(client,snapshot);
+        assert!(matches!(frames.recv_timeout(Duration::from_secs(2)).unwrap(),WorkerFrame::Daemon{frame,..} if frame["type"]=="hello"));
+        let notice=frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(&notice,WorkerFrame::NativeAuthHistory{session_id} if session_id=="retained"));
+        assert!(!format!("{notice:?}").contains("PRIVATE_DIAGNOSTIC"));
+        drop(commands);drop(frames);worker.join().unwrap();server.join().unwrap();
+    }
 
     #[test]
     fn glm_billing_bridge_polls_cache_and_only_explicit_refresh_requests_quota() {

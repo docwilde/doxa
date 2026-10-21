@@ -42,6 +42,55 @@ impl AuthState {
     }
 }
 
+// Native providers currently emit scrubbed terminal diagnostics rather than
+// a common typed auth code. Only recognized failures become static UI hints.
+pub(crate) fn rejected(error: &str) -> bool {
+    if error.len() > 16 * 1024 {
+        return false;
+    }
+    let error = error.to_ascii_lowercase();
+    ["authentication expired", "authentication failed", "authentication unavailable",
+        "failed to authenticate", "not authenticated", "not logged in", "invalid api key",
+        "invalid authentication", "authentication token is invalid", "401 unauthorized",
+        "access token has expired", "access token expired", "oauth session expired", "login expired",
+        "refresh token has expired", "refresh token was already used", "refresh token has already been used",
+        "refresh token was revoked", "access token could not be refreshed. please log out and sign in again",
+        "access token could not be refreshed because you have since logged out or signed in to another account"]
+        .iter().any(|reason|error.contains(reason))
+}
+
+/// Existing Codex history records prove a previous rejection, not that it is
+/// still current. Successful terminal events are not durably recorded there.
+/// Claude assistant prose has no retained auth-error type and is never used.
+pub(crate) fn historical_rejection(
+    snapshot: &crate::transport::TranscriptSnapshot,
+    provider: &str,
+) -> bool {
+    let Some(id) = snapshot
+        .session_id
+        .as_deref()
+        .filter(|id| doxa_transcript::valid_session_id(id))
+    else {
+        return false;
+    };
+    if provider != "codex" || snapshot.bytes.len() > 8 * 1024 * 1024 {
+        return false;
+    }
+    snapshot
+        .bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| line.len() <= 64 * 1024)
+        .any(|line| {
+            let Ok(row) = serde_json::from_slice::<Value>(line) else {
+                return false;
+            };
+            row["type"] == "doxa_provider_error"
+                && row["sessionId"].as_str() == Some(id)
+                && row["data"]["is_error"] == true
+                && row["data"]["error"].as_str().is_some_and(rejected)
+        })
+}
+
 fn owned(path: &Path) -> Option<Vec<u8>> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -332,6 +381,40 @@ pub fn snapshot() -> [(&'static str, AuthState); 2] {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn native_refresh_rejections_and_wrapped_claude_login_failures_are_recognized() {
+        for error in [
+            "Claude session unavailable: Claude authentication expired or was rejected. Open /setup and log in to Claude, or run `claude auth login`, then retry.",
+            "Claude provider error: Login expired · Please run /login",
+            "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.",
+            "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+            "Your refresh token has already been used to generate a new access token. Please try signing in again.",
+            "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+        ] {assert!(rejected(error),"{error}");}
+    }
+    #[test]
+    fn history_rejection_uses_only_bound_native_error_records_not_assistant_prose() {
+        let row = json!({"type":"doxa_provider_error","sessionId":"retained","data":{"is_error":true,"error":"Your access token has expired"}});
+        let snapshot = |row: &Value| crate::transport::TranscriptSnapshot {
+            session_id: Some("retained".into()),
+            bytes: serde_json::to_vec(row).unwrap(),
+            ..Default::default()
+        };
+        assert!(historical_rejection(&snapshot(&row), "codex"));
+        assert!(!historical_rejection(&snapshot(&row), "claude"));
+        let mut foreign = row.clone();
+        foreign["sessionId"] = json!("other");
+        assert!(!historical_rejection(&snapshot(&foreign), "codex"));
+        let mut archive = snapshot(&row);
+        archive.session_id = None;
+        assert!(!historical_rejection(&archive, "codex"));
+        let mut prose = row.clone();
+        prose["type"] = json!("assistant");
+        assert!(!historical_rejection(&snapshot(&prose), "codex"));
+        let mut unrelated = row;
+        unrelated["data"]["error"] = json!("Quota exhausted");
+        assert!(!historical_rejection(&snapshot(&unrelated), "codex"));
+    }
     #[test]
     fn expired_access_is_not_authenticated_even_with_cli_success_and_refresh_is_not_rejection() {
         let mut value = json!({"claudeAiOauth":{"accessToken":"PRIVATE","expiresAt":100000,"refreshToken":"RECOVERABLE"}});

@@ -2,7 +2,7 @@
 use super::App;
 use crate::provider_auth::{self, AuthState};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant},
 };
@@ -14,7 +14,12 @@ pub(super) struct Status {
     pending_started: Option<Instant>,
     checked: Option<Instant>,
     enabled: bool,
-    rejected_sessions: HashSet<String>,
+    rejected_sessions: HashMap<String, Rejection>,
+}
+#[derive(Clone, Copy)]
+enum Rejection {
+    Observed,
+    Historical,
 }
 impl Status {
     fn invalidate(&mut self) {
@@ -78,7 +83,7 @@ impl Status {
                         )
                     } else {
                         false
-                    }
+                    };
                 }
             }
         }
@@ -104,35 +109,6 @@ impl Status {
     }
 }
 
-// Existing native providers emit scrubbed terminal diagnostics, not a common
-// typed auth code. Match specific authentication failures only, and display
-// static text rather than copying any diagnostic into a login notice.
-fn rejected(error: &str) -> bool {
-    if error.len() > 16 * 1024 {
-        return false;
-    }
-    let error = error.to_ascii_lowercase();
-    [
-        "authentication expired",
-        "authentication failed",
-        "authentication unavailable",
-        "failed to authenticate",
-        "not authenticated",
-        "not logged in",
-        "invalid api key",
-        "invalid authentication",
-        "authentication token is invalid",
-        "401 unauthorized",
-        "access token has expired",
-        "access token expired",
-        "oauth session expired",
-        "refresh token has expired",
-        "refresh token was already used",
-    ]
-    .iter()
-    .any(|reason| error.contains(reason))
-}
-
 impl App {
     pub(super) fn poll_host_auth(&mut self) -> bool {
         if self.remote_mode {
@@ -142,6 +118,22 @@ impl App {
     }
     pub(super) fn invalidate_host_auth(&mut self) {
         self.host_auth.invalidate();
+    }
+    pub(super) fn restore_session_auth_rejection(&mut self, id: &str) -> bool {
+        if !self.sessions.iter().any(|session| session.id == id)
+            || self
+                .session_identity
+                .get(id)
+                .and_then(|identity| identity.0.as_deref())
+                != Some("codex")
+        {
+            return false;
+        }
+        self.host_auth
+            .rejected_sessions
+            .entry(id.to_owned())
+            .or_insert(Rejection::Historical);
+        true
     }
     pub(super) fn observe_session_auth(&mut self, id: &str, event: &str, data: &serde_json::Value) {
         if !self.sessions.iter().any(|session| session.id == id)
@@ -158,8 +150,10 @@ impl App {
             "turn_refused" => data["message"].as_str(),
             _ => None,
         };
-        if failure.is_some_and(rejected) {
-            self.host_auth.rejected_sessions.insert(id.to_owned());
+        if failure.is_some_and(provider_auth::rejected) {
+            self.host_auth
+                .rejected_sessions
+                .insert(id.to_owned(), Rejection::Observed);
         } else if event == "turn_done" && data["is_error"] == false && data["operation"].is_null() {
             // Admission, reconnect and a fresh global credential file are not
             // proof that this daemon's private credential snapshot recovered.
@@ -179,8 +173,11 @@ impl App {
                 .hint(super::ENGINE_CHOICES[self.engine_selected]);
         }
         if let Some(id) = session {
-            if self.host_auth.rejected_sessions.contains(id) {
-                return Some("Session login expired or rejected · /setup; retry/reconnect to verify recovery".into());
+            if let Some(rejection) = self.host_auth.rejected_sessions.get(id) {
+                return Some(match rejection {
+                    Rejection::Observed=>"Session login expired or rejected · /setup; retry/reconnect to verify recovery",
+                    Rejection::Historical=>"Previous session authentication failure · recovery unverified; /setup, then retry",
+                }.into());
             }
             return self
                 .session_identity
@@ -334,7 +331,33 @@ mod tests {
             "access denied for file",
             "Codex protected contract unavailable",
         ] {
-            assert!(!rejected(error), "{error}");
+            assert!(!provider_auth::rejected(error), "{error}");
         }
+    }
+    #[test]
+    fn fresh_ui_restores_previous_native_auth_failure_without_claiming_current_expiry() {
+        let mut app = App::default();
+        app.apply_daemon_frame(
+            &serde_json::json!({"type":"hello","session_id":"retained","engine":"codex"}),
+        );
+        app.host_auth.apply(
+            [
+                ("claude", AuthState::Present),
+                ("codex", AuthState::Present),
+            ],
+            Instant::now(),
+        );
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::NativeAuthHistory {
+            session_id: "retained".into(),
+        });
+        let hint = app.host_auth_hint(Some("retained")).unwrap();
+        assert!(
+            hint.contains("Previous session authentication failure")
+                && hint.contains("recovery unverified")
+        );
+        assert!(!hint.contains("login expired"));
+        app.apply_daemon_frame(&serde_json::json!({"type":"event","session_id":"retained","event":{"type":"turn_done","data":{"is_error":false}}}));
+        assert!(app.host_auth_hint(Some("retained")).is_none());
+        assert_eq!(app.sessions.len(), 1);
     }
 }
