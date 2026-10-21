@@ -429,3 +429,22 @@ fn explicit_stop_merges_sibling_identity_without_authorizing_stale_geometry() {
     assert!(stale.save(&old).is_err());
     assert_eq!(fs::read(stale.path()).unwrap(), good);
 }
+
+#[test]
+fn recovery_retains_the_established_reserved_startup_slot_and_refuses_a_second_overflow() {
+    let tabs: Vec<_> = (0..256).map(|index| json!({"session_id":format!("saved-{index}")})).collect();
+    let (dir, mut full) = seeded(json!({"tabs":tabs}));
+    full.remember_session(&recovery_session("reserved-fresh")).unwrap();
+    let good = fs::read(full.path()).unwrap();
+    let value: Value = serde_json::from_slice(&good).unwrap();
+    assert_eq!(value["tabs"].as_array().unwrap().len(), 257);
+    assert_eq!(value["rust_ui"]["startup_fresh_slot"], "reserved-fresh");
+    assert!(full.remember_session(&recovery_session("second-overflow")).is_err());
+    assert_eq!(fs::read(full.path()).unwrap(), good);
+    let restored = UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+    let mut app = App::default();
+    let mut ids: Vec<String> = (0..256).map(|index|format!("saved-{index}")).collect();
+    ids.push("reserved-fresh".into());
+    assert!(restored.restore(&mut app, &ids));
+    assert!(app.groups.iter().any(|group|group.tabs.iter().any(|id|id == "reserved-fresh")));
+}

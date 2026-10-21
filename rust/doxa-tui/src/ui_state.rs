@@ -193,15 +193,19 @@ impl UiStateStore {
             return Ok(());
         }
         if !existing {
-            if record.tabs.len() >= MAX_TABS {
+            if record.tabs.len() >= crate::startup_restore::MAX_STARTUP_TABS {
                 return Err(io::Error::new(io::ErrorKind::Unsupported, "session recovery tab bound exceeded"));
             }
+            if record.tabs.len() == MAX_TABS { self.startup_overflow_id = Some(session.id.clone()); }
             record.tabs.push(Tab { session_id: session.id.clone(), pinned_name: None, cwd: Some(session.scope_key.clone()) });
         }
         pending.push(session.id.clone());
         let native = record.raw.entry("rust_ui").or_insert_with(|| json!({})).as_object_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "unknown native UI metadata"))?;
         native.insert("recovery_open_tabs".into(), json!(pending));
+        if let Some(id) = &self.startup_overflow_id {
+            native.insert("startup_fresh_slot".into(), json!(id));
+        }
         record.raw.insert("tabs".into(), tab_rows(&record.tabs));
         save_tabset(&self.path, &record)?;
         self.startup_extra_ids = pending;
@@ -670,12 +674,19 @@ fn additive_recovery(old: Option<&TabSet>, latest: Option<&TabSet>) -> bool {
         || latest.tabs[old.tabs.len()..].iter().any(|tab| !pending.contains(&tab.session_id)) {
         return false;
     }
+    let slot = |record: &TabSet| record.raw.get("rust_ui").and_then(|native| native.get("startup_fresh_slot")).cloned();
+    if slot(old) != slot(latest)
+        && !(old.tabs.len() == MAX_TABS && latest.tabs.len() == crate::startup_restore::MAX_STARTUP_TABS
+            && latest.tabs.last().is_some_and(|tab| slot(latest) == Some(json!(tab.session_id)))) {
+        return false;
+    }
     fn baseline(record: &TabSet) -> serde_json::Map<String, Value> {
         let mut raw = record.raw.clone();
         raw.remove("tabs");
         if let Some(layout) = raw.get_mut("layout").and_then(Value::as_object_mut) { layout.remove("tabs"); }
         if let Some(native) = raw.get_mut("rust_ui").and_then(Value::as_object_mut) {
             native.remove("recovery_open_tabs");
+            native.remove("startup_fresh_slot");
             if native.is_empty() { raw.remove("rust_ui"); }
         }
         raw
@@ -690,7 +701,7 @@ fn tab_rows(tabs: &[Tab]) -> Value {
 fn recovery_tabs(record: Option<&TabSet>) -> Vec<String> {
     let Some(record) = record else { return Vec::new(); };
     record.raw.get("rust_ui").and_then(|native| native.get("recovery_open_tabs"))
-        .and_then(Value::as_array).filter(|rows| rows.len() <= MAX_TABS)
+        .and_then(Value::as_array).filter(|rows| rows.len() <= crate::startup_restore::MAX_STARTUP_TABS)
         .into_iter().flatten().filter_map(Value::as_str)
         .filter(|id| valid_session_id(id) && record.tabs.iter().any(|tab| tab.session_id == *id))
         .map(str::to_owned).collect()
