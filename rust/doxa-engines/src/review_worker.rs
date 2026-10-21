@@ -57,6 +57,14 @@ fn review_at(executable: &Path, metadata: &Value, engine: &str, timeout: Duratio
     let expected_receipt = approval_receipt(metadata, engine, timeout)?;
     if cancelled() || review_disabled() { return Ok(false); }
     let mut command = Command::new(executable);
+    // This host-only manifest supplies authority. Provider metadata and inherited
+    // user-wide Codex roots cannot redirect an isolated review to another session.
+    if engine == "codex" {
+        if let Some(scope) = doxa_isolation::active()? {
+            let home = scope.private_home.join("codex");
+            command.env("CODEX_HOME", &home).env("LORE_CODEX_SESSIONS_DIR", home.join("sessions"));
+        }
+    }
     command.args(["__review-supervisor", engine, &metadata.to_string(), &timeout.as_millis().to_string()])
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     unsafe { command.pre_exec(|| { if libc::setsid() < 0 { return Err(io::Error::last_os_error()); } Ok(()) }); }

@@ -44,6 +44,10 @@ pub fn check_turn_budget(manifest:&Manifest)->io::Result<()> {
     else if manifest.profile.docker(){check_disk_budget(manifest).map(|_|())}else{Ok(())}
 }
 
+/// Match the canonical LORE reviewer: bounded complete history and JSONL records.
+pub const MAX_PROVIDER_REVIEW_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_PROVIDER_REVIEW_LINE_BYTES: usize = 8 * 1024 * 1024;
+
 pub const ACTIVE_MANIFEST: &str = "DOXA_ISOLATION_MANIFEST";
 pub const SESSION_MANIFEST: &str = "DOXA_SESSION_MANIFEST";
 
@@ -65,7 +69,7 @@ pub struct ProviderReviewFile { pub path: PathBuf, _directory: tempfile::TempDir
 pub fn provider_review_file(snapshot: &ProviderSnapshot) -> io::Result<ProviderReviewFile> {
     let manifest=active()?.ok_or_else(||error("provider review requires an active session"))?;
     if manifest.session_id!=snapshot.session_id || manifest.profile.key()!="docker-hardened"
-        || snapshot.family!="codex" || snapshot.bytes.is_empty() || snapshot.bytes.len()>32*1024*1024 {
+        || snapshot.family!="codex" || snapshot.bytes.is_empty() || snapshot.bytes.len()>MAX_PROVIDER_REVIEW_BYTES {
         return Err(error("provider review snapshot scope or byte limit changed"));
     }
     if snapshot.proof["size"].as_u64()!=Some(snapshot.bytes.len() as u64)
