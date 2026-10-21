@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.67 — 2026-10-21
+
+**Codex continuation diagnostics**
+
+- Preserve the first failure in **`CodexHost`**. Distinguish failed compaction review, unreviewed compaction, output limits, incomplete provider turns and actual transcript/checkpoint failures.
+- Retain recognized failure categories in incomplete checkpoints when writes succeed. Later prompts and resume refusals name the original boundary; uncertain turns stay blocked without replay.
+
+**Recovery guidance**
+
+- Explain read-only transcript recovery through **`/resume`** and retain unknown usage and failed review guards. Local protocol fixtures cover failed, blocked and unreviewed compaction after a clean turn.
+
 ## 2.0.0-beta.66 — 2026-10-21
 
 **Session recovery**

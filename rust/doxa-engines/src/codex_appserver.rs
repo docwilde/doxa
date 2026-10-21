@@ -102,6 +102,12 @@ pub enum AppServerError {
     /// Cancellation before sending any compaction request. The bound context
     /// remains safe to resume even if the source-read transport was stopped.
     CompactionCancelled,
+    /// A native review failure stopped the protected provider. No settled
+    /// terminal/context boundary was observed, unlike CompactionBlocked.
+    CompactionReviewFailed,
+    CompactionUnreviewed,
+    AutomaticCompactionBlocked,
+    AssistantOutputLimit,
     TimedOut,
 }
 
@@ -779,8 +785,8 @@ impl AppServerDriver {
                                     automatic_compaction_reviewed = true;
                                     emit(EngineEvent::new("lore_review_completed", json!({"before":"compaction"})));
                                 },
-                                crate::codex_compact::ReviewOutcome::Blocked => return Err(AppServerError::Server("LORE review blocked Codex compaction".into())),
-                                crate::codex_compact::ReviewOutcome::Failed => { self.kill_group(); return Err(AppServerError::Protocol("Codex compaction review hook failed; protected session stopped")); }
+                                crate::codex_compact::ReviewOutcome::Blocked => return Err(AppServerError::AutomaticCompactionBlocked),
+                                crate::codex_compact::ReviewOutcome::Failed => { self.kill_group(); return Err(AppServerError::CompactionReviewFailed); }
                                 crate::codex_compact::ReviewOutcome::Unrelated => {},
                             }
                         }
@@ -795,7 +801,7 @@ impl AppServerDriver {
                         if let (Some(id), Some(delta)) = (params["itemId"].as_str(), params["delta"].as_str()) {
                             if !valid_thread_id(id) { return Err(AppServerError::Protocol("invalid assistant item ID")); }
                             if self.assistant_bytes.saturating_add(delta.len()) > MAX_FRAME_BYTES {
-                                return Err(AppServerError::Protocol("assistant turn text exceeded display limit"));
+                                return Err(AppServerError::AssistantOutputLimit);
                             }
                             self.assistant_bytes += delta.len();
                             if let Some((_, text)) = self.assistant_buffers.iter_mut().find(|(key, _)| key == id) {
@@ -837,7 +843,7 @@ impl AppServerDriver {
                         if item["type"] == "contextCompaction" && method == "item/completed"
                             && self.compact_gate.is_some() && !automatic_compaction_reviewed {
                             self.kill_group();
-                            return Err(AppServerError::Protocol("automatic compaction completed without observed native LORE review; protected session stopped"));
+                            return Err(AppServerError::CompactionUnreviewed);
                         }
                         if item["type"] == "contextCompaction" && method == "item/completed" {
                             automatic_compaction_reviewed = false;
@@ -858,7 +864,7 @@ impl AppServerDriver {
                                 let buffered_bytes = buffered.as_ref().map_or(0, String::len);
                                 let text = params["item"]["text"].as_str().map(str::to_owned).or(buffered).unwrap_or_default();
                                 self.assistant_bytes = self.assistant_bytes.saturating_add(text.len().saturating_sub(buffered_bytes));
-                                if self.assistant_bytes > MAX_FRAME_BYTES { return Err(AppServerError::Protocol("assistant turn text exceeded display limit")); }
+                                if self.assistant_bytes > MAX_FRAME_BYTES { return Err(AppServerError::AssistantOutputLimit); }
                                 self.emit_assistant_message(&text, &mut emit)?;
                             }
                         }
@@ -966,7 +972,7 @@ impl AppServerDriver {
         let separator = if self.assistant_message_emitted { "\n\n" } else { "" };
         self.assistant_bytes = self.assistant_bytes.saturating_add(separator.len());
         if self.assistant_bytes > MAX_FRAME_BYTES {
-            return Err(AppServerError::Protocol("assistant turn text exceeded display limit"));
+            return Err(AppServerError::AssistantOutputLimit);
         }
         emit(EngineEvent::new("text_delta", json!({"text":format!("{separator}{clean}")})));
         self.assistant_message_emitted = true;

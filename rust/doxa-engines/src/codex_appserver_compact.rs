@@ -100,12 +100,12 @@ impl AppServerDriver {
                     match outcome {
                         ReviewOutcome::Reviewed => { reviewed = true; emit(EngineEvent::new("lore_review_completed", json!({"before":"compaction"}))); }
                         ReviewOutcome::Blocked => { blocked = true; }
-                        ReviewOutcome::Failed => { self.kill_group(); return Err(AppServerError::Protocol("Codex PreCompact hook failed; protected session stopped")); }
+                        ReviewOutcome::Failed => { self.kill_group(); return Err(AppServerError::CompactionReviewFailed); }
                         ReviewOutcome::Unrelated => {}
                     }
                 }
                 "item/completed" if params["item"]["type"] == "contextCompaction" => {
-                    if blocked || !reviewed { self.kill_group(); return Err(AppServerError::Protocol("compaction completed without verified LORE review")); }
+                    if blocked || !reviewed { self.kill_group(); return Err(AppServerError::CompactionUnreviewed); }
                     completed = true;
                 }
                 "turn/completed" => {

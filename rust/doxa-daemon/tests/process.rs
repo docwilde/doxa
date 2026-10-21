@@ -1506,6 +1506,72 @@ fn codex_clean_checkpoint_failure_overrides_success_and_preserves_dirty_resume_g
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn codex_unsettled_compaction_preserves_first_cause_and_refuses_replay() {
+    for (mode, category) in [
+        ("failed", "compaction_review_failed"),
+        ("unreviewed", "compaction_review_unobserved"),
+        ("blocked", "automatic_compaction_blocked_unsettled"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("codex-compaction-fixture");
+        fs::write(dir.path().join("compaction-mode"), mode).unwrap();
+        executable(&codex, &supported_codex_fixture(include_str!("fixtures/codex_compaction_failure.py")));
+        let mut process = Process::start_codex_appserver_with_review(dir.path(), &codex, false, true);
+        let (mut reader, mut socket) = process.connect();
+        reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        send(&mut socket, json!({"type":"prompt","id":1,"text":"initial clean turn"}));
+        let clean = claude_receive_until(&mut reader, |f| f["event"]["type"] == "turn_done");
+        assert_eq!(clean["event"]["data"]["is_error"], false, "{mode}: {clean}");
+        let thread_path = native_transcript(dir.path(), "codex-session.codex.json");
+        let before: Value = serde_json::from_slice(&fs::read(&thread_path).unwrap()).unwrap();
+        assert_eq!(before["turn_incomplete"], false);
+        assert!(before["transcript_bytes"].as_u64().is_some());
+        send(&mut socket, json!({"type":"prompt","id":2,"text":"turn reaching automatic compaction"}));
+        let failure = claude_receive_until(&mut reader, |f| f["event"]["type"] == "turn_done");
+        let data = &failure["event"]["data"];
+        assert_eq!(data["is_error"], true, "{mode}: {failure}");
+        assert_eq!(data["failure_category"], category, "{mode}: {failure}");
+        assert_eq!(data["resume_blocked"], true);
+        assert_ne!(data["usage_complete"], true, "unsettled usage cannot become complete");
+        assert!(data["cost_usd"].is_null());
+        let saved: Value = serde_json::from_slice(&fs::read(&thread_path).unwrap()).unwrap();
+        assert_eq!(saved["turn_incomplete"], true);
+        assert_eq!(saved["continuation_failure"], category);
+        assert!(saved.get("transcript_bytes").is_none());
+        // A later prompt must not turn this into a generic I/O diagnosis,
+        // start another provider, append another user row or clear the guard.
+        let transcript = native_transcript(dir.path(), "codex-session.jsonl");
+        let transcript_before = fs::read(&transcript).unwrap();
+        send(&mut socket, json!({"type":"prompt","id":3,"text":"followup withheld"}));
+        let again = claude_receive_until(&mut reader, |f| f["event"]["type"] == "turn_done");
+        assert_eq!(&again["event"]["data"], data);
+        assert_eq!(fs::read(&transcript).unwrap(), transcript_before);
+        send(&mut socket, json!({"type":"call","id":4,"method":"stop","params":{}}));
+        assert_eq!(claude_receive_until(&mut reader, |f| f["type"] == "reply" && f["id"] == 4)["ok"], true);
+        wait_until(|| process.exited());
+        let requests_before = fs::read(dir.path().join("requests.jsonl")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&requests_before).lines().filter(|line|
+            serde_json::from_str::<Value>(line).unwrap()["method"] == "turn/start").count(), 2);
+        let restart = daemon_command().args([
+            "--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
+            "--session-id", "codex-session", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
+            "--resume", "true",
+        ]).env("DOXA_HOME", dir.path().join("home")).env("LORE_DISABLE_REVIEW", "0")
+            .output().unwrap();
+        assert!(!restart.status.success());
+        let error = String::from_utf8_lossy(&restart.stderr);
+        assert!(error.contains("transcript is incomplete"), "{mode}: {error}");
+        let expected = doxa_transcript::CodexContinuationFailure::from_key(category).unwrap();
+        assert!(error.contains(expected.message()), "{mode}: {error}");
+        assert_eq!(fs::read(dir.path().join("requests.jsonl")).unwrap(), requests_before,
+            "restart must refuse before any provider execution");
+    }
+}
+
+#[test]
 fn codex_resume_refuses_changed_clean_checkpoint_before_provider_execution() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
@@ -1758,6 +1824,22 @@ fn explicit_codex_resume_requires_matching_thread_metadata() {
         assert!(!project.join("should-not-start").exists());
         assert!(!dir.path().join("registry/codex-session.json").exists());
     }
+    for (session, cwd) in [("other", dir.path()), ("codex-session", Path::new("/wrong"))] {
+        fs::write(&thread, json!({"thread_id":"thread-1","session_id":session,"cwd":cwd,
+            "turn_incomplete":true,"continuation_failure":"compaction_review_failed"}).to_string()).unwrap();
+        let output = run();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("thread record does not match this session"), "{error}");
+        assert!(!error.contains("compaction review hook failed"), "unbound category must not be surfaced");
+    }
+    fs::write(&thread, json!({"thread_id":"thread-1","session_id":"codex-session","cwd":dir.path(),
+        "turn_incomplete":true,"continuation_failure":"untrusted stored failure prose"}).to_string()).unwrap();
+    let unknown = run();
+    assert!(!unknown.status.success());
+    let error = String::from_utf8_lossy(&unknown.stderr);
+    assert!(error.contains("transcript is incomplete"), "{error}");
+    assert!(!error.contains("untrusted stored failure prose"));
     fs::write(&thread, json!({"thread_id":"thread-1","session_id":"codex-session",
         "cwd":dir.path(),"model":null,"turn_incomplete":false}).to_string()).unwrap();
     let mut resumed = daemon_command()
@@ -4402,7 +4484,11 @@ fn codex_live_auto_checkpoint_failure_cancels_the_changed_provider() {
         frames.push(receive(&mut reader));
     }
     assert!(frames.iter().any(|row| row["event"]["type"] == "turn_done" && row["event"]["data"]["is_error"] == true));
-    assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 11, "set_permission_mode", json!({"mode":"auto"}), &mut frames)["error"], "Codex persistence failed");
+    assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 11, "set_permission_mode", json!({"mode":"auto"}), &mut frames)["error"],
+        doxa_transcript::CodexContinuationFailure::PermissionUnacknowledged.message());
+    assert!(frames.iter().any(|row| row["event"]["type"] == "turn_done"
+        && row["event"]["data"]["failure_category"] == "permission_update_unacknowledged"
+        && row["event"]["data"]["resume_blocked"] == true));
     assert_eq!(codex_auto_rpc(&mut reader, &mut socket, 12, "stop", json!({}), &mut frames)["ok"], true);
     wait_until(|| process.exited());
     }
