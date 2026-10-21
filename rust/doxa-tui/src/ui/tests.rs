@@ -8732,3 +8732,29 @@ fn isolation_menu_requires_explicit_confirmation_for_bound_idle_session(){
     app.isolation_control_key(KeyEvent::new(KeyCode::Char('Y'),KeyModifiers::SHIFT));
     assert!(matches!(app.pending_queue_commands.as_slice(),[crate::bridge::WorkerCommand::SetIsolation(id,profile)] if id=="isolated"&&profile=="native"));
 }
+
+#[test]
+fn identity_writer_handles_close_reopen_close_and_stop_without_roster_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = crate::ui_state::UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+    let session = crate::discovery::Session { id:"owned".into(), title:"owned".into(), socket:"/unused".into(),
+        scope_key:"/repo".into(), clients:Some(1), started_at:"2026".into() };
+    store.reopen_session(&session).unwrap();
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"owned","engine":"codex"}));
+    let mut seen = std::collections::HashSet::new();
+    app.detach_active_tab();
+    save_identity_intent(&mut app,&mut store,&mut seen);
+    assert!(!store.save_if_complete(&app,&Mutex::new(false)).unwrap());
+    let read = || serde_json::from_slice::<serde_json::Value>(&std::fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(read()["rust_ui"]["recovery_closed_tabs"],json!(["owned"]));
+    app.groups[0].tabs.push("owned".into());
+    save_identity_intent(&mut app,&mut store,&mut seen);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(store.path()).unwrap()).unwrap()["rust_ui"]["recovery_open_tabs"],json!(["owned"]));
+    app.detach_active_tab();
+    save_identity_intent(&mut app,&mut store,&mut seen);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(store.path()).unwrap()).unwrap()["rust_ui"]["recovery_closed_tabs"],json!(["owned"]));
+    app.killed_this_run.insert("owned".into());
+    save_identity_intent(&mut app,&mut store,&mut seen);
+    assert!(store.saved_tabs().unwrap().is_empty());
+}

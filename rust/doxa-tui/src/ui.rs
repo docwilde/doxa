@@ -44,6 +44,7 @@ pub use terminal_loop::{
     run_remote_with_worker_channels,
 };
 pub(crate) use terminal_loop::run_remote_with_worker_channels_layout;
+pub(crate) use terminal_loop::run_with_worker_channels_identity_state;
 mod session_events;
 mod session_telemetry;
 mod glm_account;

@@ -258,7 +258,7 @@ pub(crate) fn run_remote_with_worker_channels_layout(
     prompts: SyncSender<crate::bridge::WorkerCommand>,
     store: crate::remote_layout::Store,
 ) -> io::Result<()> {
-    run_loop_with_remote(FrameSource::Remote(frames), Some(prompts), None, Some(store))
+    run_loop_with_remote(FrameSource::Remote(frames), Some(prompts), None, Some(store), None)
 }
 
 pub fn run_with_worker_channels_state_guarded(
@@ -275,12 +275,22 @@ pub fn run_with_worker_channels_state_guarded(
     )
 }
 
+/// A single attached socket may mutate close/stop intent for its identities,
+/// but has no authority to replace a project's complete saved layout.
+pub(crate) fn run_with_worker_channels_identity_state(
+    frames: Receiver<crate::worker_frames::WorkerFrame>,
+    prompts: SyncSender<crate::bridge::WorkerCommand>,
+    store: crate::ui_state::UiStateStore,
+) -> io::Result<()> {
+    run_loop_with_remote(FrameSource::Worker(frames), Some(prompts), None, None, Some(store))
+}
+
 fn run_loop(
     receiver: FrameSource,
     prompt_sender: Option<SyncSender<crate::bridge::WorkerCommand>>,
     state: Option<(crate::ui_state::UiStateStore, Vec<String>, Arc<Mutex<bool>>)>,
 ) -> io::Result<()> {
-    run_loop_with_remote(receiver, prompt_sender, state, None)
+    run_loop_with_remote(receiver, prompt_sender, state, None, None)
 }
 
 pub(super) fn remote_handoff_args(url: &str, save_layout: bool) -> Vec<&str> {
@@ -308,6 +318,7 @@ fn run_loop_with_remote(
     mut prompt_sender: Option<SyncSender<crate::bridge::WorkerCommand>>,
     mut state: Option<(crate::ui_state::UiStateStore, Vec<String>, Arc<Mutex<bool>>)>,
     mut remote_layout: Option<crate::remote_layout::Store>,
+    mut identity_store: Option<crate::ui_state::UiStateStore>,
 ) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::new(
@@ -382,6 +393,7 @@ fn run_loop_with_remote(
             app.notice.push_str(&keys);
         }
     }
+    let mut saved_detached: std::collections::HashSet<String> = app.detached_this_run.iter().cloned().collect();
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
     // Restoration is a projection, not evidence that this layout was saved.
     // Checkpoint even an unchanged first frame before accepting terminal input.
@@ -762,15 +774,12 @@ fn run_loop_with_remote(
         // Retry an unsaved layout on later ticks, including ticks with no new
         // UI event (for example when the live roster becomes complete).
         if let Some((store, _, complete)) = &mut state {
-            if let Err(error) = store.forget_sessions(&app.killed_this_run) {
-                app.notice = format!(
-                    "sessions: stopped; tabset veto save failed · {}",
-                    safe_label(&error.to_string())
-                );
-                changed = true;
-            }
+            changed |= save_identity_intent(&mut app, store, &mut saved_detached);
             changed |= save_layout_if_changed(&mut app, store, complete, &mut saved_layout);
         } else {
+            if let Some(store) = identity_store.as_mut() {
+                changed |= save_identity_intent(&mut app, store, &mut saved_detached);
+            }
             saved_layout = crate::ui_state::LayoutSignature::capture(&app);
         }
         changed |= app.finish_clear_swap(
@@ -1020,6 +1029,36 @@ pub(super) fn dispatch_queue_commands(
         }
     }
     false
+}
+
+pub(super) fn save_identity_intent(
+    app: &mut App,
+    store: &mut crate::ui_state::UiStateStore,
+    saved_detached: &mut std::collections::HashSet<String>,
+) -> bool {
+    let mut changed = false;
+    if let Err(error) = store.forget_sessions(&app.killed_this_run) {
+        app.notice = format!("sessions: stopped; tabset veto save failed · {}", safe_label(&error.to_string()));
+        changed = true;
+    }
+    let visible: std::collections::HashSet<_> = app.groups.iter().flat_map(|group| group.tabs.iter()).collect();
+    let detached: std::collections::HashSet<String> = app.detached_this_run.iter()
+        .filter(|id| !visible.contains(id) && !app.killed_this_run.contains(*id)
+            && !crate::remote_client::valid_target(id)).cloned().collect();
+    let closed: Vec<_> = detached.difference(saved_detached).cloned().collect();
+    // Only successful attached, visible native tabs can reverse a close. An
+    // attach in progress (or a readonly history row) is never reopen evidence.
+    let reopened: Vec<_> = saved_detached.iter().filter(|id| visible.contains(id)
+        && !app.offline_ids.contains(*id) && !app.attaching_ids.contains(*id)
+        && !app.killed_this_run.contains(*id)).cloned().collect();
+    match store.update_tab_intent(&closed, &reopened) {
+        Ok(()) => *saved_detached = detached,
+        Err(error) => {
+            app.notice = format!("Tab close/reopen save failed · {}", safe_label(&error.to_string()));
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub(super) fn save_layout_if_changed(

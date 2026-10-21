@@ -72,7 +72,7 @@ impl App {
                 } else {
                     let id = session.id.clone();
                     self.sessions.push(session);
-                    if self.groups[0].tabs.is_empty() {
+                    if self.groups[0].tabs.is_empty() && !self.detached_this_run.contains(&id) {
                         self.groups[0].tabs.push(id);
                     }
                 }

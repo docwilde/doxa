@@ -187,7 +187,8 @@ impl UiStateStore {
         });
         let existing = record.tabs.iter().any(|tab| tab.session_id == session.id);
         let mut pending = recovery_tabs(Some(&record));
-        if existing && (!reopen || pending.contains(&session.id)) {
+        let mut closed = closed_tabs(Some(&record));
+        if existing && (!reopen || pending.contains(&session.id) && !closed.contains(&session.id)) {
             self.startup_extra_ids = pending;
             self.record = Some(record);
             return Ok(());
@@ -199,16 +200,53 @@ impl UiStateStore {
             if record.tabs.len() == MAX_TABS { self.startup_overflow_id = Some(session.id.clone()); }
             record.tabs.push(Tab { session_id: session.id.clone(), pinned_name: None, cwd: Some(session.scope_key.clone()) });
         }
-        pending.push(session.id.clone());
+        if !pending.contains(&session.id) { pending.push(session.id.clone()); }
+        closed.retain(|id| id != &session.id);
         let native = record.raw.entry("rust_ui").or_insert_with(|| json!({})).as_object_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "unknown native UI metadata"))?;
         native.insert("recovery_open_tabs".into(), json!(pending));
+        if !closed.is_empty() { native.insert("recovery_closed_tabs".into(), json!(closed)); }
+        else { native.remove("recovery_closed_tabs"); }
         if let Some(id) = &self.startup_overflow_id {
             native.insert("startup_fresh_slot".into(), json!(id));
         }
         record.raw.insert("tabs".into(), tab_rows(&record.tabs));
         save_tabset(&self.path, &record)?;
         self.startup_extra_ids = pending;
+        self.record = self.latest_record()?;
+        Ok(())
+    }
+
+    /// Apply explicit close/reopen intent only to identities already retained
+    /// in this scope. This never rewrites geometry or requires a complete roster.
+    pub fn update_tab_intent(&mut self, detached: &[String], reopened: &[String]) -> io::Result<()> {
+        if detached.len().saturating_add(reopened.len()) > crate::startup_restore::MAX_STARTUP_TABS
+            || detached.iter().chain(reopened).any(|id| !valid_session_id(id)) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid scoped tab intent"));
+        }
+        if detached.is_empty() && reopened.is_empty() { return Ok(()); }
+        let _lock = self.mutation_lock()?;
+        let latest = self.latest_record()?;
+        self.preserve_layout_authority(latest.as_ref());
+        let Some(mut record) = latest else { return Ok(()); };
+        let mut pending = recovery_tabs(Some(&record));
+        let mut closed = closed_tabs(Some(&record));
+        let before = (pending.clone(), closed.clone());
+        for id in detached.iter().filter(|id| record.tabs.iter().any(|tab| &tab.session_id == *id)) {
+            pending.retain(|open| open != id);
+            if !closed.contains(id) { closed.push(id.clone()); }
+        }
+        for id in reopened.iter().filter(|id| record.tabs.iter().any(|tab| &tab.session_id == *id)) {
+            closed.retain(|old| old != id);
+            if !pending.contains(id) { pending.push(id.clone()); }
+        }
+        if before == (pending.clone(), closed.clone()) { return Ok(()); }
+        let native = record.raw.entry("rust_ui").or_insert_with(|| json!({})).as_object_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "unknown native UI metadata"))?;
+        native.insert("recovery_open_tabs".into(), json!(pending));
+        native.insert("recovery_closed_tabs".into(), json!(closed));
+        save_tabset(&self.path, &record)?;
+        self.startup_extra_ids = recovery_tabs(Some(&record));
         self.record = self.latest_record()?;
         Ok(())
     }
@@ -256,11 +294,13 @@ impl UiStateStore {
 
     pub fn saved_tabs(&self) -> Option<&[Tab]> { self.record.as_ref().map(|record| record.tabs.as_slice()) }
     pub(crate) fn has_open_live_session(&self, sessions: &[crate::discovery::Session]) -> bool {
+        let closed = closed_tabs(self.record.as_ref());
         let Some(groups) = self.record.as_ref().and_then(|record|record.raw.get("layout"))
-            .and_then(|layout|layout.get("groups")) else { return !sessions.is_empty(); };
-        if !supported_group_tree(groups) { return !sessions.is_empty(); }
+            .and_then(|layout|layout.get("groups")) else { return sessions.iter().any(|session| !closed.contains(&session.id)); };
+        if !supported_group_tree(groups) { return sessions.iter().any(|session| !closed.contains(&session.id)); }
         let open = tree_ids(groups);
-        sessions.iter().any(|session|open.contains(session.id.as_str()) || self.startup_extra_ids.contains(&session.id))
+        sessions.iter().any(|session| !closed.contains(&session.id)
+            && (open.contains(session.id.as_str()) || self.startup_extra_ids.contains(&session.id)))
     }
     pub fn discard_loaded_layout(&mut self) { self.record = None; self.writable_layout = true; self.startup_overflow_id=None; }
 
@@ -363,18 +403,19 @@ impl UiStateStore {
         } else {
             groups[0].tabs = ids.clone();
         }
+        let closed = closed_tabs(Some(record));
         let mut seen = HashSet::new();
         for group in &mut groups {
-            group.tabs.retain(|id| seen.insert(id.clone()));
+            group.tabs.retain(|id| !closed.contains(id) && seen.insert(id.clone()));
             group.active = group.active.min(group.tabs.len().saturating_sub(1));
         }
         for id in &self.startup_extra_ids {
-            if live.contains(id.as_str()) && seen.insert(id.clone()) { groups[0].tabs.push(id.clone()); }
+            if !closed.contains(id) && live.contains(id.as_str()) && seen.insert(id.clone()) { groups[0].tabs.push(id.clone()); }
         }
         let mut detached = Vec::new();
         for id in ids {
             if seen.insert(id.clone()) {
-                if grouped_layout { detached.push(id); }
+                if grouped_layout || closed.contains(&id) { detached.push(id); }
                 else { groups[0].tabs.push(id); }
             }
         }
@@ -459,8 +500,10 @@ impl UiStateStore {
         if let Some(titles) = record.raw.get_mut("rust_ui").and_then(|ui|ui.get_mut("default_titles"))
             .and_then(Value::as_object_mut) { titles.retain(|id,_|!killed.contains(id)); }
         let pending: Vec<_> = recovery_tabs(Some(&record)).into_iter().filter(|id| !killed.contains(id)).collect();
+        let closed = closed_tabs(Some(&record));
         if let Some(native) = record.raw.get_mut("rust_ui").and_then(Value::as_object_mut) {
             native.insert("recovery_open_tabs".into(), json!(pending));
+            native.insert("recovery_closed_tabs".into(), json!(closed));
         }
         record.raw.insert("tabs".into(), tab_rows(&record.tabs));
         save_tabset(&self.path, &record)?;
@@ -603,6 +646,7 @@ impl UiStateStore {
         let rust_ui=record.raw.entry("rust_ui").or_insert_with(||json!({})).as_object_mut()
             .ok_or_else(||io::Error::new(io::ErrorKind::Unsupported,"unknown native UI metadata"))?;
         rust_ui.remove("recovery_open_tabs");
+        rust_ui.remove("recovery_closed_tabs");
         if let Some(id)=self.startup_overflow_id.as_ref().filter(|id|record.tabs.iter().any(|tab|tab.session_id==**id)) {
             rust_ui.insert("startup_fresh_slot".into(),json!(id));
         }else{rust_ui.remove("startup_fresh_slot");}
@@ -698,9 +742,11 @@ fn tab_rows(tabs: &[Tab]) -> Value {
     json!(tabs.iter().map(|tab| json!({"session_id":tab.session_id,"pinned_name":tab.pinned_name,"cwd":tab.cwd})).collect::<Vec<_>>())
 }
 
-fn recovery_tabs(record: Option<&TabSet>) -> Vec<String> {
+fn recovery_tabs(record: Option<&TabSet>) -> Vec<String> { intent_tabs(record, "recovery_open_tabs") }
+fn closed_tabs(record: Option<&TabSet>) -> Vec<String> { intent_tabs(record, "recovery_closed_tabs") }
+fn intent_tabs(record: Option<&TabSet>, key: &str) -> Vec<String> {
     let Some(record) = record else { return Vec::new(); };
-    record.raw.get("rust_ui").and_then(|native| native.get("recovery_open_tabs"))
+    record.raw.get("rust_ui").and_then(|native| native.get(key))
         .and_then(Value::as_array).filter(|rows| rows.len() <= crate::startup_restore::MAX_STARTUP_TABS)
         .into_iter().flatten().filter_map(Value::as_str)
         .filter(|id| valid_session_id(id) && record.tabs.iter().any(|tab| tab.session_id == *id))

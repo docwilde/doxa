@@ -334,9 +334,16 @@ pub(crate) fn rejection_frame(command: WorkerCommand, message: &str) -> WorkerFr
 }
 
 pub fn run_sessions(sessions: &[Session], store: Option<crate::ui_state::UiStateStore>) -> io::Result<()> {
+    run_sessions_inner(sessions, store, None)
+}
+
+fn run_sessions_inner(sessions: &[Session], store: Option<crate::ui_state::UiStateStore>,
+    identity_store: Option<crate::ui_state::UiStateStore>) -> io::Result<()> {
     let MultiBridge { frames, commands, live_ids, complete, router, workers } = connect_sessions_inner(sessions,store.as_ref().is_some_and(|store|!store.startup_archives.is_empty() || !store.startup_notice.is_empty()))?;
     let result = if let Some(store) = store {
         ui::run_with_worker_channels_state_guarded(frames, commands.clone(), store, live_ids, complete)
+    } else if let Some(store) = identity_store {
+        ui::run_with_worker_channels_identity_state(frames, commands.clone(), store)
     } else {
         ui::run_with_worker_channels(frames, commands.clone())
     };
@@ -380,14 +387,15 @@ pub fn run_socket_expected(path: impl AsRef<Path>, expected: Option<&str>) -> io
     };
     // A fleet inspector has its own saved view; private worker identities must
     // not become ordinary project tabs just because the operator inspects one.
-    if expected.is_none() && !session.scope_key.is_empty() {
+    let identity_store = if expected.is_none() && !session.scope_key.is_empty() {
         let home = crate::operations::doxa_home()?;
         let mut store = crate::ui_state::UiStateStore::for_scope(&home, &session.scope_key)?;
         store.reopen_session(&session)?;
-    }
+        Some(store)
+    } else { None };
     // This explicit window has only one verified attachment. Retain its
     // identity, but do not authorize replacing a whole project's geometry.
-    run_sessions(&[session], None)
+    run_sessions_inner(&[session], None, identity_store)
 }
 
 fn registered_socket(sessions: Vec<Session>, id: &str, path: &Path) -> io::Result<Session> {

@@ -448,3 +448,41 @@ fn recovery_retains_the_established_reserved_startup_slot_and_refuses_a_second_o
     assert!(restored.restore(&mut app, &ids));
     assert!(app.groups.iter().any(|group|group.tabs.iter().any(|id|id == "reserved-fresh")));
 }
+
+#[test]
+fn identity_only_close_preserves_group_geometry_history_and_sibling_fields() {
+    let (dir, mut store) = seeded(json!({"tabs":[{"session_id":"closed"},{"session_id":"sibling"}],
+        "layout":{"kind":"tabs","groups":{"kind":"group","active":0,"tabs":[{"kind":"leaf","session_id":"closed"},{"kind":"leaf","session_id":"sibling"}]}},
+        "collections":[{"name":"Keep","sessions":["closed","sibling"]}],"future":{"keep":true}}));
+    store.reopen_session(&recovery_session("closed")).unwrap();
+    let before: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    store.update_tab_intent(&["closed".into(),"foreign-unrecorded".into()], &[]).unwrap();
+    let value: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    for key in ["tabs", "layout", "collections", "future"] { assert_eq!(value[key], before[key]); }
+    assert_eq!(value["rust_ui"]["recovery_open_tabs"], json!([]));
+    assert_eq!(value["rust_ui"]["recovery_closed_tabs"], json!(["closed"]));
+    let reloaded = UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+    let mut app = App::default(); reloaded.restore(&mut app, &live(&["closed", "sibling"]));
+    assert_eq!(app.groups[0].tabs, ["sibling"]);
+    store.reopen_session(&recovery_session("closed")).unwrap();
+    let reloaded = UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+    let mut app = App::default(); reloaded.restore(&mut app, &live(&["closed", "sibling"]));
+    assert!(app.groups[0].tabs.contains(&"closed".into()));
+}
+
+#[test]
+fn closed_intent_vetoes_stale_window_and_exact_stop_forgets_only_that_identity() {
+    let (dir, mut store) = seeded(json!({"tabs":[{"session_id":"closed"},{"session_id":"keep"}]}));
+    let mut stale = UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+    let mut old = App::default(); stale.restore(&mut old, &live(&["closed", "keep"]));
+    store.update_tab_intent(&["closed".into()], &[]).unwrap();
+    let closed = fs::read(store.path()).unwrap();
+    assert!(stale.save_if_complete(&old, &Mutex::new(true)).is_err());
+    assert_eq!(fs::read(store.path()).unwrap(), closed);
+    let mut killed = std::collections::HashSet::new(); killed.insert("closed".into());
+    store.forget_sessions(&killed).unwrap();
+    let value: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(value["tabs"].as_array().unwrap().len(), 1);
+    assert_eq!(value["tabs"][0]["session_id"], "keep");
+    assert_eq!(value["rust_ui"]["recovery_closed_tabs"], json!([]));
+}
