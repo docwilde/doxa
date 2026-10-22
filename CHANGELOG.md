@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.69 — 2026-10-22
+
+**DeepSeek non-thinking workers**
+
+- Fix **`catalog_models`** treating reasoning-effort metadata as a ban on non-thinking mode. Preserve the documented disabled-thinking choice for advertised `deepseek-flash` and `deepseek-v4-pro` models.
+- Keep unknown models and malformed metadata conservative; retain advertised reasoning levels and defaults. Pinned non-thinking Router workers can pass catalogue admission.
+
 ## 2.0.0-beta.68 — 2026-10-21
 
 **Isolated Codex review**

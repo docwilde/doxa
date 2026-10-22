@@ -182,7 +182,8 @@ impl Vendor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelCapability {
     pub id: String,
-    /// Verified provider levels, or the canonical local known-model fallback.
+    /// Provider reasoning levels and documented transport mode choices, or the
+    /// canonical local known-model fallback when metadata is absent.
     pub efforts: Vec<String>,
     pub default_effort: Option<String>,
     /// An advertised list with no usable levels must not trigger a fallback.
@@ -191,7 +192,7 @@ pub struct ModelCapability {
 
 impl ModelCapability {
     /// Missing documented metadata permits only the transport's known-model
-    /// fallback. A present DeepSeek list, including an empty list, is final.
+    /// fallback. Present metadata never adds unadvertised reasoning levels.
     pub fn resolved(mut self, vendor: Vendor) -> Self {
         if !self.effort_metadata_present {
             self.efforts = vendor.effort_choices(&self.id).iter().map(|level| (*level).into()).collect();
@@ -258,6 +259,16 @@ async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<
                         efforts.push(level.to_owned());
                     }
                 }
+                // DeepSeek's supported_levels lists reasoning efforts, while
+                // thinking.type=disabled is a separate documented toggle for
+                // these models. DOXA calls that transport mode "none". Unknown
+                // models and malformed metadata retain the strict catalog path.
+                // https://api-docs.deepseek.com/guides/thinking_mode/
+                if vendor == Vendor::DeepSeek
+                    && matches!(id, "deepseek-flash" | "deepseek-v4-pro")
+                    && !efforts.iter().any(|level| level == "none") {
+                    efforts.insert(0, "none".into());
+                }
             }
             let default_effort = row.pointer("/effort/default_level").and_then(Value::as_str)
                 .filter(|level| efforts.iter().any(|seen| seen == level)).map(str::to_owned);
@@ -295,7 +306,7 @@ mod catalog_tests {
         let (_guard, _home) = credentials::tests::fixture();
         let (url, worker) = serve("200 OK", r#"{"data":[{"id":"deepseek-flash","effort":{"supported_levels":["low","high","max"],"default_level":"high"}},{"id":"deepseek-flash"},{"id":"new-model","effort":{"supported_levels":["medium","max","high"],"default_level":"medium"}},{"id":"bad\u202e-id","effort":{"supported_levels":["high"]}},{"id":"has space","effort":{"supported_levels":["high"]}}]}"#.into(), "").await;
         assert_eq!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.unwrap(), [
-            ModelCapability { id: "deepseek-flash".into(), efforts: vec!["low".into(), "high".into(), "max".into()], default_effort: Some("high".into()), effort_metadata_present: true },
+            ModelCapability { id: "deepseek-flash".into(), efforts: vec!["none".into(), "low".into(), "high".into(), "max".into()], default_effort: Some("high".into()), effort_metadata_present: true },
             ModelCapability { id: "new-model".into(), efforts: vec!["max".into(), "high".into()], default_effort: None, effort_metadata_present: true },
         ]);
         let request = worker.await.unwrap();
@@ -317,6 +328,22 @@ mod catalog_tests {
         worker.await.unwrap();
         let (url, worker) = serve("200 OK", format!("{{\"data\":[{{\"id\":\"{}\"}}]}}", "a".repeat(4 * 1024 * 1024)), "").await;
         assert!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.is_none());
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_thinking_toggle_does_not_invent_reasoning_efforts_or_unknown_model_modes() {
+        let (_guard, _home) = credentials::tests::fixture();
+        let body = r#"{"data":[{"id":"deepseek-flash","effort":{"supported_levels":["low"],"default_level":"high"}},{"id":"deepseek-v4-pro","effort":{"supported_levels":["none","low"],"default_level":"none"}},{"id":"unknown-model","effort":{"supported_levels":["low"],"default_level":"low"}}]}"#;
+        let (url, worker) = serve("200 OK", body.into(), "").await;
+        let rows = catalog_models_at(Vendor::DeepSeek, &url, "key").await.unwrap();
+        assert_eq!(rows[0].efforts, ["none", "low"]);
+        assert!(rows[0].default_effort.is_none());
+        assert_eq!(rows[1].efforts, ["none", "low"]);
+        assert_eq!(rows[1].default_effort.as_deref(), Some("none"));
+        assert_eq!(rows[2].efforts, ["low"]);
+        assert_eq!(rows[2].default_effort.as_deref(), Some("low"));
+        assert!(rows.iter().all(|row| row.effort_metadata_present));
         worker.await.unwrap();
     }
 
@@ -344,7 +371,7 @@ mod catalog_tests {
         let rows = catalog_models_at(Vendor::DeepSeek, &url, "key").await.unwrap();
         assert_eq!(rows[0], ModelCapability::local(Vendor::DeepSeek, "deepseek-flash"));
         assert!(rows[1].effort_metadata_present);
-        assert!(rows[1].efforts.is_empty());
+        assert_eq!(rows[1].efforts, ["none"]);
         assert!(rows[1].default_effort.is_none());
         assert!(rows[2].efforts.is_empty());
         worker.await.unwrap();
