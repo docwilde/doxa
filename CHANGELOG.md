@@ -11,7 +11,7 @@ the stable 2.0 release has not been cut.
 
 - Fix **`catalog_models`** treating reasoning-effort metadata as a ban on non-thinking mode. Preserve the documented disabled-thinking choice for advertised `deepseek-flash` and `deepseek-v4-pro` models.
 - Keep unknown models and malformed metadata conservative; retain advertised reasoning levels and defaults. Pinned non-thinking Router workers can pass catalogue admission.
-- Fix **`WorkspaceReadGate`** aborting paid turns when a file does not exist. Return a tool error and retain verified usage; keep credential, path and scrub checks strict.
+- Fix **`WorkspaceReadGate`** aborting paid turns on absent files or refused paths. Return visible tool errors with known usage; keep read restrictions and fatal integrity checks.
 
 **Checkpoint review diagnostics**
 

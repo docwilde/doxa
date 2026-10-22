@@ -256,7 +256,8 @@ mod tests {
     fn prompt(host:&RouterHost,text:&str)->Vec<Value> {let mut events=Vec::new();host.prompt(text,&mut|event|events.push(event));events}
 
     #[test]
-    fn missing_workspace_file_is_a_tool_error_with_known_usage_and_a_usable_next_turn() {
+    fn workspace_read_errors_keep_known_usage_and_a_usable_next_turn() {
+        for (path,expected) in [("not-created-yet.py","file_not_found"),(".","workspace_read_refused")] {
         let env=Env::new();let mut step=0;
         let server=Server::new(move|method,body| {
             if method=="GET" {return ("application/json".into(),json!({"data":[{
@@ -265,12 +266,12 @@ mod tests {
             assert_eq!(body["model"],"deepseek-flash");step+=1;
             if step==1 {
                 let (kind,stream,delay)=worker(body,true);
-                return (kind,stream.replace("visible.txt","not-created-yet.py"),delay);
+                return (kind,stream.replace("visible.txt",path),delay);
             }
             if step==2 {
                 let messages=body["messages"].as_array().unwrap();
                 let result:Value=serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
-                assert_eq!(result,json!({"is_error":true,"error":"file_not_found"}));
+                assert_eq!(result,json!({"is_error":true,"error":expected}));
             }
             worker(body,false)
         });
@@ -286,6 +287,7 @@ mod tests {
         assert_eq!(env.state()["worker"]["input_tokens"],9);
         assert_eq!(env.state()["worker"]["output_tokens"],12);
         host.shutdown();
+        }
     }
 
     #[test]
