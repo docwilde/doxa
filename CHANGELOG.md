@@ -13,6 +13,11 @@ the stable 2.0 release has not been cut.
 - Keep unknown models and malformed metadata conservative; retain advertised reasoning levels and defaults. Pinned non-thinking Router workers can pass catalogue admission.
 - Fix **`WorkspaceReadGate`** aborting paid turns when a file does not exist. Return a tool error and retain verified usage; keep credential, path and scrub checks strict.
 
+**Checkpoint review diagnostics**
+
+- Record closed rejection categories in **`apply_supervisor`** for oversized fields, invalid evidence and unavailable reviews. Rejected response text stays out of the journal.
+- Include the existing byte and evidence limits in **`SUPERVISOR_INSTRUCTIONS`** so the reviewer receives the same contract enforced by the host.
+
 ## 2.0.0-beta.68 — 2026-10-21
 
 **Isolated Codex review**

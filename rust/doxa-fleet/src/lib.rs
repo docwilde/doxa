@@ -360,13 +360,23 @@ pub enum Alignment { Aligned, Uncertain, Drifted, Blocked }
 pub struct SupervisorVerdict {pub verdict:Alignment,pub evidence_refs:Vec<String>,pub charter_clause:String,pub reason:String,pub recommended_action:String}
 pub fn apply_supervisor(context:&Context,result:Result<SupervisorVerdict,String>)->io::Result<State>{
     transaction(context,|state|{
+        // Record only closed categories. Provider errors and rejected verdict
+        // text can contain untrusted content or reflected credentials.
+        let failure_category=match &result {
+            Err(_)=>Some("review_unavailable"),
+            Ok(v) if v.reason.len()>2000||v.charter_clause.len()>512||v.recommended_action.len()>512=>Some("field_limit"),
+            Ok(v) if v.evidence_refs.len()>16=>Some("evidence_ref_limit"),
+            Ok(v) if v.evidence_refs.iter().any(|id|!state.artifacts.contains_key(id))=>Some("unknown_evidence"),
+            Ok(v) if matches!(v.verdict,Alignment::Drifted|Alignment::Blocked)&&v.evidence_refs.is_empty()=>Some("missing_evidence"),
+            Ok(_)=>None,
+        };
         let verdict=match result {
-            Ok(verdict) if verdict.reason.len()<=2000&&verdict.charter_clause.len()<=512&&verdict.recommended_action.len()<=512&&verdict.evidence_refs.len()<=16&&verdict.evidence_refs.iter().all(|id|state.artifacts.contains_key(id))&&(!matches!(verdict.verdict,Alignment::Drifted|Alignment::Blocked)||!verdict.evidence_refs.is_empty())=>{
+            Ok(verdict) if failure_category.is_none()=>{
                 state.supervisor_status=serde_json::to_value(verdict.verdict)?.as_str().unwrap_or("uncertain").into();
                 if context.review.supervisor_mode==Mode::Enforce&&verdict.verdict!=Alignment::Aligned{state.paused=true;state.reason=verdict.reason.clone();}
                 json!({"event":"supervisor_verdict","verdict":verdict,"at":unix_now()})
             },
-            _=>{state.supervisor_status="unavailable".into();if context.review.supervisor_mode==Mode::Enforce{state.paused=true;state.reason="independent supervisor failed or returned unverifiable evidence".into();}json!({"event":"supervisor_unavailable","at":unix_now()})},
+            _=>{state.supervisor_status="unavailable".into();if context.review.supervisor_mode==Mode::Enforce{state.paused=true;state.reason="independent supervisor failed or returned unverifiable evidence".into();}json!({"event":"supervisor_unavailable","failure_category":failure_category.unwrap_or("review_unavailable"),"at":unix_now()})},
         };
         state.last_supervisor_at=unix_now();record(state,verdict);Ok(state.clone())
     })

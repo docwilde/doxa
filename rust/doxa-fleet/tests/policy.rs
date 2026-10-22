@@ -105,6 +105,29 @@ fn supervisor_never_accepts_fabricated_completion_or_unknown_evidence(){
     let aligned=SupervisorVerdict{verdict:Alignment::Aligned,evidence_refs:vec![],charter_clause:"task".into(),reason:"aligned".into(),recommended_action:"continue".into()};assert!(apply_supervisor(&context,Ok(aligned)).unwrap().paused,"a model cannot clear a human pause");
 }
 #[test]
+fn rejected_supervisor_verdicts_record_closed_categories_without_rejected_text(){
+    for (case,expected) in [(0,"review_unavailable"),(1,"field_limit"),(2,"evidence_ref_limit"),(3,"unknown_evidence"),(4,"missing_evidence")] {
+        let (_dir,mut context)=fixture();context.review.supervisor=Some(judge::Model::parse("deepseek:reviewer").unwrap());
+        transaction(&context,|state|{state.artifacts.insert("host-known".into(),json!({"kind":"host_checkpoint"}));Ok(())}).unwrap();
+        let mut v=SupervisorVerdict{verdict:Alignment::Uncertain,evidence_refs:vec![],charter_clause:"scope".into(),reason:"untrusted-rejected-text".into(),recommended_action:"review".into()};
+        match case {
+            1=>v.charter_clause="β".repeat(257),
+            2=>v.evidence_refs=vec!["host-known".into();17],
+            3=>v.evidence_refs=vec!["untrusted-rejected-reference".into()],
+            4=>v.verdict=Alignment::Blocked,
+            _=>{},
+        }
+        let result=if case==0{Err("untrusted-provider-error".into())}else{Ok(v)};
+        let state=apply_supervisor(&context,result).unwrap();let event=state.observations.last().unwrap();
+        assert!(state.paused);assert_eq!(state.supervisor_status,"unavailable");
+        assert_eq!(event["event"],"supervisor_unavailable");assert_eq!(event["failure_category"],expected);
+        assert!(!serde_json::to_string(&state).unwrap().contains("untrusted-"));
+    }
+    let (_dir,context)=fixture();
+    let v=SupervisorVerdict{verdict:Alignment::Uncertain,evidence_refs:vec![],charter_clause:"β".repeat(256),reason:"known uncertainty".into(),recommended_action:"a".repeat(512)};
+    assert_eq!(apply_supervisor(&context,Ok(v)).unwrap().supervisor_status,"uncertain");
+}
+#[test]
 fn durable_state_recovers_dedup_and_refuses_charter_edits_symlinks_and_unknown_spend(){
     let (dir,context)=fixture();let message=envelope(&context,Kind::Status);admit(&context,&message,"b",101,Some(Ok(safe()))).unwrap();
     let recovered:Context=serde_json::from_value(serde_json::to_value(&context).unwrap()).unwrap();assert!(!admit(&recovered,&message,"b",101,Some(Ok(safe()))).unwrap().delivered);
