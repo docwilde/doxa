@@ -7,10 +7,11 @@ the stable 2.0 release has not been cut.
 
 ## 2.0.0-beta.69 — 2026-10-22
 
-**DeepSeek non-thinking workers**
+**API worker startup and recovery**
 
 - Fix **`catalog_models`** treating reasoning-effort metadata as a ban on non-thinking mode. Preserve the documented disabled-thinking choice for advertised `deepseek-flash` and `deepseek-v4-pro` models.
 - Keep unknown models and malformed metadata conservative; retain advertised reasoning levels and defaults. Pinned non-thinking Router workers can pass catalogue admission.
+- Fix **`WorkspaceReadGate`** aborting paid turns when a file does not exist. Return a tool error and retain verified usage; keep credential, path and scrub checks strict.
 
 ## 2.0.0-beta.68 — 2026-10-21
 

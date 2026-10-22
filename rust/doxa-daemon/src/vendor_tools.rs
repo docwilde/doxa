@@ -48,7 +48,16 @@ impl<'a> WorkspaceReadGate<'a> {
                 | if last { libc::O_NONBLOCK } else { libc::O_DIRECTORY };
             // SAFETY: openat receives a live directory fd and a NUL-terminated name.
             let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), flags) };
-            if fd < 0 { return Err(()); }
+            if fd < 0 {
+                // A new project often has files the worker has not created yet.
+                // Let the model handle absence without aborting a paid tool
+                // turn and losing its otherwise verified response usage.
+                // Path, credential, symlink and scrub failures remain closed.
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+                    return Ok(json!({"is_error":true,"error":"file_not_found"}));
+                }
+                return Err(());
+            }
             // SAFETY: a successful openat returns a newly owned fd.
             file = unsafe { File::from_raw_fd(fd) };
         }
@@ -120,9 +129,14 @@ mod tests {
         let scrub = |text: &str| Ok(text.replace("secret", "***"));
         let gate = WorkspaceReadGate::new(root.path(), &scrub);
         assert_eq!(gate.read(&call("src/main.rs")).unwrap()["content"], "*** text");
-        for path in ["../etc/passwd", "/etc/passwd", ".env", "src/../.env", "link", "src", "missing"] {
+        for path in ["../etc/passwd", "/etc/passwd", ".env", "src/../.env", "link", "src"] {
             assert!(gate.read(&call(path)).is_err(), "{path}");
         }
+        for path in ["missing", "new-directory/missing"] {
+            assert_eq!(gate.read(&call(path)).unwrap(), json!({"is_error":true,"error":"file_not_found"}));
+        }
+        let failed_scrub = |_: &str| Err(());
+        assert!(WorkspaceReadGate::new(root.path(), &failed_scrub).read(&call("src/main.rs")).is_err());
         fs::write(root.path().join("large.txt"), vec![b'a'; MAX_READ_BYTES as usize + 1]).unwrap();
         assert!(gate.read(&call("large.txt")).is_err());
     }
