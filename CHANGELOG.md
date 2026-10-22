@@ -17,7 +17,7 @@ the stable 2.0 release has not been cut.
 
 - Record closed rejection categories in **`apply_supervisor`** for oversized fields, invalid evidence and unavailable reviews. Rejected response text stays out of the journal.
 - Include the existing byte and evidence limits in **`SUPERVISOR_INSTRUCTIONS`** so the reviewer receives the same contract enforced by the host.
-- Fix **`fleet_scrub`** corrupting serialized review JSON. Scrub string values within the structure, preserve numeric facts, and withhold snapshots whose keys cannot be safely retained.
+- Fix **`fleet_scrub`** and **`NativeVendorGate`** corrupting structured review, handoff and tool JSON. Scrub values within the structure and withhold data whose keys cannot be safely retained.
 
 ## 2.0.0-beta.68 — 2026-10-21
 

@@ -279,6 +279,11 @@ impl<'a> NativeVendorGate<'a> {
         })
     }
     pub(super) fn audit_handle(&self)->std::sync::Arc<std::sync::Mutex<Value>>{self.audit.clone()}
+    fn scrub_arguments(&self, call: &ToolCall) -> Result<Value, ()> {
+        let mut arguments=Value::Object(call.arguments.clone());
+        crate::vendor_mcp::scrub_value(&mut arguments,self.scrub)?;
+        Ok(arguments)
+    }
     fn execute_inner<'b>(&'b mut self, call: &'b ToolCall) -> BoxFuture<'b, Result<Value, ()>> {
         if let Some((bindings, _, service, cancel)) = &self.mcp {
             if let Some(binding) = bindings.iter().find(|binding| binding.provider_name == call.name) {
@@ -311,7 +316,7 @@ impl<'a> NativeVendorGate<'a> {
         if matches!(call.name.as_str(),doxa_engines::peer_tools::LIST|doxa_engines::peer_tools::SEND|doxa_engines::peer_tools::HISTORY) {
             let checked=(|| {
                 let id=(self.scrub)(&call.id)?;
-                let arguments:Value=serde_json::from_str(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string())?).map_err(|_|())?;
+                let arguments=self.scrub_arguments(call)?;
                 Ok::<_,()>((id,arguments))
             })();
             let (id,arguments)=match checked{Ok(value)=>value,Err(())=>return Box::pin(async{Err(())})};
@@ -324,7 +329,7 @@ impl<'a> NativeVendorGate<'a> {
         }
         let start = (|| {
             let call_id = (self.scrub)(&call.id)?;
-            let arguments: Value = serde_json::from_str(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string())?).map_err(|_| ())?;
+            let arguments=self.scrub_arguments(call)?;
             let (peer, method, dispatch_arguments) = if let Some((_, handler)) = self.agent.as_ref().filter(|(rows, _)|
                 rows.iter().any(|row| row["function"]["name"] == call.name)) {
                 (handler.clone(), call.name.clone(), arguments.clone())
@@ -424,7 +429,7 @@ impl ToolGate for NativeVendorGate<'_> {
             doxa_engines::peer_tools::LIST=>"list",
             doxa_engines::peer_tools::HISTORY=>"history",_=>"other"};
         let selected=if operation=="send" {
-            serde_json::from_str::<Value>(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string()).unwrap_or_default()).ok()
+            self.scrub_arguments(call).ok()
                 .filter(|args|doxa_engines::peer_tools::validated_call(&call.name,args).is_ok())
                 .map(|args|json!({"target":args["target"],"fleet_kind":args["fleet_kind"],"artifact_refs":args["artifact_refs"],"in_reply_to":args["in_reply_to"]}))
         }else{None};
@@ -513,7 +518,7 @@ mod peer_tests {
         let dir=tempfile::tempdir().unwrap();let calls=Arc::new(AtomicUsize::new(0));let called=calls.clone();
         let handler:doxa_runtime::PeerToolHandler=Arc::new(move|_,_|{called.fetch_add(1,Ordering::SeqCst);Ok(json!({}))});
         let desk=Arc::new(PeerDesk::default());let displayed=RefCell::new(Vec::new());
-        let emit=|event|displayed.borrow_mut().push(event);let scrub=|text:&str|Ok(text.replace("fixture-secret","[redacted]"));
+        let emit=|event|displayed.borrow_mut().push(event);let scrub=|text:&str|Ok(text.replace("fixture-secret","[redacted] \"quoted\"\n"));
         let mut gate=NativeVendorGate::new(dir.path(),false,Some(handler),desk,&scrub,&emit,Arc::new(Mutex::new(Vec::new())));
         let call=peer_call(doxa_engines::peer_tools::SEND,json!({"target":"current-exact-session","text":"fixture-secret","fleet_kind":"handoff","artifact_refs":[],"in_reply_to":"host-checkpoint-is-not-a-message-id"}));
         let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
