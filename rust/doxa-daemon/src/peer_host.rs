@@ -1,4 +1,5 @@
 //! Same-scope native peer RPCs. LORE starts lazily and failed starts retry.
+#[path = "fleet_snapshot.rs"] mod fleet_snapshot;
 use doxa_lore::LoreClient;
 use doxa_peers::delivery::{self, Ledger, PeerFrame, RateLimiter, SendLimits};
 use doxa_peers::{now, presence, scope_for_cwd, PeerRecord, Registry};
@@ -831,9 +832,8 @@ impl PeerHost {
             },
             "fleet_scrub" => {
                 if self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.is_none(){return Err("Session has no fleet guard".into());}
-                let text=params["snapshot"].to_string();if text.len()>doxa_fleet::judge::MAX_INPUT{return Err("Fleet review snapshot exceeds bounds".into());}
-                let clean=self.with_lore(|lore|lore.scrub(&text).map_err(|_|"LORE scrub unavailable".into()))?;
-                let clean:Value=serde_json::from_str(&clean).map_err(|_|"Scrubbed fleet review snapshot is invalid")?;
+                let clean=self.with_lore(|lore|fleet_snapshot::scrub(params["snapshot"].clone(),
+                    &mut|text|lore.scrub(text).map_err(|_|"LORE scrub unavailable".into())))?;
                 Ok(json!({"snapshot":clean}))
             },
             "spawn_session" => {
