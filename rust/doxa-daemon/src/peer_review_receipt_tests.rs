@@ -12,8 +12,10 @@ fn canonical_lore(root:&Path)->LoreClient{
     let carrier=PathBuf::from(std::env::var_os("DOXA_LORE_RS").expect("absolute real native LORE carrier required"));
     assert!(carrier.is_absolute()&&carrier.is_file());
     let wrapper=root.join("private-lore");
-    fs::write(&wrapper,format!("#!/bin/sh\nexec /usr/bin/env -i PATH=/usr/bin:/bin HOME={} LORE_ROOT={} LORE_PROJECTS_DIR={} LORE_DISABLE_SYNC=1 LORE_DISABLE_REVIEW=1 {} \"$@\"\n",
-        quote(root),quote(&root.join("lore")),quote(&root.join("projects")),quote(&carrier))).unwrap();
+    // LoreClient's development carrier dispatch passes a Python module name;
+    // this fixture runs the real native kernel's equivalent JSONL bridge.
+    fs::write(&wrapper,format!("#!/bin/sh\nexec /usr/bin/env -i PATH=/usr/bin:/bin HOME={} TMPDIR={} LORE_ROOT={} LORE_PROJECTS_DIR={} LORE_DISABLE_SYNC=1 LORE_DISABLE_REVIEW=1 {} bridge\n",
+        quote(root),quote(root),quote(&root.join("lore")),quote(&root.join("projects")),quote(&carrier))).unwrap();
     fs::set_permissions(&wrapper,fs::Permissions::from_mode(0o700)).unwrap();
     LoreClient::spawn(&wrapper,Duration::from_secs(5)).expect("real private LORE kernel must start")
 }
