@@ -156,14 +156,15 @@ fn version_identifies_checked_protected_payload_instead_of_newer_official_cli() 
     let dir = fixture();
     let official = dir.path().join("official-codex");
     let marker = dir.path().join("executed");
-    let version: Vec<u64> = doxa_engines::codex_compact::SUPPORTED_VERSION
+    let current = doxa_engines::codex_compact::SUPPORTED_VERSION;
+    let version: Vec<u64> = current
         .split('.').map(|part| part.parse().unwrap()).collect();
     let newer_version = format!("{}.{}.{}", version[0], version[1], version[2] + 1);
     let official_script = format!("#!/bin/sh\nprintf 'official' >> \"$DOXA_VERSION_TEST_MARKER\"\nif [ \"$1\" = --version ]; then printf 'codex-cli {newer_version}\\n'; else printf 'official:%s\\n' \"$*\"; fi\n");
     fs::write(&official, official_script).unwrap();
     fs::set_permissions(&official, fs::Permissions::from_mode(0o700)).unwrap();
     let payload = dir.path().join("codex-app-server");
-    fs::write(&payload, b"#!/bin/sh\nprintf 'payload' >> \"$DOXA_VERSION_TEST_MARKER\"\nprintf 'codex-app-server 0.164.0\\n'\n").unwrap();
+    fs::write(&payload, format!("#!/bin/sh\nprintf 'payload' >> \"$DOXA_VERSION_TEST_MARKER\"\nprintf 'codex-app-server {current}\\n'\n")).unwrap();
     let receipt = dir.path().join("receipt.json");
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
     value["official_cli"] = json!(official);
@@ -178,7 +179,7 @@ fn version_identifies_checked_protected_payload_instead_of_newer_official_cli() 
             .env("DOXA_VERSION_TEST_MARKER", &marker).output().unwrap();
         assert!(result.status.success());
         let report = String::from_utf8(result.stdout).unwrap();
-        assert_eq!(report, "doxa-codex-protected 0.164.0 (provider codex-0.164.0-precompact-v1; upstream 6aaac694803004a63c6f393d153c96d22521a6b9; contract doxa-precompact-fail-closed-v1)\n");
+        assert_eq!(report, format!("doxa-codex-protected {current} (provider codex-{current}-precompact-v1; upstream {}; contract doxa-precompact-fail-closed-v1)\n",value["source_commit"].as_str().unwrap()));
         assert!(!report.contains(&newer_version));assert!(!marker.exists());
     }
     let login = Command::new(dir.path().join("codex")).args(["login", "status"])

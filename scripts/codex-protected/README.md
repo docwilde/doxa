@@ -62,13 +62,29 @@ none of these commands require account credentials or external model calls.
 See each verifier's `--help` for its exact options. These checks do not establish
 real-account model availability or live sandbox acceptance.
 
-## Reviewed0.164.0 port
+## Reviewed 0.164.0 port
 
-The0.163.0-to0.164.0 safety diff remains subject to manual semantic review;
+The 0.163.0-to-0.164.0 safety diff remains subject to manual semantic review;
 the automatic updater still refuses unreviewed safety-sensitive paths. The
-protection port preserves0.164's structured approval source/cancellation
+protection port preserves 0.164's structured approval source/cancellation
 metadata when a live-auto switch refuses a stale result, and uses the live
 step policy for remote execution routing. A regression exercises both an
 already-pending approval and refusal before review. Current payloads use
-Rust1.99.1 and the official source-pinned V8152.2.0 archive/binding manifests;
-reviewed older receipts retain Rust1.95.0 for migration and rollback.
+Rust 1.99.1 and the official source-pinned V8 152.2.0 archive/binding manifests;
+reviewed older receipts retain Rust 1.95.0 for migration and rollback.
+
+## Retained Docker sessions after an upgrade
+
+Existing Docker sessions keep the exact image recorded in their isolation
+manifest. Installing a new host provider or selecting a new-session image
+does not replace that saved image. A saved image with Codex 0.163.0 cannot
+resume a protected thread under a DOXA build requiring 0.164.0. The version
+check refuses it before thread/resume or turn submission. The session remains
+available for inspection, with its transcript and clean checkpoint unchanged.
+
+Retain the matching previous DOXA release and saved image to continue that
+session, or use an explicit reviewed migration. Same-backend Docker image
+replacement is not implemented. Do not edit the image digest, isolation
+manifest, provider receipt or conversation checkpoint to bypass the check.
+Isolation changes require their normal explicit confirmation; the application
+does not fall back to a native provider or broaden accepted provider versions.

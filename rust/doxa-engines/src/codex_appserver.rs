@@ -369,6 +369,9 @@ impl AppServerDriver {
                     // in its suffix never becomes proof of the provider hook contract.
                     let version = initialized["userAgent"].as_str().and_then(provider_version);
                     if version != Some(crate::codex_compact::SUPPORTED_VERSION) {
+                        if driver.options.resume_thread.is_some() {
+                            return Err(AppServerError::Protocol("Saved Codex provider is incompatible with this DOXA release; the saved thread was not resumed. Docker sessions retain their pinned image: use the matching DOXA release or an explicit reviewed migration. History and checkpoint are retained"));
+                        }
                         return Err(AppServerError::Protocol("Codex build has no verified DOXA compaction hook contract"));
                     }
                     if !initialized["userAgent"].as_str().is_some_and(|agent| agent.starts_with(
@@ -1261,17 +1264,18 @@ for line in sys.stdin:
         let desktop = "Codex Desktop/0.164.0 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)";
         assert_eq!(provider_version(desktop), Some(crate::codex_compact::SUPPORTED_VERSION));
         assert_eq!(provider_version("codex_cli_rs/0.164.0"), Some(crate::codex_compact::SUPPORTED_VERSION));
+        let current = crate::codex_compact::SUPPORTED_VERSION;
         for agent in [
-            "Codex Desktop/0.1.0 (doxa; 0.163.0)",
-            "codex_cli_rs/0.1.0 (client/0.163.0)",
-            "Codex Desktop (doxa/0.163.0)",
-            "codex_cli_rs (doxa; 0.163.0)",
-            "unknown/0.163.0 (doxa; 0.163.0)",
-            "doxa/0.163.0",
-            "Codex Desktop/unknown (doxa; 0.163.0)",
-            "Codex Desktop/0.163.0-client",
+            format!("Codex Desktop/0.1.0 (doxa; {current})"),
+            format!("codex_cli_rs/0.1.0 (client/{current})"),
+            format!("Codex Desktop (doxa/{current})"),
+            format!("codex_cli_rs (doxa; {current})"),
+            format!("unknown/{current} (doxa; {current})"),
+            format!("doxa/{current}"),
+            format!("Codex Desktop/unknown (doxa; {current})"),
+            format!("Codex Desktop/{current}-client"),
         ] {
-            assert_ne!(provider_version(agent), Some(crate::codex_compact::SUPPORTED_VERSION), "{agent}");
+            assert_ne!(provider_version(&agent), Some(current), "{agent}");
         }
     }
 

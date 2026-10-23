@@ -91,6 +91,17 @@ fn immutable_creation_label_survives_current_network_profile_change(){
     assert!(validate_inspect(&value,&changed).is_err());
 }
 #[test]
+fn saved_docker_image_cannot_be_replaced_by_a_new_provider_image(){
+    let root=tempfile::tempdir().unwrap();let value=manifest(root.path());
+    let saved=value.policy.as_ref().unwrap().image.clone();
+    let mut replacement=inspection(&value);
+    replacement["Config"]["Image"]=json!(format!("sha256:{}","d".repeat(64)));
+    assert!(validate_inspect(&value,&replacement).is_err());
+    let args=create_args(&value).unwrap();
+    assert_eq!(args[args.len()-2].to_string_lossy(),saved);
+    assert_eq!(value.policy.as_ref().unwrap().image,saved);
+}
+#[test]
 fn mount_replacement_and_symlink_components_are_refused(){
     let root=tempfile::tempdir().unwrap();let value=manifest(root.path());let baseline=inspection(&value);
     fs::rename(&value.checkout,root.path().join("original")).unwrap();
