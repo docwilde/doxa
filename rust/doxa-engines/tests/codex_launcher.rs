@@ -163,7 +163,7 @@ fn version_identifies_checked_protected_payload_instead_of_newer_official_cli() 
     fs::write(&official, official_script).unwrap();
     fs::set_permissions(&official, fs::Permissions::from_mode(0o700)).unwrap();
     let payload = dir.path().join("codex-app-server");
-    fs::write(&payload, b"#!/bin/sh\nprintf 'payload' >> \"$DOXA_VERSION_TEST_MARKER\"\nprintf 'codex-app-server 0.163.0\\n'\n").unwrap();
+    fs::write(&payload, b"#!/bin/sh\nprintf 'payload' >> \"$DOXA_VERSION_TEST_MARKER\"\nprintf 'codex-app-server 0.164.0\\n'\n").unwrap();
     let receipt = dir.path().join("receipt.json");
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
     value["official_cli"] = json!(official);
@@ -178,7 +178,7 @@ fn version_identifies_checked_protected_payload_instead_of_newer_official_cli() 
             .env("DOXA_VERSION_TEST_MARKER", &marker).output().unwrap();
         assert!(result.status.success());
         let report = String::from_utf8(result.stdout).unwrap();
-        assert_eq!(report, "doxa-codex-protected 0.163.0 (provider codex-0.163.0-precompact-v1; upstream 83086188ae0614bd882818ff1aa23f3194962012; contract doxa-precompact-fail-closed-v1)\n");
+        assert_eq!(report, "doxa-codex-protected 0.164.0 (provider codex-0.164.0-precompact-v1; upstream 6aaac694803004a63c6f393d153c96d22521a6b9; contract doxa-precompact-fail-closed-v1)\n");
         assert!(!report.contains(&newer_version));assert!(!marker.exists());
     }
     let login = Command::new(dir.path().join("codex")).args(["login", "status"])
