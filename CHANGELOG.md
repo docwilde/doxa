@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.71 — 2026-10-23
+
+**Reviewed peer messages**
+
+- Fix **`semantic_with_receipt_for_envelope`** rejecting supervised peer messages when scrubbing redacts host metadata. Bind the original envelope and reviewed message separately.
+- Validate **`cache_semantic_reviewed_with_receipt`** against the exact scrubbed request and typed verdict. Keep sparse scrubbed replacements for audit; older entries remain readable.
+
 ## 2.0.0-beta.70 — 2026-10-23
 
 **Protected Codex compatibility**
