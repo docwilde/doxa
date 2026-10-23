@@ -3,3 +3,12 @@ members = ["rust/*"]
 default-members = ["rust/doxa-tui", "rust/doxa-daemon"]
 exclude = ["scripts/rust_ui_bench"]
 resolver = "2"
+
+# Native compaction carriers are deliberately bounded to 256MiB. Full DWARF
+# makes Rust 1.99 debug daemons exceed that boundary before provider startup.
+# Retain source-line backtraces without enlarging the trusted executable limit.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"

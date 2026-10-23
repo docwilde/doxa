@@ -141,6 +141,12 @@ fn legacy_exec_refusal_preserves_saved_thread_transcript_and_never_spawns_provid
 #[test]
 #[cfg(target_os = "linux")]
 fn explicit_legacy_migration_resumes_exact_provider_thread_without_creating_one() {
+    let daemon=fs::canonicalize(env!("CARGO_BIN_EXE_doxa-daemon")).unwrap();
+    let daemon_bytes=fs::metadata(&daemon).unwrap().len();
+    assert!(daemon_bytes<=256*1024*1024,
+        "debug daemon is {daemon_bytes} bytes; bounded native carriers require the workspace's line-tables-only debug profiles");
+    doxa_engines::compact_hook::executable_digest(&daemon)
+        .expect("the built daemon must pass the unchanged native carrier ownership and byte limit");
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let store = seed(root);
