@@ -91,7 +91,7 @@ fn actual_http_review_propagates_one_message_bound_receipt_without_secret_data()
         let data=json!({"model":"fixture-model","choices":[{"finish_reason":"stop","message":{"content":raw_safe().to_string()}}],"usage":{"prompt_tokens":100,"completion_tokens":10}}).to_string();
         write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}",data.len()).unwrap();
     });
-    let response=evaluate_request_at_bound(&context,&model,&body,&endpoint,"fixture-secret-never-log",message_sha256).unwrap();
+    let response=evaluate_request_at_bound(&context,&model,&body,&endpoint,"fixture-secret-never-log",message_sha256,true).unwrap();
     worker.join().unwrap();
     let proof=response.review_receipt.unwrap();
     let verdict:SemanticVerdict=serde_json::from_value(response.result).unwrap();
