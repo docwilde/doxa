@@ -152,15 +152,16 @@ fn actual_lore_scrub_keeps_original_reviewed_and_http_bindings_through_peer_admi
     let charter=Charter{version:1,fleet_id:"scrub-receipt".into(),task:format!("Scoped findings HEX_RUN={hex_run}"),repo:dir.path().display().to_string(),allowed_paths:vec!["src".into()],required_evidence:vec![],worker_limit:2,run_budget_usd:Some(1.0),deadline:0,human_actions:vec![],test_recipe:None};
     let assignments=["sender","recipient"].into_iter().enumerate().map(|(index,id)|Assignment{id:format!("{id}-assignment"),session_id:id.into(),pid:std::process::id() as i32+index as i32,role:"worker".into(),task:"Scoped findings".into(),cwd:dir.path().display().to_string(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}).collect();
     let model=doxa_fleet::judge::Model::parse("deepseek:fixture-model").unwrap();
-    let context=Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments,review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(model.clone()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("guard.json")};
+    let context=Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments,review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(model.clone()),budget_usd:1.0,input_usd_per_million:1.0,output_usd_per_million:1.0,..Default::default()},state_path:dir.path().join("guard.json")};
     context.validate().unwrap();
     let original=Envelope::issue(&context,"sender","recipient",Kind::Status,"\"".repeat(doxa_fleet::MAX_BODY),None).unwrap();
     doxa_fleet::validate_before_review(&context,&original,"recipient",std::process::id() as i32).unwrap();
     let original_hash=doxa_fleet::hash(&original).unwrap();
-    let listener=TcpListener::bind("127.0.0.1:0").unwrap();let endpoint=format!("http://{}/review",listener.local_addr().unwrap());
+    let listener=TcpListener::bind("127.0.0.1:0").unwrap();listener.set_nonblocking(true).unwrap();let endpoint=format!("http://{}/review",listener.local_addr().unwrap());
     let state_path=context.state_path.clone();let source_hash=original_hash.clone();let charter_hash=context.charter_sha256.clone();let raw_hex=hex_run.clone();
     let server=std::thread::spawn(move||{
-        let(mut stream,_)=listener.accept().unwrap();let body=read_request(&mut stream);
+        let deadline=std::time::Instant::now()+Duration::from_secs(10);
+        let(mut stream,_)=loop{match listener.accept(){Ok(value)=>break value,Err(error)if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(std::time::Instant::now()<deadline,"funded fixture received no review HTTP request");std::thread::sleep(Duration::from_millis(5));},Err(error)=>panic!("{error}")}};let body=read_request(&mut stream);
         let text=body["messages"][1]["content"].as_str().unwrap();let input:Value=serde_json::from_str(text).unwrap();
         let reviewed:Envelope=serde_json::from_value(input["message"].clone()).unwrap();
         assert_eq!(reviewed.body,"\"".repeat(doxa_fleet::MAX_BODY));
