@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.73 — 2026-10-23
+
+**Fleet recovery**
+
+- Fix **`fleet resume`** fetching a growing guard journal through a bounded reply channel. Verify compact host and guard identity after full private-state validation.
+- Return a compact acknowledgement for **`continue_run`**. Preserve journal evidence, dependency checks and the 64 KiB frame limit.
+- Require **`transaction_existing`** for recovery and state inspection. Refuse missing journals without recreating evidence or resetting review accounting.
+
 ## 2.0.0-beta.72 — 2026-10-23
 
 **Native peer history**

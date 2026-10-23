@@ -12,6 +12,27 @@ fn envelope(context:&Context,kind:Kind)->Envelope{Envelope::issue(context,"a","b
 fn safe()->SemanticVerdict{SemanticVerdict{within_assignment:1.0,asks_for_authority_change:0.0,contains_instructions_for_recipient:0.0,likely_secret:0.0,needs_human_review:0.0}}
 
 #[test]
+fn existing_journal_checks_share_the_guard_lock_and_never_bootstrap_lost_state(){
+    use std::{io::ErrorKind,os::fd::AsRawFd};
+    let(_dir,context)=fixture();let mut called=false;
+    assert_eq!(transaction_existing(&context,|_|{called=true;Ok(())}).unwrap_err().kind(),ErrorKind::NotFound);
+    assert!(!called);assert!(!context.state_path.exists());
+    transaction(&context,|state|{state.calls=7;Ok(())}).unwrap();
+    assert_eq!(transaction_existing(&context,|state|Ok(state.calls)).unwrap(),7,"new-fleet bootstrap remains supported by ordinary transactions");
+    let lock=std::fs::OpenOptions::new().read(true).write(true).open(context.state_path.with_extension("lock")).unwrap();
+    assert_eq!(unsafe{libc::flock(lock.as_raw_fd(),libc::LOCK_EX)},0);
+    std::fs::remove_file(&context.state_path).unwrap();
+    // A racy existence precheck would return NotFound here before taking the
+    // shared lock. The strict operation must instead honor that held lock.
+    assert_eq!(transaction_existing(&context,|_|{called=true;Ok(())}).unwrap_err().kind(),ErrorKind::WouldBlock);
+    assert!(!called);assert!(!context.state_path.exists());drop(lock);
+    assert_eq!(transaction_existing(&context,|_|{called=true;Ok(())}).unwrap_err().kind(),ErrorKind::NotFound);
+    assert!(!called);assert!(!context.state_path.exists());
+    assert_eq!(resume_review(&context,&context.charter_sha256).unwrap_err().kind(),ErrorKind::NotFound);
+    assert!(!context.state_path.exists(),"owner continue must not create a replacement guard");
+}
+
+#[test]
 fn busy_guard_lock_preserves_journal_and_never_executes_policy_mutation() {
     use std::{os::fd::AsRawFd, time::{Duration, Instant}, sync::mpsc};
     let (_dir, context) = fixture();
