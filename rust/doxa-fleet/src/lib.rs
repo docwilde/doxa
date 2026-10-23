@@ -231,6 +231,9 @@ pub fn predecessor_released(context:&Context,state:&State,predecessor:&str,turn_
 pub struct CachedSemantic {pub envelope_sha256:String,pub result:Result<SemanticVerdict,String>,
     #[serde(default,skip_serializing_if="Option::is_none")] pub review_receipt:Option<judge::ReviewReceipt>,
     #[serde(default,skip_serializing_if="Option::is_none")] pub verdict_sha256:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub reviewed_message_sha256:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub request_sha256:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub reviewed_message_patch:Option<serde_json::Map<String,Value>>,
 }
 pub fn read_private<T: for<'a> Deserialize<'a>>(path:&Path,max:u64)->io::Result<T>{
     let mut file=fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path)?;
@@ -278,6 +281,47 @@ pub fn cache_semantic(context:&Context,envelope:&Envelope,result:Result<Semantic
 /// Preserve per-call evidence with the exact envelope even after observations
 /// rotate. Older callers and journals remain explicitly unbound.
 pub fn cache_semantic_with_receipt(context:&Context,envelope:&Envelope,result:Result<SemanticVerdict,String>,review_receipt:Option<judge::ReviewReceipt>)->io::Result<()> {
+    if review_receipt.as_ref().is_some_and(|receipt|receipt.reviewed_message_sha256.is_some()) {
+        return Err(invalid("reviewed semantic receipt requires its actual scrubbed snapshot"));
+    }
+    cache_semantic_bound(context,envelope,result,review_receipt,None)
+}
+/// Bind all reviewed inputs before deriving sparse sanitized replacements.
+/// Full snapshots and raw previous values never enter the persistent patch.
+pub fn cache_semantic_reviewed_with_receipt(context:&Context,envelope:&Envelope,snapshot:&Value,result:Result<SemanticVerdict,String>,review_receipt:Option<judge::ReviewReceipt>)->io::Result<()> {
+    let reviewed=judge::reviewed_envelope(snapshot)?;
+    let reviewed_hash=hash(&reviewed)?;let request_hash=judge::semantic_request_sha256(context,snapshot)?;
+    if review_receipt.as_ref().is_some_and(|receipt|receipt.reviewed_message_sha256.as_deref()!=Some(reviewed_hash.as_str()) || receipt.request_sha256!=request_hash) {
+        return Err(invalid("semantic review receipt belongs to a different scrubbed view or request"));
+    }
+    cache_semantic_bound(context,envelope,result,review_receipt,Some((reviewed_hash,request_hash,reviewed)))
+}
+fn reviewed_message_patch(original:&Envelope,reviewed:&Envelope)->io::Result<serde_json::Map<String,Value>> {
+    let source=serde_json::to_value(original)?;let clean=serde_json::to_value(reviewed)?;
+    let source=source.as_object().ok_or_else(||invalid("original semantic envelope is not an object"))?;
+    let clean=clean.as_object().ok_or_else(||invalid("reviewed semantic envelope is not an object"))?;
+    if source.len()!=clean.len() || source.keys().ne(clean.keys()) || source.iter().any(|(key,value)|
+        std::mem::discriminant(value)!=std::mem::discriminant(&clean[key])) {
+        return Err(invalid("semantic review changed envelope keys or value types"));
+    }
+    Ok(clean.iter().filter(|(key,value)|source.get(*key)!=Some(*value)).map(|(key,value)|(key.clone(),value.clone())).collect())
+}
+/// Reconstruct the typed reviewed view without touching a journal or cache.
+/// Require the canonical sparse form: no new keys, type changes, redundant
+/// replacements or values discarded by typed deserialization are accepted.
+pub fn reviewed_envelope_from_patch(original:&Envelope,patch:&serde_json::Map<String,Value>)->io::Result<Envelope>{
+    let mut value=serde_json::to_value(original)?;
+    let fields=value.as_object_mut().ok_or_else(||invalid("reviewed patch source is not an object"))?;
+    for(key,replacement)in patch {
+        let field=fields.get_mut(key).ok_or_else(||invalid("reviewed patch introduced a field"))?;
+        if std::mem::discriminant(field)!=std::mem::discriminant(replacement){return Err(invalid("reviewed patch changed a field type"));}
+        *field=replacement.clone();
+    }
+    let reviewed:Envelope=serde_json::from_value(value).map_err(|_|invalid("reviewed patch is not a typed envelope"))?;
+    if reviewed_message_patch(original,&reviewed)?!=*patch {return Err(invalid("reviewed patch is not canonical and sparse"));}
+    Ok(reviewed)
+}
+fn cache_semantic_bound(context:&Context,envelope:&Envelope,result:Result<SemanticVerdict,String>,review_receipt:Option<judge::ReviewReceipt>,reviewed:Option<(String,String,Envelope)>)->io::Result<()> {
     transaction(context,|state|{
         if state.semantic_cache.len()>=10_000{return Err(invalid("fleet semantic journal ceiling reached"));}
         let refusal=match &result{Ok(verdict)=>{verdict.validate()?;verdict.risky(context.review.risk_threshold)},Err(_)=>context.review.strict_unavailable||!envelope.kind.ordinary()};
@@ -289,15 +333,34 @@ pub fn cache_semantic_with_receipt(context:&Context,envelope:&Envelope,result:Re
         if review_receipt.as_ref().is_some_and(|receipt|receipt.verdict_sha256!=verdict_sha256) {
             return Err(invalid("semantic review receipt belongs to a different verdict"));
         }
-        state.semantic_cache.insert(envelope.message_id.clone(),CachedSemantic{envelope_sha256:envelope_sha256.clone(),result:result.clone(),review_receipt:review_receipt.clone(),verdict_sha256:verdict_sha256.clone()});
-        record(state,json!({"event":"outbound_semantic","id":envelope.message_id,"input_sha256":envelope_sha256,"result":result,"review_receipt":review_receipt,"verdict_sha256":verdict_sha256,"at":unix_now()}));
+        let reviewed_message_sha256=reviewed.as_ref().map(|value|value.0.clone());let request_sha256=reviewed.as_ref().map(|value|value.1.clone());let reviewed_message_patch=reviewed.as_ref().map(|value|reviewed_message_patch(envelope,&value.2)).transpose()?;
+        state.semantic_cache.insert(envelope.message_id.clone(),CachedSemantic{envelope_sha256:envelope_sha256.clone(),result:result.clone(),review_receipt:review_receipt.clone(),verdict_sha256:verdict_sha256.clone(),reviewed_message_sha256:reviewed_message_sha256.clone(),request_sha256:request_sha256.clone(),reviewed_message_patch:reviewed_message_patch.clone()});
+        record(state,json!({"event":"outbound_semantic","id":envelope.message_id,"input_sha256":envelope_sha256,"reviewed_message_sha256":reviewed_message_sha256,"request_sha256":request_sha256,"reviewed_message_patch":reviewed_message_patch,"result":result,"review_receipt":review_receipt,"verdict_sha256":verdict_sha256,"at":unix_now()}));
         if refusal&&context.review.message_mode==Mode::Enforce{state.paused=true;state.reason="outgoing fleet message quarantined for human review".into();return Err(invalid("outgoing fleet message quarantined for human review"));}
         Ok(())
     })
 }
 pub fn cached_semantic(context:&Context,envelope:&Envelope)->io::Result<Option<Result<SemanticVerdict,String>>>{
     let envelope_hash=hash(envelope)?;
-    transaction(context,|state|Ok(state.semantic_cache.get(&envelope.message_id).filter(|cached|cached.envelope_sha256==envelope_hash).map(|cached|cached.result.clone())))
+    transaction(context,|state|{
+        let Some(cached)=state.semantic_cache.get(&envelope.message_id).filter(|cached|cached.envelope_sha256==envelope_hash) else{return Ok(None);};
+        let verdict=cached.result.as_ref().ok().map(hash).transpose()?;
+        if cached.verdict_sha256.as_ref().is_some_and(|expected|Some(expected)!=verdict.as_ref()) {
+            return Err(invalid("cached semantic verdict binding changed"));
+        }
+        if let Some(receipt)=&cached.review_receipt {
+            if receipt.message_sha256.as_deref()!=Some(envelope_hash.as_str()) || receipt.verdict_sha256!=verdict || receipt.reviewed_message_sha256!=cached.reviewed_message_sha256
+                || cached.request_sha256.as_ref().is_some_and(|expected|*expected!=receipt.request_sha256)
+                || receipt.reviewed_message_sha256.is_some()&&(cached.request_sha256.as_deref()!=Some(receipt.request_sha256.as_str())||cached.verdict_sha256!=verdict) {
+                return Err(invalid("cached semantic receipt binding changed"));
+            }
+        }
+        if let Some(patch)=&cached.reviewed_message_patch {
+            let reviewed=reviewed_envelope_from_patch(envelope,patch)?;
+            if cached.reviewed_message_sha256.as_deref()!=Some(hash(&reviewed)?.as_str()) {return Err(invalid("cached reviewed patch binding changed"));}
+        }else if cached.reviewed_message_sha256.is_some(){return Err(invalid("cached reviewed patch missing"));}
+        Ok(Some(cached.result.clone()))
+    })
 }
 
 fn deterministic(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,state:&mut State)->io::Result<()> {

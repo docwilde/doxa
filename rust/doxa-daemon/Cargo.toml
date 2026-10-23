@@ -1,6 +1,6 @@
 [package]
 name = "doxa-daemon"
-version = "2.0.0-beta.70"
+version = "2.0.0-beta.71"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -36,4 +36,4 @@ tempfile = "3"
 doxa-tui = { path = "../doxa-tui" }
 
 [features]
-local-test-server = ["doxa-vendors/local-test-server", "doxa-router/test-transport"]
+local-test-server = ["doxa-vendors/local-test-server", "doxa-router/test-transport", "doxa-fleet/test-transport"]
