@@ -11,6 +11,7 @@ the stable 2.0 release has not been cut.
 
 - Fix **`request_approval`** compatibility with Codex 0.164.0. Preserve reviewer and cancellation metadata when live auto denies a pending approval.
 - Pin **`toolchain`** and **`v8_inputs`** to Rust 1.99.1 and V8 152.2.0. Retain exact Rust 1.95.0 provenance for reviewed older installations.
+- Fix **`initialized_contract`** rejecting saved Docker sessions after provider upgrades. Retain reviewed provider identities across future updates and preserve each saved image.
 
 **Representative routing tasks**
 
@@ -19,7 +20,7 @@ the stable 2.0 release has not been cut.
 
 **Message review evidence**
 
-- Fix **`cache_semantic_with_receipt`** linking judge timing by equal scores. Retain unique invocation, request, envelope and verdict bindings when the 256-event history rotates; older entries remain explicitly unbound.
+- Fix ambiguous judge timing in **`review_usage`**. Retain unique invocation, request, envelope and verdict bindings when the 256-event history rotates; older entries remain explicitly unbound.
 
 ## 2.0.0-beta.69 — 2026-10-22
 
