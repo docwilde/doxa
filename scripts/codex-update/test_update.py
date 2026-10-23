@@ -258,12 +258,13 @@ class UpdateTests(unittest.TestCase):
         original=update.load(raw)["contracts"]
         old=update.baseline(update.ROOT)
         first=update.retained_contracts(raw,old)
-        next_pin=dict(old,version="0.165.0",source_commit="c"*40,patch_sha256="d"*64)
+        major,minor,_=map(int,old["version"].split('.'))
+        next_pin=dict(old,version=f"{major}.{minor+1}.0",source_commit="c"*40,patch_sha256="d"*64)
         second=update.retained_contracts(first,next_pin)
         rows={row["version"]:row for row in update.load(second)["contracts"]}
         for identity in original+[old,next_pin]:
             self.assertEqual({key:identity[key] for key in ("version","source_commit","patch_sha256")},rows[identity["version"]])
-        self.assertIn("0.163.0",rows);self.assertIn("0.164.0",rows);self.assertIn("0.165.0",rows)
+        self.assertIn("0.163.0",rows);self.assertIn(old["version"],rows);self.assertIn(next_pin["version"],rows)
         self.assertEqual(second,update.retained_contracts(second,next_pin))
 
     def test_contract_history_rejects_conflicts_unknown_fields_duplicates_and_overflow(self):
