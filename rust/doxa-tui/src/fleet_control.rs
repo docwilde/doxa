@@ -588,6 +588,10 @@ fn verify_resume_identity(context:&doxa_fleet::Context,session_id:&str,identity:
     }
     Ok(())
 }
+fn validate_resume_guard(context:&doxa_fleet::Context,rows:&[Value])->io::Result<()>{
+    context.validate()?;
+    doxa_fleet::transaction_existing(context,|state|validate_dependency_resume(context,state,rows))
+}
 
 pub fn resume(root: &Path, id: &str) -> io::Result<()> {
     let _signals = Signals::install()?;
@@ -649,9 +653,7 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
     let quiet = seconds(&value["spec"]["quiescence_grace_s"].as_f64().or_else(|| value["spec"]["quiet_dwell_s"].as_f64()).unwrap_or(5.0).to_string())?;
     if !value["supervision"].is_null() {
         let context:doxa_fleet::Context=serde_json::from_value(value["supervision"]["context"].clone()).map_err(|_|invalid("fleet supervision context is invalid"))?;
-        context.validate()?;
-        let guard=doxa_fleet::transaction(&context,|state|Ok(state.clone()))?;
-        validate_dependency_resume(&context,&guard,&rows)?;
+        validate_resume_guard(&context,&rows)?;
         for slot in &mut slots {
             let identity=rpc(&mut slot.client,"fleet_identity",json!({"validate_guard":true}))?;
             verify_resume_identity(&context,&slot.session.id,&identity)?;
@@ -1630,6 +1632,16 @@ mod tests {
         let mut legacy=identity.clone();legacy.as_object_mut().unwrap().remove("guard");assert!(verify_resume_identity(&context,"worker",&legacy).is_err());
         let mut changed=context.clone();changed.review.budget_usd=2.0;assert_eq!(changed.charter_sha256,context.charter_sha256);assert!(verify_resume_identity(&changed,"worker",&identity).is_err(),"the charter alone cannot qualify a different review context");
         assert!(verify_resume_identity(&context,"other",&identity).is_err());
+    }
+    #[test]
+    fn controller_resume_requires_an_existing_guard_without_recreating_it(){
+        let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
+        let charter=doxa_fleet::Charter{version:1,fleet_id:"resume".into(),task:"Scoped work".into(),repo:"/repo".into(),allowed_paths:vec![String::new()],required_evidence:vec![],worker_limit:1,run_budget_usd:Some(1.0),deadline:0,human_actions:vec![],test_recipe:None};
+        let context=doxa_fleet::Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments:vec![doxa_fleet::Assignment{id:"worker-id".into(),session_id:"worker".into(),pid:42,role:"worker".into(),task:"Inspect source".into(),cwd:"/repo".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}],review:Default::default(),state_path:dir.path().join("guard.json")};
+        let rows=vec![json!({"phase":"dispatched"})];
+        assert_eq!(validate_resume_guard(&context,&rows).unwrap_err().kind(),io::ErrorKind::NotFound);assert!(!context.state_path.exists());
+        doxa_fleet::transaction(&context,|state|{state.calls=7;Ok(())}).unwrap();assert!(validate_resume_guard(&context,&rows).is_ok());
+        fs::remove_file(&context.state_path).unwrap();assert_eq!(validate_resume_guard(&context,&rows).unwrap_err().kind(),io::ErrorKind::NotFound);assert!(!context.state_path.exists());
     }
 
     #[test]

@@ -798,7 +798,7 @@ impl PeerHost {
         let assignment_sha256=doxa_fleet::hash(own).map_err(|error|error.to_string())?;
         // Validate the complete private journal under its ordinary lock. Only
         // its identity leaves the host; observations and receipts stay intact.
-        doxa_fleet::transaction(&context,|state|Ok(json!({"version":1,"context_sha256":context_sha256,
+        doxa_fleet::transaction_existing(&context,|state|Ok(json!({"version":1,"context_sha256":context_sha256,
             "charter_sha256":state.charter_sha256,"assignments_sha256":state.assignments_sha256,
             "assignment_sha256":assignment_sha256}))).map_err(|error|error.to_string())
     }

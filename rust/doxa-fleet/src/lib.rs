@@ -252,12 +252,20 @@ pub fn save_private(path:&Path,value:&impl Serialize)->io::Result<()> {
 }
 /// All host processes serialize policy and reservations on the same durable file.
 pub fn transaction<T>(context:&Context,work:impl FnOnce(&mut State)->io::Result<T>)->io::Result<T>{
+    transaction_inner(context,true,work)
+}
+/// Continuity checks and owner recovery require an existing journal. Check
+/// existence while holding the same lock as validation, never before locking.
+pub fn transaction_existing<T>(context:&Context,work:impl FnOnce(&mut State)->io::Result<T>)->io::Result<T>{
+    transaction_inner(context,false,work)
+}
+fn transaction_inner<T>(context:&Context,create_allowed:bool,work:impl FnOnce(&mut State)->io::Result<T>)->io::Result<T>{
     let lock=fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(context.state_path.with_extension("lock"))?;
     let meta=lock.metadata()?;
     if !meta.is_file()||meta.nlink()!=1||meta.uid()!=unsafe{libc::geteuid()}||meta.mode()&0o077!=0{return Err(invalid("untrusted fleet state lock"));}
     doxa_state::lock_exclusive_bounded(&lock)?;
     let assignments_sha256=hash(&context.assignments)?;
-    let mut state=match read_private::<State>(&context.state_path,MAX_STATE){Ok(state)=>state,Err(err) if err.kind()==io::ErrorKind::NotFound=>State{charter_sha256:context.charter_sha256.clone(),assignments_sha256:assignments_sha256.clone(),supervisor_status:if context.review.supervisor.is_some(){"pending"}else{"off"}.into(),..Default::default()},Err(err)=>return Err(err)};
+    let mut state=match read_private::<State>(&context.state_path,MAX_STATE){Ok(state)=>state,Err(err) if create_allowed&&err.kind()==io::ErrorKind::NotFound=>State{charter_sha256:context.charter_sha256.clone(),assignments_sha256:assignments_sha256.clone(),supervisor_status:if context.review.supervisor.is_some(){"pending"}else{"off"}.into(),..Default::default()},Err(err) if err.kind()==io::ErrorKind::NotFound=>return Err(io::Error::new(io::ErrorKind::NotFound,"fleet guard journal is missing; resume withheld")),Err(err)=>return Err(err)};
     if state.charter_sha256!=context.charter_sha256{return Err(invalid("fleet charter changed; admission withheld"));}
     // Older private journals gain this binding on their first beta.11 read.
     if state.assignments_sha256.is_empty(){state.assignments_sha256=assignments_sha256.clone();}
@@ -462,5 +470,5 @@ pub fn apply_supervisor(context:&Context,result:Result<SupervisorVerdict,String>
 }
 pub fn resume_review(context:&Context,expected_hash:&str)->io::Result<State>{
     context.validate()?;if expected_hash!=context.charter_sha256{return Err(invalid("human resume requires the reviewed charter hash"));}
-    transaction(context,|state|{if state.isolation_change.is_some(){return Err(invalid("isolation change is incomplete; resume withheld"));}if state.accounting_unknown{return Err(invalid("review spend is unknown; reconcile before resume"));}if state.reserved_usd>=context.review.budget_usd||state.calls>=context.review.max_calls{return Err(invalid("review budget exhausted"));}state.paused=false;state.reason.clear();record(state,json!({"event":"human_resume","charter_sha256":expected_hash,"at":unix_now()}));Ok(state.clone())})
+    transaction_existing(context,|state|{if state.isolation_change.is_some(){return Err(invalid("isolation change is incomplete; resume withheld"));}if state.accounting_unknown{return Err(invalid("review spend is unknown; reconcile before resume"));}if state.reserved_usd>=context.review.budget_usd||state.calls>=context.review.max_calls{return Err(invalid("review budget exhausted"));}state.paused=false;state.reason.clear();record(state,json!({"event":"human_resume","charter_sha256":expected_hash,"at":unix_now()}));Ok(state.clone())})
 }

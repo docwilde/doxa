@@ -45,6 +45,10 @@ fn large_persisted_guard_has_a_compact_validated_resume_identity_and_owner_ackno
     let refused=client.call("fleet_resume",json!({"compact":true,"charter_sha256":"different"}).as_object().unwrap().clone()).unwrap();assert_eq!(refused["ok"],false);
     let resumed=client.call("fleet_resume",json!({"compact":true,"charter_sha256":context.charter_sha256}).as_object().unwrap().clone()).unwrap();assert_eq!(resumed["ok"],true);assert_eq!(resumed["resumed"],true);assert_eq!(resumed["charter_sha256"],context.charter_sha256);assert!(resumed.to_string().len()<1024);
     let after:doxa_fleet::State=doxa_fleet::read_private(&context.state_path,doxa_fleet::MAX_STATE).unwrap();assert!(!after.paused);assert_eq!(after.observations[0],observation);assert!(fs::metadata(&context.state_path).unwrap().len()>doxa_runtime::MAX_FRAME_BYTES as u64);
+    fs::remove_file(&context.state_path).unwrap();
+    for (method,params) in [("fleet_identity",json!({"validate_guard":true})),("fleet_resume",json!({"compact":true,"charter_sha256":context.charter_sha256})),("fleet_resume",json!({"charter_sha256":context.charter_sha256}))]{
+        let refused=client.call(method,params.as_object().unwrap().clone()).unwrap();assert_eq!(refused["ok"],false,"{method}");assert!(refused["error"].as_str().unwrap().contains("journal is missing"));assert!(!context.state_path.exists(),"{method} recreated a lost guard");
+    }
     daemon.shutdown();
 }
 
