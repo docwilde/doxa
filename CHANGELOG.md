@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.74 — 2026-10-23
+
+**Fleet message capacity**
+
+- Raise **`MAX_BODY`** from 6,000 to 16,384 UTF-8 bytes for fleet reports. Bound encoded transport separately from message text.
+- Preserve complete fleet messages through history and review. Report oversized bodies with their byte count and limit.
+
 ## 2.0.0-beta.73 — 2026-10-23
 
 **Fleet recovery**
