@@ -148,6 +148,7 @@ fn explicit_legacy_migration_resumes_exact_provider_thread_without_creating_one(
     let provider = root.join("provider");
     let fixture = r#"#!/usr/bin/env python3
 import json,sys,tomllib,os,socket,threading,signal
+sys.stderr=open('provider.stderr','a')
 if 'DOXA_CODEX_OWNER_FD' in os.environ:
  control=socket.socket(fileno=int(os.environ['DOXA_CODEX_OWNER_FD']))
  control.sendall(b'DOXA_PROVIDER_OWNER_V1\n');assert control.recv(1)==b'G'
@@ -211,7 +212,9 @@ sys.stdin.read()
     loop {
         let frame = receive(&mut reader);
         if frame["event"]["type"] == "turn_done" {
-            assert_eq!(frame["event"]["data"]["is_error"], false, "{frame}");
+            assert_eq!(frame["event"]["data"]["is_error"], false, "{frame}; provider stderr: {}; provider RPCs: {}",
+                fs::read_to_string(root.join("provider.stderr")).unwrap_or_default(),
+                fs::read_to_string(root.join("requests.jsonl")).unwrap_or_default());
             break;
         }
     }
