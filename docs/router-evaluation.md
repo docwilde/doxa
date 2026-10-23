@@ -9,6 +9,10 @@ it has checked. Jev cannot introduce a provider, model, effort, permission or
 tool. A fallback must remain eligible; otherwise preparation fails.
 
 Candidate descriptions are operator assumptions, not measured quality facts.
+The [representative repair benchmark](representative-routing-benchmark.md)
+provides 18 code-repair tasks with predeclared difficulty, provisional exact-model
+mappings and credential-free offline correctness checks. Its labels are separate
+from routing ground truth and the human supervision holdout.
 Context/output fields are narrow operator request caps; prices are declared
 bounds. The host must compare them with sourced registry prices and applicable
 provider limits/catalog evidence before priced worker admission. Unknown

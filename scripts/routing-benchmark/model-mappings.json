@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "status": "operator_hypotheses_not_measured_model_rankings",
+  "observed_on": "2026-10-23",
+  "provisional_defaults": {
+    "easy": "flash-direct",
+    "intermediate": "flash-thinking",
+    "difficult": "pro-thinking"
+  },
+  "candidates": [
+    {
+      "id": "flash-direct",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "effort": "none",
+      "description": "Provisional low-latency choice for localized code repairs with an explicit contract; suitability must be measured on actual task outcomes.",
+      "context_tokens": 131072,
+      "max_output_tokens": 32768,
+      "max_tool_requests": 1,
+      "input_usd_micros_per_million": 300000,
+      "output_usd_micros_per_million": 1200000
+    },
+    {
+      "id": "flash-thinking",
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "description": "Provisional choice for interacting invariants, stateful repairs and cross-module reasoning; suitability must be measured on actual task outcomes.",
+      "context_tokens": 131072,
+      "max_output_tokens": 32768,
+      "max_tool_requests": 1,
+      "input_usd_micros_per_million": 300000,
+      "output_usd_micros_per_million": 1200000
+    },
+    {
+      "id": "pro-thinking",
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "effort": "high",
+      "description": "Provisional escalation for concurrency, crash recovery and multi-invariant authority repairs; no quality superiority is asserted before measured outcomes.",
+      "context_tokens": 131072,
+      "max_output_tokens": 32768,
+      "max_tool_requests": 1,
+      "input_usd_micros_per_million": 1320000,
+      "output_usd_micros_per_million": 3960000
+    }
+  ],
+  "evidence": {
+    "model_ids": "https://api-docs.deepseek.com/quick_start/pricing/",
+    "efforts": "https://api-docs.deepseek.com/guides/thinking_mode/",
+    "provider_context_tokens": 1048576,
+    "provider_max_output_tokens": 393216,
+    "rates": "Published peak, cache-miss upper token rates; provider billing tier/cache effects remain separate from these conservative bounds.",
+    "availability": "Official model names and controls verified. Refresh the executing account catalog before every paid candidate admission; this file does not prove account availability."
+  },
+  "evaluation": {
+    "tasks": 18,
+    "candidates_per_task": 3,
+    "recommended_independent_repetitions": 3,
+    "proposed_generation_calls": 162,
+    "paid_runs_performed_by_this_tool": 0,
+    "difficulty_is_not_expected_candidate_id": true,
+    "all_candidates_remain_eligible_for_every_task": true,
+    "native_models": "GPT-6 Sol or GPT-6.1 Sol may be separate native-engine escalation arms only after exact carrier/account availability and matched tool permissions are verified. They are not silently substituted into this API benchmark."
+  }
+}

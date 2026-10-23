@@ -1,0 +1,2174 @@
+{
+  "version": 1,
+  "origin": "machine_authored_repair_benchmark",
+  "human_labels": false,
+  "model_ranking_validated": false,
+  "tasks": [
+    {
+      "id": "easy-config",
+      "difficulty": "easy",
+      "family": "config",
+      "title": "Validate listener configuration",
+      "split": "development",
+      "driver": "pure",
+      "contract": "Repair handle(config): return {host,port,tls}, defaulting to127.0.0.1,8080,false. Reject unknown keys, nonobject input, empty/nonstring host, non-int port outside1..65535 (including bool), and non-bool tls with ValueError. Do not mutate input.",
+      "editable_paths": [
+        "app.py"
+      ],
+      "starter": {
+        "app.py": "def handle(value):\n    if type(value) is not dict or set(value)-{'host','port','tls'}:\n        raise ValueError('invalid config')\n    result={'host':'127.0.0.1','port':8080,'tls':False,**value}\n    if not isinstance(result['host'],str) or not result['host']:\n        raise ValueError('invalid host')\n    if not isinstance(result['port'],int) or not 1<=result['port']<=65535:\n        raise ValueError('invalid port')\n    if type(result['tls']) is not bool:\n        raise ValueError('invalid tls')\n    return result\n"
+      },
+      "reference": {
+        "app.py": "def handle(value):\n    if type(value) is not dict or set(value)-{'host','port','tls'}:\n        raise ValueError('invalid config')\n    result={'host':'127.0.0.1','port':8080,'tls':False,**value}\n    if not isinstance(result['host'],str) or not result['host']:\n        raise ValueError('invalid host')\n    if type(result['port']) is not int or not 1<=result['port']<=65535:\n        raise ValueError('invalid port')\n    if type(result['tls']) is not bool:\n        raise ValueError('invalid tls')\n    return result\n"
+      },
+      "public_cases": [
+        {
+          "input": {},
+          "expected": {
+            "host": "127.0.0.1",
+            "port": 8080,
+            "tls": false
+          }
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "port": true
+          },
+          "expected": {
+            "error": "ValueError"
+          }
+        },
+        {
+          "input": {
+            "port": 65536
+          },
+          "expected": {
+            "error": "ValueError"
+          }
+        },
+        {
+          "input": {
+            "tls": "yes"
+          },
+          "expected": {
+            "error": "ValueError"
+          }
+        },
+        {
+          "input": {
+            "host": ""
+          },
+          "expected": {
+            "error": "ValueError"
+          }
+        },
+        {
+          "input": {
+            "host": "::1",
+            "port": 443,
+            "tls": true
+          },
+          "expected": {
+            "host": "::1",
+            "port": 443,
+            "tls": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "easy-path",
+      "difficulty": "easy",
+      "family": "path-scope",
+      "title": "Enforce project path boundaries",
+      "split": "development",
+      "driver": "pure",
+      "contract": "Repair handle({root,path}) to return whether an absolute POSIX path is root or a descendant. Normalize repeated separators and dot components; reject any dot-dot component, nonabsolute/nonstring root/path or NUL by returning false. Prefix collisions must be denied. No filesystem access.",
+      "editable_paths": [
+        "app.py"
+      ],
+      "starter": {
+        "app.py": "import posixpath\ndef handle(value):\n    root,path=value['root'],value['path']\n    if any(type(v) is not str or not v.startswith('/') or '\\x00' in v or '..' in v.split('/') for v in (root,path)):\n        return False\n    root=posixpath.normpath(root);path=posixpath.normpath(path)\n    return path.startswith(root)\n"
+      },
+      "reference": {
+        "app.py": "import posixpath\ndef handle(value):\n    root,path=value['root'],value['path']\n    if any(type(v) is not str or not v.startswith('/') or '\\x00' in v or '..' in v.split('/') for v in (root,path)):\n        return False\n    root=posixpath.normpath(root);path=posixpath.normpath(path)\n    return path==root or path.startswith(root.rstrip('/')+'/')\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "root": "/project",
+            "path": "/project/a"
+          },
+          "expected": true
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "root": "/project",
+            "path": "/project-other/a"
+          },
+          "expected": false
+        },
+        {
+          "input": {
+            "root": "/p",
+            "path": "/p/../secret"
+          },
+          "expected": false
+        },
+        {
+          "input": {
+            "root": "/p/.",
+            "path": "/p//a"
+          },
+          "expected": true
+        },
+        {
+          "input": {
+            "root": "/",
+            "path": "/anything"
+          },
+          "expected": true
+        },
+        {
+          "input": {
+            "root": "p",
+            "path": "/p/a"
+          },
+          "expected": false
+        }
+      ]
+    },
+    {
+      "id": "easy-json",
+      "difficulty": "easy",
+      "family": "json-decoding",
+      "title": "Reject ambiguous JSON",
+      "split": "holdout",
+      "driver": "pure",
+      "contract": "Repair handle(text) to decode JSON while rejecting duplicate object keys at every depth and NaN/Infinity/-Infinity with ValueError. Other valid JSON scalar/list/object values must remain intact.",
+      "editable_paths": [
+        "app.py"
+      ],
+      "starter": {
+        "app.py": "import json\ndef pairs(items):\n    out={}\n    for key,value in items:\n        if key in out:raise ValueError('duplicate')\n        out[key]=value\n    return out\ndef constant(_):raise ValueError('nonfinite')\ndef handle(text):\n    return json.loads(text)\n"
+      },
+      "reference": {
+        "app.py": "import json\ndef pairs(items):\n    out={}\n    for key,value in items:\n        if key in out:raise ValueError('duplicate')\n        out[key]=value\n    return out\ndef constant(_):raise ValueError('nonfinite')\ndef handle(text):\n    return json.loads(text,object_pairs_hook=pairs,parse_constant=constant)\n"
+      },
+      "public_cases": [
+        {
+          "input": "{\"x\":1}",
+          "expected": {
+            "x": 1
+          }
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": "{\"x\":1,\"x\":2}",
+          "expected": {
+            "error": "ValueError"
+          }
+        },
+        {
+          "input": "{\"outer\":{\"x\":0,\"x\":1}}",
+          "expected": {
+            "error": "ValueError"
+          }
+        },
+        {
+          "input": "[NaN]",
+          "expected": {
+            "error": "ValueError"
+          }
+        },
+        {
+          "input": "Infinity",
+          "expected": {
+            "error": "ValueError"
+          }
+        },
+        {
+          "input": "[false,null,1.5]",
+          "expected": [
+            false,
+            null,
+            1.5
+          ]
+        }
+      ]
+    },
+    {
+      "id": "easy-billing",
+      "difficulty": "easy",
+      "family": "billing",
+      "title": "Round token costs in integer micros",
+      "split": "development",
+      "driver": "pure",
+      "contract": "Repair handle({input,output,input_rate,output_rate}) to return ceil((input*input_rate+output*output_rate)/1000000) using exact integers. All four fields are nonnegative ints; bool and negative/noninteger values raise ValueError. Rates are USD micros per million tokens.",
+      "editable_paths": [
+        "app.py"
+      ],
+      "starter": {
+        "app.py": "def handle(v):\n    values=[v[k] for k in ('input','output','input_rate','output_rate')]\n    if any(type(x) is not int or x<0 for x in values):raise ValueError('invalid')\n    i,o,ir,orr=values\n    return int((i*ir+o*orr)/1000000)\n"
+      },
+      "reference": {
+        "app.py": "def handle(v):\n    values=[v[k] for k in ('input','output','input_rate','output_rate')]\n    if any(type(x) is not int or x<0 for x in values):raise ValueError('invalid')\n    i,o,ir,orr=values\n    return (i*ir+o*orr+999999)//1000000\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "input": 1000,
+            "output": 0,
+            "input_rate": 300000,
+            "output_rate": 1200000
+          },
+          "expected": 300
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "input": 1,
+            "output": 0,
+            "input_rate": 1,
+            "output_rate": 0
+          },
+          "expected": 1
+        },
+        {
+          "input": {
+            "input": 9007199254740993,
+            "output": 7,
+            "input_rate": 300000,
+            "output_rate": 1200000
+          },
+          "expected": 2702159776422307
+        },
+        {
+          "input": {
+            "input": false,
+            "output": 0,
+            "input_rate": 1,
+            "output_rate": 0
+          },
+          "expected": {
+            "error": "ValueError"
+          }
+        },
+        {
+          "input": {
+            "input": -1,
+            "output": 0,
+            "input_rate": 1,
+            "output_rate": 0
+          },
+          "expected": {
+            "error": "ValueError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "easy-expiry",
+      "difficulty": "easy",
+      "family": "expiry",
+      "title": "Honor receipt validity boundaries",
+      "split": "development",
+      "driver": "pure",
+      "contract": "Repair handle({valid_from,expires_at,now,spent,revoked}) to return a bool. Times must be nonnegative ints, valid_from<expires_at; spent/revoked must be actual bools. Malformed input raises ValueError. A valid receipt is usable exactly when valid_from<=now<expires_at and neither spent nor revoked.",
+      "editable_paths": [
+        "app.py"
+      ],
+      "starter": {
+        "app.py": "def handle(v):\n    a,b,n=(v[k] for k in ('valid_from','expires_at','now'))\n    if any(type(x) is not int or x<0 for x in (a,b,n)) or a>=b or any(type(v[k]) is not bool for k in ('spent','revoked')):raise ValueError('invalid')\n    return a<=n<=b and not v['spent'] and not v['revoked']\n"
+      },
+      "reference": {
+        "app.py": "def handle(v):\n    a,b,n=(v[k] for k in ('valid_from','expires_at','now'))\n    if any(type(x) is not int or x<0 for x in (a,b,n)) or a>=b or any(type(v[k]) is not bool for k in ('spent','revoked')):raise ValueError('invalid')\n    return a<=n<b and not v['spent'] and not v['revoked']\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "valid_from": 5,
+            "expires_at": 9,
+            "now": 5,
+            "spent": false,
+            "revoked": false
+          },
+          "expected": true
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "valid_from": 5,
+            "expires_at": 9,
+            "now": 9,
+            "spent": false,
+            "revoked": false
+          },
+          "expected": false
+        },
+        {
+          "input": {
+            "valid_from": 5,
+            "expires_at": 9,
+            "now": 8,
+            "spent": true,
+            "revoked": false
+          },
+          "expected": false
+        },
+        {
+          "input": {
+            "valid_from": 0,
+            "expires_at": 9,
+            "now": false,
+            "spent": false,
+            "revoked": false
+          },
+          "expected": {
+            "error": "ValueError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "easy-redaction",
+      "difficulty": "easy",
+      "family": "structured-redaction",
+      "title": "Preserve typed JSON while redacting",
+      "split": "holdout",
+      "driver": "pure",
+      "contract": "Repair handle({value,secrets}) to recursively replace each nonempty supplied secret in string values with [redacted]. Preserve JSON structure, bool/int/null and list order. If an object key contains a secret, raise ValueError rather than renaming it. Do not modify input. Secrets are synthetic fixture strings.",
+      "editable_paths": [
+        "app.py"
+      ],
+      "starter": {
+        "app.py": "def handle(v):\n    secrets=v['secrets']\n    def visit(x):\n        if isinstance(x,str):\n            for secret in secrets:\n                if secret:x=x.replace(secret,'[redacted]')\n            return x\n        if isinstance(x,list):return x\n        if isinstance(x,dict):\n            if any(s and s in k for k in x for s in secrets):raise ValueError('unsafe key')\n            return {k:visit(y) for k,y in x.items()}\n        return x\n    return visit(v['value'])\n"
+      },
+      "reference": {
+        "app.py": "def handle(v):\n    secrets=v['secrets']\n    def visit(x):\n        if isinstance(x,str):\n            for secret in secrets:\n                if secret:x=x.replace(secret,'[redacted]')\n            return x\n        if isinstance(x,list):return [visit(y) for y in x]\n        if isinstance(x,dict):\n            if any(s and s in k for k in x for s in secrets):raise ValueError('unsafe key')\n            return {k:visit(y) for k,y in x.items()}\n        return x\n    return visit(v['value'])\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "value": {
+              "note": "demo-private",
+              "n": 2
+            },
+            "secrets": [
+              "demo-private"
+            ]
+          },
+          "expected": {
+            "note": "[redacted]",
+            "n": 2
+          }
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "value": {
+              "nested": [
+                "say \"demo-private\"\nnext",
+                false,
+                null
+              ]
+            },
+            "secrets": [
+              "demo-private"
+            ]
+          },
+          "expected": {
+            "nested": [
+              "say \"[redacted]\"\nnext",
+              false,
+              null
+            ]
+          }
+        },
+        {
+          "input": {
+            "value": {
+              "demo-private-key": "value"
+            },
+            "secrets": [
+              "demo-private"
+            ]
+          },
+          "expected": {
+            "error": "ValueError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "intermediate-events",
+      "difficulty": "intermediate",
+      "family": "event-replay",
+      "title": "Make event application idempotent",
+      "split": "development",
+      "driver": "stateful",
+      "contract": "Repair Service.apply(op). configure(run) initializes one run, only once. add requires matching run, nonempty string id and nonnegative integer amount; return {total,seen} with sorted IDs. Repeated identical ID+amount is a no-op; conflicting duplicate, wrong run or malformed operation raises ValueError without changing state. snapshot reports state. Constructor takes an unused private root path.",
+      "editable_paths": [
+        "app.py",
+        "rules.py"
+      ],
+      "starter": {
+        "app.py": "from rules import integer,require\nclass Service:\n    def __init__(self,root):self.run=None;self.items={}\n    def apply(self,v):\n        if v['op']=='configure':\n            require(self.run is None and type(v['run']) is str and bool(v['run']));self.run=v['run']\n        elif v['op']=='add':\n            require(self.run is not None and v['run']==self.run and type(v['id']) is str and bool(v['id']) and integer(v['amount']))\n            if v['id'] in self.items:self.items[v['id']]+=v['amount']\n            else:self.items[v['id']]=v['amount']\n        elif v['op']!='snapshot':raise ValueError('unknown')\n        return {'total':sum(self.items.values()),'seen':sorted(self.items)}\n",
+        "rules.py": "def integer(value):\n    return type(value) is int and value >= 0\n\ndef require(ok):\n    if not ok:\n        raise ValueError(\"invalid input\")\n"
+      },
+      "reference": {
+        "app.py": "from rules import integer,require\nclass Service:\n    def __init__(self,root):self.run=None;self.items={}\n    def apply(self,v):\n        if v['op']=='configure':\n            require(self.run is None and type(v['run']) is str and bool(v['run']));self.run=v['run']\n        elif v['op']=='add':\n            require(self.run is not None and v['run']==self.run and type(v['id']) is str and bool(v['id']) and integer(v['amount']))\n            if v['id'] in self.items:require(self.items[v['id']]==v['amount'])\n            else:self.items[v['id']]=v['amount']\n        elif v['op']!='snapshot':raise ValueError('unknown')\n        return {'total':sum(self.items.values()),'seen':sorted(self.items)}\n",
+        "rules.py": "def integer(value):\n    return type(value) is int and value >= 0\n\ndef require(ok):\n    if not ok:\n        raise ValueError(\"invalid input\")\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "ops": [
+              {
+                "op": "configure",
+                "run": "r"
+              },
+              {
+                "op": "add",
+                "run": "r",
+                "id": "a",
+                "amount": 3
+              }
+            ]
+          },
+          "expected": [
+            {
+              "total": 0,
+              "seen": []
+            },
+            {
+              "total": 3,
+              "seen": [
+                "a"
+              ]
+            }
+          ]
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "ops": [
+              {
+                "op": "configure",
+                "run": "r"
+              },
+              {
+                "op": "add",
+                "run": "r",
+                "id": "a",
+                "amount": 3
+              },
+              {
+                "op": "add",
+                "run": "r",
+                "id": "a",
+                "amount": 3
+              },
+              {
+                "op": "add",
+                "run": "r",
+                "id": "a",
+                "amount": 4
+              },
+              {
+                "op": "snapshot"
+              }
+            ]
+          },
+          "expected": [
+            {
+              "total": 0,
+              "seen": []
+            },
+            {
+              "total": 3,
+              "seen": [
+                "a"
+              ]
+            },
+            {
+              "total": 3,
+              "seen": [
+                "a"
+              ]
+            },
+            {
+              "error": "ValueError"
+            },
+            {
+              "total": 3,
+              "seen": [
+                "a"
+              ]
+            }
+          ]
+        },
+        {
+          "input": {
+            "ops": [
+              {
+                "op": "configure",
+                "run": "r"
+              },
+              {
+                "op": "add",
+                "run": "other",
+                "id": "x",
+                "amount": 1
+              },
+              {
+                "op": "snapshot"
+              }
+            ]
+          },
+          "expected": [
+            {
+              "total": 0,
+              "seen": []
+            },
+            {
+              "error": "ValueError"
+            },
+            {
+              "total": 0,
+              "seen": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "intermediate-graph",
+      "difficulty": "intermediate",
+      "family": "dependency-graph",
+      "title": "Schedule only satisfied dependencies",
+      "split": "development",
+      "driver": "pure",
+      "contract": "Repair handle({tasks,completed,failed}). tasks maps IDs to dependency lists. rules.validate rejects unknown dependencies, duplicate edges and cycles; completed/failed must name known nodes and be disjoint. Return alphabetically sorted unfinished/unfailed tasks whose every dependency is completed. A failed prerequisite does not count as completed. Do not mutate input.",
+      "editable_paths": [
+        "app.py",
+        "rules.py"
+      ],
+      "starter": {
+        "app.py": "from rules import validate\ndef handle(v):\n    graph=v['tasks'];validate(graph)\n    complete=set(v['completed']);failed=set(v['failed'])\n    if (complete|failed)-set(graph) or complete&failed:raise ValueError('invalid state')\n    return sorted(k for k,deps in graph.items() if k not in complete|failed and set(deps)<=complete|failed)\n",
+        "rules.py": "def validate(graph):\n    visited=set();active=set()\n    def visit(k):\n        if k in active:raise ValueError('cycle')\n        if k in visited:return\n        active.add(k)\n        if len(set(graph[k]))!=len(graph[k]):raise ValueError('duplicate')\n        for d in graph[k]:\n            if d not in graph:raise ValueError('unknown')\n            visit(d)\n        active.remove(k);visited.add(k)\n    for k in graph:visit(k)\n"
+      },
+      "reference": {
+        "app.py": "from rules import validate\ndef handle(v):\n    graph=v['tasks'];validate(graph)\n    complete=set(v['completed']);failed=set(v['failed'])\n    if (complete|failed)-set(graph) or complete&failed:raise ValueError('invalid state')\n    return sorted(k for k,deps in graph.items() if k not in complete|failed and set(deps)<=complete)\n",
+        "rules.py": "def validate(graph):\n    visited=set();active=set()\n    def visit(k):\n        if k in active:raise ValueError('cycle')\n        if k in visited:return\n        active.add(k)\n        if len(set(graph[k]))!=len(graph[k]):raise ValueError('duplicate')\n        for d in graph[k]:\n            if d not in graph:raise ValueError('unknown')\n            visit(d)\n        active.remove(k);visited.add(k)\n    for k in graph:visit(k)\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "tasks": {
+              "a": [],
+              "b": [
+                "a"
+              ]
+            },
+            "completed": [
+              "a"
+            ],
+            "failed": []
+          },
+          "expected": [
+            "b"
+          ]
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "tasks": {
+              "a": [],
+              "b": [
+                "a"
+              ]
+            },
+            "completed": [],
+            "failed": [
+              "a"
+            ]
+          },
+          "expected": []
+        },
+        {
+          "input": {
+            "tasks": {
+              "a": [
+                "b"
+              ],
+              "b": [
+                "a"
+              ]
+            },
+            "completed": [],
+            "failed": []
+          },
+          "expected": {
+            "error": "ValueError"
+          }
+        },
+        {
+          "input": {
+            "tasks": {
+              "a": [
+                "missing"
+              ]
+            },
+            "completed": [],
+            "failed": []
+          },
+          "expected": {
+            "error": "ValueError"
+          }
+        },
+        {
+          "input": {
+            "tasks": {
+              "a": [],
+              "b": [],
+              "c": [
+                "a",
+                "b"
+              ]
+            },
+            "completed": [
+              "a"
+            ],
+            "failed": []
+          },
+          "expected": [
+            "b"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "intermediate-budget",
+      "difficulty": "intermediate",
+      "family": "budget",
+      "title": "Retain unknown reservations",
+      "split": "development",
+      "driver": "stateful",
+      "contract": "Repair Service.apply(op). configure sets positive integer limit once. reserve(id,amount) returns accepted/budget/held: positive integer amount and new string ID, except all new reserves return held after any unknown outcome. settle(id,actual) replaces its reservation with nonnegative integer actual<=reserved once. unknown(id) retains its full hold and blocks new reservations. Duplicate IDs, duplicate settlement and malformed operations raise ValueError without changing state. snapshot returns {held,unknown}.",
+      "editable_paths": [
+        "app.py",
+        "rules.py"
+      ],
+      "starter": {
+        "app.py": "from rules import integer,require\nclass Service:\n    def __init__(self,root):self.limit=None;self.rows={};self.unknown=False\n    def apply(self,v):\n        op=v['op']\n        if op=='configure':require(self.limit is None and integer(v['limit']) and v['limit']>0);self.limit=v['limit'];return 'configured'\n        if op=='snapshot':return {'held':sum(x[0] for x in self.rows.values()),'unknown':self.unknown}\n        require(self.limit is not None)\n        if op=='reserve':\n            require(type(v['id']) is str and bool(v['id']) and v['id'] not in self.rows and integer(v['amount']) and v['amount']>0)\n            if self.unknown:return 'held'\n            if sum(x[0] for x in self.rows.values())+v['amount']>self.limit:return 'budget'\n            self.rows[v['id']]=(v['amount'],'pending');return 'accepted'\n        require(v['id'] in self.rows and self.rows[v['id']][1]=='pending')\n        if op=='settle':\n            require(integer(v['actual']) and v['actual']<=self.rows[v['id']][0]);self.rows[v['id']]=(v['actual'],'settled');return 'settled'\n        if op=='unknown':self.unknown=True;self.rows[v['id']]=(0,'unknown');return 'held'\n        raise ValueError('unknown')\n",
+        "rules.py": "def integer(value):\n    return type(value) is int and value >= 0\n\ndef require(ok):\n    if not ok:\n        raise ValueError(\"invalid input\")\n"
+      },
+      "reference": {
+        "app.py": "from rules import integer,require\nclass Service:\n    def __init__(self,root):self.limit=None;self.rows={};self.unknown=False\n    def apply(self,v):\n        op=v['op']\n        if op=='configure':require(self.limit is None and integer(v['limit']) and v['limit']>0);self.limit=v['limit'];return 'configured'\n        if op=='snapshot':return {'held':sum(x[0] for x in self.rows.values()),'unknown':self.unknown}\n        require(self.limit is not None)\n        if op=='reserve':\n            require(type(v['id']) is str and bool(v['id']) and v['id'] not in self.rows and integer(v['amount']) and v['amount']>0)\n            if self.unknown:return 'held'\n            if sum(x[0] for x in self.rows.values())+v['amount']>self.limit:return 'budget'\n            self.rows[v['id']]=(v['amount'],'pending');return 'accepted'\n        require(v['id'] in self.rows and self.rows[v['id']][1]=='pending')\n        if op=='settle':\n            require(integer(v['actual']) and v['actual']<=self.rows[v['id']][0]);self.rows[v['id']]=(v['actual'],'settled');return 'settled'\n        if op=='unknown':self.unknown=True;return 'held'\n        raise ValueError('unknown')\n",
+        "rules.py": "def integer(value):\n    return type(value) is int and value >= 0\n\ndef require(ok):\n    if not ok:\n        raise ValueError(\"invalid input\")\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "ops": [
+              {
+                "op": "configure",
+                "limit": 10
+              },
+              {
+                "op": "reserve",
+                "id": "a",
+                "amount": 8
+              },
+              {
+                "op": "snapshot"
+              }
+            ]
+          },
+          "expected": [
+            "configured",
+            "accepted",
+            {
+              "held": 8,
+              "unknown": false
+            }
+          ]
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "ops": [
+              {
+                "op": "configure",
+                "limit": 10
+              },
+              {
+                "op": "reserve",
+                "id": "a",
+                "amount": 8
+              },
+              {
+                "op": "unknown",
+                "id": "a"
+              },
+              {
+                "op": "reserve",
+                "id": "b",
+                "amount": 1
+              },
+              {
+                "op": "snapshot"
+              }
+            ]
+          },
+          "expected": [
+            "configured",
+            "accepted",
+            "held",
+            "held",
+            {
+              "held": 8,
+              "unknown": true
+            }
+          ]
+        },
+        {
+          "input": {
+            "ops": [
+              {
+                "op": "configure",
+                "limit": 10
+              },
+              {
+                "op": "reserve",
+                "id": "a",
+                "amount": 8
+              },
+              {
+                "op": "settle",
+                "id": "a",
+                "actual": 3
+              },
+              {
+                "op": "reserve",
+                "id": "b",
+                "amount": 7
+              },
+              {
+                "op": "snapshot"
+              }
+            ]
+          },
+          "expected": [
+            "configured",
+            "accepted",
+            "settled",
+            "accepted",
+            {
+              "held": 10,
+              "unknown": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "intermediate-evidence",
+      "difficulty": "intermediate",
+      "family": "approval-evidence",
+      "title": "Bind release to current evidence",
+      "split": "holdout",
+      "driver": "pure",
+      "contract": "Repair handle({current,receipt,owner_release}). Current and receipt each have nonempty source,handoff,readback,confirmation strings and nonnegative integer turn. A release is true only when both records are valid, every field matches exactly and owner_release is actual true. Otherwise false. No runtime action is performed.",
+      "editable_paths": [
+        "app.py",
+        "rules.py"
+      ],
+      "starter": {
+        "app.py": "from rules import valid\ndef handle(v):\n    current,receipt=v['current'],v['receipt']\n    return v['owner_release'] is True and valid(current) and valid(receipt) and current['readback']==receipt['readback']\n",
+        "rules.py": "def valid(v):\n    return type(v) is dict and set(v)=={'source','turn','handoff','readback','confirmation'} and type(v['turn']) is int and v['turn']>=0 and all(type(v[k]) is str and bool(v[k]) for k in ('source','handoff','readback','confirmation'))\n"
+      },
+      "reference": {
+        "app.py": "from rules import valid\ndef handle(v):\n    current,receipt=v['current'],v['receipt']\n    return v['owner_release'] is True and valid(current) and valid(receipt) and current==receipt\n",
+        "rules.py": "def valid(v):\n    return type(v) is dict and set(v)=={'source','turn','handoff','readback','confirmation'} and type(v['turn']) is int and v['turn']>=0 and all(type(v[k]) is str and bool(v[k]) for k in ('source','handoff','readback','confirmation'))\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "current": {
+              "source": "s1",
+              "turn": 2,
+              "handoff": "h",
+              "readback": "a",
+              "confirmation": "c"
+            },
+            "receipt": {
+              "source": "s1",
+              "turn": 2,
+              "handoff": "h",
+              "readback": "a",
+              "confirmation": "c"
+            },
+            "owner_release": true
+          },
+          "expected": true
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "current": {
+              "source": "s2",
+              "turn": 3,
+              "handoff": "h",
+              "readback": "a",
+              "confirmation": "c"
+            },
+            "receipt": {
+              "source": "s1",
+              "turn": 2,
+              "handoff": "h",
+              "readback": "a",
+              "confirmation": "c"
+            },
+            "owner_release": true
+          },
+          "expected": false
+        },
+        {
+          "input": {
+            "current": {
+              "source": "s1",
+              "turn": 2,
+              "handoff": "new",
+              "readback": "a",
+              "confirmation": "c"
+            },
+            "receipt": {
+              "source": "s1",
+              "turn": 2,
+              "handoff": "h",
+              "readback": "a",
+              "confirmation": "c"
+            },
+            "owner_release": true
+          },
+          "expected": false
+        },
+        {
+          "input": {
+            "current": {},
+            "receipt": {},
+            "owner_release": true
+          },
+          "expected": false
+        }
+      ]
+    },
+    {
+      "id": "intermediate-delegation",
+      "difficulty": "intermediate",
+      "family": "network-policy",
+      "title": "Delegate without granting worker internet",
+      "split": "development",
+      "driver": "pure",
+      "contract": "Repair handle({worker,supervisor,request}). Actor records have profile and bool internet. Valid profile/internet pairs: docker-offline/false, docker-open/true, native/either. request is provider or web. Provider returns provider_only. A web request is direct if worker online, delegated if only supervisor online, otherwise needs_approval. Return {decision,worker} preserving the exact worker record; malformed profiles/flags/requests raise ValueError. Never infer general internet from provider connectivity.",
+      "editable_paths": [
+        "app.py",
+        "rules.py"
+      ],
+      "starter": {
+        "app.py": "from rules import validate\ndef handle(v):\n    validate(v['worker']);validate(v['supervisor'])\n    worker=dict(v['worker']);request=v['request']\n    if request=='provider':decision='provider_only'\n    elif request=='web':\n        decision='direct' if worker['internet'] else ('delegated' if v['supervisor']['internet'] else 'needs_approval')\n    else:raise ValueError('unknown request')\n    worker['internet']=worker['internet'] or decision=='delegated';return {'decision':decision,'worker':worker}\n",
+        "rules.py": "def validate(v):\n    p=v['profile'];n=v['internet']\n    if type(n) is not bool or p not in ('docker-offline','docker-open','native') or (p=='docker-offline' and n) or (p=='docker-open' and not n):raise ValueError('invalid policy')\n"
+      },
+      "reference": {
+        "app.py": "from rules import validate\ndef handle(v):\n    validate(v['worker']);validate(v['supervisor'])\n    worker=dict(v['worker']);request=v['request']\n    if request=='provider':decision='provider_only'\n    elif request=='web':\n        decision='direct' if worker['internet'] else ('delegated' if v['supervisor']['internet'] else 'needs_approval')\n    else:raise ValueError('unknown request')\n    return {'decision':decision,'worker':worker}\n",
+        "rules.py": "def validate(v):\n    p=v['profile'];n=v['internet']\n    if type(n) is not bool or p not in ('docker-offline','docker-open','native') or (p=='docker-offline' and n) or (p=='docker-open' and not n):raise ValueError('invalid policy')\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "worker": {
+              "profile": "docker-offline",
+              "internet": false
+            },
+            "supervisor": {
+              "profile": "docker-offline",
+              "internet": false
+            },
+            "request": "provider"
+          },
+          "expected": {
+            "decision": "provider_only",
+            "worker": {
+              "profile": "docker-offline",
+              "internet": false
+            }
+          }
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "worker": {
+              "profile": "docker-offline",
+              "internet": false
+            },
+            "supervisor": {
+              "profile": "docker-open",
+              "internet": true
+            },
+            "request": "web"
+          },
+          "expected": {
+            "decision": "delegated",
+            "worker": {
+              "profile": "docker-offline",
+              "internet": false
+            }
+          }
+        },
+        {
+          "input": {
+            "worker": {
+              "profile": "docker-offline",
+              "internet": false
+            },
+            "supervisor": {
+              "profile": "docker-offline",
+              "internet": false
+            },
+            "request": "web"
+          },
+          "expected": {
+            "decision": "needs_approval",
+            "worker": {
+              "profile": "docker-offline",
+              "internet": false
+            }
+          }
+        },
+        {
+          "input": {
+            "worker": {
+              "profile": "docker-offline",
+              "internet": true
+            },
+            "supervisor": {
+              "profile": "native",
+              "internet": true
+            },
+            "request": "web"
+          },
+          "expected": {
+            "error": "ValueError"
+          }
+        }
+      ]
+    },
+    {
+      "id": "intermediate-idempotency",
+      "difficulty": "intermediate",
+      "family": "idempotency",
+      "title": "Cache requests without repeating uncertain effects",
+      "split": "holdout",
+      "driver": "stateful",
+      "contract": "Repair Service.apply(op). submit(key,payload,outcome) records one effect for new valid key; outcome is ok or unknown. Exact repeated key+payload returns cached ok/held without another effect, regardless of the repeated outcome argument. Changed payload for an existing key raises ValueError. snapshot returns effects and unique requests. unknown retains held state. keys/payload are nonempty strings. Constructor root is unused.",
+      "editable_paths": [
+        "app.py",
+        "rules.py"
+      ],
+      "starter": {
+        "app.py": "from rules import require\nclass Service:\n    def __init__(self,root):self.rows={};self.effects=0\n    def apply(self,v):\n        if v['op']=='snapshot':return {'effects':self.effects,'requests':len(self.rows)}\n        require(v['op']=='submit' and all(type(v[k]) is str and bool(v[k]) for k in ('key','payload')) and v['outcome'] in ('ok','unknown'))\n        key=v['key']\n        if key in self.rows:\n            require(self.rows[key][0]==v['payload']);self.effects+=1;return self.rows[key][1]\n        self.effects+=1;result='ok' if v['outcome']=='ok' else 'held';self.rows[key]=(v['payload'],result);return result\n",
+        "rules.py": "def integer(value):\n    return type(value) is int and value >= 0\n\ndef require(ok):\n    if not ok:\n        raise ValueError(\"invalid input\")\n"
+      },
+      "reference": {
+        "app.py": "from rules import require\nclass Service:\n    def __init__(self,root):self.rows={};self.effects=0\n    def apply(self,v):\n        if v['op']=='snapshot':return {'effects':self.effects,'requests':len(self.rows)}\n        require(v['op']=='submit' and all(type(v[k]) is str and bool(v[k]) for k in ('key','payload')) and v['outcome'] in ('ok','unknown'))\n        key=v['key']\n        if key in self.rows:\n            require(self.rows[key][0]==v['payload']);return self.rows[key][1]\n        self.effects+=1;result='ok' if v['outcome']=='ok' else 'held';self.rows[key]=(v['payload'],result);return result\n",
+        "rules.py": "def integer(value):\n    return type(value) is int and value >= 0\n\ndef require(ok):\n    if not ok:\n        raise ValueError(\"invalid input\")\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "ops": [
+              {
+                "op": "submit",
+                "key": "a",
+                "payload": "x",
+                "outcome": "ok"
+              },
+              {
+                "op": "snapshot"
+              }
+            ]
+          },
+          "expected": [
+            "ok",
+            {
+              "effects": 1,
+              "requests": 1
+            }
+          ]
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "ops": [
+              {
+                "op": "submit",
+                "key": "a",
+                "payload": "x",
+                "outcome": "unknown"
+              },
+              {
+                "op": "submit",
+                "key": "a",
+                "payload": "x",
+                "outcome": "ok"
+              },
+              {
+                "op": "snapshot"
+              }
+            ]
+          },
+          "expected": [
+            "held",
+            "held",
+            {
+              "effects": 1,
+              "requests": 1
+            }
+          ]
+        },
+        {
+          "input": {
+            "ops": [
+              {
+                "op": "submit",
+                "key": "a",
+                "payload": "x",
+                "outcome": "ok"
+              },
+              {
+                "op": "submit",
+                "key": "a",
+                "payload": "y",
+                "outcome": "ok"
+              },
+              {
+                "op": "snapshot"
+              }
+            ]
+          },
+          "expected": [
+            "ok",
+            {
+              "error": "ValueError"
+            },
+            {
+              "effects": 1,
+              "requests": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "difficult-outbox",
+      "difficulty": "difficult",
+      "family": "idempotency",
+      "title": "Preserve a durable outbox across restart",
+      "split": "holdout",
+      "driver": "restart",
+      "contract": "Repair Service(root).apply(op) with real SQLite persistence. enqueue(id,payload) adds pending once; an exact repeat returns the existing status, conflicting payload raises ValueError. ack(id) changes pending->acked and is idempotent; unknown IDs raise ValueError. pending returns sorted pending IDs. The evaluator starts fresh Python processes against the same private root between phases. IDs/payloads are nonempty strings.",
+      "editable_paths": [
+        "app.py",
+        "storage.py"
+      ],
+      "starter": {
+        "app.py": "from storage import connect,get,put\nclass Service:\n    def __init__(self,root):self.db=connect(root)\n    def apply(self,v):\n        self.db.execute('BEGIN IMMEDIATE')\n        try:\n            rows=get(self.db,'rows',{});op=v['op']\n            if op=='pending':result=sorted(k for k,r in rows.items() if r[1]=='pending')\n            elif op=='enqueue':\n                key,payload=v['id'],v['payload']\n                if type(key) is not str or not key or type(payload) is not str or not payload:raise ValueError('invalid')\n                if key in rows:\n                    if rows[key][0]!=payload:raise ValueError('conflict')\n                    rows[key][1]='pending'\n                else:rows[key]=[payload,'pending']\n                result=rows[key][1]\n            elif op=='ack':\n                if v['id'] not in rows:raise ValueError('unknown')\n                rows[v['id']][1]='acked';result='acked'\n            else:raise ValueError('unknown')\n            put(self.db,'rows',rows);self.db.execute('COMMIT');return result\n        except BaseException:self.db.execute('ROLLBACK');raise\n",
+        "storage.py": "import json,os,sqlite3\ndef connect(root):\n    os.makedirs(root,exist_ok=True)\n    db=sqlite3.connect(os.path.join(root,'state.sqlite'),timeout=5,isolation_level=None)\n    db.execute('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')\n    return db\ndef get(db,key,default):\n    row=db.execute('SELECT value FROM state WHERE key=?',(key,)).fetchone()\n    return json.loads(row[0]) if row else default\ndef put(db,key,value):\n    db.execute('INSERT OR REPLACE INTO state VALUES (?,?)',(key,json.dumps(value,sort_keys=True)))\n"
+      },
+      "reference": {
+        "app.py": "from storage import connect,get,put\nclass Service:\n    def __init__(self,root):self.db=connect(root)\n    def apply(self,v):\n        self.db.execute('BEGIN IMMEDIATE')\n        try:\n            rows=get(self.db,'rows',{});op=v['op']\n            if op=='pending':result=sorted(k for k,r in rows.items() if r[1]=='pending')\n            elif op=='enqueue':\n                key,payload=v['id'],v['payload']\n                if type(key) is not str or not key or type(payload) is not str or not payload:raise ValueError('invalid')\n                if key in rows:\n                    if rows[key][0]!=payload:raise ValueError('conflict')\n                else:rows[key]=[payload,'pending']\n                result=rows[key][1]\n            elif op=='ack':\n                if v['id'] not in rows:raise ValueError('unknown')\n                rows[v['id']][1]='acked';result='acked'\n            else:raise ValueError('unknown')\n            put(self.db,'rows',rows);self.db.execute('COMMIT');return result\n        except BaseException:self.db.execute('ROLLBACK');raise\n",
+        "storage.py": "import json,os,sqlite3\ndef connect(root):\n    os.makedirs(root,exist_ok=True)\n    db=sqlite3.connect(os.path.join(root,'state.sqlite'),timeout=5,isolation_level=None)\n    db.execute('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')\n    return db\ndef get(db,key,default):\n    row=db.execute('SELECT value FROM state WHERE key=?',(key,)).fetchone()\n    return json.loads(row[0]) if row else default\ndef put(db,key,value):\n    db.execute('INSERT OR REPLACE INTO state VALUES (?,?)',(key,json.dumps(value,sort_keys=True)))\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "enqueue",
+                    "id": "a",
+                    "payload": "x"
+                  },
+                  {
+                    "op": "pending"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "pending",
+              [
+                "a"
+              ]
+            ]
+          ]
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "enqueue",
+                    "id": "a",
+                    "payload": "x"
+                  }
+                ]
+              },
+              {
+                "ops": [
+                  {
+                    "op": "ack",
+                    "id": "a"
+                  }
+                ]
+              },
+              {
+                "ops": [
+                  {
+                    "op": "enqueue",
+                    "id": "a",
+                    "payload": "x"
+                  },
+                  {
+                    "op": "pending"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "pending"
+            ],
+            [
+              "acked"
+            ],
+            [
+              "acked",
+              []
+            ]
+          ]
+        },
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "enqueue",
+                    "id": "a",
+                    "payload": "x"
+                  }
+                ]
+              },
+              {
+                "ops": [
+                  {
+                    "op": "enqueue",
+                    "id": "a",
+                    "payload": "y"
+                  },
+                  {
+                    "op": "pending"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "pending"
+            ],
+            [
+              {
+                "error": "ValueError"
+              },
+              [
+                "a"
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "difficult-checkpoint",
+      "difficulty": "difficult",
+      "family": "crash-checkpoint",
+      "title": "Keep checkpoints atomic across process death",
+      "split": "holdout",
+      "driver": "restart",
+      "contract": "Repair storage.write used by Service.apply({op:write,value}) and read. A write must fsync a separate temporary file, invoke crash(before_replace), atomically replace checkpoint, fsync the directory, then invoke crash(after_replace). The injected crash terminates the actual child process. Before-replace crash preserves the old complete checkpoint; after-replace crash exposes the new complete checkpoint. Ignore orphan temporary files on read. Only standard-library files inside the supplied root may be written.",
+      "editable_paths": [
+        "app.py",
+        "storage.py"
+      ],
+      "starter": {
+        "app.py": "from storage import write,read\nclass Service:\n    def __init__(self,root):self.root=root\n    def apply(self,v):\n        if v['op']=='write':write(self.root,v['value']);return 'written'\n        if v['op']=='read':return read(self.root)\n        raise ValueError('unknown')\n",
+        "storage.py": "import json,os\ndef crash(stage):\n    if os.environ.get('BENCHMARK_CRASH_STAGE')==stage:os._exit(86)\ndef write(root,value):\n    target=os.path.join(root,'checkpoint.json');temp=target+'.new'\n    with open(temp,'w') as f:\n        json.dump(value,f);f.flush();os.fsync(f.fileno())\n    os.replace(temp,target)\n    crash('before_replace')\n    fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)\n    try:os.fsync(fd)\n    finally:os.close(fd)\n    crash('after_replace')\ndef read(root):\n    try:\n        with open(os.path.join(root,'checkpoint.json')) as f:return json.load(f)\n    except FileNotFoundError:return {}\n"
+      },
+      "reference": {
+        "app.py": "from storage import write,read\nclass Service:\n    def __init__(self,root):self.root=root\n    def apply(self,v):\n        if v['op']=='write':write(self.root,v['value']);return 'written'\n        if v['op']=='read':return read(self.root)\n        raise ValueError('unknown')\n",
+        "storage.py": "import json,os\ndef crash(stage):\n    if os.environ.get('BENCHMARK_CRASH_STAGE')==stage:os._exit(86)\ndef write(root,value):\n    target=os.path.join(root,'checkpoint.json');temp=target+'.new'\n    with open(temp,'w') as f:\n        json.dump(value,f);f.flush();os.fsync(f.fileno())\n    crash('before_replace')\n    os.replace(temp,target)\n    fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)\n    try:os.fsync(fd)\n    finally:os.close(fd)\n    crash('after_replace')\ndef read(root):\n    try:\n        with open(os.path.join(root,'checkpoint.json')) as f:return json.load(f)\n    except FileNotFoundError:return {}\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "write",
+                    "value": {
+                      "n": 1
+                    }
+                  }
+                ]
+              },
+              {
+                "ops": [
+                  {
+                    "op": "read"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "written"
+            ],
+            [
+              {
+                "n": 1
+              }
+            ]
+          ]
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "write",
+                    "value": {
+                      "n": 1
+                    }
+                  }
+                ]
+              },
+              {
+                "ops": [
+                  {
+                    "op": "write",
+                    "value": {
+                      "n": 2
+                    }
+                  }
+                ],
+                "crash_stage": "before_replace"
+              },
+              {
+                "ops": [
+                  {
+                    "op": "read"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "written"
+            ],
+            {
+              "crashed": true
+            },
+            [
+              {
+                "n": 1
+              }
+            ]
+          ]
+        },
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "write",
+                    "value": {
+                      "n": 1
+                    }
+                  }
+                ]
+              },
+              {
+                "ops": [
+                  {
+                    "op": "write",
+                    "value": {
+                      "n": 2
+                    }
+                  }
+                ],
+                "crash_stage": "after_replace"
+              },
+              {
+                "ops": [
+                  {
+                    "op": "read"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "written"
+            ],
+            {
+              "crashed": true
+            },
+            [
+              {
+                "n": 2
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "difficult-budget",
+      "difficulty": "difficult",
+      "family": "budget",
+      "title": "Make concurrent reservations atomic and durable",
+      "split": "development",
+      "driver": "parallel",
+      "contract": "Repair Service(root).apply. configure(limit) writes the limit once; reserve(id,amount) atomically accepts a fresh unique ID iff all held+amount<=limit; positive integer amounts only. Return accepted or budget. snapshot returns {held,count}. The evaluator races up to24 real threads on one Service and then constructs a fresh Service to probe persistence. Failed reservations do not consume IDs. Duplicate successful IDs raise ValueError. SQLite transaction reads, checks and writes must be one unit.",
+      "editable_paths": [
+        "app.py",
+        "storage.py"
+      ],
+      "starter": {
+        "app.py": "import threading\nfrom storage import connect,get,put\nclass Service:\n    def __init__(self,root):self.root=root;self.lock=threading.Lock()\n    def apply(self,v):\n        with self.lock:\n            db=connect(self.root);db.execute('BEGIN IMMEDIATE')\n            try:\n                rows=get(db,'rows',{});limit=get(db,'limit',None)\n                if v['op']=='configure':\n                    if limit is not None or type(v['limit']) is not int or v['limit']<=0:raise ValueError('invalid')\n                    put(db,'limit',v['limit']);result='configured'\n                elif v['op']=='snapshot':result={'held':sum(rows.values()),'count':len(rows)}\n                elif v['op']=='reserve':\n                    key,n=v['id'],v['amount']\n                    if limit is None or type(key) is not str or not key or key in rows or type(n) is not int or n<=0:raise ValueError('invalid')\n                    if n>limit:result='budget'\n                    else:rows[key]=n;put(db,'rows',rows);result='accepted'\n                else:raise ValueError('unknown')\n                db.execute('COMMIT');return result\n            except BaseException:db.execute('ROLLBACK');raise\n            finally:db.close()\n",
+        "storage.py": "import json,os,sqlite3\ndef connect(root):\n    os.makedirs(root,exist_ok=True)\n    db=sqlite3.connect(os.path.join(root,'state.sqlite'),timeout=5,isolation_level=None)\n    db.execute('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')\n    return db\ndef get(db,key,default):\n    row=db.execute('SELECT value FROM state WHERE key=?',(key,)).fetchone()\n    return json.loads(row[0]) if row else default\ndef put(db,key,value):\n    db.execute('INSERT OR REPLACE INTO state VALUES (?,?)',(key,json.dumps(value,sort_keys=True)))\n"
+      },
+      "reference": {
+        "app.py": "import threading\nfrom storage import connect,get,put\nclass Service:\n    def __init__(self,root):self.root=root;self.lock=threading.Lock()\n    def apply(self,v):\n        with self.lock:\n            db=connect(self.root);db.execute('BEGIN IMMEDIATE')\n            try:\n                rows=get(db,'rows',{});limit=get(db,'limit',None)\n                if v['op']=='configure':\n                    if limit is not None or type(v['limit']) is not int or v['limit']<=0:raise ValueError('invalid')\n                    put(db,'limit',v['limit']);result='configured'\n                elif v['op']=='snapshot':result={'held':sum(rows.values()),'count':len(rows)}\n                elif v['op']=='reserve':\n                    key,n=v['id'],v['amount']\n                    if limit is None or type(key) is not str or not key or key in rows or type(n) is not int or n<=0:raise ValueError('invalid')\n                    if sum(rows.values())+n>limit:result='budget'\n                    else:rows[key]=n;put(db,'rows',rows);result='accepted'\n                else:raise ValueError('unknown')\n                db.execute('COMMIT');return result\n            except BaseException:db.execute('ROLLBACK');raise\n            finally:db.close()\n",
+        "storage.py": "import json,os,sqlite3\ndef connect(root):\n    os.makedirs(root,exist_ok=True)\n    db=sqlite3.connect(os.path.join(root,'state.sqlite'),timeout=5,isolation_level=None)\n    db.execute('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')\n    return db\ndef get(db,key,default):\n    row=db.execute('SELECT value FROM state WHERE key=?',(key,)).fetchone()\n    return json.loads(row[0]) if row else default\ndef put(db,key,value):\n    db.execute('INSERT OR REPLACE INTO state VALUES (?,?)',(key,json.dumps(value,sort_keys=True)))\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "setup": [
+              {
+                "op": "configure",
+                "limit": 10
+              }
+            ],
+            "parallel": [
+              {
+                "op": "reserve",
+                "id": "0",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "1",
+                "amount": 3
+              }
+            ],
+            "probe": {
+              "op": "snapshot"
+            }
+          },
+          "expected": {
+            "setup": [
+              "configured"
+            ],
+            "accepted": 2,
+            "rejected": 0,
+            "probe": {
+              "held": 6,
+              "count": 2
+            }
+          }
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "setup": [
+              {
+                "op": "configure",
+                "limit": 25
+              }
+            ],
+            "parallel": [
+              {
+                "op": "reserve",
+                "id": "0",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "1",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "2",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "3",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "4",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "5",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "6",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "7",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "8",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "9",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "10",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "11",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "12",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "13",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "14",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "15",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "16",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "17",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "18",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "19",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "20",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "21",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "22",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "23",
+                "amount": 3
+              }
+            ],
+            "probe": {
+              "op": "snapshot"
+            }
+          },
+          "expected": {
+            "setup": [
+              "configured"
+            ],
+            "accepted": 8,
+            "rejected": 16,
+            "probe": {
+              "held": 24,
+              "count": 8
+            }
+          }
+        },
+        {
+          "input": {
+            "setup": [
+              {
+                "op": "configure",
+                "limit": 10
+              }
+            ],
+            "parallel": [
+              {
+                "op": "reserve",
+                "id": "same",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "same",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "same",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "same",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "same",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "same",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "same",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "same",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "same",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "same",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "same",
+                "amount": 3
+              },
+              {
+                "op": "reserve",
+                "id": "same",
+                "amount": 3
+              }
+            ],
+            "probe": {
+              "op": "snapshot"
+            }
+          },
+          "expected": {
+            "setup": [
+              "configured"
+            ],
+            "accepted": 1,
+            "rejected": 11,
+            "probe": {
+              "held": 3,
+              "count": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "difficult-replay",
+      "difficulty": "difficult",
+      "family": "session-replay",
+      "title": "Fence stale session events after restart",
+      "split": "holdout",
+      "driver": "restart",
+      "contract": "Repair Service(root).apply with persisted {incarnation,next,readonly}. snapshot(id,next) installs a nonempty incarnation and nonnegative integer frontier, clearing readonly. event(id,seq) is applied only for current incarnation and exact next seq; older duplicates return duplicate without moving frontier. A forward gap or changed incarnation returns held, sets readonly and blocks all events until a fresh snapshot. Probe returns state. Fresh Python processes reuse the same durable root.",
+      "editable_paths": [
+        "app.py",
+        "storage.py"
+      ],
+      "starter": {
+        "app.py": "from storage import connect,get,put\nclass Service:\n    def __init__(self,root):self.root=root\n    def apply(self,v):\n        db=connect(self.root);db.execute('BEGIN IMMEDIATE')\n        try:\n            s=get(db,'state',{'incarnation':None,'next':0,'readonly':True})\n            if v['op']=='snapshot':\n                if type(v['id']) is not str or not v['id'] or type(v['next']) is not int or v['next']<0:raise ValueError('invalid')\n                s={'incarnation':v['id'],'next':v['next'],'readonly':False};result='ready'\n            elif v['op']=='probe':result=dict(s)\n            elif v['op']=='event':\n                if type(v['seq']) is not int or v['seq']<0:raise ValueError('invalid')\n                if s['readonly']:result='held'\n                elif v['seq']>s['next']:s['readonly']=True;result='held'\n                elif v['seq']<s['next']:result='duplicate'\n                else:s['next']+=1;result='applied'\n            else:raise ValueError('unknown')\n            put(db,'state',s);db.execute('COMMIT');return result\n        except BaseException:db.execute('ROLLBACK');raise\n        finally:db.close()\n",
+        "storage.py": "import json,os,sqlite3\ndef connect(root):\n    os.makedirs(root,exist_ok=True)\n    db=sqlite3.connect(os.path.join(root,'state.sqlite'),timeout=5,isolation_level=None)\n    db.execute('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')\n    return db\ndef get(db,key,default):\n    row=db.execute('SELECT value FROM state WHERE key=?',(key,)).fetchone()\n    return json.loads(row[0]) if row else default\ndef put(db,key,value):\n    db.execute('INSERT OR REPLACE INTO state VALUES (?,?)',(key,json.dumps(value,sort_keys=True)))\n"
+      },
+      "reference": {
+        "app.py": "from storage import connect,get,put\nclass Service:\n    def __init__(self,root):self.root=root\n    def apply(self,v):\n        db=connect(self.root);db.execute('BEGIN IMMEDIATE')\n        try:\n            s=get(db,'state',{'incarnation':None,'next':0,'readonly':True})\n            if v['op']=='snapshot':\n                if type(v['id']) is not str or not v['id'] or type(v['next']) is not int or v['next']<0:raise ValueError('invalid')\n                s={'incarnation':v['id'],'next':v['next'],'readonly':False};result='ready'\n            elif v['op']=='probe':result=dict(s)\n            elif v['op']=='event':\n                if type(v['seq']) is not int or v['seq']<0:raise ValueError('invalid')\n                if s['readonly']:result='held'\n                elif v['id']!=s['incarnation'] or v['seq']>s['next']:s['readonly']=True;result='held'\n                elif v['seq']<s['next']:result='duplicate'\n                else:s['next']+=1;result='applied'\n            else:raise ValueError('unknown')\n            put(db,'state',s);db.execute('COMMIT');return result\n        except BaseException:db.execute('ROLLBACK');raise\n        finally:db.close()\n",
+        "storage.py": "import json,os,sqlite3\ndef connect(root):\n    os.makedirs(root,exist_ok=True)\n    db=sqlite3.connect(os.path.join(root,'state.sqlite'),timeout=5,isolation_level=None)\n    db.execute('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')\n    return db\ndef get(db,key,default):\n    row=db.execute('SELECT value FROM state WHERE key=?',(key,)).fetchone()\n    return json.loads(row[0]) if row else default\ndef put(db,key,value):\n    db.execute('INSERT OR REPLACE INTO state VALUES (?,?)',(key,json.dumps(value,sort_keys=True)))\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "snapshot",
+                    "id": "a",
+                    "next": 0
+                  },
+                  {
+                    "op": "event",
+                    "id": "a",
+                    "seq": 0
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "ready",
+              "applied"
+            ]
+          ]
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "snapshot",
+                    "id": "a",
+                    "next": 0
+                  },
+                  {
+                    "op": "event",
+                    "id": "a",
+                    "seq": 0
+                  }
+                ]
+              },
+              {
+                "ops": [
+                  {
+                    "op": "event",
+                    "id": "a",
+                    "seq": 0
+                  },
+                  {
+                    "op": "event",
+                    "id": "a",
+                    "seq": 2
+                  },
+                  {
+                    "op": "event",
+                    "id": "a",
+                    "seq": 1
+                  },
+                  {
+                    "op": "probe"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "ready",
+              "applied"
+            ],
+            [
+              "duplicate",
+              "held",
+              "held",
+              {
+                "incarnation": "a",
+                "next": 1,
+                "readonly": true
+              }
+            ]
+          ]
+        },
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "snapshot",
+                    "id": "a",
+                    "next": 1
+                  }
+                ]
+              },
+              {
+                "ops": [
+                  {
+                    "op": "event",
+                    "id": "b",
+                    "seq": 1
+                  },
+                  {
+                    "op": "probe"
+                  },
+                  {
+                    "op": "snapshot",
+                    "id": "b",
+                    "next": 0
+                  },
+                  {
+                    "op": "event",
+                    "id": "b",
+                    "seq": 0
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "ready"
+            ],
+            [
+              "held",
+              {
+                "incarnation": "a",
+                "next": 1,
+                "readonly": true
+              },
+              "ready",
+              "applied"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "difficult-dispatch",
+      "difficulty": "difficult",
+      "family": "idempotency",
+      "title": "Do not replay dispatch after an uncertain crash",
+      "split": "holdout",
+      "driver": "restart",
+      "contract": "Repair Service(root).apply. submit(key,payload,crash=false) must durably claim the exact request BEFORE incrementing the effects counter. A crash=true invokes storage.crash(after_effect), which really kills the process after that increment but before marking success. Reopening a pending claim returns held and never repeats its effect. A settled exact duplicate returns ok; conflicting payload raises ValueError. probe returns {effects,requests}. All persistent fields are in SQLite; no actual network call occurs.",
+      "editable_paths": [
+        "app.py",
+        "storage.py"
+      ],
+      "starter": {
+        "app.py": "from storage import connect,get,put,crash\nclass Service:\n    def __init__(self,root):self.root=root\n    def apply(self,v):\n        db=connect(self.root)\n        try:\n            if v['op']=='probe':return {'effects':get(db,'effects',0),'requests':len(get(db,'rows',{}))}\n            if v['op']!='submit' or type(v['key']) is not str or not v['key'] or type(v['payload']) is not str or not v['payload']:raise ValueError('invalid')\n            db.execute('BEGIN IMMEDIATE');rows=get(db,'rows',{});key=v['key']\n            if key in rows:\n                if rows[key][0]!=v['payload']:db.execute('ROLLBACK');raise ValueError('conflict')\n                db.execute('COMMIT');return 'ok' if rows[key][1]=='done' else 'held'\n            rows[key]=[v['payload'],'pending'];db.execute('COMMIT')\n            put(db,'effects',get(db,'effects',0)+1)\n            if v.get('crash'):crash('after_effect')\n            rows[key][1]='done';put(db,'rows',rows);return 'ok'\n        finally:db.close()\n",
+        "storage.py": "import json,os,sqlite3\ndef connect(root):\n    os.makedirs(root,exist_ok=True)\n    db=sqlite3.connect(os.path.join(root,'state.sqlite'),timeout=5,isolation_level=None)\n    db.execute('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')\n    return db\ndef get(db,key,default):\n    row=db.execute('SELECT value FROM state WHERE key=?',(key,)).fetchone()\n    return json.loads(row[0]) if row else default\ndef put(db,key,value):\n    db.execute('INSERT OR REPLACE INTO state VALUES (?,?)',(key,json.dumps(value,sort_keys=True)))\n\ndef crash(stage):\n    if os.environ.get('BENCHMARK_CRASH_STAGE')==stage:os._exit(86)\n"
+      },
+      "reference": {
+        "app.py": "from storage import connect,get,put,crash\nclass Service:\n    def __init__(self,root):self.root=root\n    def apply(self,v):\n        db=connect(self.root)\n        try:\n            if v['op']=='probe':return {'effects':get(db,'effects',0),'requests':len(get(db,'rows',{}))}\n            if v['op']!='submit' or type(v['key']) is not str or not v['key'] or type(v['payload']) is not str or not v['payload']:raise ValueError('invalid')\n            db.execute('BEGIN IMMEDIATE');rows=get(db,'rows',{});key=v['key']\n            if key in rows:\n                if rows[key][0]!=v['payload']:db.execute('ROLLBACK');raise ValueError('conflict')\n                db.execute('COMMIT');return 'ok' if rows[key][1]=='done' else 'held'\n            rows[key]=[v['payload'],'pending'];put(db,'rows',rows);db.execute('COMMIT')\n            put(db,'effects',get(db,'effects',0)+1)\n            if v.get('crash'):crash('after_effect')\n            rows[key][1]='done';put(db,'rows',rows);return 'ok'\n        finally:db.close()\n",
+        "storage.py": "import json,os,sqlite3\ndef connect(root):\n    os.makedirs(root,exist_ok=True)\n    db=sqlite3.connect(os.path.join(root,'state.sqlite'),timeout=5,isolation_level=None)\n    db.execute('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')\n    return db\ndef get(db,key,default):\n    row=db.execute('SELECT value FROM state WHERE key=?',(key,)).fetchone()\n    return json.loads(row[0]) if row else default\ndef put(db,key,value):\n    db.execute('INSERT OR REPLACE INTO state VALUES (?,?)',(key,json.dumps(value,sort_keys=True)))\n\ndef crash(stage):\n    if os.environ.get('BENCHMARK_CRASH_STAGE')==stage:os._exit(86)\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "submit",
+                    "key": "a",
+                    "payload": "x"
+                  },
+                  {
+                    "op": "probe"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "ok",
+              {
+                "effects": 1,
+                "requests": 1
+              }
+            ]
+          ]
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "submit",
+                    "key": "a",
+                    "payload": "x",
+                    "crash": true
+                  }
+                ],
+                "crash_stage": "after_effect"
+              },
+              {
+                "ops": [
+                  {
+                    "op": "submit",
+                    "key": "a",
+                    "payload": "x"
+                  },
+                  {
+                    "op": "probe"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            {
+              "crashed": true
+            },
+            [
+              "held",
+              {
+                "effects": 1,
+                "requests": 1
+              }
+            ]
+          ]
+        },
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "submit",
+                    "key": "a",
+                    "payload": "x"
+                  }
+                ]
+              },
+              {
+                "ops": [
+                  {
+                    "op": "submit",
+                    "key": "a",
+                    "payload": "y"
+                  },
+                  {
+                    "op": "submit",
+                    "key": "a",
+                    "payload": "x"
+                  },
+                  {
+                    "op": "probe"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "ok"
+            ],
+            [
+              {
+                "error": "ValueError"
+              },
+              "ok",
+              {
+                "effects": 1,
+                "requests": 1
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "difficult-migration",
+      "difficulty": "difficult",
+      "family": "migration",
+      "title": "Preserve authority through migration failures",
+      "split": "holdout",
+      "driver": "restart",
+      "contract": "Repair Service(root).apply. init(receipts) sets a registry of unique nonempty receipt IDs once and starts docker-offline/source_active=true. migrate(receipt,target,outcome) requires an unspent registry receipt, target docker-offline/docker-open/native, and outcome ready/failed/unknown. Only ready consumes the receipt and changes profile; failed leaves profile/source and receipt intact. Unknown durably marks the receipt pending, keeps source active, and prohibits retrying that receipt even after restart. probe returns profile,source_active,spent,pending. Source must remain active throughout these simulated preparation outcomes; no real process is launched.",
+      "editable_paths": [
+        "app.py",
+        "storage.py",
+        "policy.py"
+      ],
+      "starter": {
+        "app.py": "from storage import connect,get,put\nfrom policy import validate\nclass Service:\n    def __init__(self,root):self.root=root\n    def apply(self,v):\n        db=connect(self.root);db.execute('BEGIN IMMEDIATE')\n        try:\n            s=get(db,'state',None)\n            if v['op']=='init':\n                if s is not None or type(v['receipts']) is not list or any(type(x) is not str or not x for x in v['receipts']) or len(set(v['receipts']))!=len(v['receipts']):raise ValueError('invalid')\n                s={'registry':v['receipts'],'profile':'docker-offline','source_active':True,'spent':[],'pending':[]};result='initialized'\n            elif v['op']=='probe':\n                if s is None:raise ValueError('uninitialized')\n                result={k:s[k] for k in ('profile','source_active','spent','pending')}\n            elif v['op']=='migrate':\n                validate(s,v)\n                if v['outcome']=='ready':s['spent'].append(v['receipt']);s['profile']=v['target'];result='ready'\n                elif v['outcome']=='unknown':s['pending'].append(v['receipt']);result='held'\n                else:result='rolled_back'\n            else:raise ValueError('unknown')\n            put(db,'state',s);db.execute('COMMIT');return result\n        except BaseException:db.execute('ROLLBACK');raise\n        finally:db.close()\n",
+        "storage.py": "import json,os,sqlite3\ndef connect(root):\n    os.makedirs(root,exist_ok=True)\n    db=sqlite3.connect(os.path.join(root,'state.sqlite'),timeout=5,isolation_level=None)\n    db.execute('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')\n    return db\ndef get(db,key,default):\n    row=db.execute('SELECT value FROM state WHERE key=?',(key,)).fetchone()\n    return json.loads(row[0]) if row else default\ndef put(db,key,value):\n    db.execute('INSERT OR REPLACE INTO state VALUES (?,?)',(key,json.dumps(value,sort_keys=True)))\n",
+        "policy.py": "def validate(s,v):\n    if s is None or v['receipt'] not in s['registry'] or v['receipt'] in s['spent'] or v['target'] not in ('docker-offline','docker-open','native') or v['outcome'] not in ('ready','failed','unknown'):raise ValueError('invalid authority')\n"
+      },
+      "reference": {
+        "app.py": "from storage import connect,get,put\nfrom policy import validate\nclass Service:\n    def __init__(self,root):self.root=root\n    def apply(self,v):\n        db=connect(self.root);db.execute('BEGIN IMMEDIATE')\n        try:\n            s=get(db,'state',None)\n            if v['op']=='init':\n                if s is not None or type(v['receipts']) is not list or any(type(x) is not str or not x for x in v['receipts']) or len(set(v['receipts']))!=len(v['receipts']):raise ValueError('invalid')\n                s={'registry':v['receipts'],'profile':'docker-offline','source_active':True,'spent':[],'pending':[]};result='initialized'\n            elif v['op']=='probe':\n                if s is None:raise ValueError('uninitialized')\n                result={k:s[k] for k in ('profile','source_active','spent','pending')}\n            elif v['op']=='migrate':\n                validate(s,v)\n                if v['outcome']=='ready':s['spent'].append(v['receipt']);s['profile']=v['target'];result='ready'\n                elif v['outcome']=='unknown':s['pending'].append(v['receipt']);result='held'\n                else:result='rolled_back'\n            else:raise ValueError('unknown')\n            put(db,'state',s);db.execute('COMMIT');return result\n        except BaseException:db.execute('ROLLBACK');raise\n        finally:db.close()\n",
+        "storage.py": "import json,os,sqlite3\ndef connect(root):\n    os.makedirs(root,exist_ok=True)\n    db=sqlite3.connect(os.path.join(root,'state.sqlite'),timeout=5,isolation_level=None)\n    db.execute('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')\n    return db\ndef get(db,key,default):\n    row=db.execute('SELECT value FROM state WHERE key=?',(key,)).fetchone()\n    return json.loads(row[0]) if row else default\ndef put(db,key,value):\n    db.execute('INSERT OR REPLACE INTO state VALUES (?,?)',(key,json.dumps(value,sort_keys=True)))\n",
+        "policy.py": "def validate(s,v):\n    if s is None or v['receipt'] not in s['registry'] or v['receipt'] in s['spent']+s['pending'] or v['target'] not in ('docker-offline','docker-open','native') or v['outcome'] not in ('ready','failed','unknown'):raise ValueError('invalid authority')\n"
+      },
+      "public_cases": [
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "init",
+                    "receipts": [
+                      "r"
+                    ]
+                  },
+                  {
+                    "op": "migrate",
+                    "receipt": "r",
+                    "target": "native",
+                    "outcome": "ready"
+                  },
+                  {
+                    "op": "probe"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "initialized",
+              "ready",
+              {
+                "profile": "native",
+                "source_active": true,
+                "spent": [
+                  "r"
+                ],
+                "pending": []
+              }
+            ]
+          ]
+        }
+      ],
+      "evaluator_cases": [
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "init",
+                    "receipts": [
+                      "r"
+                    ]
+                  },
+                  {
+                    "op": "migrate",
+                    "receipt": "r",
+                    "target": "native",
+                    "outcome": "failed"
+                  }
+                ]
+              },
+              {
+                "ops": [
+                  {
+                    "op": "probe"
+                  },
+                  {
+                    "op": "migrate",
+                    "receipt": "r",
+                    "target": "docker-open",
+                    "outcome": "ready"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "initialized",
+              "rolled_back"
+            ],
+            [
+              {
+                "profile": "docker-offline",
+                "source_active": true,
+                "spent": [],
+                "pending": []
+              },
+              "ready"
+            ]
+          ]
+        },
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "init",
+                    "receipts": [
+                      "r"
+                    ]
+                  },
+                  {
+                    "op": "migrate",
+                    "receipt": "r",
+                    "target": "native",
+                    "outcome": "unknown"
+                  }
+                ]
+              },
+              {
+                "ops": [
+                  {
+                    "op": "migrate",
+                    "receipt": "r",
+                    "target": "native",
+                    "outcome": "ready"
+                  },
+                  {
+                    "op": "probe"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "initialized",
+              "held"
+            ],
+            [
+              {
+                "error": "ValueError"
+              },
+              {
+                "profile": "docker-offline",
+                "source_active": true,
+                "spent": [],
+                "pending": [
+                  "r"
+                ]
+              }
+            ]
+          ]
+        },
+        {
+          "input": {
+            "phases": [
+              {
+                "ops": [
+                  {
+                    "op": "init",
+                    "receipts": [
+                      "r"
+                    ]
+                  },
+                  {
+                    "op": "migrate",
+                    "receipt": "forged",
+                    "target": "native",
+                    "outcome": "ready"
+                  }
+                ]
+              }
+            ]
+          },
+          "expected": [
+            [
+              "initialized",
+              {
+                "error": "ValueError"
+              }
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}
