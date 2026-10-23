@@ -35,6 +35,6 @@
     "third_party/v8/rusty_v8_152_2_0_release_manifests.sha256": "1dd7c7f7d3d91af7f06a2846bddc6a1da7725acc67ecd7ab2c7dfc980dd8c6d4"
   },
   "required_new_regression": "doxa_auto_structured_approval_preserves_review_metadata_when_denied",
-  "compiled_verification": "pending; this review record is not a compiled acceptance receipt",
+  "compiled_verification": "Separate hash-bound build and compiled guard proof required; this static review record is never an acceptance receipt.",
   "automatic_sensitive_path_gate_changed": false
 }

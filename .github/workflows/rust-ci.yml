@@ -94,6 +94,8 @@ jobs:
           python3 -W error::ResourceWarning scripts/hardened-isolation/test_root_broker.py -v
           python3 scripts/check_workflow_action_pins.py
           python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/routing-benchmark -p 'test_*.py' -v
+          python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/codex-update -p 'test_*.py' -v
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_gallery_capture.py -v
