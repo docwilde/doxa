@@ -2192,7 +2192,7 @@ index c7a5de0..2e2ce58 100644
  
          // Recheck the latest rules before applying the update.
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index a61493a..9781940 100644
+index a61493a..a881b22 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
 @@ -416,6 +416,13 @@ struct ActivationFixture {
@@ -2230,7 +2230,7 @@ index a61493a..9781940 100644
      let prepared = session
          .new_turn_with_default_settings("step-activation-turn".to_string(), Default::default())
          .await;
-@@ -467,6 +481,390 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
+@@ -467,6 +481,389 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
      }
  }
  
@@ -2398,12 +2398,11 @@ index a61493a..9781940 100644
 +#[tokio::test]
 +async fn doxa_auto_structured_approval_preserves_review_metadata_when_denied() {
 +    use crate::guardian::GuardianReviewContext;
-+    use crate::tools::approvals::ApprovalAction;
-+    use crate::tools::approvals::ApprovalContext;
-+    use crate::tools::approvals::ApprovalResolutionSource;
++    use crate::tools::ApprovalContext;
++    use crate::tools::ApprovalResolutionSource;
++    use crate::tools::sandboxing::ApprovalAction;
 +    use crate::tools::sandboxing::ToolError;
 +    use codex_tools::ToolName;
-+    use codex_utils_path_uri::PathUri;
 +
 +    let ActivationFixture { session, turn, .. } =
 +        activation_fixture_with_model_switching(activation_models(), false).await;
@@ -2420,7 +2419,7 @@ index a61493a..9781940 100644
 +            .selection()
 +            .environment_id
 +            .clone(),
-+        cwd: PathUri::from_abs_path(&turn.cwd),
++        cwd: captured.environments.primary().unwrap().cwd().clone(),
 +        files: Vec::new(),
 +        patch: String::new(),
 +        changes: Arc::new(Default::default()),

@@ -1,4 +1,4 @@
-//! Official Codex 0.163.0 server requests mapped to DOXA's input protocol.
+//! Official Codex 0.164.0 server requests mapped to DOXA's input protocol.
 //! Replies are single use and apply only to the currently displayed request.
 use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
 use serde_json::{json, Map, Value};

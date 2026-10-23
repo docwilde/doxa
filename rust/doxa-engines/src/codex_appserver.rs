@@ -2,7 +2,7 @@
 //! Interactive requests require a host bridge; unknown requests are refused.
 //!
 //! The shapes below come from `codex app-server generate-ts --experimental`
-//! (Codex 0.163.0). Stdio is newline-delimited JSON-RPC without LSP headers.
+//! (Codex 0.164.0). Stdio is newline-delimited JSON-RPC without LSP headers.
 use std::io;
 use std::os::unix::{process::CommandExt, net::UnixStream, io::AsRawFd};
 use std::collections::VecDeque;
