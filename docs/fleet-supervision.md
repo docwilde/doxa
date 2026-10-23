@@ -411,10 +411,19 @@ counting them. The review-event history retains at most 256 observations, so
 quarantine and supervisor counts are labeled as counts within that window.
 New message reviews retain a host-issued invocation UUID, call number and exact
 HTTP-request hash through reservation, verified usage and the persistent semantic
-cache. The receipt binds the reviewed envelope, typed verdict, actual model,
-tokens and latency; equal scores do not merge calls. Cache receipts survive
-observation-ring eviction. Legacy rows without receipts remain readable, but
-cannot prove per-message latency through score or timestamp matching.
+cache. Required scrubbing can redact host metadata such as charter hashes, so
+the receipt binds the original host envelope separately from the typed scrubbed
+message actually reviewed. Neither raw metadata nor hidden text is restored to
+the model request. The cache checks both identities, the complete scrubbed HTTP
+request and typed verdict before retaining the actual model, tokens and latency.
+
+The private cache and outbound record retain only changed top-level fields as
+sanitized replacement values. `reviewed_envelope_from_patch` reconstructs the
+exact typed reviewed message from the original and this sparse patch; it does
+not reconstruct the full historical HTTP context. Full snapshots and previous
+raw values are not copied into the patch. Equal scores do not merge calls, and
+receipts survive observation-ring eviction. Older entries remain readable;
+missing view/receipt evidence cannot establish the new review contract.
 
 Review cost is a recorded known-usage subtotal. A reservation count does not prove
 that every attempt settled, including older journals, so the debrief leaves the
