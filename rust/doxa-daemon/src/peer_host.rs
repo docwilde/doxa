@@ -858,7 +858,7 @@ impl PeerHost {
             },
             "fleet_state" => {
                 let context=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.clone().ok_or("Session has no fleet guard")?;
-                let state=doxa_fleet::transaction(&context,|state|Ok(state.clone())).map_err(|error|error.to_string())?;
+                let state=doxa_fleet::transaction_existing(&context,|state|Ok(state.clone())).map_err(|error|error.to_string())?;
                 Ok(json!({"charter_sha256":context.charter_sha256,"state":state}))
             },
             "fleet_resume" => {
