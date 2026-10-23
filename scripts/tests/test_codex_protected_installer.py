@@ -197,6 +197,7 @@ sys.stdin.read()
         source.parent.mkdir(parents=True)
         source.write_text(Path(installer.__file__).read_text())
         files = {
+            updater.RETAINED_CONTRACTS:updater.read(updater.ROOT/updater.RETAINED_CONTRACTS).decode(),
             'rust/doxa-tui/Cargo.toml':'[package]\nname = "doxa-tui"\nversion = "2.0.0-beta.65"\n',
             'Cargo.lock':'version = 4\n\n[[package]]\nname = "doxa-tui"\nversion = "2.0.0-beta.65"\n',
             'CHANGELOG.md':'# Changelog\n\n## 2.0.0-beta.65 — 2026-10-21\n\nSynthetic fixture.\n',
@@ -204,7 +205,7 @@ sys.stdin.read()
         for name, raw in files.items():
             path=fixture/name; path.parent.mkdir(parents=True,exist_ok=True); path.write_text(raw)
         pin = dict(version=installer.SOURCE_TAG.removeprefix('rust-v'),tag=installer.SOURCE_TAG,
-                   source_commit=installer.SOURCE,patch_sha256=installer.PATCH_SHA256,provider=installer.PROVIDER)
+                   source_commit=installer.SOURCE,patch_sha256=installer.PATCH_SHA256,provider=installer.PROVIDER,contract=installer.CONTRACT)
         for version, digit in [('0.165.0','a'),('0.166.0','b')]:
             carried = ('synthetic reviewed protection '+version+'\n').encode()
             new = dict(pin,version=version,tag='rust-v'+version,source_commit=digit*40,
@@ -216,6 +217,10 @@ sys.stdin.read()
         future_spec=importlib.util.spec_from_file_location('twice_rotated_installer',source)
         future=importlib.util.module_from_spec(future_spec); future_spec.loader.exec_module(future)
         self.assertEqual('codex-0.165.0-precompact-v1',future.PREVIOUS_PROVIDER)
+        contracts={row['version']:row for row in updater.load(updater.read(fixture/updater.RETAINED_CONTRACTS))['contracts']}
+        self.assertEqual(installer.SOURCE,contracts['0.164.0']['source_commit'])
+        self.assertEqual(installer.PATCH_SHA256,contracts['0.164.0']['patch_sha256'])
+        self.assertIn('0.163.0',contracts);self.assertIn('0.165.0',contracts)
         self.assertEqual(installer.PROVIDER,future.receipt_provider(old_receipt))
         self.assertIn((installer.SOURCE,installer.PATCH_SHA256,installer.PROVIDER),future.REVIEWED_INSTALLATIONS)
         self.assertTrue(future.artifact_name(old.name))
