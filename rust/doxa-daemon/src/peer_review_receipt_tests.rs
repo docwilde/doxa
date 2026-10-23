@@ -107,6 +107,9 @@ fn actual_lore_scrub_keeps_original_reviewed_and_http_bindings_through_peer_admi
     let mut legacy=serde_json::to_value(&receipt).unwrap();legacy.as_object_mut().unwrap().remove("reviewed_message_sha256");
     let legacy:doxa_fleet::judge::ReviewReceipt=serde_json::from_value(legacy).unwrap();assert!(legacy.reviewed_message_sha256.is_none());
     assert!(cache(&original,&input,verdict.clone(),legacy).is_err());
+    doxa_fleet::transaction(&context,|state|{state.semantic_cache.get_mut(&original.message_id).unwrap().request_sha256=None;Ok(())}).unwrap();
+    assert!(doxa_fleet::cached_semantic(&context,&original).is_err());
+    cache(&original,&input,verdict.clone(),receipt.clone()).unwrap();
     doxa_fleet::transaction(&context,|state|{state.semantic_cache.get_mut(&original.message_id).unwrap().reviewed_message_patch.as_mut().unwrap().insert("body".into(),json!("tampered persisted view"));Ok(())}).unwrap();
     assert!(doxa_fleet::cached_semantic(&context,&original).is_err());
     cache(&original,&input,verdict,receipt).unwrap();

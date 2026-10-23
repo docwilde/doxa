@@ -350,7 +350,8 @@ pub fn cached_semantic(context:&Context,envelope:&Envelope)->io::Result<Option<R
         }
         if let Some(receipt)=&cached.review_receipt {
             if receipt.message_sha256.as_deref()!=Some(envelope_hash.as_str()) || receipt.verdict_sha256!=verdict || receipt.reviewed_message_sha256!=cached.reviewed_message_sha256
-                || cached.request_sha256.as_ref().is_some_and(|expected|*expected!=receipt.request_sha256) {
+                || cached.request_sha256.as_ref().is_some_and(|expected|*expected!=receipt.request_sha256)
+                || receipt.reviewed_message_sha256.is_some()&&(cached.request_sha256.as_deref()!=Some(receipt.request_sha256.as_str())||cached.verdict_sha256!=verdict) {
                 return Err(invalid("cached semantic receipt binding changed"));
             }
         }
