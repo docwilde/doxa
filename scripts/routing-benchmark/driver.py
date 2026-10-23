@@ -21,8 +21,16 @@ def load_app():
     return importlib.import_module('app')
 
 def call(function,value):
-    try:return function(value)
-    except (ValueError,KeyError,TypeError) as error:return {'error':type(error).__name__}
+    before=json.dumps(value,sort_keys=True,allow_nan=False)
+    try:
+        result=function(value)
+        # Error objects are reserved for the adapter's exception representation.
+        # Returning such an object is not evidence that the API raised ValueError.
+        if type(result) is dict and set(result)=={'error'}:result={'error':'returned_error_object'}
+    except ValueError:result={'error':'ValueError'}
+    except (KeyError,TypeError) as error:result={'error':type(error).__name__}
+    if json.dumps(value,sort_keys=True,allow_nan=False)!=before:return {'error':'input_mutated'}
+    return result
 
 def stateful(value):
     service=load_app().Service(ROOT)

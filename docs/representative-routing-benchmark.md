@@ -78,7 +78,8 @@ answers are not code changes.
 `--trusted-reference` is solely for operator fixture validation. Never use that
 workspace as a model input. The repository contains the transparent corpus for
 reproducibility, so it is not a secret external benchmark. Evaluator-only means
-the cases/answers are withheld from the candidate workspace and score container;
+the test source and expected answers are withheld from the candidate workspace
+and score container; runtime inputs necessarily reach the program under test.
 future contamination and deliberate test gaming remain limitations.
 
 ## Grade in offline Docker
@@ -96,7 +97,8 @@ report rootless mode. Each case starts a new credential-free container with
 network `none`, read-only source/root filesystem, no capabilities or privilege
 escalation, 256 MiB memory/no swap, one CPU, 64 PIDs, a 32 MiB private state
 tmpfs and a 30-second deadline. It receives no host home, Docker socket, provider
-gateway, credential store or oracle answers. Root inside the rootless container
+gateway, credential store or evaluator answers. Public smoke examples remain
+visible by design. Root inside the rootless container
 is used only to read the owner-private source mount; host-root privileges are
 not granted.
 

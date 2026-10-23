@@ -109,4 +109,14 @@ class Tests(unittest.TestCase):
         self.assertTrue(all(row['supports_tools'] is False and row['max_output_tokens']==32768 for row in config['candidates']))
         with self.assertRaises(ValueError):b.router_config('invented-model')
 
+    def test_trusted_driver_distinguishes_mutation_and_real_exceptions(self):
+        spec=importlib.util.spec_from_file_location('repair_driver',ROOT/'driver.py')
+        driver=importlib.util.module_from_spec(spec);spec.loader.exec_module(driver)
+        # These are trusted test callbacks, never candidate/reference modules.
+        def mutate(value):value['changed']=True;return 7
+        def fail(_):raise ValueError('fixture')
+        self.assertEqual(driver.call(mutate,{}),{'error':'input_mutated'})
+        self.assertEqual(driver.call(fail,{}),{'error':'ValueError'})
+        self.assertEqual(driver.call(lambda _: {'error':'ValueError'},{}),{'error':'returned_error_object'})
+
 if __name__=='__main__':unittest.main()

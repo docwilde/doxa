@@ -2,8 +2,9 @@
 """Prepare repair repositories and grade only in bounded rootless offline Docker.
 
 No provider calls, model execution, routing defaults or supervision gate changes.
-Oracle answers/reference repairs stay in the operator checkout and are never
-mounted in the candidate container. Every score is a fresh snapshot-bound run.
+Evaluator answers/reference repairs stay in the operator checkout and are never
+mounted in the candidate container. Public smoke answers are intentionally shared.
+Every score is a fresh snapshot-bound run.
 """
 import argparse
 import hashlib
@@ -225,7 +226,7 @@ def grade(state,host,image):
         'passed':all(r['passed'] for r in observations),'tests':observations,'source_sha256':digest(encode(inventory)),
         'corpus_sha256':plan['corpus_sha256'],'driver_sha256':plan['driver_sha256'],
         'image':image,'docker_host':'local_rootless_unix_socket','network':'none','source_readonly':True,
-        'oracle_answers_mounted':False,'provider_credentials_passed':False,'host_candidate_execution':False,
+        'evaluator_answers_mounted':False,'public_smoke_examples_mounted':True,'provider_credentials_passed':False,'host_candidate_execution':False,
         'trusted_reference_self_check':plan['trusted_reference_self_check'],'model_quality_validated':False,'human_labels':False,
         'result_directory':str(run)}
     create(run/'report.json',report)
