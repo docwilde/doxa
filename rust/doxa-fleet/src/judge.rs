@@ -121,10 +121,14 @@ fn credential(model: &Model) -> io::Result<String> {
 pub fn evaluate(context:&Context,model:&Model,instructions:&str,input:&Value)->io::Result<Response>{
     let body=request_with_threshold(model,instructions,input,context.review.risk_threshold)?;
     let (endpoint,_)=model.service();let key=credential(model)?;
-    let message_sha256=if instructions==SEMANTIC_INSTRUCTIONS {
-        input.get("message").filter(|value|serde_json::from_value::<crate::Envelope>((*value).clone()).is_ok()).map(hash).transpose()?
-    }else{None};
+    let message_sha256=semantic_message_sha256(instructions,input)?;
     evaluate_request_at_bound(context,model,&body,endpoint,&key,message_sha256)
+}
+fn semantic_message_sha256(instructions:&str,input:&Value)->io::Result<Option<String>> {
+    if instructions!=SEMANTIC_INSTRUCTIONS {return Ok(None);}
+    // Hash the typed envelope, whose serialization order is the cache contract;
+    // serde_json::Value object ordering is the separate HTTP request contract.
+    input.get("message").and_then(|value|serde_json::from_value::<crate::Envelope>(value.clone()).ok()).as_ref().map(hash).transpose()
 }
 #[cfg(test)]
 fn evaluate_request_at(context:&Context,model:&Model,body:&Value,endpoint:&str,key:&str)->io::Result<Response>{

@@ -68,7 +68,12 @@ fn actual_http_review_propagates_one_message_bound_receipt_without_secret_data()
     use std::{io::{Read,Write},net::TcpListener};
     let (_dir, context, model) = fixture();
     let envelope = message(&context,"Read-only scoped findings");
-    let body = request(&model,SEMANTIC_INSTRUCTIONS,&json!({"message":envelope})).unwrap();
+    let input=json!({"message":envelope});
+    let message_sha256=semantic_message_sha256(SEMANTIC_INSTRUCTIONS,&input).unwrap();
+    assert_eq!(message_sha256,Some(hash(&envelope).unwrap()));
+    assert_ne!(message_sha256,Some(hash(&input["message"]).unwrap()));
+    assert!(semantic_message_sha256(SUPERVISOR_INSTRUCTIONS,&input).unwrap().is_none());
+    let body = request(&model,SEMANTIC_INSTRUCTIONS,&input).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/review",listener.local_addr().unwrap());
     let worker = std::thread::spawn(move || {
@@ -86,7 +91,7 @@ fn actual_http_review_propagates_one_message_bound_receipt_without_secret_data()
         let data=json!({"model":"fixture-model","choices":[{"finish_reason":"stop","message":{"content":raw_safe().to_string()}}],"usage":{"prompt_tokens":100,"completion_tokens":10}}).to_string();
         write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}",data.len()).unwrap();
     });
-    let response=evaluate_request_at_bound(&context,&model,&body,&endpoint,"fixture-secret-never-log",Some(hash(&envelope).unwrap())).unwrap();
+    let response=evaluate_request_at_bound(&context,&model,&body,&endpoint,"fixture-secret-never-log",message_sha256).unwrap();
     worker.join().unwrap();
     let proof=response.review_receipt.unwrap();
     let verdict:SemanticVerdict=serde_json::from_value(response.result).unwrap();
