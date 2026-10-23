@@ -21,6 +21,7 @@ class Tests(unittest.TestCase):
         for task in tasks:
             self.assertEqual(set(task['starter']),set(task['reference']))
             self.assertTrue(task['public_cases'] and task['evaluator_cases'])
+            self.assertTrue(all('expected_protocol' in c for c in task['public_cases']+task['evaluator_cases']))
             self.assertNotEqual(task['starter'],task['reference'])
             self.assertEqual(groups.setdefault(task['family'],task['split']),task['split'])
             for files in [task['starter'],task['reference']]:
@@ -115,8 +116,10 @@ class Tests(unittest.TestCase):
         # These are trusted test callbacks, never candidate/reference modules.
         def mutate(value):value['changed']=True;return 7
         def fail(_):raise ValueError('fixture')
-        self.assertEqual(driver.call(mutate,{}),{'error':'input_mutated'})
-        self.assertEqual(driver.call(fail,{}),{'error':'ValueError'})
-        self.assertEqual(driver.call(lambda _: {'error':'ValueError'},{}),{'error':'returned_error_object'})
+        self.assertEqual(driver.call(mutate,{}),{'violation':'input_mutated'})
+        self.assertEqual(driver.call(fail,{}),{'raised':'ValueError'})
+        self.assertEqual(driver.call(lambda _: {'error':'ValueError'},{}),{'returned':{'error':'ValueError'}})
+        row=b.task('easy-json')['evaluator_cases'][-1]
+        self.assertEqual(row['expected_protocol'],{'returned':{'error':'ValueError'}})
 
 if __name__=='__main__':unittest.main()

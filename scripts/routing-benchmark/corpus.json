@@ -28,6 +28,13 @@
             "host": "127.0.0.1",
             "port": 8080,
             "tls": false
+          },
+          "expected_protocol": {
+            "returned": {
+              "host": "127.0.0.1",
+              "port": 8080,
+              "tls": false
+            }
           }
         }
       ],
@@ -38,6 +45,9 @@
           },
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         },
         {
@@ -46,6 +56,9 @@
           },
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         },
         {
@@ -54,6 +67,9 @@
           },
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         },
         {
@@ -62,6 +78,9 @@
           },
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         },
         {
@@ -74,6 +93,13 @@
             "host": "::1",
             "port": 443,
             "tls": true
+          },
+          "expected_protocol": {
+            "returned": {
+              "host": "::1",
+              "port": 443,
+              "tls": true
+            }
           }
         }
       ]
@@ -101,7 +127,10 @@
             "root": "/project",
             "path": "/project/a"
           },
-          "expected": true
+          "expected": true,
+          "expected_protocol": {
+            "returned": true
+          }
         }
       ],
       "evaluator_cases": [
@@ -110,35 +139,50 @@
             "root": "/project",
             "path": "/project-other/a"
           },
-          "expected": false
+          "expected": false,
+          "expected_protocol": {
+            "returned": false
+          }
         },
         {
           "input": {
             "root": "/p",
             "path": "/p/../secret"
           },
-          "expected": false
+          "expected": false,
+          "expected_protocol": {
+            "returned": false
+          }
         },
         {
           "input": {
             "root": "/p/.",
             "path": "/p//a"
           },
-          "expected": true
+          "expected": true,
+          "expected_protocol": {
+            "returned": true
+          }
         },
         {
           "input": {
             "root": "/",
             "path": "/anything"
           },
-          "expected": true
+          "expected": true,
+          "expected_protocol": {
+            "returned": true
+          }
         },
         {
           "input": {
             "root": "p",
             "path": "/p/a"
           },
-          "expected": false
+          "expected": false,
+          "expected_protocol": {
+            "returned": false
+          }
         }
       ]
     },
@@ -164,6 +208,11 @@
           "input": "{\"x\":1}",
           "expected": {
             "x": 1
+          },
+          "expected_protocol": {
+            "returned": {
+              "x": 1
+            }
           }
         }
       ],
@@ -172,24 +221,36 @@
           "input": "{\"x\":1,\"x\":2}",
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         },
         {
           "input": "{\"outer\":{\"x\":0,\"x\":1}}",
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         },
         {
           "input": "[NaN]",
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         },
         {
           "input": "Infinity",
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         },
         {
@@ -198,7 +259,25 @@
             false,
             null,
             1.5
-          ]
+          ],
+          "expected_protocol": {
+            "returned": [
+              false,
+              null,
+              1.5
+            ]
+          }
+        },
+        {
+          "input": "{\"error\":\"ValueError\"}",
+          "expected": {
+            "error": "ValueError"
+          },
+          "expected_protocol": {
+            "returned": {
+              "error": "ValueError"
+            }
+          }
         }
       ]
     },
@@ -227,7 +306,10 @@
             "input_rate": 300000,
             "output_rate": 1200000
           },
-          "expected": 300
+          "expected": 300,
+          "expected_protocol": {
+            "returned": 300
+          }
         }
       ],
       "evaluator_cases": [
@@ -238,7 +320,10 @@
             "input_rate": 1,
             "output_rate": 0
           },
-          "expected": 1
+          "expected": 1,
+          "expected_protocol": {
+            "returned": 1
+          }
         },
         {
           "input": {
@@ -247,7 +332,10 @@
             "input_rate": 300000,
             "output_rate": 1200000
           },
-          "expected": 2702159776422307
+          "expected": 2702159776422307,
+          "expected_protocol": {
+            "returned": 2702159776422307
+          }
         },
         {
           "input": {
@@ -258,6 +346,9 @@
           },
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         },
         {
@@ -269,6 +360,9 @@
           },
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         }
       ]
@@ -299,7 +393,10 @@
             "spent": false,
             "revoked": false
           },
-          "expected": true
+          "expected": true,
+          "expected_protocol": {
+            "returned": true
+          }
         }
       ],
       "evaluator_cases": [
@@ -311,7 +408,10 @@
             "spent": false,
             "revoked": false
           },
-          "expected": false
+          "expected": false,
+          "expected_protocol": {
+            "returned": false
+          }
         },
         {
           "input": {
@@ -321,7 +421,10 @@
             "spent": true,
             "revoked": false
           },
-          "expected": false
+          "expected": false,
+          "expected_protocol": {
+            "returned": false
+          }
         },
         {
           "input": {
@@ -333,6 +436,9 @@
           },
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         }
       ]
@@ -368,6 +474,12 @@
           "expected": {
             "note": "[redacted]",
             "n": 2
+          },
+          "expected_protocol": {
+            "returned": {
+              "note": "[redacted]",
+              "n": 2
+            }
           }
         }
       ],
@@ -391,6 +503,15 @@
               false,
               null
             ]
+          },
+          "expected_protocol": {
+            "returned": {
+              "nested": [
+                "say \"[redacted]\"\nnext",
+                false,
+                null
+              ]
+            }
           }
         },
         {
@@ -404,6 +525,9 @@
           },
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         }
       ]
@@ -454,6 +578,22 @@
               "seen": [
                 "a"
               ]
+            }
+          ],
+          "expected_protocol": [
+            {
+              "returned": {
+                "total": 0,
+                "seen": []
+              }
+            },
+            {
+              "returned": {
+                "total": 3,
+                "seen": [
+                  "a"
+                ]
+              }
             }
           ]
         }
@@ -515,6 +655,41 @@
                 "a"
               ]
             }
+          ],
+          "expected_protocol": [
+            {
+              "returned": {
+                "total": 0,
+                "seen": []
+              }
+            },
+            {
+              "returned": {
+                "total": 3,
+                "seen": [
+                  "a"
+                ]
+              }
+            },
+            {
+              "returned": {
+                "total": 3,
+                "seen": [
+                  "a"
+                ]
+              }
+            },
+            {
+              "raised": "ValueError"
+            },
+            {
+              "returned": {
+                "total": 3,
+                "seen": [
+                  "a"
+                ]
+              }
+            }
           ]
         },
         {
@@ -546,6 +721,23 @@
             {
               "total": 0,
               "seen": []
+            }
+          ],
+          "expected_protocol": [
+            {
+              "returned": {
+                "total": 0,
+                "seen": []
+              }
+            },
+            {
+              "raised": "ValueError"
+            },
+            {
+              "returned": {
+                "total": 0,
+                "seen": []
+              }
             }
           ]
         }
@@ -587,7 +779,12 @@
           },
           "expected": [
             "b"
-          ]
+          ],
+          "expected_protocol": {
+            "returned": [
+              "b"
+            ]
+          }
         }
       ],
       "evaluator_cases": [
@@ -604,7 +801,10 @@
               "a"
             ]
           },
-          "expected": []
+          "expected": [],
+          "expected_protocol": {
+            "returned": []
+          }
         },
         {
           "input": {
@@ -621,6 +821,9 @@
           },
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         },
         {
@@ -635,6 +838,9 @@
           },
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         },
         {
@@ -654,7 +860,12 @@
           },
           "expected": [
             "b"
-          ]
+          ],
+          "expected_protocol": {
+            "returned": [
+              "b"
+            ]
+          }
         }
       ]
     },
@@ -703,6 +914,20 @@
               "held": 8,
               "unknown": false
             }
+          ],
+          "expected_protocol": [
+            {
+              "returned": "configured"
+            },
+            {
+              "returned": "accepted"
+            },
+            {
+              "returned": {
+                "held": 8,
+                "unknown": false
+              }
+            }
           ]
         }
       ],
@@ -742,6 +967,26 @@
               "held": 8,
               "unknown": true
             }
+          ],
+          "expected_protocol": [
+            {
+              "returned": "configured"
+            },
+            {
+              "returned": "accepted"
+            },
+            {
+              "returned": "held"
+            },
+            {
+              "returned": "held"
+            },
+            {
+              "returned": {
+                "held": 8,
+                "unknown": true
+              }
+            }
           ]
         },
         {
@@ -779,6 +1024,26 @@
             {
               "held": 10,
               "unknown": false
+            }
+          ],
+          "expected_protocol": [
+            {
+              "returned": "configured"
+            },
+            {
+              "returned": "accepted"
+            },
+            {
+              "returned": "settled"
+            },
+            {
+              "returned": "accepted"
+            },
+            {
+              "returned": {
+                "held": 10,
+                "unknown": false
+              }
             }
           ]
         }
@@ -823,7 +1088,10 @@
             },
             "owner_release": true
           },
-          "expected": true
+          "expected": true,
+          "expected_protocol": {
+            "returned": true
+          }
         }
       ],
       "evaluator_cases": [
@@ -845,7 +1113,10 @@
             },
             "owner_release": true
           },
-          "expected": false
+          "expected": false,
+          "expected_protocol": {
+            "returned": false
+          }
         },
         {
           "input": {
@@ -865,7 +1136,10 @@
             },
             "owner_release": true
           },
-          "expected": false
+          "expected": false,
+          "expected_protocol": {
+            "returned": false
+          }
         },
         {
           "input": {
@@ -873,7 +1147,10 @@
             "receipt": {},
             "owner_release": true
           },
-          "expected": false
+          "expected": false,
+          "expected_protocol": {
+            "returned": false
+          }
         }
       ]
     },
@@ -916,6 +1193,15 @@
               "profile": "docker-offline",
               "internet": false
             }
+          },
+          "expected_protocol": {
+            "returned": {
+              "decision": "provider_only",
+              "worker": {
+                "profile": "docker-offline",
+                "internet": false
+              }
+            }
           }
         }
       ],
@@ -938,6 +1224,15 @@
               "profile": "docker-offline",
               "internet": false
             }
+          },
+          "expected_protocol": {
+            "returned": {
+              "decision": "delegated",
+              "worker": {
+                "profile": "docker-offline",
+                "internet": false
+              }
+            }
           }
         },
         {
@@ -958,6 +1253,15 @@
               "profile": "docker-offline",
               "internet": false
             }
+          },
+          "expected_protocol": {
+            "returned": {
+              "decision": "needs_approval",
+              "worker": {
+                "profile": "docker-offline",
+                "internet": false
+              }
+            }
           }
         },
         {
@@ -974,6 +1278,9 @@
           },
           "expected": {
             "error": "ValueError"
+          },
+          "expected_protocol": {
+            "raised": "ValueError"
           }
         }
       ]
@@ -1019,6 +1326,17 @@
               "effects": 1,
               "requests": 1
             }
+          ],
+          "expected_protocol": [
+            {
+              "returned": "ok"
+            },
+            {
+              "returned": {
+                "effects": 1,
+                "requests": 1
+              }
+            }
           ]
         }
       ],
@@ -1050,6 +1368,20 @@
               "effects": 1,
               "requests": 1
             }
+          ],
+          "expected_protocol": [
+            {
+              "returned": "held"
+            },
+            {
+              "returned": "held"
+            },
+            {
+              "returned": {
+                "effects": 1,
+                "requests": 1
+              }
+            }
           ]
         },
         {
@@ -1080,6 +1412,20 @@
             {
               "effects": 1,
               "requests": 1
+            }
+          ],
+          "expected_protocol": [
+            {
+              "returned": "ok"
+            },
+            {
+              "raised": "ValueError"
+            },
+            {
+              "returned": {
+                "effects": 1,
+                "requests": 1
+              }
             }
           ]
         }
@@ -1130,6 +1476,18 @@
                 "a"
               ]
             ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "pending"
+              },
+              {
+                "returned": [
+                  "a"
+                ]
+              }
+            ]
           ]
         }
       ],
@@ -1179,6 +1537,26 @@
               "acked",
               []
             ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "pending"
+              }
+            ],
+            [
+              {
+                "returned": "acked"
+              }
+            ],
+            [
+              {
+                "returned": "acked"
+              },
+              {
+                "returned": []
+              }
+            ]
           ]
         },
         {
@@ -1218,6 +1596,23 @@
               [
                 "a"
               ]
+            ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "pending"
+              }
+            ],
+            [
+              {
+                "raised": "ValueError"
+              },
+              {
+                "returned": [
+                  "a"
+                ]
+              }
             ]
           ]
         }
@@ -1275,6 +1670,20 @@
                 "n": 1
               }
             ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "written"
+              }
+            ],
+            [
+              {
+                "returned": {
+                  "n": 1
+                }
+              }
+            ]
           ]
         }
       ],
@@ -1324,6 +1733,23 @@
                 "n": 1
               }
             ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "written"
+              }
+            ],
+            {
+              "crashed": true
+            },
+            [
+              {
+                "returned": {
+                  "n": 1
+                }
+              }
+            ]
           ]
         },
         {
@@ -1369,6 +1795,23 @@
             [
               {
                 "n": 2
+              }
+            ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "written"
+              }
+            ],
+            {
+              "crashed": true
+            },
+            [
+              {
+                "returned": {
+                  "n": 2
+                }
               }
             ]
           ]
@@ -1429,6 +1872,21 @@
             "probe": {
               "held": 6,
               "count": 2
+            }
+          },
+          "expected_protocol": {
+            "setup": [
+              {
+                "returned": "configured"
+              }
+            ],
+            "accepted": 2,
+            "rejected": 0,
+            "probe": {
+              "returned": {
+                "held": 6,
+                "count": 2
+              }
             }
           }
         }
@@ -1578,6 +2036,21 @@
               "held": 24,
               "count": 8
             }
+          },
+          "expected_protocol": {
+            "setup": [
+              {
+                "returned": "configured"
+              }
+            ],
+            "accepted": 8,
+            "rejected": 16,
+            "probe": {
+              "returned": {
+                "held": 24,
+                "count": 8
+              }
+            }
           }
         },
         {
@@ -1664,6 +2137,21 @@
               "held": 3,
               "count": 1
             }
+          },
+          "expected_protocol": {
+            "setup": [
+              {
+                "returned": "configured"
+              }
+            ],
+            "accepted": 1,
+            "rejected": 11,
+            "probe": {
+              "returned": {
+                "held": 3,
+                "count": 1
+              }
+            }
           }
         }
       ]
@@ -1712,6 +2200,16 @@
             [
               "ready",
               "applied"
+            ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "ready"
+              },
+              {
+                "returned": "applied"
+              }
             ]
           ]
         }
@@ -1773,6 +2271,34 @@
                 "readonly": true
               }
             ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "ready"
+              },
+              {
+                "returned": "applied"
+              }
+            ],
+            [
+              {
+                "returned": "duplicate"
+              },
+              {
+                "returned": "held"
+              },
+              {
+                "returned": "held"
+              },
+              {
+                "returned": {
+                  "incarnation": "a",
+                  "next": 1,
+                  "readonly": true
+                }
+              }
+            ]
           ]
         },
         {
@@ -1825,6 +2351,31 @@
               "ready",
               "applied"
             ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "ready"
+              }
+            ],
+            [
+              {
+                "returned": "held"
+              },
+              {
+                "returned": {
+                  "incarnation": "a",
+                  "next": 1,
+                  "readonly": true
+                }
+              },
+              {
+                "returned": "ready"
+              },
+              {
+                "returned": "applied"
+              }
+            ]
           ]
         }
       ]
@@ -1875,6 +2426,19 @@
                 "requests": 1
               }
             ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "ok"
+              },
+              {
+                "returned": {
+                  "effects": 1,
+                  "requests": 1
+                }
+              }
+            ]
           ]
         }
       ],
@@ -1916,6 +2480,22 @@
               {
                 "effects": 1,
                 "requests": 1
+              }
+            ]
+          ],
+          "expected_protocol": [
+            {
+              "crashed": true
+            },
+            [
+              {
+                "returned": "held"
+              },
+              {
+                "returned": {
+                  "effects": 1,
+                  "requests": 1
+                }
               }
             ]
           ]
@@ -1963,6 +2543,27 @@
               {
                 "effects": 1,
                 "requests": 1
+              }
+            ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "ok"
+              }
+            ],
+            [
+              {
+                "raised": "ValueError"
+              },
+              {
+                "returned": "ok"
+              },
+              {
+                "returned": {
+                  "effects": 1,
+                  "requests": 1
+                }
               }
             ]
           ]
@@ -2030,6 +2631,26 @@
                 "pending": []
               }
             ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "initialized"
+              },
+              {
+                "returned": "ready"
+              },
+              {
+                "returned": {
+                  "profile": "native",
+                  "source_active": true,
+                  "spent": [
+                    "r"
+                  ],
+                  "pending": []
+                }
+              }
+            ]
           ]
         }
       ],
@@ -2081,6 +2702,29 @@
                 "pending": []
               },
               "ready"
+            ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "initialized"
+              },
+              {
+                "returned": "rolled_back"
+              }
+            ],
+            [
+              {
+                "returned": {
+                  "profile": "docker-offline",
+                  "source_active": true,
+                  "spent": [],
+                  "pending": []
+                }
+              },
+              {
+                "returned": "ready"
+              }
             ]
           ]
         },
@@ -2136,6 +2780,31 @@
                 ]
               }
             ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "initialized"
+              },
+              {
+                "returned": "held"
+              }
+            ],
+            [
+              {
+                "raised": "ValueError"
+              },
+              {
+                "returned": {
+                  "profile": "docker-offline",
+                  "source_active": true,
+                  "spent": [],
+                  "pending": [
+                    "r"
+                  ]
+                }
+              }
+            ]
           ]
         },
         {
@@ -2164,6 +2833,16 @@
               "initialized",
               {
                 "error": "ValueError"
+              }
+            ]
+          ],
+          "expected_protocol": [
+            [
+              {
+                "returned": "initialized"
+              },
+              {
+                "raised": "ValueError"
               }
             ]
           ]

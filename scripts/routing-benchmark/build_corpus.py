@@ -5,6 +5,15 @@ from pathlib import Path
 from textwrap import dedent
 
 TASKS=[]
+def outcome(value,literal=False):
+    if not literal and type(value) is dict and set(value)=={'error'}:return {'raised':value['error']}
+    return {'returned':value}
+def expected_protocol(driver,value,literal=False):
+    if driver=='pure':return outcome(value,literal)
+    if driver=='stateful':return [outcome(x) for x in value]
+    if driver=='restart':return [x if type(x) is dict and x.get('crashed') is True else [outcome(y) for y in x] for x in value]
+    if driver=='parallel':return {**value,'setup':[outcome(x) for x in value['setup']],'probe':outcome(value['probe'])}
+    raise ValueError('unknown fixture driver')
 RULES='''def integer(value):
     return type(value) is int and value >= 0
 
@@ -17,11 +26,12 @@ def task(id,level,family,title,contract,source,cases,bug,*,driver='pure',helpers
     filename,old,new=bug
     assert files[filename].count(old)==1,(id,old)
     starter={**files,filename:files[filename].replace(old,new)}
+    for item in cases:item['expected_protocol']=expected_protocol(driver,item['expected'],item.pop('literal_return',False))
     TASKS.append({'id':id,'difficulty':level,'family':family,'title':title,
         'split':'holdout' if family in {'json-decoding','structured-redaction','approval-evidence','idempotency','crash-checkpoint','session-replay','migration'} else 'development',
         'driver':driver,'contract':contract,'editable_paths':list(files),'starter':starter,
         'reference':files,'public_cases':cases[:1],'evaluator_cases':cases[1:]})
-def case(input,expected):return {'input':input,'expected':expected}
+def case(input,expected,*,literal_return=False):return {'input':input,'expected':expected,'literal_return':literal_return}
 
 task('easy-config','easy','config','Validate listener configuration',
  'Repair handle(config): return {host,port,tls}, defaulting to127.0.0.1,8080,false. Reject unknown keys, nonobject input, empty/nonstring host, non-int port outside1..65535 (including bool), and non-bool tls with ValueError. Do not mutate input.', '''
@@ -61,7 +71,7 @@ def pairs(items):
 def constant(_):raise ValueError('nonfinite')
 def handle(text):
     return json.loads(text,object_pairs_hook=pairs,parse_constant=constant)
-''',[case('{"x":1}',{'x':1}),case('{"x":1,"x":2}',{'error':'ValueError'}),case('{"outer":{"x":0,"x":1}}',{'error':'ValueError'}),case('[NaN]',{'error':'ValueError'}),case('Infinity',{'error':'ValueError'}),case('[false,null,1.5]',[False,None,1.5])],('app.py',"json.loads(text,object_pairs_hook=pairs,parse_constant=constant)","json.loads(text)"))
+''',[case('{"x":1}',{'x':1}),case('{"x":1,"x":2}',{'error':'ValueError'}),case('{"outer":{"x":0,"x":1}}',{'error':'ValueError'}),case('[NaN]',{'error':'ValueError'}),case('Infinity',{'error':'ValueError'}),case('[false,null,1.5]',[False,None,1.5]),case('{"error":"ValueError"}',{'error':'ValueError'},literal_return=True)],('app.py',"json.loads(text,object_pairs_hook=pairs,parse_constant=constant)","json.loads(text)"))
 
 task('easy-billing','easy','billing','Round token costs in integer micros',
  'Repair handle({input,output,input_rate,output_rate}) to return ceil((input*input_rate+output*output_rate)/1000000) using exact integers. All four fields are nonnegative ints; bool and negative/noninteger values raise ValueError. Rates are USD micros per million tokens.', '''

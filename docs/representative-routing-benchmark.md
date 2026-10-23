@@ -110,6 +110,12 @@ use real child-process termination/restart or synchronized threads, not a model
 answer claiming that those operations ran. No real network/isolation migration
 or paid side effect is executed by the simulated approval/dispatch tasks.
 
+The driver wraps ordinary return values as `{"returned": value}` and actual
+exceptions as `{"raised": "ValueError"}`. Public examples include that typed
+`expected_protocol` beside their human-readable expected value; returning an
+error-shaped JSON object cannot impersonate an exception. The driver also
+checks the no-input-mutation contract after successful and refused operations.
+
 Every grade copies a new source snapshot, hashes the complete allowed inventory,
 and records its task/driver/corpus/image identity and actual case outcomes in a
 new private result directory. Output overflow, timeout, invalid JSON, process
@@ -166,8 +172,8 @@ The explicit Docker check requires every trusted repair to pass and every buggy
 starter to fail at least one case. It calls no model and starts no DOXA session.
 
 On 2026-10-23 a clean checkout passed this check against the locally pinned
-`06f2e44b…` DOXA image: all **18 trusted repairs passed all 71 cases**, and all
-**18 buggy starters failed at least one case**. The 142 isolated case runs
+`06f2e44b…` DOXA image: all **18 trusted repairs passed all 72 cases**, and all
+**18 buggy starters failed at least one case**. The 144 isolated case runs
 confirmed cleanup. Crash checkpoints/dispatch used real child-process exit;
 the budget task used actual synchronized threads. These are fixture-validation
 results, not provider/model scores or a production security certification.

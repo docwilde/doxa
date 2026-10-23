@@ -23,13 +23,10 @@ def load_app():
 def call(function,value):
     before=json.dumps(value,sort_keys=True,allow_nan=False)
     try:
-        result=function(value)
-        # Error objects are reserved for the adapter's exception representation.
-        # Returning such an object is not evidence that the API raised ValueError.
-        if type(result) is dict and set(result)=={'error'}:result={'error':'returned_error_object'}
-    except ValueError:result={'error':'ValueError'}
-    except (KeyError,TypeError) as error:result={'error':type(error).__name__}
-    if json.dumps(value,sort_keys=True,allow_nan=False)!=before:return {'error':'input_mutated'}
+        result={'returned':function(value)}
+    except ValueError:result={'raised':'ValueError'}
+    except (KeyError,TypeError) as error:result={'raised':type(error).__name__}
+    if json.dumps(value,sort_keys=True,allow_nan=False)!=before:return {'violation':'input_mutated'}
     return result
 
 def stateful(value):
@@ -65,7 +62,7 @@ def main():
             replies=list(pool.map(apply,operations))
         # Reopen the service to check durable state rather than an in-memory cache.
         probe=call(app.Service(ROOT).apply,value['probe'])
-        count=sum(reply=='accepted' for reply in replies)
+        count=sum(reply=={'returned':'accepted'} for reply in replies)
         result={'setup':setup,'accepted':count,'rejected':len(replies)-count,'probe':probe}
     else:raise ValueError('unknown driver')
     print(json.dumps(result,separators=(',',':'),allow_nan=False))

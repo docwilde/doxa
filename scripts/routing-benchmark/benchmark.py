@@ -215,7 +215,7 @@ def grade(state,host,image):
     for split in ('public_cases','evaluator_cases'):
         for i,case in enumerate(row[split]):
             result=invoke(host,image,run/'source',row['driver'],case['input'],run/'driver.py')
-            passed=result['observed'] and equal(result['output'],case['expected'])
+            passed=result['observed'] and equal(result['output'],case['expected_protocol'])
             # Preserve output only in the private operator grade directory.
             create(run/f'{split}-{i}.json',result)
             observations.append({'set':split,'index':i,'passed':passed,'failure':result['failure'],'duration_ms':result['duration_ms']})
