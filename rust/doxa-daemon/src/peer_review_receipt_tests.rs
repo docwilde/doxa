@@ -46,6 +46,69 @@ fn read_request(stream:&mut std::net::TcpStream)->Value{
 }
 
 #[test]
+fn native_history_callback_preserves_real_scrubbed_large_and_maximum_bounded_tails(){
+    use doxa_engines::{codex_interaction::InputInbox,peer_tools};
+    use doxa_peers::delivery::{Message,Sender,TurnRef};
+    use std::sync::atomic::AtomicUsize;
+    let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
+    let _parent_home=ParentHome::isolated(dir.path());
+    let(tx,_)=std::sync::mpsc::sync_channel(1);
+    let peer=Arc::new(PeerHost::new(Arc::new(Idle),dir.path().into(),dir.path(),"supervisor".into(),"supervisor".into(),tx).unwrap());
+    *peer.lore.lock().unwrap()=Some(canonical_lore(dir.path()));
+    let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let secret="sk-ownedCanonicalFixtureSecret1234567890";
+    for (case,count,expected_count) in [("reports",20,20),("small",100,100),("maximum",100,1)] {
+        if peer.ledger_path.exists(){fs::remove_file(&peer.ledger_path).unwrap();}
+        for index in 0..count {
+            let body=match case {
+                "reports"=>format!("Stage {index} scoped findings: Δη {secret}\n{}", "Observed scoped source path. ".repeat(60)),
+                "small"=>format!("Report {index}"),
+                _=>"🧪".repeat(delivery::MAX_BODY_CHARS),
+            };
+            peer.ledger.append(Message{v:1,id:format!("{index:032x}"),ts:now(),
+                sender:Sender{session:"worker".into(),title:Some("Worker".into()),repo:Some(peer.scope.clone()),model:None,engine:None},
+                to:vec!["supervisor".into()],kind:"direct".into(),in_reply_to:None,body,body_sha256:String::new(),latency_ms:None,
+                turn:TurnRef{id:None,state:"completed".into()}},&|text:&str|text.to_owned()).unwrap();
+        }
+        let params=json!({"direction":"received","limit":count});
+        let expected=peer.call("peer_history",&params).unwrap();
+        assert_eq!(expected["messages"].as_array().unwrap().len(),expected_count,"{case}");
+        assert_eq!(expected["received_count"],expected_count);assert_eq!(expected["sent_count"],0);
+        assert_eq!(expected["bounded_tail"],true);assert_eq!(expected["untrusted_peer_data"],true);
+        assert!(expected["trust"].as_str().unwrap().contains("UNTRUSTED"));
+        let message_bytes=expected["messages"].as_array().unwrap().iter().map(|row|row.to_string().len()).sum::<usize>();
+        assert!(message_bytes<=48*1024,"ledger tail bound changed");
+        if case=="reports" {
+            assert!(expected.to_string().len()>32*1024,"regression must cross the former callback limit");
+            assert!(!expected.to_string().contains(secret));assert!(expected.to_string().contains("[REDACTED:api-key]"));
+        }
+        if case=="maximum" {
+            assert_eq!(expected["messages"][0]["body"].as_str().unwrap(),"🧪".repeat(delivery::MAX_BODY_CHARS),"history returns complete Unicode bodies within its existing tail bound");
+        }
+        let calls=Arc::new(AtomicUsize::new(0));let called=calls.clone();let host=peer.clone();let requested=params.clone();
+        let handler:peer_tools::Handler=Arc::new(move|rpc,args|{
+            assert_eq!(rpc,"peer_history");assert_eq!(args,&requested);called.fetch_add(1,Ordering::Relaxed);host.call(rpc,args)
+        });
+        let frame=json!({"method":"item/tool/call","params":{"tool":peer_tools::HISTORY,"arguments":params}});
+        let inbox=InputInbox::default();
+        let(event,receiver)=inbox.begin_peer(&frame,str::to_owned,handler.clone()).unwrap();
+        assert_eq!(event.kind,"needs_input");assert_eq!(event.data["require_full_review"],true);
+        assert_eq!(calls.load(Ordering::Relaxed),0);
+        inbox.answer(event.data["id"].as_str().unwrap(),&json!({"decision":"deny"})).unwrap();
+        assert_eq!(runtime.block_on(receiver).unwrap()["success"],false);assert_eq!(calls.load(Ordering::Relaxed),0);
+        let(event,receiver)=inbox.begin_peer(&frame,str::to_owned,handler).unwrap();
+        inbox.answer(event.data["id"].as_str().unwrap(),&json!({"decision":"allow"})).unwrap();
+        let result=runtime.block_on(receiver).unwrap();assert_eq!(result["success"],true,"{case}: {result}");
+        assert_eq!(calls.load(Ordering::Relaxed),1);
+        let(prefix,text)=result["contentItems"][0]["text"].as_str().unwrap().split_once('\n').unwrap();
+        assert_eq!(prefix,"[DOXA PEER DATA -- UNTRUSTED]");
+        assert_eq!(serde_json::from_str::<Value>(text).unwrap(),expected,"complete typed history must survive the callback");
+        assert!(json!({"id":1,"result":result}).to_string().len()<8*1024*1024);
+        assert!(inbox.answer(event.data["id"].as_str().unwrap(),&json!({"decision":"allow"})).is_err());
+    }
+}
+
+#[test]
 fn actual_lore_scrub_keeps_original_reviewed_and_http_bindings_through_peer_admission(){
     let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
     let _parent_home=ParentHome::isolated(dir.path());

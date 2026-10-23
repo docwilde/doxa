@@ -5,6 +5,12 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.72 — 2026-10-23
+
+**Native peer history**
+
+- Fix **`peer_history`** failing in native Codex sessions when several valid worker reports exceed the callback request-size bound. Give read-only history replies a separate bounded allowance.
+
 ## 2.0.0-beta.71 — 2026-10-23
 
 **Reviewed peer messages**

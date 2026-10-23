@@ -7,6 +7,11 @@ use crate::EngineEvent;
 
 const MAX_REQUEST_BYTES: usize = 32 * 1024;
 const MAX_ANSWER_BYTES: usize = 16 * 1024;
+const MAX_CALLBACK_RESULT_BYTES: usize = 32 * 1024;
+// History is already a scrubbed, byte-bounded ledger tail (48 KiB of
+// messages), but its response can exceed the request/review allowance.
+// Even after JSON string escaping, this stays below the driver's 8 MiB frame.
+const MAX_PEER_HISTORY_RESULT_BYTES: usize = 1024 * 1024;
 
 #[derive(Default)]
 pub struct InputInbox {
@@ -243,8 +248,16 @@ fn dispatch_callback(reply: oneshot::Sender<Value>, rpc:String, arguments:Value,
         let result = if allowed { handler(&rpc, &arguments) }
             else { Err("The user declined this peer tool".into()) };
         let (success, text) = match result {
-            Ok(value) if value.to_string().len() <= MAX_REQUEST_BYTES => (!value["error"].is_string(), format!("{}\n{value}", if rpc.starts_with("mcp__doxa__lore_") { "[DOXA LORE DATA -- UNTRUSTED]" } else { "[DOXA PEER DATA -- UNTRUSTED]" })),
-            Ok(_) => (false, "Tool result exceeded the display limit".into()),
+            Ok(value) => {
+                let serialized = value.to_string();
+                let limit = if rpc == "peer_history" { MAX_PEER_HISTORY_RESULT_BYTES }
+                    else { MAX_CALLBACK_RESULT_BYTES };
+                if serialized.len() > limit {
+                    (false, format!("Tool result exceeded the response limit (actual: {} bytes; allowed: {limit} bytes)", serialized.len()))
+                } else {
+                    (!value["error"].is_string(), format!("{}\n{serialized}", if rpc.starts_with("mcp__doxa__lore_") { "[DOXA LORE DATA -- UNTRUSTED]" } else { "[DOXA PEER DATA -- UNTRUSTED]" }))
+                }
+            },
             Err(_) => (false, "Tool was declined or unavailable".into()),
         };
         let _ = reply.send(json!({"success":success,"contentItems":[{"type":"inputText","text":text}]}));
@@ -255,6 +268,59 @@ fn dispatch_callback(reply: oneshot::Sender<Value>, rpc:String, arguments:Value,
 mod tests {
     use super::*;
     fn question() -> Value { json!({"method":"item/tool/requestUserInput","params":{"questions":[{"id":"q1","question":"Choose?","options":[{"label":"First"},{"label":"Second"}]}]}}) }
+    fn callback_result(rpc: &str, value: Value) -> Value {
+        let (reply, receiver) = oneshot::channel();
+        let handler: crate::peer_tools::Handler = std::sync::Arc::new(move |_, _| Ok(value.clone()));
+        dispatch_callback(reply, rpc.into(), json!({}), handler, true);
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+            .block_on(receiver).unwrap()
+    }
+    #[test]
+    fn history_response_budget_counts_serialized_bytes_without_truncating_utf8() {
+        // Escapes and multibyte characters must survive two JSON layers: the
+        // typed RPC result and the app-server's contentItems text string.
+        let mut body = "界\n\"\\".repeat(70_000);
+        let padding = MAX_PEER_HISTORY_RESULT_BYTES - json!({"body":body}).to_string().len();
+        body.push_str(&"x".repeat(padding));
+        let value = json!({"body":body});
+        assert_eq!(value.to_string().len(), MAX_PEER_HISTORY_RESULT_BYTES);
+        let result = callback_result("peer_history", value.clone());
+        assert_eq!(result["success"], true);
+        let (prefix, text) = result["contentItems"][0]["text"].as_str().unwrap().split_once('\n').unwrap();
+        assert_eq!(prefix, "[DOXA PEER DATA -- UNTRUSTED]");
+        assert_eq!(serde_json::from_str::<Value>(text).unwrap(), value);
+        assert!(json!({"id":1,"result":result}).to_string().len() < 8 * 1024 * 1024);
+
+        let mut oversized = value;
+        let mut body = oversized["body"].as_str().unwrap().to_owned();
+        body.push('x'); oversized["body"] = json!(body);
+        let result = callback_result("peer_history", oversized);
+        assert_eq!(result["success"], false);
+        let text = result["contentItems"][0]["text"].as_str().unwrap();
+        assert!(text.contains(&format!("actual: {} bytes", MAX_PEER_HISTORY_RESULT_BYTES + 1)));
+        assert!(text.contains(&format!("allowed: {MAX_PEER_HISTORY_RESULT_BYTES} bytes")));
+        assert!(!text.contains('界'), "oversized replies fail instead of leaking a partial result");
+    }
+    #[test]
+    fn larger_history_result_does_not_expand_other_callbacks_requests_or_rpc_status() {
+        let value = json!({"body":"x".repeat(MAX_CALLBACK_RESULT_BYTES)});
+        assert_eq!(callback_result("peer_history", value.clone())["success"], true);
+        for rpc in ["peers", "msg", "mcp__doxa__lore_remember", "mcp__configured__search"] {
+            let result = callback_result(rpc, value.clone());
+            assert_eq!(result["success"], false);
+            assert!(result["contentItems"][0]["text"].as_str().unwrap()
+                .contains(&format!("allowed: {MAX_CALLBACK_RESULT_BYTES} bytes")));
+        }
+        let failed = json!({"error":"History unavailable", "detail":"x".repeat(MAX_REQUEST_BYTES)});
+        let result = callback_result("peer_history", failed.clone());
+        assert_eq!(result["success"], false);
+        assert!(result["contentItems"][0]["text"].as_str().unwrap().ends_with(&failed.to_string()));
+
+        let frame = json!({"method":"item/tool/call","params":{"tool":crate::peer_tools::SEND,
+            "arguments":{"target":"owned","text":"x".repeat(MAX_REQUEST_BYTES)}}});
+        let handler: crate::peer_tools::Handler = std::sync::Arc::new(|_, _| panic!("oversized request dispatched"));
+        assert!(InputInbox::default().begin_peer_with_approval(&frame, str::to_owned, handler, false).is_err());
+    }
     #[test]
     fn preset_peer_execution_is_strictly_builtin_and_does_not_grant_external_callbacks() {
         use std::sync::{Arc, atomic::AtomicUsize};
