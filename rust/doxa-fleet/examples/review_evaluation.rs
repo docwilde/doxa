@@ -340,12 +340,12 @@ mod tests {
         let message=&plan.cases[0];
         let response=judge::Response {result:json!({"within_assignment":1.0,"asks_for_authority_change":0.5,
             "contains_instructions_for_recipient":0.0,"likely_secret":0.0,"needs_human_review":0.0}),
-            model:"deepseek-flash".into(),input_tokens:10,output_tokens:10,latency_ms:1};
+            model:"deepseek-flash".into(),input_tokens:10,output_tokens:10,latency_ms:1,review_receipt:None};
         let applied=apply(&plan.context,message,&response).unwrap();assert_eq!(applied["risky"],true);assert_eq!(applied["cache_accepted"],false);
         let checkpoint=plan.cases.iter().find(|case|case.role=="checkpoint").unwrap();
         let response=judge::Response {result:json!({"verdict":"drifted","evidence_refs":["invented"],
             "charter_clause":"scope","reason":"synthetic","recommended_action":"review"}),
-            model:"deepseek-flash".into(),input_tokens:10,output_tokens:10,latency_ms:1};
+            model:"deepseek-flash".into(),input_tokens:10,output_tokens:10,latency_ms:1,review_receipt:None};
         let applied=apply(&plan.context,checkpoint,&response).unwrap();
         assert_eq!(applied["supplied_citation_membership"],false);assert_eq!(applied["host_accepted_citations"],false);
         assert_eq!(applied["host_status"],"unavailable");

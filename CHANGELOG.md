@@ -17,6 +17,10 @@ the stable 2.0 release has not been cut.
 - Add **`prepare`** and **`grade`** for 18 repair tasks with 72 case checks. Run candidate code in credential-free, rootless Docker containers without network access.
 - Add **`router_config`** with provisional easy, intermediate and difficult model mappings. Task scoring measures actual repairs; model rankings remain unmeasured.
 
+**Message review evidence**
+
+- Fix **`cache_semantic_with_receipt`** linking judge timing by equal scores. Retain unique invocation, request, envelope and verdict bindings when the 256-event history rotates; older entries remain explicitly unbound.
+
 ## 2.0.0-beta.69 — 2026-10-22
 
 **API worker startup and recovery**
