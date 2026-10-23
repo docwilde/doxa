@@ -38,7 +38,7 @@ The private provider makes the decision inside `run_pre_compact_hooks`, before c
 
 ## Install the protected provider
 
-The standard Linux x86_64 installer builds a native dispatcher, pinned private app server, and matching `codex-code-mode-host`. Some models require that helper even with shell tools enabled. It needs Python 3.11+, Git, and a working user systemd scope. The installer bootstraps checksum-pinned Rust 1.95.0 and uses one build job with a 12 GiB memory cap. Python is build tooling only. The first build downloads a large dependency graph; verified artifacts are reused.
+The standard Linux x86_64 installer builds a native dispatcher, pinned private app server, and matching `codex-code-mode-host`. Some models require that helper even with shell tools enabled. It needs Python 3.11+, Git, and a working user systemd scope. The installer bootstraps checksum-pinned Rust 1.99.1 and uses one build job with an 8 GiB memory cap and zero swap. Python is build tooling only. The first build downloads a large dependency graph; verified artifacts are reused.
 
 From a checkout, build separately with:
 

@@ -19,24 +19,33 @@ import tomllib
 import re
 from contextlib import contextmanager
 
-SOURCE = "83086188ae0614bd882818ff1aa23f3194962012"
-SOURCE_TAG = "rust-v0.163.0"
+SOURCE = "6aaac694803004a63c6f393d153c96d22521a6b9"
+SOURCE_TAG = "rust-v0.164.0"
 CONTRACT = "doxa-precompact-fail-closed-v1"
-PROVIDER = "codex-0.163.0-precompact-v1"
+PROVIDER = "codex-0.164.0-precompact-v1"
 PATCH = Path(__file__).resolve().parent / "codex-protected/precompact.patch"
-PATCH_SHA256 = "3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c"
+PATCH_SHA256 = "516e4acc50647d5061a099a1a1900e802555e15c1892270332922eccb05109a0"
 LEGACY_PATCH_SHA256 = "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b"
-PREVIOUS_SOURCE = "b412ff32c417f855c2b2d1581b77058eed87c84b"
-PREVIOUS_PROVIDER = "codex-0.156.1-precompact-v1"
-PREVIOUS_PATCHES = {"23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d", LEGACY_PATCH_SHA256}
+PREVIOUS_SOURCE = '83086188ae0614bd882818ff1aa23f3194962012'
+PREVIOUS_PROVIDER = 'codex-0.163.0-precompact-v1'
+PREVIOUS_PATCHES = {'3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c'}
 # Installer migration/rollback trust only. The native launcher stays current-only.
 # Never infer identities from an active receipt or discard older reviewed entries.
 MAX_REVIEWED_INSTALLATIONS = 256
 REVIEWED_INSTALLATIONS = (
-    ("b412ff32c417f855c2b2d1581b77058eed87c84b", "23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d", "codex-0.156.1-precompact-v1"),
-    ("b412ff32c417f855c2b2d1581b77058eed87c84b", "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b", "codex-0.156.1-precompact-v1"),
+    ('83086188ae0614bd882818ff1aa23f3194962012', '3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c', 'codex-0.163.0-precompact-v1'),
+    ('b412ff32c417f855c2b2d1581b77058eed87c84b', '23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d', 'codex-0.156.1-precompact-v1'),
+    ('b412ff32c417f855c2b2d1581b77058eed87c84b', 'd6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b', 'codex-0.156.1-precompact-v1'),
 )
-AGENT_PREFIX = "doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; "
+AGENT_PREFIX = "doxa_codex_rs/0.164.0 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; "
+
+# Older reviewed payloads retain their original compiler provenance during
+# migration and rollback. Exact source/patch keys prevent a toolchain relabel.
+LEGACY_BUILD_TOOLCHAINS = {
+    ("83086188ae0614bd882818ff1aa23f3194962012", "3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c"): "1.95.0",
+    ("b412ff32c417f855c2b2d1581b77058eed87c84b", "23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d"): "1.95.0",
+    ("b412ff32c417f855c2b2d1581b77058eed87c84b", "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b"): "1.95.0",
+}
 
 
 def digest(path):
@@ -137,20 +146,20 @@ def toolchain(cache, cargo):
         # changes argv[0] dispatch and loses the sibling rustc proxy.
         executable = Path(cargo).absolute()
         rustc = executable.parent / "rustc"
-        environment = {"RUSTC": str(rustc), "RUSTUP_TOOLCHAIN": "1.95.0"}
-        for binary, prefix in [(executable, "cargo 1.95.0 "), (rustc, "rustc 1.95.0 ")]:
+        environment = {"RUSTC": str(rustc), "RUSTUP_TOOLCHAIN": "1.99.1"}
+        for binary, prefix in [(executable, "cargo 1.99.1 "), (rustc, "rustc 1.99.1 ")]:
             version = subprocess.check_output([str(binary), "--version"], text=True, env=build_environment(environment), timeout=10)
             if not version.startswith(prefix):
-                raise ValueError("--cargo and its sibling rustc must both be Rust 1.95.0")
+                raise ValueError("--cargo and its sibling rustc must both be Rust 1.99.1")
         return str(executable), environment
     if platform.system() != "Linux" or platform.machine() != "x86_64":
-        raise ValueError("automatic private toolchain bootstrap supports Linux x86_64; pass --cargo for Rust 1.95.0")
+        raise ValueError("automatic private toolchain bootstrap supports Linux x86_64; pass --cargo for Rust 1.99.1")
     private_directory(cache / "toolchain")
     private_directory(cache / "cargo")
     environment = dict(RUSTUP_HOME=str(cache / "toolchain"), CARGO_HOME=str(cache / "cargo"),
-                       RUSTUP_TOOLCHAIN="1.95.0")
+                       RUSTUP_TOOLCHAIN="1.99.1")
     executable = cache / "cargo/bin/cargo"
-    rustc = cache / "toolchain/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustc"
+    rustc = cache / "toolchain/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/rustc"
     if not executable.exists() or not rustc.exists():
         bootstrap = cache / "rustup-init"
         if not bootstrap.exists() or digest(bootstrap) != RUSTUP_SHA256:
@@ -160,14 +169,14 @@ def toolchain(cache, cargo):
             bootstrap.chmod(0o700)
         if digest(bootstrap) != RUSTUP_SHA256:
             raise ValueError("private Rust bootstrap differs from its pinned checksum")
-        print("doxa-codex-install: installing isolated Rust 1.95.0 (no global toolchain changes)", flush=True)
-        run([str(bootstrap), "-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", "1.95.0"],
+        print("doxa-codex-install: installing isolated Rust 1.99.1 (no global toolchain changes)", flush=True)
+        run([str(bootstrap), "-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", "1.99.1"],
             env=dict(os.environ, **environment))
     environment["RUSTC"] = str(rustc)
-    for binary, prefix in [(executable, "cargo 1.95.0 "), (rustc, "rustc 1.95.0 ")]:
+    for binary, prefix in [(executable, "cargo 1.99.1 "), (rustc, "rustc 1.99.1 ")]:
         version = subprocess.check_output([str(binary), "--version"], text=True, env=build_environment(environment), timeout=10)
         if not version.startswith(prefix):
-            raise ValueError("private provider toolchain is not Rust 1.95.0")
+            raise ValueError("private provider toolchain is not Rust 1.99.1")
     return str(executable), environment
 
 
@@ -211,11 +220,11 @@ def v8_inputs(cache, source, target):
         raise ValueError("invalid helper target")
     lock = tomllib.loads((source / "codex-rs/Cargo.lock").read_text())
     versions = {package["version"] for package in lock["package"] if package["name"] == "v8"}
-    if versions != {"150.4.0"}:
+    if versions != {"152.2.0"}:
         raise ValueError("reviewed source no longer has the expected locked V8 version")
-    version = "150.4.0"
+    version = "152.2.0"
     manifest_name = f"rusty_v8_ptrcomp_sandbox_release_{target}.sha256"
-    trusted = source / "third_party/v8/rusty_v8_150_4_0_release_manifests.sha256"
+    trusted = source / "third_party/v8/rusty_v8_152_2_0_release_manifests.sha256"
     manifest_pins = dict((name, checksum) for checksum, name in (line.split() for line in trusted.read_text().splitlines()))
     if manifest_name not in manifest_pins:
         raise ValueError("the pinned source has no approved sandbox V8 inputs for this target")
@@ -242,7 +251,7 @@ def build(cache, cargo):
     source = prepare_source(cache)
     binary = cache / "target/dev-small/codex-app-server"
     fingerprint = cache / "build.json"
-    identity = {"source_commit": SOURCE, "patch_sha256": PATCH_SHA256, "profile": "dev-small", "toolchain": "1.95.0"}
+    identity = {"source_commit": SOURCE, "patch_sha256": PATCH_SHA256, "profile": "dev-small", "toolchain": "1.99.1"}
     if binary.is_file() and fingerprint.is_file():
         prior = json.loads(private_read(fingerprint, 16384))
         if prior == dict(identity, binary_sha256=digest(binary)):
@@ -277,7 +286,7 @@ def build_code_mode_host(cache, cargo):
         text=True, env=build_environment(toolchain_environment), timeout=10).strip()
     native_environment, native_identity = v8_inputs(cache, source, target)
     identity = {"source_commit": SOURCE, "patch_sha256": PATCH_SHA256,
-                "profile": "dev-small", "toolchain": "1.95.0", "product": "codex-code-mode-host", "v8_inputs": native_identity}
+                "profile": "dev-small", "toolchain": "1.99.1", "product": "codex-code-mode-host", "v8_inputs": native_identity}
     if binary.is_file() and fingerprint.is_file():
         previous = json.loads(private_read(fingerprint, 16384))
         if previous == dict(identity, binary_sha256=digest(binary)):
@@ -301,7 +310,7 @@ def build_code_mode_host(cache, cargo):
 def verified_artifacts(cache, binary, code_mode_host, helper_identity):
     """Bind incoming bytes to both independently checked build fingerprints."""
     identity = {"source_commit": SOURCE, "patch_sha256": PATCH_SHA256,
-                "profile": "dev-small", "toolchain": "1.95.0"}
+                "profile": "dev-small", "toolchain": "1.99.1"}
     server = dict(identity, binary_sha256=private_read(binary, 1024 * 1024 * 1024, hash_only=True, cargo_output=True))
     if (any(helper_identity.get(key) != value for key, value in identity.items())
             or helper_identity.get("product") != "codex-code-mode-host"):
@@ -317,7 +326,10 @@ def verified_artifacts(cache, binary, code_mode_host, helper_identity):
 
 def verify_installed(destination, previous):
     """Never repair or replace an installation whose own receipt does not match."""
-    expected = {"contract": CONTRACT, "profile": "dev-small", "toolchain": "1.95.0"}
+    receipt_provider(previous)
+    identity = (previous.get("source_commit"), previous.get("patch_sha256"))
+    toolchain = LEGACY_BUILD_TOOLCHAINS.get(identity, "1.99.1")
+    expected = {"contract": CONTRACT, "profile": "dev-small", "toolchain": toolchain}
     if any(previous.get(key) != value for key, value in expected.items()):
         raise ValueError("installed provider provenance differs from reviewed source")
     receipt_provider(previous)
@@ -489,7 +501,7 @@ def install(binary, root, official_cli, launcher, code_mode_host, helper_identit
                    "code_mode_host_sha256": digest(stage / "codex-code-mode-host-payload"),
                    "code_mode_host_dispatcher_sha256": digest(stage / "codex-code-mode-host"),
                    "code_mode_host_source_commit": SOURCE,
-                   "profile": "dev-small", "toolchain": "1.95.0"}
+                   "profile": "dev-small", "toolchain": "1.99.1"}
         if helper_identity is not None:
             receipt["code_mode_host_v8_inputs"] = helper_identity["v8_inputs"]
         (stage / "receipt.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
@@ -606,7 +618,7 @@ def main():
     parser.add_argument("--cache", type=Path, default=Path(os.environ.get("DOXA_CODEX_PROTECTED_CACHE", str(Path.home() / ".cache/doxa/codex-protected"))))
     parser.add_argument("--install-root", type=Path, default=Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "doxa/providers")
     parser.add_argument("--official-cli", type=Path)
-    parser.add_argument("--cargo", help="explicit Rust 1.95.0 cargo; default bootstraps a private pinned toolchain")
+    parser.add_argument("--cargo", help="explicit Rust 1.99.1 cargo; default bootstraps a private pinned toolchain")
     parser.add_argument("--rollback-receipt", type=Path, help="private outer-install rollback receipt; contains no credentials")
     parser.add_argument("--rollback", action="store_true", help="restore only the exact recorded provider publication")
     parser.add_argument("--launcher", type=Path, help="native doxa-codex-protected binary built from this DOXA checkout")

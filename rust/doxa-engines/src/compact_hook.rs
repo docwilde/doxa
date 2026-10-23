@@ -239,7 +239,7 @@ mod tests {
         let scope: doxa_isolation::Manifest = serde_json::from_value(json!({"version":1,"session_id":"doxa-session","profile":"docker-offline",
             "policy_hash":"","creation_policy_hash":"","source":checkout,"checkout":checkout,"checkout_device":0,"checkout_inode":0,
             "base_sha":"","branch":"","private_home":home,"cache":root.join("cache"),"broker":root.join("broker"),"nonce":"fixture","state":"ready"})).unwrap();
-        let manifest = json!({"version":"0.163.0","provider_thread":"provider-thread","doxa_session":"doxa-session",
+        let manifest = json!({"version":"0.164.0","provider_thread":"provider-thread","doxa_session":"doxa-session",
             "codex_home":home.join("codex"),"cwd":checkout,"lore_enabled":true});
         let event = json!({"hook_event_name":"PreCompact","trigger":"auto","session_id":"provider-thread","transcript_path":source});
         fs::write(&source, format!("{}\n{}\n",json!({"type":"session_meta","payload":{"id":"provider-thread","cwd":"/workspace","extra":{"cwd":"/workspace/unchanged"}}}),
@@ -361,7 +361,7 @@ mod tests {
         let source = sessions.join("thread.jsonl");
         let bytes = br#"{"type":"session_meta","payload":{"id":"provider-thread"}}"#;
         fs::write(&source, bytes).unwrap();
-        let manifest = json!({"version":"0.163.0","provider_thread":"provider-thread","doxa_session":"doxa-session",
+        let manifest = json!({"version":"0.164.0","provider_thread":"provider-thread","doxa_session":"doxa-session",
             "codex_home":dir.path(),"cwd":dir.path(),"lore_enabled":true});
         let event = json!({"hook_event_name":"PreCompact","trigger":"manual","session_id":"provider-thread","transcript_path":source});
         let job = review_job_for_manifest(&manifest, &event).unwrap().unwrap();
@@ -386,7 +386,7 @@ mod tests {
         let transcript = sessions.join("thread.jsonl"); let raw = br#"{"type":"session_meta","payload":{"id":"provider-thread"}}"#;
         fs::write(&transcript,raw).unwrap();
         let manifest = dir.path().join("manifest.json");
-        fs::write(&manifest,json!({"version":"0.163.0","provider_thread":"provider-thread","doxa_session":"doxa-session","codex_home":dir.path(),"cwd":dir.path(),"lore_enabled":true}).to_string()).unwrap();
+        fs::write(&manifest,json!({"version":"0.164.0","provider_thread":"provider-thread","doxa_session":"doxa-session","codex_home":dir.path(),"cwd":dir.path(),"lore_enabled":true}).to_string()).unwrap();
         let event = json!({"hook_event_name":"PreCompact","trigger":"manual","session_id":"provider-thread","transcript_path":transcript});
         assert!(review(&manifest,&event,|metadata| { assert_eq!(metadata["expected_source"]["size"],raw.len()); Ok(true) }).unwrap());
         assert!(!review(&manifest,&event,|_| { fs::write(&transcript,format!("{}\n{{}}",String::from_utf8_lossy(raw))).unwrap(); Ok(true) }).unwrap());
@@ -401,7 +401,7 @@ mod tests {
         let bytes = br#"{"type":"session_meta","payload":{"id":"provider-thread"}}"#;
         fs::write(&source, bytes).unwrap();
         let manifest = dir.path().join("manifest.json");
-        fs::write(&manifest, json!({"version":"0.163.0","provider_thread":"provider-thread","doxa_session":"doxa-session","codex_home":dir.path(),"cwd":dir.path(),"lore_enabled":true}).to_string()).unwrap();
+        fs::write(&manifest, json!({"version":"0.164.0","provider_thread":"provider-thread","doxa_session":"doxa-session","codex_home":dir.path(),"cwd":dir.path(),"lore_enabled":true}).to_string()).unwrap();
         let event = json!({"hook_event_name":"PreCompact","trigger":"manual","session_id":"provider-thread","transcript_path":source});
         assert!(!review(&manifest, &event, |_| Ok(false)).unwrap());
         for failure in ["worker spawn failed", "worker timed out", "invalid approval output"] {

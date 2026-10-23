@@ -9,8 +9,8 @@ use std::io::Write;
 #[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
 
-pub const SUPPORTED_VERSION: &str = "0.163.0";
-pub const PROTECTED_AGENT_PREFIX: &str = "doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; ";
+pub const SUPPORTED_VERSION: &str = "0.164.0";
+pub const PROTECTED_AGENT_PREFIX: &str = "doxa_codex_rs/0.164.0 (doxa-precompact-fail-closed-v1; ";
 pub const HOOK_TIMEOUT: u64 = 240;
 pub const HOOK_KEY: &str = "/<session-flags>/config.toml:pre_compact:0:0";
 const MATCHER: &str = "^(auto|manual)$";

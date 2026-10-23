@@ -1,7 +1,7 @@
 # Protected Codex provider
 
-The reviewed patch targets official `rust-v0.163.0`, commit
-`83086188ae0614bd882818ff1aa23f3194962012`. Source, patch, launcher,
+The reviewed patch targets official `rust-v0.164.0`, commit
+`6aaac694803004a63c6f393d153c96d22521a6b9`. Source, patch, launcher,
 app-server and code-mode helper identities are checked independently. The
 installer uses a separate `source-<commit>-<patch>` checkout and publishes
 immutable receipt-addressed artifacts; it never resets old build sources.
@@ -14,7 +14,7 @@ or history replacement. A missing hook, flush failure, infrastructure error,
 non-command/asynchronous handler, duplicate required hook or absent explicit
 `{"continue":true,"suppressOutput":true}` JSON approval stops compaction.
 
-Upstream 0.163.0 introduces speculative asynchronous remote V2 compaction before
+Upstream introduced speculative asynchronous remote V2 compaction before
 that foreground review. This path is deliberately disabled in the protected
 payload: the scheduler refuses it even with its feature enabled, and the direct
 background execution entry point returns `TurnAborted` before a request. DOXA
@@ -48,7 +48,7 @@ python3 scripts/codex-protected/verify_code_mode.py --server PRIVATE_SERVER --sc
 ```
 
 List each Rust filter first and require a nonzero inventory: the current source
-has seven core guard tests and one hook guard test. The originating-turn,
+has eight core guard tests and one hook guard test. The originating-turn,
 environment-keyed permission-grant and strict Guardian review baselines must
 also remain passing. These focused checks do not replace the complete upstream
 test suite.
@@ -61,3 +61,14 @@ control. The helper proof must use the same source build and verified receipt;
 none of these commands require account credentials or external model calls.
 See each verifier's `--help` for its exact options. These checks do not establish
 real-account model availability or live sandbox acceptance.
+
+## Reviewed0.164.0 port
+
+The0.163.0-to0.164.0 safety diff remains subject to manual semantic review;
+the automatic updater still refuses unreviewed safety-sensitive paths. The
+protection port preserves0.164's structured approval source/cancellation
+metadata when a live-auto switch refuses a stale result, and uses the live
+step policy for remote execution routing. A regression exercises both an
+already-pending approval and refusal before review. Current payloads use
+Rust1.99.1 and the official source-pinned V8152.2.0 archive/binding manifests;
+reviewed older receipts retain Rust1.95.0 for migration and rollback.

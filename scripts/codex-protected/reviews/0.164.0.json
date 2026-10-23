@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "review_kind": "manual protected contract port; no automatic approval exception",
+  "before": {
+    "schema": 1,
+    "version": "0.163.0",
+    "tag": "rust-v0.163.0",
+    "source_commit": "83086188ae0614bd882818ff1aa23f3194962012",
+    "patch_sha256": "3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c",
+    "contract": "doxa-precompact-fail-closed-v1",
+    "provider": "codex-0.163.0-precompact-v1"
+  },
+  "after": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "516e4acc50647d5061a099a1a1900e802555e15c1892270332922eccb05109a0",
+    "provider": "codex-0.164.0-precompact-v1",
+    "schema": 1,
+    "source_commit": "6aaac694803004a63c6f393d153c96d22521a6b9",
+    "tag": "rust-v0.164.0",
+    "version": "0.164.0"
+  },
+  "upstream_diff_sha256": "d5b3f1464600c5f62d512cc8d9e1eed1e71207daff01d0f5b0f99551b35b9b41",
+  "changed_path_count": 1927,
+  "guard_sensitive_path_count": 519,
+  "reviewed_contracts": {
+    "compaction": "Foreground local/remote gates still require complete flushed rollout and exactly one trusted synchronous SessionFlags command result; executor hook context changes cannot become trusted session flags. Async scheduler/direct path remain refused.",
+    "approval_result": "0.164 adds ApprovalResult reviewer/cancellation metadata. Live-auto guards return structured errors before review with no invented provenance; post-review denial retains the actual resolution source and cancellation reason.",
+    "execution": "Remote unified-exec routing reads StepContext.approval_policy so captured steps observe live tightening; sandbox/escalation limits remain mandatory.",
+    "permission_grants": "Final grants remain sanitized and recorded under the live-auto publication lock; environment-bound grant and strict Guardian baseline tests remain required.",
+    "new_entrypoints": "New optional Responses metadata patch, thread sampling, executor hook and runtime-agent modules are not added to DOXA RPC or tool surfaces. DOXA still disables agents.enabled, multi_agent_v2, token-budget resets and asynchronous compaction.",
+    "build_inputs": "Rust1.99.1, official source Cargo.lock V8152.2.0 and official archive/binding release-manifest hashes. Older reviewed payloads retain1.95.0 provenance during migration/rollback."
+  },
+  "source_inputs": {
+    "codex-rs/rust-toolchain.toml": "913d7e9d7adcd7abfeb0c4554c39a5a57c3cf84a694bc6a6aeae038a1f6ae33b",
+    "third_party/v8/rusty_v8_152_2_0_release_manifests.sha256": "1dd7c7f7d3d91af7f06a2846bddc6a1da7725acc67ecd7ab2c7dfc980dd8c6d4"
+  },
+  "required_new_regression": "doxa_auto_structured_approval_preserves_review_metadata_when_denied",
+  "compiled_verification": "pending; this review record is not a compiled acceptance receipt",
+  "automatic_sensitive_path_gate_changed": false
+}
