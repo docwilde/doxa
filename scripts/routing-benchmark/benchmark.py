@@ -38,17 +38,25 @@ def parse(raw):
     def constant(_):raise ValueError('nonfinite JSON')
     return json.loads(raw,object_pairs_hook=pairs,parse_constant=constant)
 
-def read(path,limit=MAX_FILE):
+def read(path,limit=MAX_FILE,*,repository_source=False):
     fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
     try:
         before=os.fstat(fd)
-        require(stat.S_ISREG(before.st_mode) and before.st_uid==os.getuid() and before.st_nlink==1 and not before.st_mode&0o022 and before.st_size<=limit,'unsafe bounded input')
+        # The invoked repository's code/fixtures share its source trust. Private
+        # plans/candidates remain stricter; a group-writable checkout is not a
+        # reason to accept group-writable external control files.
+        denied_mode=0o002 if repository_source else 0o022
+        require(stat.S_ISREG(before.st_mode) and before.st_uid==os.getuid() and before.st_nlink==1 and not before.st_mode&denied_mode and before.st_size<=limit,'unsafe bounded input')
         with os.fdopen(fd,'rb',closefd=False) as stream:raw=stream.read(limit+1)
         after=os.fstat(fd);named=Path(path).lstat()
         identity=lambda s:(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns)
         require(len(raw)<=limit and identity(before)==identity(after)==identity(named),'input changed while reading')
         return raw
     finally:os.close(fd)
+
+def repo_read(name,limit=MAX_FILE):
+    require(Path(name).name==name,'repository source must be a direct named file')
+    return read(ROOT/name,limit,repository_source=True)
 
 def private_directory(path):
     path=Path(path)
@@ -63,7 +71,7 @@ def create(path,value):
     return digest(raw)
 
 def corpus():
-    value=parse(read(ROOT/'corpus.json',2*1024*1024))
+    value=parse(repo_read('corpus.json',2*1024*1024))
     require(value['version']==1 and len(value['tasks'])==18,'corpus identity')
     return value
 
@@ -92,7 +100,7 @@ def prepare(id,state,reference=False):
         result=subprocess.run(argv,cwd=project,env=env,capture_output=True,timeout=10)
         require(result.returncode==0,'task repository initialization failed')
     plan={'schema':'doxa-repair-task-plan-v1','task_id':id,'difficulty':row['difficulty'],'family':row['family'],'split':row['split'],
-        'corpus_sha256':digest(read(ROOT/'corpus.json',2*1024*1024)),'driver_sha256':digest(read(ROOT/'driver.py')),
+        'corpus_sha256':digest(repo_read('corpus.json',2*1024*1024)),'driver_sha256':digest(repo_read('driver.py')),
         'editable_paths':row['editable_paths'],'immutable_sha256':{k:digest(v) for k,v in immutable.items()},
         'initial_source_sha256':{name:digest(source.encode()) for name,source in row['reference' if reference else 'starter'].items()},
         'trusted_reference_self_check':reference,'provider_calls':0,'human_labels':False}
@@ -101,7 +109,7 @@ def prepare(id,state,reference=False):
 
 def snapshot(state,target):
     state=Path(state);private_directory(state);plan=parse(read(state/'plan.json'));row=task(plan['task_id'])
-    require(plan['corpus_sha256']==digest(read(ROOT/'corpus.json',2*1024*1024)) and plan['driver_sha256']==digest(read(ROOT/'driver.py')),'frozen suite changed')
+    require(plan['corpus_sha256']==digest(repo_read('corpus.json',2*1024*1024)) and plan['driver_sha256']==digest(repo_read('driver.py')),'frozen suite changed')
     require(plan['editable_paths']==row['editable_paths'],'task path scope changed')
     project=state/'agent';private_directory(project)
     expected=set(row['editable_paths'])|set(plan['immutable_sha256'])
@@ -120,7 +128,7 @@ def snapshot(state,target):
         create(target/name,raw);inventory[name]=digest(raw)
     return plan,inventory
 
-def docker_args(host,image,name,source,kind):
+def docker_args(host,image,name,source,kind,driver=None):
     require(re.fullmatch(r'sha256:[0-9a-f]{64}',image) is not None,'an immutable Docker image ID is required')
     require(host.startswith('unix:///') and not any(c in host for c in '\n\r'),'a local rootless Docker Unix socket is required')
     return ['/usr/bin/docker','--host',host,'run','--rm','--pull=never','-i','--name',name,
@@ -128,7 +136,7 @@ def docker_args(host,image,name,source,kind):
         '--user=0:0','--ipc=private','--cgroupns=private','--memory=268435456','--memory-swap=268435456',
         '--cpus=1','--pids-limit=64','--tmpfs=/run/benchmark:rw,nosuid,nodev,noexec,size=33554432,mode=1777',
         '--mount',f'type=bind,src={source},dst=/workspace,readonly',
-        '--mount',f'type=bind,src={ROOT/"driver.py"},dst=/driver.py,readonly',
+        '--mount',f'type=bind,src={driver or ROOT/"driver.py"},dst=/driver.py,readonly',
         '--env','HOME=/run/benchmark','--env','TMPDIR=/run/benchmark','--workdir=/workspace',
         '--entrypoint=/usr/bin/python3',image,'-I','-B','/driver.py',kind]
 
@@ -138,9 +146,9 @@ def cleanup(host,name):
     check=subprocess.run(['/usr/bin/docker','--host',host,'ps','-a','--filter','name=^/'+name+'$','--format','{{.ID}}'],env=env,capture_output=True,timeout=5)
     require(check.returncode==0 and not check.stdout.strip(),'offline container cleanup unconfirmed')
 
-def invoke(host,image,source,kind,input):
+def invoke(host,image,source,kind,input,driver=None):
     name='doxa-repair-'+uuid.uuid4().hex
-    argv=docker_args(host,image,name,source,kind);start=time.monotonic()
+    argv=docker_args(host,image,name,source,kind,driver);start=time.monotonic()
     child=None;failure=None;output=[bytearray(),bytearray()]
     try:
         child=subprocess.Popen(argv,env={'PATH':'/usr/bin:/bin'},stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
@@ -191,20 +199,23 @@ def grade(state,host,image):
     require(inspected.returncode==0 and inspected.stdout.decode().strip()==image,'immutable local image unavailable')
     run=state/('grade-'+uuid.uuid4().hex);run.mkdir(mode=0o700)
     plan,inventory=snapshot(state,run/'source');row=task(plan['task_id'])
+    driver=repo_read('driver.py');require(digest(driver)==plan['driver_sha256'],'driver changed during source capture')
+    create(run/'driver.py',driver)
     create(run/'claim.json',{'single_use':True,'source_sha256':digest(encode(inventory)),'plan_sha256':digest(read(state/'plan.json')),'image':image,'network':'none','provider_calls':0})
     observations=[]
     for split in ('public_cases','evaluator_cases'):
         for i,case in enumerate(row[split]):
-            result=invoke(host,image,run/'source',row['driver'],case['input'])
+            result=invoke(host,image,run/'source',row['driver'],case['input'],run/'driver.py')
             passed=result['observed'] and equal(result['output'],case['expected'])
             # Preserve output only in the private operator grade directory.
             create(run/f'{split}-{i}.json',result)
             observations.append({'set':split,'index':i,'passed':passed,'failure':result['failure'],'duration_ms':result['duration_ms']})
     # Recheck the copied source after every contained run; the original may be edited
     # later for a new, separately scored revision, but a grade always binds this copy.
-    require({name:digest(read(run/'source'/name)) for name in inventory}==inventory,'scored snapshot changed')
+    require({name:digest(read(run/'source'/name)) for name in inventory}==inventory and digest(read(run/'driver.py'))==plan['driver_sha256'],'scored snapshot or driver changed')
     report={'schema':'doxa-repair-grade-v1','task_id':row['id'],'difficulty':row['difficulty'],'family':row['family'],'split':row['split'],
         'passed':all(r['passed'] for r in observations),'tests':observations,'source_sha256':digest(encode(inventory)),
+        'corpus_sha256':plan['corpus_sha256'],'driver_sha256':plan['driver_sha256'],
         'image':image,'docker_host':'local_rootless_unix_socket','network':'none','source_readonly':True,
         'oracle_answers_mounted':False,'provider_credentials_passed':False,'host_candidate_execution':False,
         'trusted_reference_self_check':plan['trusted_reference_self_check'],'model_quality_validated':False,'human_labels':False,

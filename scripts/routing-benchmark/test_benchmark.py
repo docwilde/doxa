@@ -83,6 +83,14 @@ class Tests(unittest.TestCase):
         self.assertFalse(b.equal(1,1.0))
         self.assertTrue(b.equal({'n':[False,None,3]},{'n':[False,None,3]}))
 
+    def test_external_controls_remain_strict_when_repository_source_is_group_writable(self):
+        with tempfile.TemporaryDirectory(dir='/home/docwilde/t') as root:
+            path=Path(root)/'data';path.write_text('{}');path.chmod(0o664)
+            with self.assertRaises(ValueError):b.read(path)
+            self.assertEqual(b.read(path,repository_source=True),b'{}')
+            path.chmod(0o666)
+            with self.assertRaises(ValueError):b.read(path,repository_source=True)
+
     def test_model_mappings_are_provisional_and_not_task_ground_truth(self):
         model=json.loads((ROOT/'model-mappings.json').read_text())
         self.assertEqual(model['status'],'operator_hypotheses_not_measured_model_rankings')
