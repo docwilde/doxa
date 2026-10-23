@@ -228,7 +228,10 @@ pub fn predecessor_released(context:&Context,state:&State,predecessor:&str,turn_
 }
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CachedSemantic {pub envelope_sha256:String,pub result:Result<SemanticVerdict,String>}
+pub struct CachedSemantic {pub envelope_sha256:String,pub result:Result<SemanticVerdict,String>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub review_receipt:Option<judge::ReviewReceipt>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub verdict_sha256:Option<String>,
+}
 pub fn read_private<T: for<'a> Deserialize<'a>>(path:&Path,max:u64)->io::Result<T>{
     let mut file=fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path)?;
     let meta=file.metadata()?;
@@ -270,11 +273,24 @@ pub struct Admission {pub delivered:bool,pub unreviewed:bool,pub reason:String,p
 /// The sending host reviews once and exposes quarantine to the sender. A
 /// receiving host can reuse only this exact private hash-bound verdict.
 pub fn cache_semantic(context:&Context,envelope:&Envelope,result:Result<SemanticVerdict,String>)->io::Result<()> {
+    cache_semantic_with_receipt(context,envelope,result,None)
+}
+/// Preserve per-call evidence with the exact envelope even after observations
+/// rotate. Older callers and journals remain explicitly unbound.
+pub fn cache_semantic_with_receipt(context:&Context,envelope:&Envelope,result:Result<SemanticVerdict,String>,review_receipt:Option<judge::ReviewReceipt>)->io::Result<()> {
     transaction(context,|state|{
         if state.semantic_cache.len()>=10_000{return Err(invalid("fleet semantic journal ceiling reached"));}
         let refusal=match &result{Ok(verdict)=>{verdict.validate()?;verdict.risky(context.review.risk_threshold)},Err(_)=>context.review.strict_unavailable||!envelope.kind.ordinary()};
-        state.semantic_cache.insert(envelope.message_id.clone(),CachedSemantic{envelope_sha256:hash(envelope)?,result:result.clone()});
-        record(state,json!({"event":"outbound_semantic","id":envelope.message_id,"input_sha256":hash(envelope)?,"result":result,"at":unix_now()}));
+        let envelope_sha256=hash(envelope)?;
+        if review_receipt.as_ref().is_some_and(|receipt|receipt.message_sha256.as_deref()!=Some(envelope_sha256.as_str())) {
+            return Err(invalid("semantic review receipt belongs to a different message"));
+        }
+        let verdict_sha256=result.as_ref().ok().map(hash).transpose()?;
+        if review_receipt.as_ref().is_some_and(|receipt|receipt.verdict_sha256!=verdict_sha256) {
+            return Err(invalid("semantic review receipt belongs to a different verdict"));
+        }
+        state.semantic_cache.insert(envelope.message_id.clone(),CachedSemantic{envelope_sha256:envelope_sha256.clone(),result:result.clone(),review_receipt:review_receipt.clone(),verdict_sha256:verdict_sha256.clone()});
+        record(state,json!({"event":"outbound_semantic","id":envelope.message_id,"input_sha256":envelope_sha256,"result":result,"review_receipt":review_receipt,"verdict_sha256":verdict_sha256,"at":unix_now()}));
         if refusal&&context.review.message_mode==Mode::Enforce{state.paused=true;state.reason="outgoing fleet message quarantined for human review".into();return Err(invalid("outgoing fleet message quarantined for human review"));}
         Ok(())
     })

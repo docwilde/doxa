@@ -397,8 +397,8 @@ impl PeerHost {
                 let recent=doxa_fleet::transaction(context,|state|Ok(state.recent_messages.clone())).map_err(|error|error.to_string())?;
                 let snapshot=json!({"recent_untrusted_messages":recent,"charter":context.charter,"assignment":context.assignment(&self.session_id).map_err(|error|error.to_string())?,"message":envelope});
                 let clean=self.scrub_fleet_value(snapshot)?;
-                let verdict=doxa_fleet::judge::semantic(context,&clean);
-                if let Err(error)=doxa_fleet::cache_semantic(context,&envelope,verdict){let _=self.events.try_send(json!({"type":"fleet_guard","data":{"delivered":false,"reason":error.to_string(),"message_id":envelope.message_id}}));return Err(error.to_string());}
+                let (verdict,receipt)=doxa_fleet::judge::semantic_with_receipt(context,&clean);
+                if let Err(error)=doxa_fleet::cache_semantic_with_receipt(context,&envelope,verdict,receipt){let _=self.events.try_send(json!({"type":"fleet_guard","data":{"delivered":false,"reason":error.to_string(),"message_id":envelope.message_id}}));return Err(error.to_string());}
             }
             Some(envelope.wire().map_err(|error|error.to_string())?)
         } else {None};

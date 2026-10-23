@@ -5469,6 +5469,49 @@ fn check_long_claude_restore(trimmed: bool) {
 
 #[test]
 #[cfg(target_os = "linux")]
+fn incompatible_codex_restore_retains_visible_history_and_clean_checkpoint() {
+    let dir=tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
+    let slug:String=dir.path().to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();
+    let store=doxa_transcript::TranscriptStore::new(&dir.path().join("native-projects"),&slug,"codex-session").unwrap();
+    store.try_append(json!({"type":"user","message":{"role":"user","content":"saved owner task"}}),"codex",|s|Ok(s.into())).unwrap();
+    store.try_append(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"saved answer"}]}}),"codex",|s|Ok(s.into())).unwrap();
+    store.try_write_thread(json!({"thread_id":"previous-thread","session_id":"codex-session","engine":"codex","transport":"app-server","cwd":dir.path(),"lore_enabled":true,"lore_tools":false,"peer_tools":false,"turn_incomplete":false,"model":"account-model","effort":"high","permission_mode":"on-request"}).as_object().unwrap().clone(),|s|Ok(s.into())).unwrap();
+    let transcript_before=fs::read(store.transcript_path()).unwrap();
+    let checkpoint=native_transcript(dir.path(),"codex-session.codex.json");
+    let checkpoint_before=fs::read(&checkpoint).unwrap();
+    let codex=dir.path().join("old-image-codex");
+    // An unreviewed historical image cannot become today's provider.
+    // This peer only initializes and cannot run a turn.
+    executable(&codex,&include_str!("fixtures/codex_appserver.py").replace("__DOXA_SUPPORTED_CODEX_VERSION__","0.162.0"));
+    executable(&codex.with_extension("turn"),"#!/bin/sh\necho unexpected provider turn >&2\nexit 99\n");
+    let mut child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id","codex-session","--engine","codex","--codex-bin",codex.to_str().unwrap(),"--resume","true","--linger","10"])
+        .env_remove("DOXA_CODEX_APPSERVER").stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry=dir.path().join("registry/codex-session.json");wait_for_registry(&mut child,&registry);
+    let row:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    let mut process=Process {child,registry,socket:PathBuf::from(row["daemon_socket"].as_str().unwrap())};
+    let (mut reader,mut socket)=process.connect();
+    reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
+    assert_eq!(receive(&mut reader)["session_id"],"codex-session");
+    send(&mut socket,json!({"type":"attach","cursor":null}));
+    for id in [1,2] {
+        send(&mut socket,json!({"type":"prompt","id":id,"text":"continue after upgrading DOXA"}));
+        let terminal=claude_receive_until(&mut reader,|frame|frame["event"]["type"]=="turn_done");
+        let error=terminal["event"]["data"]["error"].as_str().unwrap();
+        assert_eq!(terminal["event"]["data"]["is_error"],true,"{terminal}");
+        assert!(error.contains("Saved Codex provider is incompatible")&&error.contains("pinned image"),"{error}");
+        assert_eq!(fs::read(store.transcript_path()).unwrap(),transcript_before);
+        assert_eq!(fs::read(&checkpoint).unwrap(),checkpoint_before);
+        assert_eq!(process.entry()["session_id"],"codex-session");
+    }
+    let requests=fs::read_to_string(codex.with_extension("rpc")).unwrap();
+    for method in ["thread/start","thread/resume","turn/start","thread/compact/start"] {assert!(!requests.contains(method),"{requests}");}
+    send(&mut socket,json!({"type":"call","id":3,"method":"stop","params":{}}));
+    claude_receive_until(&mut reader,|frame|frame["id"]==3);wait_until(||process.exited());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn long_codex_restore_resumes_saved_thread_before_first_request() {
     check_long_codex_restore(false);
 }

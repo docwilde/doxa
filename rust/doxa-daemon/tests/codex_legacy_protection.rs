@@ -141,6 +141,12 @@ fn legacy_exec_refusal_preserves_saved_thread_transcript_and_never_spawns_provid
 #[test]
 #[cfg(target_os = "linux")]
 fn explicit_legacy_migration_resumes_exact_provider_thread_without_creating_one() {
+    let daemon=fs::canonicalize(env!("CARGO_BIN_EXE_doxa-daemon")).unwrap();
+    let daemon_bytes=fs::metadata(&daemon).unwrap().len();
+    assert!(daemon_bytes<=256*1024*1024,
+        "debug daemon is {daemon_bytes} bytes; bounded native carriers require the workspace's line-tables-only debug profiles");
+    doxa_engines::compact_hook::executable_digest(&daemon)
+        .expect("the built daemon must pass the unchanged native carrier ownership and byte limit");
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let store = seed(root);
@@ -148,6 +154,7 @@ fn explicit_legacy_migration_resumes_exact_provider_thread_without_creating_one(
     let provider = root.join("provider");
     let fixture = r#"#!/usr/bin/env python3
 import json,sys,tomllib,os,socket,threading,signal
+sys.stderr=open('provider.stderr','a')
 if 'DOXA_CODEX_OWNER_FD' in os.environ:
  control=socket.socket(fileno=int(os.environ['DOXA_CODEX_OWNER_FD']))
  control.sendall(b'DOXA_PROVIDER_OWNER_V1\n');assert control.recv(1)==b'G'
@@ -211,7 +218,9 @@ sys.stdin.read()
     loop {
         let frame = receive(&mut reader);
         if frame["event"]["type"] == "turn_done" {
-            assert_eq!(frame["event"]["data"]["is_error"], false, "{frame}");
+            assert_eq!(frame["event"]["data"]["is_error"], false, "{frame}; provider stderr: {}; provider RPCs: {}",
+                fs::read_to_string(root.join("provider.stderr")).unwrap_or_default(),
+                fs::read_to_string(root.join("requests.jsonl")).unwrap_or_default());
             break;
         }
     }

@@ -131,7 +131,7 @@ sys.stdin.read()
         with self.assertRaisesRegex(ValueError, "verified build provenance"):
             self.install()
         identity = {"source_commit": installer.SOURCE, "patch_sha256": installer.PATCH_SHA256,
-                    "profile": "dev-small", "toolchain": "1.95.0"}
+                    "profile": "dev-small", "toolchain": "1.99.1"}
         helper = dict(identity, product="codex-code-mode-host", v8_inputs={"fixture": "reviewed"})
         (self.root / "build.json").write_text(json.dumps(dict(identity, binary_sha256=installer.digest(self.binary))))
         (self.root / "code-mode-host-build.json").write_text(json.dumps(dict(helper, binary_sha256=installer.digest(self.helper))))
@@ -153,6 +153,7 @@ sys.stdin.read()
         receipt["source_commit"] = installer.PREVIOUS_SOURCE
         receipt["code_mode_host_source_commit"] = installer.PREVIOUS_SOURCE
         receipt["patch_sha256"] = next(value for value in installer.PREVIOUS_PATCHES if value != installer.LEGACY_PATCH_SHA256)
+        receipt["toolchain"] = "1.95.0"
         receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n")
         old = self.root / "providers" / (installer.PREVIOUS_PROVIDER + "-" + installer.digest(receipt_path))
         self.destination.rename(old)
@@ -164,7 +165,7 @@ sys.stdin.read()
             self.install()
         self.assertEqual(pointer.resolve(), old)
         identity = {"source_commit": installer.SOURCE, "patch_sha256": installer.PATCH_SHA256,
-                    "profile": "dev-small", "toolchain": "1.95.0"}
+                    "profile": "dev-small", "toolchain": "1.99.1"}
         helper = dict(identity, product="codex-code-mode-host", v8_inputs={"fixture": "reviewed"})
         for filename, value in (("build.json", dict(identity, binary_sha256=installer.digest(self.binary))),
                                 ("code-mode-host-build.json", dict(helper, binary_sha256=installer.digest(self.helper)))):
@@ -196,6 +197,7 @@ sys.stdin.read()
         source.parent.mkdir(parents=True)
         source.write_text(Path(installer.__file__).read_text())
         files = {
+            updater.RETAINED_CONTRACTS:updater.read(updater.ROOT/updater.RETAINED_CONTRACTS).decode(),
             'rust/doxa-tui/Cargo.toml':'[package]\nname = "doxa-tui"\nversion = "2.0.0-beta.65"\n',
             'Cargo.lock':'version = 4\n\n[[package]]\nname = "doxa-tui"\nversion = "2.0.0-beta.65"\n',
             'CHANGELOG.md':'# Changelog\n\n## 2.0.0-beta.65 — 2026-10-21\n\nSynthetic fixture.\n',
@@ -203,8 +205,10 @@ sys.stdin.read()
         for name, raw in files.items():
             path=fixture/name; path.parent.mkdir(parents=True,exist_ok=True); path.write_text(raw)
         pin = dict(version=installer.SOURCE_TAG.removeprefix('rust-v'),tag=installer.SOURCE_TAG,
-                   source_commit=installer.SOURCE,patch_sha256=installer.PATCH_SHA256,provider=installer.PROVIDER)
-        for version, digit in [('0.164.0','a'),('0.165.0','b')]:
+                   source_commit=installer.SOURCE,patch_sha256=installer.PATCH_SHA256,provider=installer.PROVIDER,contract=installer.CONTRACT)
+        current_version=pin['version'];major,minor,_=map(int,current_version.split('.'))
+        next_versions=[f'{major}.{minor+offset}.0' for offset in (1,2)]
+        for version, digit in zip(next_versions,('a','b')):
             carried = ('synthetic reviewed protection '+version+'\n').encode()
             new = dict(pin,version=version,tag='rust-v'+version,source_commit=digit*40,
                        patch_sha256=hashlib.sha256(carried).hexdigest(),provider='codex-'+version+'-precompact-v1')
@@ -214,7 +218,11 @@ sys.stdin.read()
             pin=new
         future_spec=importlib.util.spec_from_file_location('twice_rotated_installer',source)
         future=importlib.util.module_from_spec(future_spec); future_spec.loader.exec_module(future)
-        self.assertEqual('codex-0.164.0-precompact-v1',future.PREVIOUS_PROVIDER)
+        self.assertEqual('codex-'+next_versions[0]+'-precompact-v1',future.PREVIOUS_PROVIDER)
+        contracts={row['version']:row for row in updater.load(updater.read(fixture/updater.RETAINED_CONTRACTS))['contracts']}
+        self.assertEqual(installer.SOURCE,contracts[current_version]['source_commit'])
+        self.assertEqual(installer.PATCH_SHA256,contracts[current_version]['patch_sha256'])
+        self.assertIn('0.163.0',contracts);self.assertIn(next_versions[0],contracts)
         self.assertEqual(installer.PROVIDER,future.receipt_provider(old_receipt))
         self.assertIn((installer.SOURCE,installer.PATCH_SHA256,installer.PROVIDER),future.REVIEWED_INSTALLATIONS)
         self.assertTrue(future.artifact_name(old.name))
@@ -227,7 +235,7 @@ sys.stdin.read()
                 future.verify_installed(old,dict(old_receipt,**change))
 
         self.binary.write_text(self.binary.read_text().replace(installer.AGENT_PREFIX,future.AGENT_PREFIX))
-        identity=dict(source_commit=future.SOURCE,patch_sha256=future.PATCH_SHA256,profile='dev-small',toolchain='1.95.0')
+        identity=dict(source_commit=future.SOURCE,patch_sha256=future.PATCH_SHA256,profile='dev-small',toolchain='1.99.1')
         helper=dict(identity,product='codex-code-mode-host',v8_inputs={'synthetic':'reviewed'})
         for name,data in [('build.json',dict(identity,binary_sha256=future.digest(self.binary))),
                           ('code-mode-host-build.json',dict(helper,binary_sha256=future.digest(self.helper)))]:
@@ -264,7 +272,7 @@ sys.stdin.read()
 
     def test_cargo_mode_is_accepted_only_for_verified_build_outputs(self):
         identity = {"source_commit": installer.SOURCE, "patch_sha256": installer.PATCH_SHA256,
-                    "profile": "dev-small", "toolchain": "1.95.0"}
+                    "profile": "dev-small", "toolchain": "1.99.1"}
         helper_identity = dict(identity, product="codex-code-mode-host", v8_inputs={"fixture": "reviewed"})
         for executable in (self.binary, self.helper):
             executable.chmod(0o755)  # Real Cargo outputs use this mode.
@@ -317,7 +325,7 @@ sys.stdin.read()
             file = self.root / name
             file.write_text("#!/bin/sh\necho '%s 1.93.0 (fixture)'\n" % name)
             file.chmod(0o700)
-        with self.assertRaisesRegex(ValueError, "both be Rust 1.95.0"):
+        with self.assertRaisesRegex(ValueError, "both be Rust 1.99.1"):
             installer.toolchain(self.root, str(self.root / "cargo"))
         injected = {"RUSTC": "/unsafe/compiler", "RUSTC_WRAPPER": "/unsafe/wrapper", "RUSTFLAGS": "unsafe",
                     "RUSTY_V8_ARCHIVE": "/unsafe/archive", "RUSTY_V8_MIRROR": "https://unsafe.invalid",
@@ -332,21 +340,37 @@ sys.stdin.read()
             if key != "RUSTC":
                 self.assertNotIn(key, environment)
 
+    def test_old_toolchain_receipt_is_bound_to_reviewed_source_and_patch(self):
+        self.install()
+        receipt = json.loads((self.destination / "receipt.json").read_text())
+        source = "83086188ae0614bd882818ff1aa23f3194962012"
+        patch_sha = "3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c"
+        old = dict(receipt, source_commit=source, patch_sha256=patch_sha,
+                   code_mode_host_source_commit=source, toolchain="1.95.0")
+        installer.verify_installed(self.destination, old)
+        # Compiler provenance cannot be relabelled in either direction.
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            installer.verify_installed(self.destination, dict(old, toolchain="1.99.1"))
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            installer.verify_installed(self.destination, dict(receipt, toolchain="1.95.0"))
+        with self.assertRaisesRegex(ValueError, "reviewed release identity"):
+            installer.verify_installed(self.destination, dict(old, patch_sha256="0" * 64))
+
     def test_v8_inputs_verify_source_manifest_and_archive_binding_bytes(self):
         target = "x86_64-unknown-linux-gnu"
         source = self.root / "v8-source"
         (source / "codex-rs").mkdir(parents=True)
         (source / "third_party/v8").mkdir(parents=True)
-        (source / "codex-rs/Cargo.lock").write_text('[[package]]\nname="v8"\nversion="150.4.0"\n')
+        (source / "codex-rs/Cargo.lock").write_text('[[package]]\nname="v8"\nversion="152.2.0"\n')
         archive = f"librusty_v8_ptrcomp_sandbox_release_{target}.a.gz"
         binding = f"src_binding_ptrcomp_sandbox_release_{target}.rs"
         name = f"rusty_v8_ptrcomp_sandbox_release_{target}.sha256"
         artifacts = {archive: b"approved archive fixture", binding: b"approved binding fixture"}
         manifest = "".join(f"{hashlib.sha256(data).hexdigest()}  {artifact}\n" for artifact, data in artifacts.items()).encode()
         artifacts[name] = manifest
-        (source / "third_party/v8/rusty_v8_150_4_0_release_manifests.sha256").write_text(f"{hashlib.sha256(manifest).hexdigest()}  {name}\n")
+        (source / "third_party/v8/rusty_v8_152_2_0_release_manifests.sha256").write_text(f"{hashlib.sha256(manifest).hexdigest()}  {name}\n")
         def response(url, **_):
-            self.assertTrue(url.startswith("https://github.com/openai/codex/releases/download/rusty-v8-v150.4.0/"))
+            self.assertTrue(url.startswith("https://github.com/openai/codex/releases/download/rusty-v8-v152.2.0/"))
             return io.BytesIO(artifacts[url.rsplit("/", 1)[1]])
         with patch.object(installer.urllib.request, "urlopen", side_effect=response):
             environment, identity = installer.v8_inputs(self.root, source, target)
@@ -374,7 +398,7 @@ sys.stdin.read()
 
     def test_explicit_rustup_proxy_keeps_cargo_and_rustc_dispatch_names(self):
         rustup = self.root / "rustup"
-        rustup.write_text("#!/bin/sh\nname=${0##*/}\necho \"$name 1.95.0 (fixture)\"\n")
+        rustup.write_text("#!/bin/sh\nname=${0##*/}\necho \"$name 1.99.1 (fixture)\"\n")
         rustup.chmod(0o700)
         for name in ("cargo", "rustc"):
             (self.root / name).symlink_to(rustup)

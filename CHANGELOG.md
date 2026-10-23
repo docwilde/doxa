@@ -5,6 +5,23 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.70 — 2026-10-23
+
+**Protected Codex compatibility**
+
+- Fix **`request_approval`** compatibility with Codex 0.164.0. Preserve reviewer and cancellation metadata when live auto denies a pending approval.
+- Pin **`toolchain`** and **`v8_inputs`** to Rust 1.99.1 and V8 152.2.0. Retain exact Rust 1.95.0 provenance for reviewed older installations.
+- Fix **`initialized_contract`** rejecting saved Docker sessions after provider upgrades. Retain reviewed provider identities across future updates and preserve each saved image.
+
+**Representative routing tasks**
+
+- Add **`prepare`** and **`grade`** for 18 repair tasks with 72 case checks. Run candidate code in credential-free, rootless Docker containers without network access.
+- Add **`router_config`** with provisional easy, intermediate and difficult model mappings. Task scoring measures actual repairs; model rankings remain unmeasured.
+
+**Message review evidence**
+
+- Fix ambiguous judge timing in **`review_usage`**. Retain unique invocation, request, envelope and verdict bindings when the 256-event history rotates; older entries remain explicitly unbound.
+
 ## 2.0.0-beta.69 — 2026-10-22
 
 **API worker startup and recovery**

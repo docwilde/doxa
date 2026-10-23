@@ -34,7 +34,7 @@ def read():
 def send(x): print(json.dumps(x),flush=True)
 def notice(method,**params): send({'method':method,'params':dict(threadId='thread-actual',**params)})
 init=read(); assert init['method']=='initialize'
-agent='codex_cli_rs/0.163.0' if mode=='stock' else 'doxa_codex_rs/'+('0.1.0' if mode=='version' else '0.163.0')+' (doxa-precompact-fail-closed-v1; upstream fixture)'
+agent='codex_cli_rs/0.164.0' if mode=='stock' else 'doxa_codex_rs/'+('0.1.0' if mode=='version' else '0.164.0')+' (doxa-precompact-fail-closed-v1; upstream fixture)'
 send({'id':init['id'],'result':{'userAgent':agent}})
 assert read()['method']=='initialized'
 if mode in ('version','stock'):
@@ -150,7 +150,7 @@ else:
 "#).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let gate_dir = dir.path().join("gate"); fs::create_dir(&gate_dir).unwrap(); fs::set_permissions(&gate_dir, fs::Permissions::from_mode(0o700)).unwrap();
-    let gate = CompactGate::prepare(&gate_dir, &std::env::current_exe().unwrap(), &dir.path().join("codex-home"), dir.path(), "doxa-fixture", "0.163.0").unwrap();
+    let gate = CompactGate::prepare(&gate_dir, &std::env::current_exe().unwrap(), &dir.path().join("codex-home"), dir.path(), "doxa-fixture", "0.164.0").unwrap();
     let options = AppServerOptions { executable, cwd:dir.path().to_owned(), model:None, sandbox:SandboxMode::WorkspaceWrite, permission:CodexPermission::OnRequest, resume_thread:None, turn_timeout:Duration::from_secs(3) };
     (dir, options, gate)
 }

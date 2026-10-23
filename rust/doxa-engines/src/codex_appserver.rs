@@ -2,7 +2,7 @@
 //! Interactive requests require a host bridge; unknown requests are refused.
 //!
 //! The shapes below come from `codex app-server generate-ts --experimental`
-//! (Codex 0.163.0). Stdio is newline-delimited JSON-RPC without LSP headers.
+//! (Codex 0.164.0). Stdio is newline-delimited JSON-RPC without LSP headers.
 use std::io;
 use std::os::unix::{process::CommandExt, net::UnixStream, io::AsRawFd};
 use std::collections::VecDeque;
@@ -299,7 +299,10 @@ impl AppServerDriver {
         if options.resume_thread.as_deref().is_some_and(|id| !valid_thread_id(id)) {
             return Err(AppServerError::Protocol("invalid resume thread ID"));
         }
-        let isolated = doxa_isolation::active()?.is_some();
+        let isolation = doxa_isolation::active()?;
+        let isolated = isolation.is_some();
+        let saved_docker_resume = options.resume_thread.is_some()
+            && isolation.as_ref().is_some_and(|scope|scope.profile.docker());
         let supervised = compact_gate.is_some() && !isolated;
         let (mut owner_control, owner_peer) = if supervised {
             let (parent, child) = UnixStream::pair()?;
@@ -357,8 +360,10 @@ impl AppServerDriver {
                     driver.supervised = true;
                 }
                 let initialized = driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
-                driver.live_auto_supported = initialized["userAgent"].as_str().is_some_and(|agent|
-                    agent.starts_with(crate::codex_compact::PROTECTED_AGENT_PREFIX) && agent.contains("; doxa-midturn-auto-v1; "));
+                let reviewed = initialized["userAgent"].as_str().and_then(|agent|
+                    crate::codex_compact::initialized_contract(agent,saved_docker_resume));
+                driver.live_auto_supported = reviewed.is_some() && initialized["userAgent"].as_str()
+                    .is_some_and(|agent|agent.contains("; doxa-midturn-auto-v1; "));
                 driver.send(json!({"method":"initialized"})).await?;
                 if offline {
                     let config=driver.request("config/read",json!({"cwd":driver.options.cwd,"includeLayers":false})).await?;
@@ -368,13 +373,14 @@ impl AppServerDriver {
                     // The server's build version is authoritative. The client version
                     // in its suffix never becomes proof of the provider hook contract.
                     let version = initialized["userAgent"].as_str().and_then(provider_version);
-                    if version != Some(crate::codex_compact::SUPPORTED_VERSION) {
+                    let Some(reviewed) = reviewed.filter(|identity|Some(identity.version)==version) else {
+                        if driver.options.resume_thread.is_some() {
+                            return Err(AppServerError::Protocol("Saved Codex provider is incompatible with this DOXA release; the saved thread was not resumed. Docker sessions retain their pinned image: use the matching DOXA release or an explicit reviewed migration. History and checkpoint are retained"));
+                        }
                         return Err(AppServerError::Protocol("Codex build has no verified DOXA compaction hook contract"));
-                    }
-                    if !initialized["userAgent"].as_str().is_some_and(|agent| agent.starts_with(
-                        crate::codex_compact::PROTECTED_AGENT_PREFIX)) {
-                        return Err(AppServerError::Protocol("Protected Codex requires DOXA's installed fail-closed app server; run scripts/install_codex_protected.py or select its launcher with --codex-bin"));
-                    }
+                    };
+                    driver.compact_gate.as_mut().unwrap().bind_provider(reviewed)
+                        .map_err(|_| AppServerError::Protocol("Protected Codex descriptor could not bind its actual reviewed provider"))?;
                     // Token-budget context resets bypass PreCompact in this provider.
                     // Confirm the process-local override is supported and effective.
                     let config = driver.request("config/read", json!({"cwd":driver.options.cwd,"includeLayers":false})).await?;
@@ -1258,26 +1264,27 @@ for line in sys.stdin:
 
     #[test]
     fn provider_version_uses_only_the_authoritative_product_prefix() {
-        let desktop = "Codex Desktop/0.163.0 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)";
+        let desktop = "Codex Desktop/0.164.0 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)";
         assert_eq!(provider_version(desktop), Some(crate::codex_compact::SUPPORTED_VERSION));
-        assert_eq!(provider_version("codex_cli_rs/0.163.0"), Some(crate::codex_compact::SUPPORTED_VERSION));
+        assert_eq!(provider_version("codex_cli_rs/0.164.0"), Some(crate::codex_compact::SUPPORTED_VERSION));
+        let current = crate::codex_compact::SUPPORTED_VERSION;
         for agent in [
-            "Codex Desktop/0.1.0 (doxa; 0.163.0)",
-            "codex_cli_rs/0.1.0 (client/0.163.0)",
-            "Codex Desktop (doxa/0.163.0)",
-            "codex_cli_rs (doxa; 0.163.0)",
-            "unknown/0.163.0 (doxa; 0.163.0)",
-            "doxa/0.163.0",
-            "Codex Desktop/unknown (doxa; 0.163.0)",
-            "Codex Desktop/0.163.0-client",
+            format!("Codex Desktop/0.1.0 (doxa; {current})"),
+            format!("codex_cli_rs/0.1.0 (client/{current})"),
+            format!("Codex Desktop (doxa/{current})"),
+            format!("codex_cli_rs (doxa; {current})"),
+            format!("unknown/{current} (doxa; {current})"),
+            format!("doxa/{current}"),
+            format!("Codex Desktop/unknown (doxa; {current})"),
+            format!("Codex Desktop/{current}-client"),
         ] {
-            assert_ne!(provider_version(agent), Some(crate::codex_compact::SUPPORTED_VERSION), "{agent}");
+            assert_ne!(provider_version(&agent), Some(current), "{agent}");
         }
     }
 
     /// Opt-in installed-provider probe: initialization and hook inventory only.
     #[tokio::test]
-    #[ignore = "requires DOXA_CODEX_PROBE pointing to installed Codex 0.156.1"]
+    #[ignore = "requires DOXA_CODEX_PROBE pointing to the current protected provider"]
     async fn installed_codex_hook_inventory_verifies_without_starting_a_thread() {
         use std::os::unix::fs::PermissionsExt;
         let executable = PathBuf::from(std::env::var_os("DOXA_CODEX_PROBE").expect("explicit installed provider"));
@@ -1303,7 +1310,74 @@ for line in sys.stdin:
         let mut driver = timeout(Duration::from_secs(20),
             AppServerDriver::initialize_with_gate(options, str::to_owned, Some(gate))).await.unwrap().unwrap();
         assert!(driver.thread_id.is_none(), "inventory probe must never start a provider thread");
+        let descriptor:Value=serde_json::from_slice(&std::fs::read(gate_dir.join("compact-session.json")).unwrap()).unwrap();
+        assert_eq!(descriptor["version"],crate::codex_compact::SUPPORTED_VERSION);
+        assert!(crate::codex_compact::descriptor_contract(&descriptor));
+        println!("protected_metadata_probe={descriptor}");
         driver.shutdown().await;
+    }
+
+    /// Run alone with an explicitly supplied task-local rootless Engine/image.
+    /// No credentials, provider threads or model turns enter this cold restore.
+    #[tokio::test]
+    #[ignore = "requires task-local DOXA_ISOLATION_TEST_HOST/IMAGE and DOXA_CODEX_PROBE_VERSION"]
+    async fn retained_docker_provider_metadata_survives_cold_restore_without_image_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+        let image=std::env::var("DOXA_ISOLATION_TEST_IMAGE").expect("explicit image");
+        let engine=std::env::var("DOXA_ISOLATION_TEST_HOST").expect("explicit task-local Engine");
+        let expected=std::env::var("DOXA_CODEX_PROBE_VERSION").expect("explicit actual version");
+        assert!(engine.starts_with("unix:///run/user/")&&!engine.ends_with("/docker.sock"));
+        let scratch=PathBuf::from(std::env::var_os("TMPDIR").expect("private SSD scratch"));
+        let dir=tempfile::tempdir_in(scratch).unwrap();
+        let home=dir.path().join("home");let source=dir.path().join("source");
+        for path in [&home,&source] {std::fs::create_dir(path).unwrap();std::fs::set_permissions(path,std::fs::Permissions::from_mode(0o700)).unwrap();}
+        for args in [vec!["init"],vec!["-c","user.name=Fixture","-c","user.email=fixture@example.invalid","commit","--allow-empty","-m","test: protected metadata fixture"]] {
+            assert!(std::process::Command::new("git").args(args).current_dir(&source)
+                .env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL","/dev/null").status().unwrap().success());
+        }
+        std::env::set_var("HOME",&home);std::env::set_var("DOXA_HOME",&home);
+        std::env::remove_var("OPENAI_API_KEY");std::env::remove_var("DOXA_SESSION_ISOLATION");
+        std::env::set_var("DOXA_DOCKER_IMAGE",&image);std::env::set_var("DOXA_DOCKER_HOST",&engine);
+        std::env::set_var("DOXA_DOCKER_MEMORY_BYTES","536870912");std::env::set_var("DOXA_DOCKER_CPUS","1");
+        let mut runtime=doxa_isolation::Runtime::prepare(&home,"metadata-cold-restore",&source,
+            Some(doxa_isolation::Profile::DockerOffline),false,None).unwrap();
+        struct Cleanup(String,String);
+        impl Drop for Cleanup {fn drop(&mut self) {for args in [vec!["stop","--time","1",&self.1],vec!["rm",&self.1]] {
+            let _=std::process::Command::new("docker").args(["--host",&self.0]).args(args).output();
+        }}}
+        let _cleanup=Cleanup(engine,runtime.manifest().container_id.clone().unwrap());
+        let checkout=runtime.checkout().to_owned();
+        let codex_home=runtime.manifest().private_home.join("codex");
+        std::fs::create_dir_all(&codex_home).unwrap();std::fs::set_permissions(&codex_home,std::fs::Permissions::from_mode(0o700)).unwrap();
+        let checkpoint=codex_home.join("metadata-checkpoint");std::fs::write(&checkpoint,"retained checkpoint").unwrap();
+        for cold in [false,true] {
+            if cold {
+                // Updating new-session defaults cannot choose a different image
+                // for an existing manifest, even if that image is unavailable.
+                std::env::set_var("DOXA_DOCKER_IMAGE",format!("sha256:{}","d".repeat(64)));
+                runtime=doxa_isolation::Runtime::prepare(&home,"metadata-cold-restore",&checkout,
+                    Some(doxa_isolation::Profile::DockerOffline),true,None).unwrap();
+            }
+            runtime.activate();
+            assert_eq!(runtime.manifest().policy.as_ref().unwrap().image,image);
+            let gate_dir=dir.path().join(if cold {"cold-gate"} else {"initial-gate"});
+            std::fs::create_dir(&gate_dir).unwrap();std::fs::set_permissions(&gate_dir,std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut gate=crate::codex_compact::CompactGate::prepare(&gate_dir,&std::env::current_exe().unwrap(),
+                &codex_home,&checkout,"metadata-cold-restore",crate::codex_compact::SUPPORTED_VERSION).unwrap();
+            gate.isolate_hook().unwrap();
+            let options=AppServerOptions {executable:PathBuf::from("/unused-host-provider"),cwd:checkout.clone(),model:None,
+                sandbox:SandboxMode::WorkspaceWrite,permission:CodexPermission::OnRequest,
+                resume_thread:Some("metadata-only-not-submitted".into()),turn_timeout:Duration::from_secs(5)};
+            let mut driver=timeout(Duration::from_secs(30),AppServerDriver::initialize_with_gate(options,str::to_owned,Some(gate))).await.unwrap().unwrap();
+            assert!(driver.thread_id.is_none());
+            let descriptor:Value=serde_json::from_slice(&std::fs::read(gate_dir.join("compact-session.json")).unwrap()).unwrap();
+            assert_eq!(descriptor["version"],expected);
+            assert!(crate::codex_compact::descriptor_contract(&descriptor));
+            assert!(descriptor["provider_thread"].is_null());
+            assert_eq!(std::fs::read_to_string(&checkpoint).unwrap(),"retained checkpoint");
+            println!("protected_docker_metadata_probe={}",json!({"cold_restore":cold,"image":image,"profile":"docker-offline","descriptor":descriptor,"thread_rpcs":0,"paid_requests":0}));
+            driver.shutdown().await;runtime.stop().unwrap();
+        }
     }
 
     #[test]

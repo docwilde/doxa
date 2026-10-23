@@ -19,7 +19,7 @@ class InstallTransactionTests(unittest.TestCase):
             if identity[1]==module.LEGACY_PATCH_SHA256)
         legacy=provider/old_provider;result.parent.rename(legacy);(provider/'codex-current').unlink()
         receipt=json.loads((legacy/'receipt.json').read_text())
-        receipt.update(source_commit=old_source,patch_sha256=old_patch,code_mode_host_source_commit=old_source)
+        receipt.update(source_commit=old_source,patch_sha256=old_patch,code_mode_host_source_commit=old_source,toolchain='1.95.0')
         (legacy/'receipt.json').write_text(json.dumps(receipt))
         self.assertEqual(module.receipt_provider(receipt),old_provider)
         module.verify_installed(legacy,receipt)
@@ -54,7 +54,7 @@ class InstallTransactionTests(unittest.TestCase):
         from pathlib import Path
         root=Path(os.environ['AUDIT_ROOT']);spec=importlib.util.spec_from_file_location('installer',Path(os.environ['AUDIT_TREE'])/'scripts/install_codex_protected.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
         server=root/'server';helper=root/'helper';launcher=root/'launcher'
-        verified={'source_commit':m.SOURCE,'patch_sha256':m.PATCH_SHA256,'profile':'dev-small','toolchain':'1.95.0','binary_sha256':m.digest(server),'code_mode_host_sha256':m.digest(helper)}
+        verified={'source_commit':m.SOURCE,'patch_sha256':m.PATCH_SHA256,'profile':'dev-small','toolchain':'1.99.1','binary_sha256':m.digest(server),'code_mode_host_sha256':m.digest(helper)}
         if '--rollback' in sys.argv:
          m.rollback_publication(Path(sys.argv[sys.argv.index('--rollback-receipt')+1]))
         else:

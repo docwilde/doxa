@@ -2,7 +2,7 @@
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
-const PATCH: &str = "3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c";
+const PATCH: &str = "f8759872787029e5bf7064fe5be7166c5367b1db09b4b60362ea625117658924";
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -38,8 +38,8 @@ fn fixture() -> tempfile::TempDir {
     )
     .unwrap();
     fs::write(dir.path().join("receipt.json"),json!({"contract":"doxa-precompact-fail-closed-v1",
-        "source_commit":"83086188ae0614bd882818ff1aa23f3194962012","patch_sha256":PATCH,
-        "code_mode_host_source_commit":"83086188ae0614bd882818ff1aa23f3194962012",
+        "source_commit":"6aaac694803004a63c6f393d153c96d22521a6b9","patch_sha256":PATCH,
+        "code_mode_host_source_commit":"6aaac694803004a63c6f393d153c96d22521a6b9",
         "code_mode_host_sha256":format!("{:x}",Sha256::digest(fs::read("/usr/bin/true").unwrap())),
         "code_mode_host_dispatcher_sha256":format!("{:x}",Sha256::digest(fs::read(env!("CARGO_BIN_EXE_doxa-codex-protected")).unwrap())),
         "binary_sha256":format!("{:x}",Sha256::digest(fs::read("/usr/bin/true").unwrap())),"official_cli":"/usr/bin/printf"}).to_string()).unwrap();
@@ -156,14 +156,15 @@ fn version_identifies_checked_protected_payload_instead_of_newer_official_cli() 
     let dir = fixture();
     let official = dir.path().join("official-codex");
     let marker = dir.path().join("executed");
-    let version: Vec<u64> = doxa_engines::codex_compact::SUPPORTED_VERSION
+    let current = doxa_engines::codex_compact::SUPPORTED_VERSION;
+    let version: Vec<u64> = current
         .split('.').map(|part| part.parse().unwrap()).collect();
     let newer_version = format!("{}.{}.{}", version[0], version[1], version[2] + 1);
     let official_script = format!("#!/bin/sh\nprintf 'official' >> \"$DOXA_VERSION_TEST_MARKER\"\nif [ \"$1\" = --version ]; then printf 'codex-cli {newer_version}\\n'; else printf 'official:%s\\n' \"$*\"; fi\n");
     fs::write(&official, official_script).unwrap();
     fs::set_permissions(&official, fs::Permissions::from_mode(0o700)).unwrap();
     let payload = dir.path().join("codex-app-server");
-    fs::write(&payload, b"#!/bin/sh\nprintf 'payload' >> \"$DOXA_VERSION_TEST_MARKER\"\nprintf 'codex-app-server 0.163.0\\n'\n").unwrap();
+    fs::write(&payload, format!("#!/bin/sh\nprintf 'payload' >> \"$DOXA_VERSION_TEST_MARKER\"\nprintf 'codex-app-server {current}\\n'\n")).unwrap();
     let receipt = dir.path().join("receipt.json");
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
     value["official_cli"] = json!(official);
@@ -178,7 +179,7 @@ fn version_identifies_checked_protected_payload_instead_of_newer_official_cli() 
             .env("DOXA_VERSION_TEST_MARKER", &marker).output().unwrap();
         assert!(result.status.success());
         let report = String::from_utf8(result.stdout).unwrap();
-        assert_eq!(report, "doxa-codex-protected 0.163.0 (provider codex-0.163.0-precompact-v1; upstream 83086188ae0614bd882818ff1aa23f3194962012; contract doxa-precompact-fail-closed-v1)\n");
+        assert_eq!(report, format!("doxa-codex-protected {current} (provider codex-{current}-precompact-v1; upstream {}; contract doxa-precompact-fail-closed-v1)\n",value["source_commit"].as_str().unwrap()));
         assert!(!report.contains(&newer_version));assert!(!marker.exists());
     }
     let login = Command::new(dir.path().join("codex")).args(["login", "status"])
