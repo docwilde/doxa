@@ -7,6 +7,18 @@ impl Host for Idle {
     fn prompt(&self,_:&str,_:&mut dyn FnMut(Value)){}
     fn call(&self,_:&str,_:&Value)->Result<Value,String>{Ok(json!({}))}
 }
+struct ParentHome(Vec<(&'static str,Option<std::ffi::OsString>)>);
+impl ParentHome{
+    fn isolated(root:&Path)->Self{
+        let mut saved=Vec::new();
+        for(key,relative)in [("HOME","home"),("DOXA_HOME","doxa-home"),("LORE_ROOT","lore"),("LORE_PROJECTS_DIR","projects")] {
+            let path=root.join(relative);fs::create_dir_all(&path).unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o700)).unwrap();
+            saved.push((key,std::env::var_os(key)));std::env::set_var(key,path);
+        }
+        Self(saved)
+    }
+}
+impl Drop for ParentHome{fn drop(&mut self){for(key,value)in self.0.drain(..){match value{Some(value)=>std::env::set_var(key,value),None=>std::env::remove_var(key)}}}}
 fn quote(value:&Path)->String{format!("'{}'",value.to_string_lossy().replace('\'',"'\\''"))}
 fn canonical_lore(root:&Path)->LoreClient{
     let carrier=PathBuf::from(std::env::var_os("DOXA_LORE_RS").expect("absolute real native LORE carrier required"));
@@ -36,6 +48,7 @@ fn read_request(stream:&mut std::net::TcpStream)->Value{
 #[test]
 fn actual_lore_scrub_keeps_original_reviewed_and_http_bindings_through_peer_admission(){
     let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
+    let _parent_home=ParentHome::isolated(dir.path());
     let(tx,_)=std::sync::mpsc::sync_channel(1);
     let peer=PeerHost::new(Arc::new(Idle),dir.path().into(),dir.path(),"sender".into(),"sender".into(),tx).unwrap();
     *peer.lore.lock().unwrap()=Some(canonical_lore(dir.path()));
