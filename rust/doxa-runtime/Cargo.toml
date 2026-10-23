@@ -6,6 +6,7 @@ publish = false
 license = "AGPL-3.0-only"
 
 [dependencies]
+doxa-protocol = { path = "../doxa-protocol" }
 doxa-input = { path = "../doxa-input" }
 libc = "0.2"
 serde_json = "1"

@@ -491,6 +491,7 @@ dependencies = [
  "doxa-lore",
  "doxa-mcp",
  "doxa-peers",
+ "doxa-protocol",
  "doxa-router",
  "doxa-runtime",
  "doxa-state",
@@ -516,6 +517,7 @@ version = "2.0.0-beta.74"
 dependencies = [
  "doxa-input",
  "doxa-isolation",
+ "doxa-protocol",
  "libc",
  "serde",
  "serde_json",
@@ -530,6 +532,7 @@ name = "doxa-fleet"
 version = "2.0.0-beta.74"
 dependencies = [
  "doxa-isolation",
+ "doxa-protocol",
  "doxa-state",
  "doxa-vendors",
  "libc",
@@ -625,6 +628,7 @@ version = "2.0.0-beta.74"
 dependencies = [
  "bytes",
  "doxa-isolation",
+ "doxa-protocol",
  "doxa-state",
  "http-body-util",
  "hyper",
@@ -644,6 +648,7 @@ dependencies = [
 name = "doxa-protocol"
 version = "2.0.0-beta.74"
 dependencies = [
+ "serde",
  "serde_json",
 ]
 
@@ -700,6 +705,7 @@ name = "doxa-runtime"
 version = "2.0.0-beta.74"
 dependencies = [
  "doxa-input",
+ "doxa-protocol",
  "libc",
  "serde_json",
  "tempfile",

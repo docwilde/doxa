@@ -1,10 +1,14 @@
 //! Scrub review prose without interpreting JSON syntax or host numeric facts.
 use serde_json::Value;
 
-pub(super) fn scrub(mut snapshot: Value,
+pub(super) fn scrub(snapshot: Value,
     scrubber: &mut impl FnMut(&str) -> Result<String, String>) -> Result<Value, String> {
+    scrub_with_limit(snapshot,doxa_fleet::judge::MAX_INPUT,scrubber)
+}
+pub(super) fn scrub_with_limit(mut snapshot:Value,limit:usize,
+    scrubber:&mut impl FnMut(&str)->Result<String,String>)->Result<Value,String>{
     let bounded = |value: &Value| serde_json::to_vec(value)
-        .is_ok_and(|bytes| bytes.len() <= doxa_fleet::judge::MAX_INPUT);
+        .is_ok_and(|bytes| bytes.len() <= limit);
     if !bounded(&snapshot) { return Err("Fleet review snapshot exceeds bounds".into()); }
     fn visit(value: &mut Value, depth: usize,
         scrubber: &mut impl FnMut(&str) -> Result<String, String>) -> Result<(), String> {

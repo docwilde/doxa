@@ -21,7 +21,7 @@ const MAX_OFFLINE: usize = 64;
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const MAX_CODEX_METADATA_BYTES: u64 = 64 * 1024;
 const MAX_RESTORED_PEER_EVENTS: usize = 2048;
-const MAX_RESTORED_PEER_RECORD_BYTES: usize = 32 * 1024;
+const MAX_RESTORED_PEER_RECORD_BYTES: usize = doxa_peers::delivery::MAX_HISTORY_RECORD_BYTES;
 
 #[derive(Clone, Debug)]
 pub struct OfflineSession {

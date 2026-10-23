@@ -8,13 +8,16 @@ mod decision_supervisor_tests;
 #[cfg(test)]
 #[path = "judge/invocation_tests.rs"]
 mod invocation_tests;
-use crate::{hash, invalid, transaction, Context, SemanticVerdict, SupervisorVerdict, MAX_BODY};
+use crate::{hash, invalid, transaction, Context, SemanticVerdict, SupervisorVerdict};
 use doxa_vendors::decisions::DecisionModel;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{io, time::{Duration,Instant}};
 
 pub const MAX_INPUT:usize=64*1024;
+pub const MAX_SEMANTIC_INPUT:usize=256*1024;
+pub const MAX_SEMANTIC_REQUEST:usize=2*MAX_SEMANTIC_INPUT+8_000;
+const MAX_REVIEW_TEXT:usize=6_000;
 pub const MAX_OUTPUT:usize=64*1024;
 pub const OUTPUT_TOKENS:u64=512;
 #[derive(Clone,Debug,Serialize,Deserialize,PartialEq)]
@@ -77,7 +80,8 @@ fn request_with_threshold(model:&Model,instructions:&str,input:&Value,threshold:
     if model.is_decision() && decision_supervisor::selected(instructions) {
         return decision_supervisor::request(model,input,threshold);
     }
-    if serde_json::to_vec(input)?.len()>MAX_INPUT{return Err(invalid("review input exceeds bound"));}
+    let limit=if instructions==SEMANTIC_INSTRUCTIONS{MAX_SEMANTIC_INPUT}else{MAX_INPUT};
+    if serde_json::to_vec(input)?.len()>limit{return Err(invalid("review input exceeds bound"));}
     let text=serde_json::to_string(input)?;
     Ok(match model.provider.as_str(){
         "jev" | "subq"=>{let questions=NOUL_FIELDS.iter().map(|(key,question)|((*key).to_owned(),json!({"type":"noul","instructions":question}))).collect::<serde_json::Map<_,_>>();json!({"model":model.model,"state":input,"questions":questions})},
@@ -94,11 +98,12 @@ fn request_with_threshold(model:&Model,instructions:&str,input:&Value,threshold:
 /// retain their reservation, so retries cannot evade the shared ceiling.
 #[cfg(test)]
 fn reserve(context:&Context,model:&Model,request:&Value)->io::Result<Reservation>{
-    reserve_for_message(context,model,request,None,None)
+    reserve_for_message(context,model,request,None,None,false)
 }
-fn reserve_for_message(context:&Context,model:&Model,request:&Value,message_sha256:Option<String>,reviewed_message_sha256:Option<String>)->io::Result<Reservation>{
+fn reserve_for_message(context:&Context,model:&Model,request:&Value,message_sha256:Option<String>,reviewed_message_sha256:Option<String>,semantic:bool)->io::Result<Reservation>{
     let input_bound=serde_json::to_vec(request)?.len() as f64;
-    if input_bound>MAX_INPUT as f64+8_000.0{return Err(invalid("review request exceeds token bound"));}
+    let limit=if semantic{MAX_SEMANTIC_REQUEST}else{MAX_INPUT+8_000};
+    if input_bound>limit as f64{return Err(invalid("review request exceeds token bound"));}
     let (input_rate,output_rate)=if let Some(decision) = DecisionModel::parse(&model.model).filter(|decision| decision.provider() == model.provider) {(decision.input_usd_micros_per_million() as f64 / 1_000_000.0,0.0)}else{(context.review.input_usd_per_million,context.review.output_usd_per_million)};
     let cost=(input_bound*input_rate+OUTPUT_TOKENS as f64*output_rate)/1_000_000.0;
     let request_sha256=hash(request)?;
@@ -127,7 +132,7 @@ pub fn evaluate(context:&Context,model:&Model,instructions:&str,input:&Value)->i
     let body=request_with_threshold(model,instructions,input,context.review.risk_threshold)?;
     let (endpoint,_)=model.service();let key=credential(model)?;
     let message_sha256=semantic_message_sha256(instructions,input)?;
-    evaluate_request_at_bound(context,model,&body,endpoint,&key,message_sha256)
+    evaluate_request_at_bound(context,model,&body,endpoint,&key,message_sha256,instructions==SEMANTIC_INSTRUCTIONS)
 }
 fn semantic_message_sha256(instructions:&str,input:&Value)->io::Result<Option<String>> {
     if instructions!=SEMANTIC_INSTRUCTIONS {return Ok(None);}
@@ -149,13 +154,13 @@ pub(crate) fn semantic_request_sha256(context:&Context,input:&Value)->io::Result
 }
 #[cfg(test)]
 fn evaluate_request_at(context:&Context,model:&Model,body:&Value,endpoint:&str,key:&str)->io::Result<Response>{
-    evaluate_request_at_bound(context,model,body,endpoint,key,None)
+    evaluate_request_at_bound(context,model,body,endpoint,key,None,false)
 }
-fn evaluate_request_at_bound(context:&Context,model:&Model,body:&Value,endpoint:&str,key:&str,message_sha256:Option<String>)->io::Result<Response>{
-    evaluate_request_at_reviewed(context,model,body,endpoint,key,message_sha256,None)
+fn evaluate_request_at_bound(context:&Context,model:&Model,body:&Value,endpoint:&str,key:&str,message_sha256:Option<String>,semantic:bool)->io::Result<Response>{
+    evaluate_request_at_reviewed(context,model,body,endpoint,key,message_sha256,None,semantic)
 }
-fn evaluate_request_at_reviewed(context:&Context,model:&Model,body:&Value,endpoint:&str,key:&str,message_sha256:Option<String>,reviewed_message_sha256:Option<String>)->io::Result<Response>{
-    let reservation=reserve_for_message(context,model,body,message_sha256,reviewed_message_sha256)?;
+fn evaluate_request_at_reviewed(context:&Context,model:&Model,body:&Value,endpoint:&str,key:&str,message_sha256:Option<String>,reviewed_message_sha256:Option<String>,semantic:bool)->io::Result<Response>{
+    let reservation=reserve_for_message(context,model,body,message_sha256,reviewed_message_sha256,semantic)?;
     let mut response=call_at(model,endpoint,key,body);
     let receipt=settle(context,model,&reservation,&response)?;
     if let Ok(response)=&mut response {response.review_receipt=receipt;}
@@ -260,7 +265,7 @@ fn parse_response_for_request(model:&Model,value:&Value,latency_ms:u128,request:
     if !provenance{return Err(invalid("review response model does not match the selected model"));}
     Ok(Response{result,model:model_name.into(),input_tokens:input_tokens.ok_or_else(||invalid("review input usage unavailable"))?,output_tokens:output_tokens.ok_or_else(||invalid("review output usage unavailable"))?,latency_ms,review_receipt:None})
 }
-fn parse_text(value:&Value)->io::Result<Value>{let text=value.as_str().filter(|text|text.len()<=MAX_BODY).ok_or_else(||invalid("invalid review text"))?;serde_json::from_str(text).map_err(|_|invalid("reviewer did not return strict JSON"))}
+fn parse_text(value:&Value)->io::Result<Value>{let text=value.as_str().filter(|text|text.len()<=MAX_REVIEW_TEXT).ok_or_else(||invalid("invalid review text"))?;serde_json::from_str(text).map_err(|_|invalid("reviewer did not return strict JSON"))}
 pub fn semantic(context:&Context,input:&Value)->Result<SemanticVerdict,String>{
     semantic_with_receipt(context,input).0
 }
@@ -275,7 +280,7 @@ pub fn semantic_with_receipt(context:&Context,input:&Value)->(Result<SemanticVer
 pub fn semantic_with_receipt_for_envelope(context:&Context,original:&crate::Envelope,input:&Value)->(Result<SemanticVerdict,String>,Option<ReviewReceipt>){
     semantic_for_envelope_with(context,original,input,|model,body,source,reviewed|{
         let(endpoint,_)=model.service();let key=credential(model)?;
-        evaluate_request_at_reviewed(context,model,body,endpoint,&key,Some(source),Some(reviewed))
+        evaluate_request_at_reviewed(context,model,body,endpoint,&key,Some(source),Some(reviewed),true)
     })
 }
 #[cfg(feature="test-transport")]
@@ -285,7 +290,7 @@ pub fn semantic_with_receipt_for_envelope_at(context:&Context,original:&crate::E
         if url.scheme()!="http" || url.host_str()!=Some("127.0.0.1") || url.port().is_none() || !url.username().is_empty() || url.password().is_some() {
             return Err(invalid("review test endpoint must be explicit IPv4 loopback"));
         }
-        evaluate_request_at_reviewed(context,model,body,endpoint,key,Some(source),Some(reviewed))
+        evaluate_request_at_reviewed(context,model,body,endpoint,key,Some(source),Some(reviewed),true)
     })
 }
 fn semantic_for_envelope_with(context:&Context,original:&crate::Envelope,input:&Value,evaluate:impl FnOnce(&Model,&Value,String,String)->io::Result<Response>)->(Result<SemanticVerdict,String>,Option<ReviewReceipt>){
@@ -320,6 +325,18 @@ pub fn supervise(context:&Context,input:&Value)->Result<SupervisorVerdict,String
 mod tests {
     use super::*;
     use std::{io::{Read,Write},net::TcpListener};
+    #[test]
+    fn semantic_escape_capacity_reserves_actual_request_bytes_and_preserves_other_review_caps(){
+        use std::os::unix::fs::PermissionsExt;
+        let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
+        let charter=crate::Charter{version:1,fleet_id:"fixture".into(),task:"Scoped fixture".into(),repo:"/fixture".into(),allowed_paths:vec![String::new()],required_evidence:vec![],worker_limit:1,run_budget_usd:Some(1.0),deadline:0,human_actions:vec![],test_recipe:None};let model=Model::parse("deepseek:fixture").unwrap();
+        let context=Context{charter_sha256:hash(&charter).unwrap(),charter,assignments:vec![crate::Assignment{id:"assignment".into(),session_id:"worker".into(),pid:1,role:"worker".into(),task:"Inspect".into(),cwd:"/fixture".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}],review:crate::ReviewConfig{message_mode:crate::Mode::Enforce,message_judge:Some(model.clone()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("guard.json")};
+        let input=json!({"message":{"body":"\u{1}".repeat(crate::MAX_BODY)},"recent_untrusted_messages":[{"body":"\u{1}".repeat(crate::MAX_BODY)}]});
+        assert!(serde_json::to_vec(&input).unwrap().len()>MAX_INPUT);let request=request_with_threshold(&model,SEMANTIC_INSTRUCTIONS,&input,0.5).unwrap();let actual=serde_json::to_vec(&request).unwrap().len();assert!(actual>MAX_INPUT+8000);assert!(actual<=MAX_SEMANTIC_REQUEST);
+        assert!(request_with_threshold(&model,SUPERVISOR_INSTRUCTIONS,&input,0.5).is_err());assert!(parse_text(&json!(" ".repeat(MAX_REVIEW_TEXT+1))).is_err());
+        let reserved=reserve_for_message(&context,&model,&request,Some("a".repeat(64)),Some("b".repeat(64)),true).unwrap();let expected=(actual as f64*context.review.input_usd_per_million+OUTPUT_TOKENS as f64*context.review.output_usd_per_million)/1_000_000.0;assert!((reserved.cost-expected).abs()<1e-12);assert_eq!(OUTPUT_TOKENS,512);
+        assert!(reserve_for_message(&context,&model,&request,None,None,false).is_err());let state=transaction(&context,|state|Ok(state.clone())).unwrap();assert_eq!(state.calls,1);assert_eq!(state.reserved_usd,reserved.cost);
+    }
     #[test]
     fn failed_reserved_review_keeps_known_subtotal_reservations_and_sticky_unknown() {
         use std::os::unix::fs::PermissionsExt;

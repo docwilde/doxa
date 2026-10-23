@@ -171,7 +171,7 @@ impl PeerMap {
             let to: Vec<String> = to.iter().filter_map(Value::as_str).filter(|id| safe_id(id))
                 .map(str::to_owned).collect();
             if from != owner && !to.iter().any(|id| id == owner) { continue; }
-            let Some(body) = row["body"].as_str().filter(|body| body.chars().count() <= 8_000) else { continue };
+            let Some(body) = row["body"].as_str().filter(|body|doxa_peers::delivery::body_within_limit(body)) else { continue };
             scope.messages.push(Message {
                 id: id.to_owned(), from: from.to_owned(), to,
                 ts: label(row["ts"].as_str().unwrap_or("")),

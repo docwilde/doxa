@@ -51,8 +51,9 @@ impl InputInbox {
         -> Result<(EngineEvent, oneshot::Receiver<Value>), String>
     {
         let params = &frame["params"];
+        let request_limit=if params["tool"]==crate::peer_tools::SEND{doxa_protocol::peer::MAX_SEND_REQUEST_BYTES}else{MAX_REQUEST_BYTES};
         if frame["method"] != "item/tool/call" || !params["namespace"].is_null()
-            || serde_json::to_vec(frame).map_or(true, |bytes| bytes.len() > MAX_REQUEST_BYTES) {
+            || serde_json::to_vec(frame).map_or(true, |bytes| bytes.len() > request_limit) {
             return Err("Unsupported or oversized Codex peer tool request".into());
         }
         let name = params["tool"].as_str().ok_or("Missing Codex peer tool")?;
@@ -89,7 +90,8 @@ impl InputInbox {
             .map_err(|_| "Codex request clock unavailable")?.as_nanos();
         let id = format!("codex-peer-{}-{generation}-{}", std::process::id(), self.next.fetch_add(1, Ordering::Relaxed));
         let input = scrub(&params["arguments"].to_string());
-        if input.len() > MAX_REQUEST_BYTES { return Err("Scrubbed peer request exceeds the review limit".into()); }
+        let request_limit=if rpc=="msg"{doxa_protocol::peer::MAX_SEND_REQUEST_BYTES}else{MAX_REQUEST_BYTES};
+        if input.len() > request_limit { return Err("Scrubbed peer request exceeds the review limit".into()); }
         let (reply, receiver) = oneshot::channel();
         if !require_approval {
             drop(pending);
@@ -258,7 +260,7 @@ fn dispatch_callback(reply: oneshot::Sender<Value>, rpc:String, arguments:Value,
                     (!value["error"].is_string(), format!("{}\n{serialized}", if rpc.starts_with("mcp__doxa__lore_") { "[DOXA LORE DATA -- UNTRUSTED]" } else { "[DOXA PEER DATA -- UNTRUSTED]" }))
                 }
             },
-            Err(_) => (false, "Tool was declined or unavailable".into()),
+            Err(error) => (false,doxa_protocol::peer::visible_body_limit_error(&error).unwrap_or_else(||"Tool was declined or unavailable".into())),
         };
         let _ = reply.send(json!({"success":success,"contentItems":[{"type":"inputText","text":text}]}));
     });
@@ -274,6 +276,24 @@ mod tests {
         dispatch_callback(reply, rpc.into(), json!({}), handler, true);
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
             .block_on(receiver).unwrap()
+    }
+    #[test]
+    fn full_sixteen_kib_peer_send_is_reviewable_and_numeric_size_errors_remain_visible(){
+        use std::sync::Arc;
+        let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        for body in ["x".repeat(16384),"🧪".repeat(4096),"\"".repeat(16384),"\u{1}".repeat(16384)]{
+            let expected=body.clone();let handler:crate::peer_tools::Handler=Arc::new(move|rpc,args|{assert_eq!(rpc,"msg");assert_eq!(args["text"],expected);Ok(json!({"delivered":true}))});
+            let args=json!({"target":"peer","text":body});let frame=json!({"method":"item/tool/call","params":{"tool":crate::peer_tools::SEND,"arguments":args}});
+            let inbox=InputInbox::default();let(event,receiver)=inbox.begin_peer(&frame,str::to_owned,handler).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(event.data["input_summary"].as_str().unwrap()).unwrap(),args);
+            let wire=doxa_protocol::encode_line(&json!({"type":"event","seq":1,"turn":null,"event":{"type":event.kind,"data":event.data}}),doxa_protocol::Direction::ServerToClient).unwrap();
+            let decoded=doxa_protocol::decode_line(&wire,doxa_protocol::Direction::ServerToClient).unwrap();assert_eq!(decoded["event"]["data"]["input_summary"],event.data["input_summary"]);
+            inbox.answer(event.data["id"].as_str().unwrap(),&json!({"decision":"allow"})).unwrap();assert_eq!(runtime.block_on(receiver).unwrap()["success"],true);
+        }
+        for error in [doxa_protocol::peer::body_limit_error(16385),format!("{} secret",doxa_protocol::peer::body_limit_error(16385))]{
+            let expected=doxa_protocol::peer::visible_body_limit_error(&error);let handler:crate::peer_tools::Handler=Arc::new(move|_,_|Err(error.clone()));let(tx,rx)=oneshot::channel();dispatch_callback(tx,"msg".into(),json!({}),handler,true);let result=runtime.block_on(rx).unwrap();assert_eq!(result["success"],false);assert_eq!(result["contentItems"][0]["text"],expected.unwrap_or_else(||"Tool was declined or unavailable".into()));
+        }
+        let inbox=InputInbox::default();let external=json!({"method":"item/tool/call","params":{"tool":"external","arguments":{"text":"x".repeat(MAX_REQUEST_BYTES)}}});let handler:crate::peer_tools::Handler=Arc::new(|_,_|panic!("unrelated oversized callback"));assert!(inbox.begin_operator(&external,str::to_owned,handler,&[json!({"name":"external"})]).is_err());
     }
     #[test]
     fn history_response_budget_counts_serialized_bytes_without_truncating_utf8() {
@@ -317,7 +337,7 @@ mod tests {
         assert!(result["contentItems"][0]["text"].as_str().unwrap().ends_with(&failed.to_string()));
 
         let frame = json!({"method":"item/tool/call","params":{"tool":crate::peer_tools::SEND,
-            "arguments":{"target":"owned","text":"x".repeat(MAX_REQUEST_BYTES)}}});
+            "arguments":{"target":"owned","text":"x".repeat(doxa_protocol::peer::MAX_SEND_REQUEST_BYTES)}}});
         let handler: crate::peer_tools::Handler = std::sync::Arc::new(|_, _| panic!("oversized request dispatched"));
         assert!(InputInbox::default().begin_peer_with_approval(&frame, str::to_owned, handler, false).is_err());
     }

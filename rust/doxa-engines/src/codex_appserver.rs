@@ -762,7 +762,7 @@ impl AppServerDriver {
                             for content in answer["contentItems"].as_array().into_iter().flatten() {
                                 if let Some(text) = content["text"].as_str() {
                                     let clean = (self.scrub)(text);
-                                    emit(EngineEvent::new("tool_result_detail", json!({"id":frame["params"]["callId"],"text":clean})));
+                                    emit(EngineEvent::new("tool_result_detail", json!({"id":frame["params"]["callId"],"name":frame["params"]["tool"],"text":clean})));
                                 }
                             }
                         }

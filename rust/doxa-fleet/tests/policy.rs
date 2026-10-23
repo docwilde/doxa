@@ -12,6 +12,16 @@ fn envelope(context:&Context,kind:Kind)->Envelope{Envelope::issue(context,"a","b
 fn safe()->SemanticVerdict{SemanticVerdict{within_assignment:1.0,asks_for_authority_change:0.0,contains_instructions_for_recipient:0.0,likely_secret:0.0,needs_human_review:0.0}}
 
 #[test]
+fn sixteen_kib_body_survives_wire_admission_and_recent_context_without_truncation(){
+    for body in ["x".repeat(MAX_BODY),"🧪".repeat(MAX_BODY/4),"\"".repeat(MAX_BODY),"\u{1}".repeat(MAX_BODY)]{
+        let(_dir,mut context)=fixture();context.review.message_mode=Mode::Off;
+        let message=Envelope::issue(&context,"a","b",Kind::Status,body.clone(),None).unwrap();let wire=message.wire().unwrap();let parsed=Envelope::parse(&wire).unwrap();assert_eq!(parsed.body,body);validate_before_review(&context,&parsed,"b",101).unwrap();assert!(admit(&context,&parsed,"b",101,None).unwrap().delivered);
+        let state=transaction_existing(&context,|state|Ok(state.clone())).unwrap();assert_eq!(state.recent_messages.len(),1);assert_eq!(state.recent_messages[0].body,body);assert_eq!(state.total_bytes,MAX_BODY as u64);
+        let before=std::fs::read(&context.state_path).unwrap();let error=Envelope::issue(&context,"a","b",Kind::Status,format!("{body}x"),None).unwrap_err().to_string();assert!(error.contains("16385 UTF-8 bytes"));assert!(error.contains("16384 bytes"));assert_eq!(std::fs::read(&context.state_path).unwrap(),before);
+    }
+}
+
+#[test]
 fn existing_journal_checks_share_the_guard_lock_and_never_bootstrap_lost_state(){
     use std::{io::ErrorKind,os::fd::AsRawFd};
     let(_dir,context)=fixture();let mut called=false;
