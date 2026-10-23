@@ -101,4 +101,12 @@ class Tests(unittest.TestCase):
             self.assertGreaterEqual(row['max_output_tokens'],16384)
             self.assertGreater(row['context_tokens'],row['max_output_tokens'])
 
+    def test_router_config_requires_reviewed_explicit_fallback_and_grants_no_tools(self):
+        config=b.router_config('flash-thinking')
+        self.assertEqual(config['fallback_id'],'flash-thinking')
+        self.assertEqual(config['jev_model'],'jev-1.13.0')
+        self.assertEqual({row['model'] for row in config['candidates']},{'deepseek-flash','deepseek-v4-pro'})
+        self.assertTrue(all(row['supports_tools'] is False and row['max_output_tokens']==32768 for row in config['candidates']))
+        with self.assertRaises(ValueError):b.router_config('invented-model')
+
 if __name__=='__main__':unittest.main()

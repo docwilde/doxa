@@ -79,6 +79,14 @@ def task(id):
     rows=[t for t in corpus()['tasks'] if t['id']==id]
     require(len(rows)==1,'unknown task');return rows[0]
 
+def router_config(fallback):
+    mappings=parse(repo_read('model-mappings.json'))
+    candidates=[{**row,'supports_tools':False} for row in mappings['candidates']]
+    require(fallback in {row['id'] for row in candidates},'fallback must be an explicit candidate')
+    return {'version':1,'jev_model':'jev-1.13.0','criteria_version':'representative-repairs-v1',
+        'candidates':candidates,'fallback_id':fallback,'confidence_threshold':.75,
+        'max_calls':100,'max_spend_usd_micros':100000,'max_input_bytes':24576,'deadline_ms':12000}
+
 def readme(row):
     paths=', '.join(row['editable_paths'])
     return (f"# {row['title']}\n\nDifficulty: {row['difficulty']} (predeclared scope; not a measured model ranking).\n\n"
@@ -226,10 +234,12 @@ def grade(state,host,image):
 def main():
     parser=argparse.ArgumentParser(description=__doc__);sub=parser.add_subparsers(dest='action',required=True)
     sub.add_parser('list')
+    p=sub.add_parser('router-config');p.add_argument('--fallback',required=True,choices=('flash-direct','flash-thinking','pro-thinking'))
     p=sub.add_parser('prepare');p.add_argument('task');p.add_argument('state',type=Path);p.add_argument('--trusted-reference',action='store_true')
     p=sub.add_parser('grade');p.add_argument('state',type=Path);p.add_argument('--docker-host',required=True);p.add_argument('--image',required=True)
     args=parser.parse_args()
     if args.action=='list':result=[{k:t[k] for k in ('id','title','difficulty','family','split','editable_paths')} for t in corpus()['tasks']]
+    elif args.action=='router-config':result=router_config(args.fallback)
     elif args.action=='prepare':result=prepare(args.task,args.state,args.trusted_reference)
     else:result=grade(args.state,args.docker_host,args.image)
     print(json.dumps(result,indent=2))

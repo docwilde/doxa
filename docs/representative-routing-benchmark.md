@@ -39,6 +39,21 @@ Optional native GPT-6 Sol/GPT-6.1 Sol arms require separate verified carrier,
 account availability and matched tool capabilities; this suite does not claim
 either native engine has been measured.
 
+To emit a production-schema Router configuration for review, choose the fallback
+explicitly and save it privately. This makes no provider call and changes no
+installed setting:
+
+```sh
+umask 077
+python3 scripts/routing-benchmark/benchmark.py router-config \
+  --fallback flash-thinking > "$HOME/ssd-cache/doxa-repair-benchmark/router.json"
+```
+
+The example is a proposed quality-first fallback experiment. Compare it with
+`--fallback flash-direct` under the same frozen tasks; neither is a calibrated
+default. The generated configuration bounds Jev only. Worker token reservations,
+model-account availability and the outer experiment ceiling still need review.
+
 ## Prepare a candidate workspace
 
 Use an owner-private directory on real disk, outside `/tmp`. There is no model
@@ -147,3 +162,10 @@ python3 scripts/routing-benchmark/self_check.py \
 
 The explicit Docker check requires every trusted repair to pass and every buggy
 starter to fail at least one case. It calls no model and starts no DOXA session.
+
+On 2026-10-23 a clean checkout passed this check against the locally pinned
+`06f2e44b…` DOXA image: all **18 trusted repairs passed all 71 cases**, and all
+**18 buggy starters failed at least one case**. The 142 isolated case runs
+confirmed cleanup. Crash checkpoints/dispatch used real child-process exit;
+the budget task used actual synchronized threads. These are fixture-validation
+results, not provider/model scores or a production security certification.
