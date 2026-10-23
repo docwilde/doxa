@@ -11,6 +11,7 @@ the stable 2.0 release has not been cut.
 
 - Fix **`fleet resume`** fetching a growing guard journal through a bounded reply channel. Verify compact host and guard identity after full private-state validation.
 - Return a compact acknowledgement for **`continue_run`**. Preserve journal evidence, dependency checks and the 64 KiB frame limit.
+- Require **`transaction_existing`** for recovery and state inspection. Refuse missing journals without recreating evidence or resetting review accounting.
 
 ## 2.0.0-beta.72 — 2026-10-23
 
