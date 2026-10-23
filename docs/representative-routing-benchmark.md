@@ -45,6 +45,7 @@ installed setting:
 
 ```sh
 umask 077
+mkdir -p -m 700 "$HOME/ssd-cache/doxa-repair-benchmark"
 python3 scripts/routing-benchmark/benchmark.py router-config \
   --fallback flash-thinking > "$HOME/ssd-cache/doxa-repair-benchmark/router.json"
 ```
@@ -80,7 +81,7 @@ workspace as a model input. The repository contains the transparent corpus for
 reproducibility, so it is not a secret external benchmark. Evaluator-only means
 the test source and expected answers are withheld from the candidate workspace
 and score container; runtime inputs necessarily reach the program under test.
-future contamination and deliberate test gaming remain limitations.
+Future contamination and deliberate test gaming remain limitations.
 
 ## Grade in offline Docker
 
@@ -128,8 +129,10 @@ starters constitute model-quality results.
 
 1. Freeze this corpus, task-family split, candidate descriptions, models/efforts,
    output allowances, attempt budget and routing policies before opening results.
-   Related variants share a family; event/replay and idempotency variants cannot
-   cross splits. This public corpus uses fixed family-level splits, not random
+   Related variants share a family: request caching, durable outbox and uncertain
+   dispatch all belong to the idempotency family and cannot cross splits.
+   Future variants retain their originating family. This public corpus uses
+   fixed family-level splits, not random
    per-message or per-test splitting.
 2. Run every model on every task under the same editing tools, public tests,
    context input, wall-clock budget and number of repair attempts. Suggested
