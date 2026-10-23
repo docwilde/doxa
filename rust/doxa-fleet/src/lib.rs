@@ -306,6 +306,21 @@ fn reviewed_message_patch(original:&Envelope,reviewed:&Envelope)->io::Result<ser
     }
     Ok(clean.iter().filter(|(key,value)|source.get(*key)!=Some(*value)).map(|(key,value)|(key.clone(),value.clone())).collect())
 }
+/// Reconstruct the typed reviewed view without touching a journal or cache.
+/// Require the canonical sparse form: no new keys, type changes, redundant
+/// replacements or values discarded by typed deserialization are accepted.
+pub fn reviewed_envelope_from_patch(original:&Envelope,patch:&serde_json::Map<String,Value>)->io::Result<Envelope>{
+    let mut value=serde_json::to_value(original)?;
+    let fields=value.as_object_mut().ok_or_else(||invalid("reviewed patch source is not an object"))?;
+    for(key,replacement)in patch {
+        let field=fields.get_mut(key).ok_or_else(||invalid("reviewed patch introduced a field"))?;
+        if std::mem::discriminant(field)!=std::mem::discriminant(replacement){return Err(invalid("reviewed patch changed a field type"));}
+        *field=replacement.clone();
+    }
+    let reviewed:Envelope=serde_json::from_value(value).map_err(|_|invalid("reviewed patch is not a typed envelope"))?;
+    if reviewed_message_patch(original,&reviewed)?!=*patch {return Err(invalid("reviewed patch is not canonical and sparse"));}
+    Ok(reviewed)
+}
 fn cache_semantic_bound(context:&Context,envelope:&Envelope,result:Result<SemanticVerdict,String>,review_receipt:Option<judge::ReviewReceipt>,reviewed:Option<(String,String,Envelope)>)->io::Result<()> {
     transaction(context,|state|{
         if state.semantic_cache.len()>=10_000{return Err(invalid("fleet semantic journal ceiling reached"));}
@@ -340,13 +355,7 @@ pub fn cached_semantic(context:&Context,envelope:&Envelope)->io::Result<Option<R
             }
         }
         if let Some(patch)=&cached.reviewed_message_patch {
-            let mut value=serde_json::to_value(envelope)?;let fields=value.as_object_mut().ok_or_else(||invalid("cached semantic envelope is not an object"))?;
-            for(key,replacement)in patch {
-                let original=fields.get_mut(key).ok_or_else(||invalid("cached reviewed patch introduced a field"))?;
-                if std::mem::discriminant(original)!=std::mem::discriminant(replacement){return Err(invalid("cached reviewed patch changed a field type"));}
-                *original=replacement.clone();
-            }
-            let reviewed:Envelope=serde_json::from_value(value).map_err(|_|invalid("cached reviewed patch is not a typed envelope"))?;
+            let reviewed=reviewed_envelope_from_patch(envelope,patch)?;
             if cached.reviewed_message_sha256.as_deref()!=Some(hash(&reviewed)?.as_str()) {return Err(invalid("cached reviewed patch binding changed"));}
         }else if cached.reviewed_message_sha256.is_some(){return Err(invalid("cached reviewed patch missing"));}
         Ok(Some(cached.result.clone()))

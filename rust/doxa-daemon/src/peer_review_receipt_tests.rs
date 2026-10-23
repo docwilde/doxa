@@ -39,7 +39,7 @@ fn actual_lore_scrub_keeps_original_reviewed_and_http_bindings_through_peer_admi
     *peer.lore.lock().unwrap()=Some(canonical_lore(dir.path()));
     let hex_run="a".repeat(64);
     let charter=Charter{version:1,fleet_id:"scrub-receipt".into(),task:format!("Scoped findings HEX_RUN={hex_run}"),repo:dir.path().display().to_string(),allowed_paths:vec!["src".into()],required_evidence:vec![],worker_limit:2,run_budget_usd:Some(1.0),deadline:0,human_actions:vec![],test_recipe:None};
-    let assignments=["sender","recipient"].into_iter().map(|id|Assignment{id:format!("{id}-assignment"),session_id:id.into(),pid:std::process::id() as i32,role:"worker".into(),task:"Scoped findings".into(),cwd:dir.path().display().to_string(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}).collect();
+    let assignments=["sender","recipient"].into_iter().enumerate().map(|(index,id)|Assignment{id:format!("{id}-assignment"),session_id:id.into(),pid:std::process::id() as i32+index as i32,role:"worker".into(),task:"Scoped findings".into(),cwd:dir.path().display().to_string(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}).collect();
     let model=doxa_fleet::judge::Model::parse("deepseek:fixture-model").unwrap();
     let context=Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments,review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(model.clone()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("guard.json")};
     context.validate().unwrap();
@@ -75,6 +75,14 @@ fn actual_lore_scrub_keeps_original_reviewed_and_http_bindings_through_peer_admi
     assert_eq!(receipt.reviewed_message_sha256,Some(doxa_fleet::hash(&reviewed).unwrap()));
     assert_eq!(receipt.request_sha256,doxa_fleet::hash(&body).unwrap());
     let patch=cached.reviewed_message_patch.as_ref().unwrap();assert_eq!(patch.len(),1);assert_eq!(patch["charter_sha256"],reviewed.charter_sha256);
+    let reconstructed=doxa_fleet::reviewed_envelope_from_patch(&original,patch).unwrap();
+    assert_eq!(doxa_fleet::hash(&reconstructed).unwrap(),doxa_fleet::hash(&reviewed).unwrap());
+    let mut redundant=patch.clone();redundant.insert("body".into(),json!(original.body));
+    assert!(doxa_fleet::reviewed_envelope_from_patch(&original,&redundant).is_err());
+    let mut introduced=patch.clone();introduced.insert("unknown".into(),json!("extra"));
+    assert!(doxa_fleet::reviewed_envelope_from_patch(&original,&introduced).is_err());
+    let mut wrong_type=patch.clone();wrong_type.insert("body".into(),json!(true));
+    assert!(doxa_fleet::reviewed_envelope_from_patch(&original,&wrong_type).is_err());
     assert!(!serde_json::to_string(patch).unwrap().contains(&context.charter_sha256));
     let outbound=state.observations.iter().find(|row|row["event"]=="outbound_semantic").unwrap();
     assert_eq!(outbound["reviewed_message_patch"],serde_json::to_value(patch).unwrap());
