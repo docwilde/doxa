@@ -611,6 +611,15 @@ mod interaction_tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
     use serde_json::json;
+    #[test]
+    fn full_sixteen_kib_fleet_history_is_kept_and_ordinary_or_oversize_rows_still_refuse(){
+        let mut map=PeerMap::default();
+        for body in ["x".repeat(16384),"🧪".repeat(4096),"\"".repeat(16384),"\u{1}".repeat(16384)]{
+            let wire=format!("{}{}",doxa_protocol::peer::FLEET_PREFIX,json!({"v":1,"fleet_id":"fleet","message_id":"message","from_session":"worker","to_session":"owner","kind":"status","assignment_id":"assignment","charter_sha256":"a".repeat(64),"in_reply_to":null,"body":body,"artifact_refs":[],"requested_action":null,"hop":0}));
+            assert!(map.history("owner",&json!({"ok":true,"messages":[{"id":"message","from":{"session":"worker"},"to":["owner"],"ts":"now","body":wire}]})));assert_eq!(map.scopes["owner"].messages.len(),1);assert_eq!(map.scopes["owner"].messages[0].body,wire);
+        }
+        map.history("owner",&json!({"ok":true,"messages":[{"id":"oversize","from":{"session":"worker"},"to":["owner"],"body":"x".repeat(8001)}]}));assert!(map.scopes["owner"].messages.is_empty());
+    }
 
     #[test]
     fn historical_receipts_and_replayed_joins_do_not_restore_dead_roster_members() {
