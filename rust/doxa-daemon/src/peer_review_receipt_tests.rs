@@ -32,6 +32,9 @@ fn canonical_lore(root:&Path)->LoreClient{
     LoreClient::spawn(&wrapper,Duration::from_secs(5)).expect("real private LORE kernel must start")
 }
 fn read_request(stream:&mut std::net::TcpStream)->Value{
+    // Darwin may inherit O_NONBLOCK from the accepting listener. Timeouts
+    // bound a blocking read; they do not switch that inherited mode off.
+    stream.set_nonblocking(false).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let mut raw=Vec::new();
     loop{
@@ -161,7 +164,13 @@ fn actual_lore_scrub_keeps_original_reviewed_and_http_bindings_through_peer_admi
     let state_path=context.state_path.clone();let source_hash=original_hash.clone();let charter_hash=context.charter_sha256.clone();let raw_hex=hex_run.clone();
     let server=std::thread::spawn(move||{
         let deadline=std::time::Instant::now()+Duration::from_secs(10);
-        let(mut stream,_)=loop{match listener.accept(){Ok(value)=>break value,Err(error)if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(std::time::Instant::now()<deadline,"funded fixture received no review HTTP request");std::thread::sleep(Duration::from_millis(5));},Err(error)=>panic!("{error}")}};let body=read_request(&mut stream);
+        let(mut stream,_)=loop{match listener.accept(){Ok(value)=>break value,Err(error)if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(std::time::Instant::now()<deadline,"funded fixture received no review HTTP request");std::thread::sleep(Duration::from_millis(5));},Err(error)=>panic!("{error}")}};
+        // Exercise the inherited Darwin state on Linux too. Assert the actual
+        // socket mode so the regression does not depend on request timing.
+        stream.set_nonblocking(true).unwrap();let body=read_request(&mut stream);
+        use std::os::fd::AsRawFd;
+        let flags=unsafe{libc::fcntl(stream.as_raw_fd(),libc::F_GETFL)};
+        assert!(flags>=0);assert_eq!(flags&libc::O_NONBLOCK,0,"HTTP helper must normalize accepted socket mode");
         let text=body["messages"][1]["content"].as_str().unwrap();let input:Value=serde_json::from_str(text).unwrap();
         let reviewed:Envelope=serde_json::from_value(input["message"].clone()).unwrap();
         assert_eq!(reviewed.body,"\"".repeat(doxa_fleet::MAX_BODY));
