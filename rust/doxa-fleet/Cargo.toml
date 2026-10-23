@@ -21,6 +21,9 @@ tokio = { version = "1", features = ["rt", "time", "net"] }
 [dev-dependencies]
 tempfile = "3"
 
+[features]
+test-transport = []
+
 [[example]]
 name = "review_evaluation"
 test = true

@@ -36,4 +36,4 @@ tempfile = "3"
 doxa-tui = { path = "../doxa-tui" }
 
 [features]
-local-test-server = ["doxa-vendors/local-test-server", "doxa-router/test-transport"]
+local-test-server = ["doxa-vendors/local-test-server", "doxa-router/test-transport", "doxa-fleet/test-transport"]
