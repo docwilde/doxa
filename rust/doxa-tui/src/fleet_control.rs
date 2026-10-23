@@ -574,6 +574,21 @@ fn verify_account_allowance(hello:&Value,expected:Option<u64>,busy:bool)->io::Re
     Ok(())
 }
 
+fn verify_resume_identity(context:&doxa_fleet::Context,session_id:&str,identity:&Value)->io::Result<()>{
+    let assignment=context.assignment(session_id)?;
+    if identity["session_id"]!=session_id||identity["pid"].as_i64()!=Some(assignment.pid as i64)||identity["cwd"]!=assignment.cwd{
+        return Err(invalid("fleet authenticated host identity changed during resume"));
+    }
+    let guard=&identity["guard"];
+    if guard["version"]!=1||guard["charter_sha256"]!=context.charter_sha256
+        ||guard["context_sha256"]!=doxa_fleet::hash(context)?
+        ||guard["assignments_sha256"]!=doxa_fleet::hash(&context.assignments)?
+        ||guard["assignment_sha256"]!=doxa_fleet::hash(assignment)?{
+        return Err(invalid("fleet validated guard identity changed during resume"));
+    }
+    Ok(())
+}
+
 pub fn resume(root: &Path, id: &str) -> io::Result<()> {
     let _signals = Signals::install()?;
     let initial = snapshot(root, id)?;
@@ -637,7 +652,10 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
         context.validate()?;
         let guard=doxa_fleet::transaction(&context,|state|Ok(state.clone()))?;
         validate_dependency_resume(&context,&guard,&rows)?;
-        for slot in &mut slots {let state=rpc(&mut slot.client,"fleet_state",json!({}))?;if state["charter_sha256"]!=context.charter_sha256{return Err(invalid("fleet approved charter changed during resume"));}let identity=rpc(&mut slot.client,"fleet_identity",json!({}))?;if identity["pid"].as_i64()!=Some(context.assignment(&slot.session.id)?.pid as i64){return Err(invalid("fleet authenticated host identity changed during resume"));}}
+        for slot in &mut slots {
+            let identity=rpc(&mut slot.client,"fleet_identity",json!({"validate_guard":true}))?;
+            verify_resume_identity(&context,&slot.session.id,&identity)?;
+        }
     }
     if interrupt_uncertain_auto_tests(&mut value){store.save(&value)?;}
     let result = monitor(&store, &mut value, &mut slots, timeout, quiet);
@@ -992,7 +1010,9 @@ pub fn continue_run(root:&Path,id:&str,charter_hash:&str)->io::Result<Value>{
     let (socket,session_id)=fleet_view::slot_socket(root,id,0)?;
     let mut client=DaemonClient::connect(socket,None).map_err(io::Error::other)?;
     if client.hello["session_id"]!=session_id{return Err(invalid("fleet daemon identity changed"));}
-    rpc(&mut client,"fleet_resume",json!({"charter_sha256":charter_hash}))
+    let reply=rpc(&mut client,"fleet_resume",json!({"charter_sha256":charter_hash,"compact":true}))?;
+    if reply["charter_sha256"]!=charter_hash||reply["resumed"]!=true{return Err(invalid("fleet resume acknowledgement is invalid"));}
+    Ok(reply)
 }
 
 /// Review a completed turn and a coordinator-accepted, host-checkpoint-backed
@@ -1594,6 +1614,23 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_requires_the_complete_validated_guard_and_authenticated_assignment_identity(){
+        let charter=doxa_fleet::Charter{version:1,fleet_id:"identity".into(),task:"Scoped work".into(),repo:"/repo".into(),allowed_paths:vec![String::new()],required_evidence:vec![],worker_limit:1,run_budget_usd:Some(1.0),deadline:0,human_actions:vec![],test_recipe:None};
+        let context=doxa_fleet::Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments:vec![doxa_fleet::Assignment{id:"worker-id".into(),session_id:"worker".into(),pid:42,role:"worker".into(),task:"Inspect source".into(),cwd:"/repo".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}],review:Default::default(),state_path:PathBuf::from("/private/guard.json")};
+        context.validate().unwrap();
+        let identity=json!({"session_id":"worker","pid":42,"cwd":"/repo","guard":{"version":1,"context_sha256":doxa_fleet::hash(&context).unwrap(),"charter_sha256":context.charter_sha256,"assignments_sha256":doxa_fleet::hash(&context.assignments).unwrap(),"assignment_sha256":doxa_fleet::hash(&context.assignments[0]).unwrap()}});
+        assert!(verify_resume_identity(&context,"worker",&identity).is_ok());
+        for (field,value) in [("session_id",json!("other")),("pid",json!(43)),("cwd",json!("/other"))]{let mut changed=identity.clone();changed[field]=value;assert!(verify_resume_identity(&context,"worker",&changed).is_err(),"{field}");}
+        for field in ["version","context_sha256","charter_sha256","assignments_sha256","assignment_sha256"]{
+            let mut changed=identity.clone();changed["guard"][field]=json!("changed");assert!(verify_resume_identity(&context,"worker",&changed).is_err(),"{field}");
+            changed["guard"].as_object_mut().unwrap().remove(field);assert!(verify_resume_identity(&context,"worker",&changed).is_err(),"missing {field}");
+        }
+        let mut legacy=identity.clone();legacy.as_object_mut().unwrap().remove("guard");assert!(verify_resume_identity(&context,"worker",&legacy).is_err());
+        let mut changed=context.clone();changed.review.budget_usd=2.0;assert_eq!(changed.charter_sha256,context.charter_sha256);assert!(verify_resume_identity(&changed,"worker",&identity).is_err(),"the charter alone cannot qualify a different review context");
+        assert!(verify_resume_identity(&context,"other",&identity).is_err());
+    }
 
     #[test]
     fn explicit_supervisor_sandbox_binds_review_role_hash_and_live_observation(){
