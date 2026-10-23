@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.69 — 2026-10-22
+
+**API worker startup and recovery**
+
+- Fix **`catalog_models`** treating reasoning-effort metadata as a ban on non-thinking mode. Preserve the documented disabled-thinking choice for advertised `deepseek-flash` and `deepseek-v4-pro` models.
+- Keep unknown models and malformed metadata conservative; retain advertised reasoning levels and defaults. Pinned non-thinking Router workers can pass catalogue admission.
+- Fix **`WorkspaceReadGate`** aborting paid turns on absent files or refused paths. Return visible tool errors with known usage; keep read restrictions and fatal integrity checks.
+
+**Checkpoint review diagnostics**
+
+- Record closed rejection categories in **`apply_supervisor`** for oversized fields, invalid evidence and unavailable reviews. Rejected response text stays out of the journal.
+- Include the existing byte and evidence limits in **`SUPERVISOR_INSTRUCTIONS`** so the reviewer receives the same contract enforced by the host.
+- Fix **`fleet_scrub`** and **`NativeVendorGate`** corrupting structured review, handoff and tool JSON. Scrub values within the structure and withhold data whose keys cannot be safely retained.
+
 ## 2.0.0-beta.68 — 2026-10-21
 
 **Isolated Codex review**

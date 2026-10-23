@@ -2281,6 +2281,8 @@ mod vendor_process {
         assert!(!started.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
         let mut text = String::new();
         let mut chunks = 0;
+        let mut workspace_call = false;
+        let mut workspace_result = false;
         for _ in 0..1024 {
             let frame = receive(reader);
             assert!(!frame.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
@@ -2290,7 +2292,21 @@ mod vendor_process {
                     text.push_str(frame["event"]["data"]["text"].as_str().expect("text chunk"));
                     chunks += 1;
                 }
-                Some("turn_done") => return (text, frame, chunks),
+                Some("tool_call") => {
+                    assert!(!workspace_call);
+                    assert_eq!(frame["event"]["data"], json!({"id":"call-1","name":"workspace_read","input":{"path":"note.txt"}}));
+                    workspace_call = true;
+                }
+                Some("tool_result") => {
+                    assert!(workspace_call && !workspace_result);
+                    assert_eq!(frame["event"]["data"], json!({"id":"call-1","name":"workspace_read","is_error":false,
+                        "result_summary":"Workspace file read (33 UTF-8 bytes)"}));
+                    workspace_result = true;
+                }
+                Some("turn_done") => {
+                    assert_eq!(workspace_call, workspace_result, "workspace card pair incomplete");
+                    return (text, frame, chunks);
+                }
                 Some("reasoning_delta" | "reasoning_progress" | "resume_context") => {},
                 _ => panic!("unexpected vendor event: {frame}"),
             }

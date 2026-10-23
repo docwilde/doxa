@@ -17,50 +17,70 @@ pub struct WorkspaceReadGate<'a> {
     scrub: &'a dyn Fn(&str) -> Result<String, ()>,
 }
 
+#[derive(Debug)]
+enum ReadFailure { Refused, Integrity }
+
 impl<'a> WorkspaceReadGate<'a> {
     pub fn new(root: &'a Path, scrub: &'a dyn Fn(&str) -> Result<String, ()>) -> Self {
         Self { root, scrub }
     }
 
-    fn read(&self, call: &ToolCall) -> Result<Value, ()> {
+    fn read(&self, call: &ToolCall) -> Result<Value, ReadFailure> {
         if call.name != "workspace_read" || call.arguments.len() != 1 {
-            return Err(());
+            return Err(ReadFailure::Refused);
         }
-        let path = call.arguments.get("path").and_then(Value::as_str).ok_or(())?;
+        let path = call.arguments.get("path").and_then(Value::as_str).ok_or(ReadFailure::Refused)?;
         let parts: Vec<_> = Path::new(path).components().collect();
         if parts.is_empty() || parts.len() > 16 || path.len() > 1024 || parts.iter().any(|part| {
             !matches!(part, Component::Normal(name) if !name.to_string_lossy().starts_with('.'))
         }) {
-            return Err(());
+            return Err(ReadFailure::Refused);
         }
         let mut file = OpenOptions::new().read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(self.root).map_err(|_| ())?;
+            .open(self.root).map_err(|_| ReadFailure::Refused)?;
         for (index, part) in parts.iter().enumerate() {
-            let Component::Normal(name) = part else { return Err(()); };
-            if index + 1 == parts.len() && doxa_vendors::credentials::is_credential_path(&file, name).map_err(|_| ())? {
-                return Err(());
+            let Component::Normal(name) = part else { return Err(ReadFailure::Refused); };
+            if index + 1 == parts.len() && doxa_vendors::credentials::is_credential_path(&file, name).map_err(|_| ReadFailure::Integrity)? {
+                return Err(ReadFailure::Refused);
             }
             use std::os::unix::ffi::OsStrExt;
-            let name = CString::new(name.as_bytes()).map_err(|_| ())?;
+            let name = CString::new(name.as_bytes()).map_err(|_| ReadFailure::Refused)?;
             let last = index + 1 == parts.len();
             let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC
                 | if last { libc::O_NONBLOCK } else { libc::O_DIRECTORY };
             // SAFETY: openat receives a live directory fd and a NUL-terminated name.
             let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), flags) };
-            if fd < 0 { return Err(()); }
+            if fd < 0 {
+                // A new project often has files the worker has not created yet.
+                // Let the model handle absence without aborting a paid tool
+                // turn and losing its otherwise verified response usage.
+                // Path, credential, symlink and scrub failures remain closed.
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+                    return Ok(json!({"is_error":true,"error":"file_not_found"}));
+                }
+                return Err(ReadFailure::Refused);
+            }
             // SAFETY: a successful openat returns a newly owned fd.
             file = unsafe { File::from_raw_fd(fd) };
         }
-        let metadata = file.metadata().map_err(|_| ())?;
-        if !metadata.is_file() || metadata.len() > MAX_READ_BYTES { return Err(()); }
-        if doxa_vendors::credentials::is_credential_file(&file).map_err(|_| ())? { return Err(()); }
+        let metadata = file.metadata().map_err(|_| ReadFailure::Refused)?;
+        if !metadata.is_file() || metadata.len() > MAX_READ_BYTES { return Err(ReadFailure::Refused); }
+        if doxa_vendors::credentials::is_credential_file(&file).map_err(|_| ReadFailure::Integrity)? { return Err(ReadFailure::Refused); }
         let mut bytes = Vec::new();
-        file.take(MAX_READ_BYTES + 1).read_to_end(&mut bytes).map_err(|_| ())?;
-        if bytes.len() as u64 > MAX_READ_BYTES { return Err(()); }
-        let content = String::from_utf8(bytes).map_err(|_| ())?;
-        Ok(json!({"path":path,"content":(self.scrub)(&content)?}))
+        file.take(MAX_READ_BYTES + 1).read_to_end(&mut bytes).map_err(|_| ReadFailure::Refused)?;
+        if bytes.len() as u64 > MAX_READ_BYTES { return Err(ReadFailure::Refused); }
+        let content = String::from_utf8(bytes).map_err(|_| ReadFailure::Refused)?;
+        Ok(json!({"path":path,"content":(self.scrub)(&content).map_err(|_| ReadFailure::Integrity)?}))
     }
+    fn execute_read(&self, call: &ToolCall) -> Result<Value, ()> {
+        match self.read(call) {
+            Ok(result) => Ok(result),
+            Err(ReadFailure::Refused) => Ok(json!({"is_error":true,"error":"workspace_read_refused"})),
+            Err(ReadFailure::Integrity) => Err(()),
+        }
+    }
+
 }
 
 impl ToolGate for WorkspaceReadGate<'_> {
@@ -73,7 +93,7 @@ impl ToolGate for WorkspaceReadGate<'_> {
     }
 
     fn execute<'a>(&'a mut self, call: &'a ToolCall) -> BoxFuture<'a, Result<Value, ()>> {
-        let result = self.read(call);
+        let result = self.execute_read(call);
         Box::pin(async move { result })
     }
 }
@@ -120,9 +140,14 @@ mod tests {
         let scrub = |text: &str| Ok(text.replace("secret", "***"));
         let gate = WorkspaceReadGate::new(root.path(), &scrub);
         assert_eq!(gate.read(&call("src/main.rs")).unwrap()["content"], "*** text");
-        for path in ["../etc/passwd", "/etc/passwd", ".env", "src/../.env", "link", "src", "missing"] {
+        for path in ["../etc/passwd", "/etc/passwd", ".env", "src/../.env", "link", "src"] {
             assert!(gate.read(&call(path)).is_err(), "{path}");
         }
+        for path in ["missing", "new-directory/missing"] {
+            assert_eq!(gate.read(&call(path)).unwrap(), json!({"is_error":true,"error":"file_not_found"}));
+        }
+        let failed_scrub = |_: &str| Err(());
+        assert!(WorkspaceReadGate::new(root.path(), &failed_scrub).read(&call("src/main.rs")).is_err());
         fs::write(root.path().join("large.txt"), vec![b'a'; MAX_READ_BYTES as usize + 1]).unwrap();
         assert!(gate.read(&call("large.txt")).is_err());
     }
@@ -254,6 +279,11 @@ impl<'a> NativeVendorGate<'a> {
         })
     }
     pub(super) fn audit_handle(&self)->std::sync::Arc<std::sync::Mutex<Value>>{self.audit.clone()}
+    fn scrub_arguments(&self, call: &ToolCall) -> Result<Value, ()> {
+        let mut arguments=Value::Object(call.arguments.clone());
+        crate::vendor_mcp::scrub_value(&mut arguments,self.scrub)?;
+        Ok(arguments)
+    }
     fn execute_inner<'b>(&'b mut self, call: &'b ToolCall) -> BoxFuture<'b, Result<Value, ()>> {
         if let Some((bindings, _, service, cancel)) = &self.mcp {
             if let Some(binding) = bindings.iter().find(|binding| binding.provider_name == call.name) {
@@ -262,7 +292,22 @@ impl<'a> NativeVendorGate<'a> {
             }
         }
         if call.name == "workspace_read" {
-            let result = self.workspace.as_ref().ok_or(()).and_then(|gate| gate.read(call));
+            let checked=(|| {
+                let id=(self.scrub)(&call.id)?;
+                let mut input=Value::Object(call.arguments.clone());
+                crate::vendor_mcp::scrub_value(&mut input,self.scrub)?;
+                Ok::<_,()>((id,input))
+            })();
+            let (id,input)=match checked {Ok(value)=>value,Err(())=>return Box::pin(async{Err(())})};
+            (self.emit)(json!({"type":"tool_call","data":{"id":id,"name":call.name,"input":input}}));
+            let result = self.workspace.as_ref().ok_or(()).and_then(|gate| gate.execute_read(call));
+            let is_error=result.as_ref().map_or(true,|value|value["is_error"]==true);
+            let summary=match &result {
+                Ok(value) if !is_error=>format!("Workspace file read ({} UTF-8 bytes)",value["content"].as_str().map(str::len).unwrap_or(0)),
+                Ok(value)=>value["error"].as_str().unwrap_or("workspace_read_refused").to_owned(),
+                Err(())=>"Workspace read integrity check failed".into(),
+            };
+            (self.emit)(json!({"type":"tool_result","data":{"id":id,"name":call.name,"is_error":is_error,"result_summary":summary}}));
             return Box::pin(async move { result });
         }
         // Malformed model arguments have no uncertain backend outcome. Show
@@ -271,7 +316,7 @@ impl<'a> NativeVendorGate<'a> {
         if matches!(call.name.as_str(),doxa_engines::peer_tools::LIST|doxa_engines::peer_tools::SEND|doxa_engines::peer_tools::HISTORY) {
             let checked=(|| {
                 let id=(self.scrub)(&call.id)?;
-                let arguments:Value=serde_json::from_str(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string())?).map_err(|_|())?;
+                let arguments=self.scrub_arguments(call)?;
                 Ok::<_,()>((id,arguments))
             })();
             let (id,arguments)=match checked{Ok(value)=>value,Err(())=>return Box::pin(async{Err(())})};
@@ -284,7 +329,7 @@ impl<'a> NativeVendorGate<'a> {
         }
         let start = (|| {
             let call_id = (self.scrub)(&call.id)?;
-            let arguments: Value = serde_json::from_str(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string())?).map_err(|_| ())?;
+            let arguments=self.scrub_arguments(call)?;
             let (peer, method, dispatch_arguments) = if let Some((_, handler)) = self.agent.as_ref().filter(|(rows, _)|
                 rows.iter().any(|row| row["function"]["name"] == call.name)) {
                 (handler.clone(), call.name.clone(), arguments.clone())
@@ -384,7 +429,7 @@ impl ToolGate for NativeVendorGate<'_> {
             doxa_engines::peer_tools::LIST=>"list",
             doxa_engines::peer_tools::HISTORY=>"history",_=>"other"};
         let selected=if operation=="send" {
-            serde_json::from_str::<Value>(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string()).unwrap_or_default()).ok()
+            self.scrub_arguments(call).ok()
                 .filter(|args|doxa_engines::peer_tools::validated_call(&call.name,args).is_ok())
                 .map(|args|json!({"target":args["target"],"fleet_kind":args["fleet_kind"],"artifact_refs":args["artifact_refs"],"in_reply_to":args["in_reply_to"]}))
         }else{None};
@@ -426,6 +471,22 @@ mod peer_tests {
         ToolCall { id:"provider-call".into(), name:name.into(), arguments:arguments.as_object().unwrap().clone() }
     }
     #[test]
+    fn workspace_refusals_are_visible_but_failed_scrubbing_still_aborts(){
+        let dir=tempfile::tempdir().unwrap();std::fs::write(dir.path().join("visible"),"unpublishable-content").unwrap();
+        let displayed=RefCell::new(Vec::new());let emit=|event|displayed.borrow_mut().push(event);
+        let scrub=|text:&str|if text.contains("unpublishable-content"){Err(())}else{Ok(text.to_owned())};
+        let mut gate=NativeVendorGate::new(dir.path(),true,None,Arc::new(PeerDesk::default()),&scrub,&emit,Arc::new(Mutex::new(Vec::new())));
+        let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let refused=peer_call("workspace_read",json!({"path":"."}));
+        assert_eq!(runtime.block_on(gate.execute(&refused)).unwrap(),json!({"is_error":true,"error":"workspace_read_refused"}));
+        assert_eq!(displayed.borrow()[0]["type"],"tool_call");assert_eq!(displayed.borrow()[0]["data"]["input"]["path"],".");
+        assert_eq!(displayed.borrow()[1]["type"],"tool_result");assert_eq!(displayed.borrow()[1]["data"]["is_error"],true);
+        let unsafe_result=peer_call("workspace_read",json!({"path":"visible"}));
+        assert!(runtime.block_on(gate.execute(&unsafe_result)).is_err());
+        assert!(!serde_json::to_string(&*displayed.borrow()).unwrap().contains("unpublishable-content"));
+        let audit=gate.audit_handle();assert!(audit.lock().unwrap()["actions"].as_array().unwrap().iter().all(|row|row["completed"]==true&&row["success"]==false));
+    }
+    #[test]
     fn native_action_audit_overflow_and_poison_refuse_evidence_without_panicking(){
         let dir=tempfile::tempdir().unwrap();let desk=Arc::new(PeerDesk::default());let scrub=|text:&str|Ok(text.to_owned());let emit=|_:Value|{};
         let mut gate=NativeVendorGate::new(dir.path(),true,None,desk,&scrub,&emit,Arc::new(Mutex::new(Vec::new())));
@@ -457,7 +518,7 @@ mod peer_tests {
         let dir=tempfile::tempdir().unwrap();let calls=Arc::new(AtomicUsize::new(0));let called=calls.clone();
         let handler:doxa_runtime::PeerToolHandler=Arc::new(move|_,_|{called.fetch_add(1,Ordering::SeqCst);Ok(json!({}))});
         let desk=Arc::new(PeerDesk::default());let displayed=RefCell::new(Vec::new());
-        let emit=|event|displayed.borrow_mut().push(event);let scrub=|text:&str|Ok(text.replace("fixture-secret","[redacted]"));
+        let emit=|event|displayed.borrow_mut().push(event);let scrub=|text:&str|Ok(text.replace("fixture-secret","[redacted] \"quoted\"\n"));
         let mut gate=NativeVendorGate::new(dir.path(),false,Some(handler),desk,&scrub,&emit,Arc::new(Mutex::new(Vec::new())));
         let call=peer_call(doxa_engines::peer_tools::SEND,json!({"target":"current-exact-session","text":"fixture-secret","fleet_kind":"handoff","artifact_refs":[],"in_reply_to":"host-checkpoint-is-not-a-message-id"}));
         let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();

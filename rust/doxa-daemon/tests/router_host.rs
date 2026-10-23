@@ -256,6 +256,41 @@ mod tests {
     fn prompt(host:&RouterHost,text:&str)->Vec<Value> {let mut events=Vec::new();host.prompt(text,&mut|event|events.push(event));events}
 
     #[test]
+    fn workspace_read_errors_keep_known_usage_and_a_usable_next_turn() {
+        for (path,expected) in [("not-created-yet.py","file_not_found"),(".","workspace_read_refused")] {
+        let env=Env::new();let mut step=0;
+        let server=Server::new(move|method,body| {
+            if method=="GET" {return ("application/json".into(),json!({"data":[{
+                "id":"deepseek-flash","effort":{"supported_levels":["low","high","max"],"default_level":"high"}
+            }]}).to_string(),Duration::ZERO);}
+            assert_eq!(body["model"],"deepseek-flash");step+=1;
+            if step==1 {
+                let (kind,stream,delay)=worker(body,true);
+                return (kind,stream.replace("visible.txt",path),delay);
+            }
+            if step==2 {
+                let messages=body["messages"].as_array().unwrap();
+                let result:Value=serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
+                assert_eq!(result,json!({"is_error":true,"error":expected}));
+            }
+            worker(body,false)
+        });
+        let host=make_host(&env,config(),&server,false,Some(2.0));
+        host.call("set_model",&json!({"model":"ds"})).unwrap();
+        for text in ["Read the new project file before implementation","Continue after the missing-file result"] {
+            let events=prompt(&host,text);
+            assert_eq!(events.last().unwrap()["data"]["is_error"],false,"{events:?}");
+            assert_eq!(env.state()["worker"]["accounting_unknown"],false);
+            assert_eq!(env.state()["worker"]["retained_reservation_usd_micros"],0);
+        }
+        assert_eq!(server.bodies().len(),3);
+        assert_eq!(env.state()["worker"]["input_tokens"],9);
+        assert_eq!(env.state()["worker"]["output_tokens"],12);
+        host.shutdown();
+        }
+    }
+
+    #[test]
     fn actual_jev_switch_keeps_canonical_history_and_tools_sticky_without_reasoning_transfer() {
         let env=Env::new(); let mut routed=0; let mut worker_step=0;
         let server=Server::new(move|method,body| {
