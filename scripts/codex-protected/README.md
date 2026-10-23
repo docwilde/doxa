@@ -77,14 +77,16 @@ reviewed older receipts retain Rust 1.95.0 for migration and rollback.
 
 Existing Docker sessions keep the exact image recorded in their isolation
 manifest. Installing a new host provider or selecting a new-session image
-does not replace that saved image. A saved image with Codex 0.163.0 cannot
-resume a protected thread under a DOXA build requiring 0.164.0. The version
-check refuses it before thread/resume or turn submission. The session remains
-available for inspection, with its transcript and clean checkpoint unchanged.
+does not replace that saved image. A saved Docker thread can resume with the
+exact reviewed 0.163.0 contract (source `83086188`, patch `3a7b8c09`) as well as
+the current 0.164.0 provider. The retained contract requires the protected
+DOXA/live-auto initialize prefix and all normal hook, feature and launcher
+receipt checks. It is unavailable to fresh sessions or native providers.
 
-Retain the matching previous DOXA release and saved image to continue that
-session, or use an explicit reviewed migration. Same-backend Docker image
-replacement is not implemented. Do not edit the image digest, isolation
-manifest, provider receipt or conversation checkpoint to bypass the check.
-Isolation changes require their normal explicit confirmation; the application
-does not fall back to a native provider or broaden accepted provider versions.
+Before thread startup, the host binds the descriptor's version, source and
+patch to the actual reviewed initialize identity. The canonical reviewer
+checks that exact tuple; it never relabels an old provider as current. Unknown
+versions are refused before thread/resume or turn submission, with the saved
+session, transcript and clean checkpoint retained for recovery. Same-backend
+Docker image replacement is not implemented. Image or isolation changes still
+require explicit review; the application never falls back to a native provider.

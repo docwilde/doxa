@@ -38,7 +38,7 @@ fn isolated_canonical_review_accepts_long_source_and_rejects_foreign_cwd_before_
     file.sync_all().unwrap(); drop(file);
     let original = fs::read(&source).unwrap(); assert!(original.len() > 32*1024*1024);
     let hook_manifest = root.join("compact.json");
-    fs::write(&hook_manifest, json!({"version":doxa_engines::codex_compact::SUPPORTED_VERSION,"provider_thread":"provider-thread","doxa_session":"review-fixture","codex_home":codex,"cwd":checkout,"lore_enabled":true}).to_string()).unwrap();
+    fs::write(&hook_manifest, json!({"version":doxa_engines::codex_compact::SUPPORTED_VERSION,"provider_source":doxa_engines::codex_compact::SUPPORTED_SOURCE,"provider_patch":doxa_engines::codex_compact::SUPPORTED_PATCH,"provider_thread":"provider-thread","doxa_session":"review-fixture","codex_home":codex,"cwd":checkout,"lore_enabled":true}).to_string()).unwrap();
     let backend = root.join("local-reviewer"); let capture = root.join("review-prompt");
     fs::write(&backend, "#!/bin/sh\ncat > \"$REVIEW_CAPTURE\"\nprintf '%s' '{\"memory\":[],\"filemap\":[],\"skills\":[],\"skill_outcomes\":[],\"conclusions\":[]}'\n").unwrap();
     fs::set_permissions(&backend, fs::Permissions::from_mode(0o700)).unwrap();

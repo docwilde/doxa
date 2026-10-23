@@ -5481,9 +5481,9 @@ fn incompatible_codex_restore_retains_visible_history_and_clean_checkpoint() {
     let checkpoint=native_transcript(dir.path(),"codex-session.codex.json");
     let checkpoint_before=fs::read(&checkpoint).unwrap();
     let codex=dir.path().join("old-image-codex");
-    // The retained 0.163 image remains historical evidence, never today's
-    // accepted provider. This peer only initializes and cannot run a turn.
-    executable(&codex,&include_str!("fixtures/codex_appserver.py").replace("__DOXA_SUPPORTED_CODEX_VERSION__","0.163.0"));
+    // An unreviewed historical image cannot become today's provider.
+    // This peer only initializes and cannot run a turn.
+    executable(&codex,&include_str!("fixtures/codex_appserver.py").replace("__DOXA_SUPPORTED_CODEX_VERSION__","0.162.0"));
     executable(&codex.with_extension("turn"),"#!/bin/sh\necho unexpected provider turn >&2\nexit 99\n");
     let mut child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id","codex-session","--engine","codex","--codex-bin",codex.to_str().unwrap(),"--resume","true","--linger","10"])
         .env_remove("DOXA_CODEX_APPSERVER").stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();

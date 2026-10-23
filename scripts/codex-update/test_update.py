@@ -236,6 +236,21 @@ class UpdateTests(unittest.TestCase):
         self.assertIn(b'# SOURCE_TAG = "rust-v0.163.0" historical observation',revised)
         self.assertEqual(raw,update.rewrite_pins('tests/fixtures/historical_provider.py',raw,old,new))
 
+    def test_contract_rotation_changes_only_current_identity_and_retains_reviewed_resume_tuple(self):
+        old={'version':'0.164.0','source_commit':'a'*40,'patch_sha256':'b'*64}
+        new={'version':'0.165.0','source_commit':'c'*40,'patch_sha256':'d'*64}
+        raw=(f'pub const SUPPORTED_VERSION: &str = "{old["version"]}";\n'
+             f'pub const SUPPORTED_SOURCE: &str = "{old["source_commit"]}";\n'
+             f'pub const SUPPORTED_PATCH: &str = "{old["patch_sha256"]}";\n'
+             'const RETAINED_VERSION: &str = "0.163.0";\n'
+             'const RETAINED_SOURCE: &str = "83086188ae0614bd882818ff1aa23f3194962012";\n'
+             'const RETAINED_PATCH: &str = "3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c";\n').encode()
+        revised=update.rewrite_pins('rust/doxa-engines/src/codex_compact.rs',raw,old,new)
+        for field in ('version','source_commit','patch_sha256'):
+            self.assertIn(new[field].encode(),revised)
+            self.assertNotIn(old[field].encode(),revised)
+        self.assertEqual(raw.split(b'const RETAINED_VERSION:')[1],revised.split(b'const RETAINED_VERSION:')[1])
+
     def test_new_or_changed_upstream_safety_paths_require_semantic_review(self):
         rows=['M\tcodex-rs/core/src/session/brand_new_inference.rs',
               'A\tcodex-rs/new-module/src/innocent_name.rs',

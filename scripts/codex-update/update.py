@@ -48,7 +48,7 @@ PYTHON_PINS = {
 }
 OTHER_PINS = {
     "scripts/codex-protected/verify_automatic.py": ('.startswith("doxa_codex_rs/',),
-    "rust/doxa-engines/src/codex_compact.rs": ('pub const SUPPORTED_VERSION:', 'pub const PROTECTED_AGENT_PREFIX:'),
+    "rust/doxa-engines/src/codex_compact.rs": ('pub const SUPPORTED_VERSION:', 'pub const PROTECTED_AGENT_PREFIX:', 'pub const SUPPORTED_SOURCE:', 'pub const SUPPORTED_PATCH:'),
     "rust/doxa-engines/src/bin/doxa-codex-protected.rs": ('const SOURCE:', 'const PATCH:'),
     "rust/doxa-engines/tests/codex_launcher.rs": ('const PATCH:', '"source_commit":', '"code_mode_host_source_commit":'),
     "rust/doxa-engines/src/compact_hook.rs": ('"version":',),

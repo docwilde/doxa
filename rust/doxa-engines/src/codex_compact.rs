@@ -11,6 +11,37 @@ use std::os::unix::fs::PermissionsExt;
 
 pub const SUPPORTED_VERSION: &str = "0.164.0";
 pub const PROTECTED_AGENT_PREFIX: &str = "doxa_codex_rs/0.164.0 (doxa-precompact-fail-closed-v1; ";
+pub const SUPPORTED_SOURCE: &str = "6aaac694803004a63c6f393d153c96d22521a6b9";
+pub const SUPPORTED_PATCH: &str = "f8759872787029e5bf7064fe5be7166c5367b1db09b4b60362ea625117658924";
+// Exact previously reviewed payload, retained only for saved Docker sessions.
+// This entry is deliberately outside the updater's current-pin inventory.
+const RETAINED_VERSION: &str = "0.163.0";
+const RETAINED_PREFIX: &str = "doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; ";
+const RETAINED_SOURCE: &str = "83086188ae0614bd882818ff1aa23f3194962012";
+const RETAINED_PATCH: &str = "3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProtectedContract {
+    pub(crate) version: &'static str,
+    source: &'static str,
+    patch: &'static str,
+}
+fn contract(version: &str) -> Option<ProtectedContract> {
+    match version {
+        SUPPORTED_VERSION => Some(ProtectedContract { version:SUPPORTED_VERSION, source:SUPPORTED_SOURCE, patch:SUPPORTED_PATCH }),
+        RETAINED_VERSION => Some(ProtectedContract { version:RETAINED_VERSION, source:RETAINED_SOURCE, patch:RETAINED_PATCH }),
+        _ => None,
+    }
+}
+pub(crate) fn initialized_contract(agent: &str, saved_docker_resume: bool) -> Option<ProtectedContract> {
+    if agent.starts_with(PROTECTED_AGENT_PREFIX) { contract(SUPPORTED_VERSION) }
+    else if saved_docker_resume && agent.starts_with(RETAINED_PREFIX) { contract(RETAINED_VERSION) }
+    else { None }
+}
+pub(crate) fn descriptor_contract(descriptor: &Value) -> bool {
+    descriptor["version"].as_str().and_then(contract).is_some_and(|reviewed|
+        descriptor["provider_source"] == reviewed.source && descriptor["provider_patch"] == reviewed.patch)
+}
 pub const HOOK_TIMEOUT: u64 = 240;
 pub const HOOK_KEY: &str = "/<session-flags>/config.toml:pre_compact:0:0";
 const MATCHER: &str = "^(auto|manual)$";
@@ -86,7 +117,7 @@ impl CompactGate {
             "type":"command","command":command,"timeout":HOOK_TIMEOUT,"async":false
         }]});
         let hash = format!("sha256:{}", digest(&serde_json::to_vec(&normalized)?));
-        let descriptor = json!({"version":SUPPORTED_VERSION,"provider_thread":null,"doxa_session":session_id,
+        let descriptor = json!({"version":SUPPORTED_VERSION,"provider_source":SUPPORTED_SOURCE,"provider_patch":SUPPORTED_PATCH,"provider_thread":null,"doxa_session":session_id,
             "codex_home":codex_home,"cwd":cwd,"lore_enabled":lore_enabled});
         let descriptor_bytes = serde_json::to_vec(&descriptor)?;
         if let Err(error)=write_new(&manifest, &descriptor_bytes){
@@ -96,6 +127,28 @@ impl CompactGate {
         let manifest_meta = fs::symlink_metadata(&manifest)?;
         Ok(Self { broker:None, directory:directory.to_owned(), manifest, descriptor, command, hash, verified:false, directory_identity,carrier_identity,
             carrier_digest: executable_digest, manifest_identity: (manifest_meta.dev(),manifest_meta.ino()) })
+    }
+    /// Bind the actual reviewed initialize identity before hooks/thread RPCs.
+    /// Old Docker images keep their old version; this never relabels a provider.
+    pub(crate) fn bind_provider(&mut self, reviewed: ProtectedContract) -> io::Result<()> {
+        if self.verified || !self.descriptor["provider_thread"].is_null() {
+            return Err(io::Error::other("compact provider already verified or bound"));
+        }
+        self.validate_manifest()?;
+        let mut descriptor=self.descriptor.clone();
+        descriptor["version"]=json!(reviewed.version);
+        descriptor["provider_source"]=json!(reviewed.source);
+        descriptor["provider_patch"]=json!(reviewed.patch);
+        self.replace_descriptor(descriptor)
+    }
+    fn replace_descriptor(&mut self, descriptor: Value) -> io::Result<()> {
+        let temporary=self.directory.join("compact-session.next.json");
+        write_new(&temporary,&serde_json::to_vec(&descriptor)?)?;
+        if let Err(error)=fs::rename(&temporary,&self.manifest) {let _=fs::remove_file(temporary);return Err(error);}
+        let metadata=fs::symlink_metadata(&self.manifest)?;
+        self.manifest_identity=(metadata.dev(),metadata.ino());
+        self.descriptor=descriptor;
+        Ok(())
     }
     /// The command inside Docker can only submit a bounded compaction event
     /// to this session's host gate; it cannot launch host commands or read LORE.
@@ -147,15 +200,10 @@ impl CompactGate {
             return Err(io::Error::other("cannot bind an unverified compact gate"));
         }
         private_directory(&self.directory)?;
+        self.validate_manifest()?;
         let mut descriptor = self.descriptor.clone();
         descriptor["provider_thread"] = json!(thread);
-        let temporary = self.directory.join("compact-session.next.json");
-        write_new(&temporary, &serde_json::to_vec(&descriptor)?)?;
-        if let Err(error) = fs::rename(&temporary, &self.manifest) { let _ = fs::remove_file(temporary); return Err(error); }
-        let manifest_meta = fs::symlink_metadata(&self.manifest)?;
-        self.manifest_identity = (manifest_meta.dev(),manifest_meta.ino());
-        self.descriptor = descriptor;
-        Ok(())
+        self.replace_descriptor(descriptor)
     }
     pub(crate) fn manual_review_job(&self, transcript: &Path) -> io::Result<Option<crate::compact_hook::ReviewJob>> {
         if !self.verified() { return Ok(None); }
@@ -233,6 +281,32 @@ mod tests {
     }
     fn metadata(gate: &CompactGate) -> Value {
         json!({"data":[{"hooks":[{"key":HOOK_KEY,"command":gate.command,"async":false,"handlerType":"command","enabled":true,"trustStatus":"trusted","currentHash":gate.hash,"eventName":"preCompact","source":"sessionFlags","sourcePath":"/<session-flags>/config.toml","timeoutSec":HOOK_TIMEOUT}]}]})
+    }
+    #[test]
+    fn retained_provider_requires_saved_docker_resume_and_binds_exact_descriptor() {
+        let old_agent=format!("{RETAINED_PREFIX}codex_cli_rs/0.163.0)");
+        assert!(initialized_contract(&old_agent,false).is_none());
+        for rejected in ["codex_cli_rs/0.163.0", "doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; upstream fixture)",
+            "doxa_codex_rs/0.162.0 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; fixture)",
+            "codex_cli_rs/0.1.0 (doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; fixture))"] {
+            assert!(initialized_contract(rejected,true).is_none(),"{rejected}");
+        }
+        for (agent,version,source,patch) in [(old_agent.as_str(),RETAINED_VERSION,RETAINED_SOURCE,RETAINED_PATCH),
+            (PROTECTED_AGENT_PREFIX,SUPPORTED_VERSION,SUPPORTED_SOURCE,SUPPORTED_PATCH)] {
+            let dir=tempfile::tempdir().unwrap();let mut gate=prepare(dir.path());
+            gate.bind_provider(initialized_contract(agent,true).unwrap()).unwrap();
+            assert_eq!(gate.descriptor["version"],version);
+            assert_eq!(gate.descriptor["provider_source"],source);
+            assert_eq!(gate.descriptor["provider_patch"],patch);
+            assert!(descriptor_contract(&gate.descriptor));
+            let mut mixed=gate.descriptor.clone();mixed["provider_patch"]=json!("f".repeat(64));
+            assert!(!descriptor_contract(&mixed));
+            gate.verify_hooks(&metadata(&gate)).unwrap();gate.bind_thread("saved-provider-thread").unwrap();
+            assert_eq!(gate.descriptor["version"],version,"thread binding must preserve the actual initialized version");
+            assert!(gate.bind_provider(contract(SUPPORTED_VERSION).unwrap()).is_err());
+            let stored:Value=serde_json::from_slice(&fs::read(&gate.manifest).unwrap()).unwrap();
+            assert_eq!(stored,gate.descriptor);
+        }
     }
     #[test]
     fn gate_requires_exact_active_trust_before_thread_binding() {
