@@ -183,6 +183,7 @@ class UpdateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             files={
+                update.RETAINED_CONTRACTS: '{"schema":1,"contract":"doxa-precompact-fail-closed-v1","contracts":[]}\n',
                 'scripts/install_codex_protected.py': 'SOURCE = "'+('a'*40)+'"\nPREVIOUS_SOURCE = "'+('b'*40)+'"\nPREVIOUS_PROVIDER = "codex-0.162.0-precompact-v1"\nPREVIOUS_PATCHES = {"'+('c'*64)+'"}\nMAX_REVIEWED_INSTALLATIONS = 256\nREVIEWED_INSTALLATIONS = ()\n',
                 'rust/doxa-tui/Cargo.toml': '[package]\nname = "doxa-tui"\nversion = "2.0.0-beta.64"\n',
                 'rust/doxa-tui/src/launch.rs': 'legacy = "codex-0.163.0-precompact-v1";\n',
@@ -194,7 +195,7 @@ class UpdateTests(unittest.TestCase):
                 p=root/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(raw)
             subprocess.run(['git','init','-q',str(root)],check=True)
             subprocess.run(['git','-C',str(root),'add','.'],check=True)
-            old={'source_commit':'a'*40,'patch_sha256':'d'*64,'version':'0.163.0','provider':'codex-0.163.0-precompact-v1'}
+            old={'source_commit':'a'*40,'patch_sha256':'d'*64,'version':'0.163.0','provider':'codex-0.163.0-precompact-v1','contract':'doxa-precompact-fail-closed-v1'}
             new={'source_commit':'e'*40,'patch_sha256':'f'*64,'version':'0.164.0','provider':'codex-0.164.0-precompact-v1'}
             revised,version,notes=update.replacement_files(root,old,new,b'carried fixture','2026-10-20')
             self.assertEqual('2.0.0-beta.65',version)
@@ -204,6 +205,7 @@ class UpdateTests(unittest.TestCase):
             self.assertIn(repr(('b'*40,'c'*64,'codex-0.162.0-precompact-v1')),installer)
             self.assertIn(repr(('a'*40,'d'*64,'codex-0.163.0-precompact-v1')),installer)
             self.assertIn('e'*40,installer)
+            self.assertEqual([{'version':'0.163.0','source_commit':'a'*40,'patch_sha256':'d'*64}],update.load(revised[update.RETAINED_CONTRACTS])["contracts"])
             self.assertNotIn('rust/doxa-tui/src/launch.rs',revised)
             self.assertNotIn('scripts/codex-update/test_update.py',revised)
             self.assertIn(b'2.0.0-beta.65',revised['Cargo.lock'])
@@ -250,6 +252,34 @@ class UpdateTests(unittest.TestCase):
             self.assertIn(new[field].encode(),revised)
             self.assertNotIn(old[field].encode(),revised)
         self.assertEqual(raw.split(b'const RETAINED_VERSION:')[1],revised.split(b'const RETAINED_VERSION:')[1])
+
+    def test_two_successive_updates_preserve_all_previously_current_contracts(self):
+        raw=update.read(update.ROOT/update.RETAINED_CONTRACTS)
+        original=update.load(raw)["contracts"]
+        old=update.baseline(update.ROOT)
+        first=update.retained_contracts(raw,old)
+        next_pin=dict(old,version="0.165.0",source_commit="c"*40,patch_sha256="d"*64)
+        second=update.retained_contracts(first,next_pin)
+        rows={row["version"]:row for row in update.load(second)["contracts"]}
+        for identity in original+[old,next_pin]:
+            self.assertEqual({key:identity[key] for key in ("version","source_commit","patch_sha256")},rows[identity["version"]])
+        self.assertIn("0.163.0",rows);self.assertIn("0.164.0",rows);self.assertIn("0.165.0",rows)
+        self.assertEqual(second,update.retained_contracts(second,next_pin))
+
+    def test_contract_history_rejects_conflicts_unknown_fields_duplicates_and_overflow(self):
+        old=update.baseline(update.ROOT)
+        raw=update.retained_contracts(update.read(update.ROOT/update.RETAINED_CONTRACTS),old)
+        valid=update.load(raw)
+        conflict=dict(old,patch_sha256="f"*64)
+        with self.assertRaisesRegex(ValueError,"conflicts"):
+            update.retained_contracts(raw,conflict)
+        for damage in ([],dict(valid,contracts=valid["contracts"]*2),dict(valid,unreviewed=True),
+                       dict(valid,contracts=[{"version":"0.1.0","source_commit":"a"*40,"patch_sha256":"b"*64,"extra":True}])):
+            with self.assertRaises(ValueError):
+                update.retained_contracts(update.encode(damage),old)
+        full=dict(valid,contracts=[{"version":f"0.1.{index}","source_commit":"a"*40,"patch_sha256":"b"*64} for index in range(256)])
+        with self.assertRaisesRegex(ValueError,"full"):
+            update.retained_contracts(update.encode(full),old)
 
     def test_new_or_changed_upstream_safety_paths_require_semantic_review(self):
         rows=['M\tcodex-rs/core/src/session/brand_new_inference.rs',

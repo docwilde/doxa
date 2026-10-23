@@ -32,6 +32,7 @@ UPSTREAM_GIT = "https://github.com/openai/codex.git"
 TAG = re.compile(r"rust-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 PIN = "scripts/codex-protected/pin.json"
+RETAINED_CONTRACTS = "scripts/codex-protected/retained.json"
 BRANCH = "automation/codex-protected-"
 MAX_FILE = 4 * 1024 * 1024
 MAX_TAG_BYTES = 8 * 1024 * 1024
@@ -360,6 +361,35 @@ def replace_installation_registry(installer, identities):
     return "".join(lines)
 
 
+def retained_contracts(raw, old):
+    """Archive only the exact trusted-base contract before changing current pins."""
+    history = load(raw)
+    if (not isinstance(history, dict) or set(history) != {"schema", "contract", "contracts"}
+            or type(history["schema"]) is not int or history["schema"] != 1
+            or history["contract"] != old["contract"] or history["contract"] != "doxa-precompact-fail-closed-v1"
+            or not isinstance(history["contracts"], list) or len(history["contracts"]) > 256):
+        raise ValueError("reviewed contract history has invalid shape or bound")
+    retained = {}
+    fields = {"version", "source_commit", "patch_sha256"}
+    for identity in history["contracts"]:
+        if (not isinstance(identity, dict) or set(identity) != fields
+                or not all(isinstance(value, str) for value in identity.values())
+                or not TAG.fullmatch("rust-v" + identity["version"])
+                or not SHA.fullmatch(identity["source_commit"])
+                or not re.fullmatch(r"[0-9a-f]{64}", identity["patch_sha256"])
+                or identity["version"] in retained):
+            raise ValueError("reviewed contract history has an invalid or duplicate identity")
+        retained[identity["version"]] = identity
+    prior = {key: old[key] for key in fields}
+    if old["version"] in retained and retained[old["version"]] != prior:
+        raise ValueError("reviewed contract history conflicts with trusted current identity")
+    retained[old["version"]] = prior
+    if len(retained) > 256:
+        raise ValueError("reviewed contract history is full; explicit migration review required")
+    history["contracts"] = sorted(retained.values(), key=lambda row: tuple(map(int, row["version"].split('.'))))
+    return encode(history)
+
+
 def replacement_files(root, old, new, patch, release_date=None):
     """Reconstruct the bounded publication from the trusted base, not an artifact."""
     result = {}
@@ -386,6 +416,7 @@ def replacement_files(root, old, new, patch, release_date=None):
     result[installer_path] = installer.encode()
     result["scripts/codex-protected/precompact.patch"] = patch
     result[PIN] = encode(new)
+    result[RETAINED_CONTRACTS] = retained_contracts(read(root / RETAINED_CONTRACTS), old)
     manifests = []
     versions = set()
     for path in sorted((root / "rust").glob("*/Cargo.toml")):

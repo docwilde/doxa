@@ -13,12 +13,32 @@ pub const SUPPORTED_VERSION: &str = "0.164.0";
 pub const PROTECTED_AGENT_PREFIX: &str = "doxa_codex_rs/0.164.0 (doxa-precompact-fail-closed-v1; ";
 pub const SUPPORTED_SOURCE: &str = "6aaac694803004a63c6f393d153c96d22521a6b9";
 pub const SUPPORTED_PATCH: &str = "f8759872787029e5bf7064fe5be7166c5367b1db09b4b60362ea625117658924";
-// Exact previously reviewed payload, retained only for saved Docker sessions.
-// This entry is deliberately outside the updater's current-pin inventory.
-const RETAINED_VERSION: &str = "0.163.0";
-const RETAINED_PREFIX: &str = "doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; ";
-const RETAINED_SOURCE: &str = "83086188ae0614bd882818ff1aa23f3194962012";
-const RETAINED_PATCH: &str = "3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c";
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredContract { version:String, source_commit:String, patch_sha256:String }
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractHistory { schema:u64, contract:String, contracts:Vec<StoredContract> }
+fn retained_contracts() -> Option<&'static ContractHistory> {
+    // Compiled trusted source, never a mutable installed receipt or provider
+    // response. Updates archive their verified base identity before rotation.
+    static HISTORY:std::sync::OnceLock<Option<ContractHistory>>=std::sync::OnceLock::new();
+    HISTORY.get_or_init(|| {
+        let history:ContractHistory=serde_json::from_str(include_str!("../../../scripts/codex-protected/retained.json")).ok()?;
+        if history.schema!=1 || history.contract!="doxa-precompact-fail-closed-v1" || history.contracts.len()>256 {return None;}
+        let mut versions=std::collections::BTreeSet::new();
+        for row in &history.contracts {
+            let parts=row.version.split('.').collect::<Vec<_>>();
+            if parts.len()!=3 || !parts.iter().all(|part| !part.is_empty() && (part.len()==1 || !part.starts_with('0'))
+                && part.bytes().all(|byte|byte.is_ascii_digit()))
+                || row.source_commit.len()!=40 || row.patch_sha256.len()!=64
+                || !row.source_commit.bytes().chain(row.patch_sha256.bytes()).all(|byte|byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || !versions.insert(row.version.clone()) {return None;}
+        }
+        Some(history)
+    }).as_ref()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ProtectedContract {
@@ -27,16 +47,17 @@ pub(crate) struct ProtectedContract {
     patch: &'static str,
 }
 fn contract(version: &str) -> Option<ProtectedContract> {
-    match version {
-        SUPPORTED_VERSION => Some(ProtectedContract { version:SUPPORTED_VERSION, source:SUPPORTED_SOURCE, patch:SUPPORTED_PATCH }),
-        RETAINED_VERSION => Some(ProtectedContract { version:RETAINED_VERSION, source:RETAINED_SOURCE, patch:RETAINED_PATCH }),
-        _ => None,
-    }
+    if version==SUPPORTED_VERSION {return Some(ProtectedContract { version:SUPPORTED_VERSION, source:SUPPORTED_SOURCE, patch:SUPPORTED_PATCH });}
+    retained_contracts()?.contracts.iter().find(|row|row.version==version)
+        .map(|row|ProtectedContract {version:row.version.as_str(),source:row.source_commit.as_str(),patch:row.patch_sha256.as_str()})
 }
 pub(crate) fn initialized_contract(agent: &str, saved_docker_resume: bool) -> Option<ProtectedContract> {
     if agent.starts_with(PROTECTED_AGENT_PREFIX) { contract(SUPPORTED_VERSION) }
-    else if saved_docker_resume && agent.starts_with(RETAINED_PREFIX) { contract(RETAINED_VERSION) }
-    else { None }
+    else if saved_docker_resume {
+        retained_contracts()?.contracts.iter().find(|row|agent.starts_with(&format!(
+            "doxa_codex_rs/{} (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; ",row.version)))
+            .and_then(|row|contract(&row.version))
+    } else { None }
 }
 pub(crate) fn descriptor_contract(descriptor: &Value) -> bool {
     descriptor["version"].as_str().and_then(contract).is_some_and(|reviewed|
@@ -284,14 +305,14 @@ mod tests {
     }
     #[test]
     fn retained_provider_requires_saved_docker_resume_and_binds_exact_descriptor() {
-        let old_agent=format!("{RETAINED_PREFIX}codex_cli_rs/0.163.0)");
+        let old_agent="doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; codex_cli_rs/0.163.0)";
         assert!(initialized_contract(&old_agent,false).is_none());
         for rejected in ["codex_cli_rs/0.163.0", "doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; upstream fixture)",
             "doxa_codex_rs/0.162.0 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; fixture)",
             "codex_cli_rs/0.1.0 (doxa_codex_rs/0.163.0 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; fixture))"] {
             assert!(initialized_contract(rejected,true).is_none(),"{rejected}");
         }
-        for (agent,version,source,patch) in [(old_agent.as_str(),RETAINED_VERSION,RETAINED_SOURCE,RETAINED_PATCH),
+        for (agent,version,source,patch) in [(old_agent,"0.163.0","83086188ae0614bd882818ff1aa23f3194962012","3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c"),
             (PROTECTED_AGENT_PREFIX,SUPPORTED_VERSION,SUPPORTED_SOURCE,SUPPORTED_PATCH)] {
             let dir=tempfile::tempdir().unwrap();let mut gate=prepare(dir.path());
             gate.bind_provider(initialized_contract(agent,true).unwrap()).unwrap();

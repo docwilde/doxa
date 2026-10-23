@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "contract": "doxa-precompact-fail-closed-v1",
+  "contracts": [
+    {
+      "version": "0.163.0",
+      "source_commit": "83086188ae0614bd882818ff1aa23f3194962012",
+      "patch_sha256": "3a7b8c09b1f95bc523611202005aa71e6ba14d23f26a3833249487385e013e9c"
+    }
+  ]
+}
