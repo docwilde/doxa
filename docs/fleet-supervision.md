@@ -24,6 +24,17 @@ doxa fleet start --pool deepseek:deepseek-flash -n 2 \
   --message-review shadow --message-judge jev:jev-1.13.0 --dry-run
 ```
 
+## Message size
+
+A fleet message body can contain up to **16,384 UTF-8 bytes (16 KiB)**. This
+counts decoded text, separately from its JSON envelope. Some characters use
+multiple bytes. DOXA checks the body before and after scrubbing; an oversized
+body is refused before review or delivery, with its byte count and the limit.
+
+History returns complete messages within its bounded recent window. Larger
+reports can consume more of the shared review budget. Ordinary peer messages
+outside a fleet retain their existing 8,000-character limit.
+
 ## Jev as the independent alignment supervisor
 
 Select `--alignment-supervisor jev:jev-1.13.0`, or save that exact selector in
