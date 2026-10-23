@@ -7,7 +7,7 @@ fn fixture() -> (tempfile::TempDir, Context, Model) {
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let model = Model::parse("deepseek:fixture-model").unwrap();
     let charter = Charter {version:1,fleet_id:"correlation".into(),task:"Scoped review".into(),repo:"/fixture".into(),allowed_paths:vec!["src".into()],required_evidence:vec![],worker_limit:2,run_budget_usd:Some(1.0),deadline:0,human_actions:vec![],test_recipe:None};
-    let assignments = ["a", "b"].map(|id|Assignment{id:id.into(),session_id:id.into(),pid:1,role:"worker".into(),task:"Scoped review".into(),cwd:"/fixture".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}).to_vec();
+    let assignments = ["a", "b"].into_iter().enumerate().map(|(index,id)|Assignment{id:id.into(),session_id:id.into(),pid:101+index as i32,role:"worker".into(),task:"Scoped review".into(),cwd:"/fixture".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}).collect();
     let context = Context {charter_sha256:hash(&charter).unwrap(),charter,assignments,review:ReviewConfig{message_judge:Some(model.clone()),message_mode:Mode::Shadow,budget_usd:1.0,..Default::default()},state_path:dir.path().join("state.json")};
     context.validate().unwrap();
     (dir, context, model)
