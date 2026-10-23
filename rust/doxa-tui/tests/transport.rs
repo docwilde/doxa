@@ -91,15 +91,20 @@ fn special_or_linked_transcript_falls_back_to_ring_replay() {
 
     for transcript in [&fifo, &linked] {
         let server_path = transcript.clone();
+        let (release_tx, release_rx) = mpsc::channel();
         let (path, task) = socket(move |mut stream| {
             send(&mut stream, json!({"type":"hello","proto":1,"session_id":"session-1",
                 "cwd":"/tmp","model":null,"engine":"doxa","next_seq":700,
                 "transcript_path":server_path,"transcript_bytes":1}));
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             assert_eq!(line(&mut reader), json!({"type":"attach","cursor":null}));
+            // Reading attach does not mean the client has finished resetting
+            // its socket timeout. Keep this successful fixture alive until it has.
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         });
         let (_, snapshot) = DaemonClient::connect_for_restore(&path).unwrap();
         assert!(snapshot.is_none());
+        release_tx.send(()).unwrap();
         finish(path, task);
     }
 
