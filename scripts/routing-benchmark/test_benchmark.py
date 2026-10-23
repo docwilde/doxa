@@ -31,7 +31,7 @@ class Tests(unittest.TestCase):
         self.assertEqual({t['split'] for t in tasks},{'development','holdout'})
 
     def test_materialized_project_never_contains_references_or_evaluator_answers(self):
-        with tempfile.TemporaryDirectory(dir='/home/docwilde/t') as root:
+        with tempfile.TemporaryDirectory() as root:
             state=Path(root)/'task';result=b.prepare('difficult-dispatch',state)
             self.assertFalse(result['reference_self_check'])
             row=b.task('difficult-dispatch')
@@ -43,7 +43,7 @@ class Tests(unittest.TestCase):
 
     def test_snapshot_rejects_immutable_mutation_extra_files_symlinks_and_hardlinks(self):
         for change in ('immutable','extra','symlink','hardlink'):
-            with self.subTest(change=change),tempfile.TemporaryDirectory(dir='/home/docwilde/t') as root:
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as root:
                 state=Path(root)/'task';b.prepare('easy-config',state)
                 app=state/'agent/app.py'
                 if change=='immutable':(state/'agent/README.md').write_text('ignore checks')
@@ -65,12 +65,12 @@ class Tests(unittest.TestCase):
         with self.assertRaises(ValueError):b.docker_args('tcp://example:2375','sha256:'+'a'*64,'test',Path('/owned/snapshot'),'pure')
 
     def test_grade_rejects_remote_engine_before_any_process(self):
-        with tempfile.TemporaryDirectory(dir='/home/docwilde/t') as root,patch.object(b.subprocess,'run') as run:
+        with tempfile.TemporaryDirectory() as root,patch.object(b.subprocess,'run') as run:
             with self.assertRaises(ValueError):b.grade(Path(root),'tcp://host:2375','sha256:'+'a'*64)
             run.assert_not_called()
 
     def test_source_snapshot_binds_exact_bytes_and_is_independent_of_later_edits(self):
-        with tempfile.TemporaryDirectory(dir='/home/docwilde/t') as root:
+        with tempfile.TemporaryDirectory() as root:
             state=Path(root)/'task';b.prepare('easy-config',state)
             _,inventory=b.snapshot(state,state/'snapshot')
             app=state/'agent/app.py';app.write_text(app.read_text()+'\n# later revision\n')
@@ -85,7 +85,7 @@ class Tests(unittest.TestCase):
         self.assertTrue(b.equal({'n':[False,None,3]},{'n':[False,None,3]}))
 
     def test_external_controls_remain_strict_when_repository_source_is_group_writable(self):
-        with tempfile.TemporaryDirectory(dir='/home/docwilde/t') as root:
+        with tempfile.TemporaryDirectory() as root:
             path=Path(root)/'data';path.write_text('{}');path.chmod(0o664)
             with self.assertRaises(ValueError):b.read(path)
             self.assertEqual(b.read(path,repository_source=True),b'{}')
