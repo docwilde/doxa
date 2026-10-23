@@ -52,8 +52,9 @@ pub fn decode_line(line: &[u8], direction: Direction) -> Result<Value, WireError
     Ok(value)
 }
 
-/// Encode a validated frame. This refuses output that a Python 1.x peer
-/// would drop because it exceeds `peers.MAX_FRAME_BYTES`.
+/// Frames through 64 KiB retain the existing wire representation. Larger
+/// canonical peer frames require extension-aware clients and daemons at both
+/// ends; their leading marker never exempts unrelated decoded payloads.
 pub fn encode_line(value: &Value, direction: Direction) -> Result<Vec<u8>, WireError> {
     validate(value, direction)?;
     let mut bytes = serde_json::to_vec(value).map_err(|_| WireError::InvalidJson)?;

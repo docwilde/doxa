@@ -31,6 +31,15 @@ pub fn body_within_limit(body:&str)->bool{
     }else{body.chars().count()<=MAX_BODY_CHARS}
 }
 fn frame_limit(body:&str)->usize{if body.starts_with(doxa_protocol::peer::FLEET_PREFIX){MAX_FLEET_FRAME_BYTES}else{MAX_FRAME_BYTES}}
+fn validate_large_frame(value:&serde_json::Value,length:usize)->io::Result<()>{
+    if length<=MAX_FRAME_BYTES{return Ok(());}
+    if length>MAX_FLEET_FRAME_BYTES||value["body"].as_str().is_none_or(|body|!doxa_protocol::peer::fleet_wire_within_limit(body)){
+        return Err(invalid("invalid large fleet frame"));
+    }
+    let mut shell=value.clone();shell["body"]=serde_json::Value::Null;
+    if serde_json::to_vec(&shell).map_err(io::Error::other)?.len()+1>MAX_FRAME_BYTES{return Err(invalid("peer frame metadata exceeds bound"));}
+    Ok(())
+}
 
 /// Recipient admission only: Started/Queued never assert provider completion.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +135,12 @@ fn read_frame(stream: &mut UnixStream) -> io::Result<PeerFrame> {
 fn parse_frame(bytes: &[u8]) -> io::Result<PeerFrame> {
     if bytes.is_empty() { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty peer probe")); }
     if bytes.last() != Some(&b'\n') || bytes[..bytes.len()-1].contains(&b'\n') { return Err(invalid("peer frame must be one complete line")); }
+    if bytes.len()>MAX_FRAME_BYTES{
+        let text=std::str::from_utf8(&bytes[..bytes.len()-1]).map_err(|_|invalid("invalid peer JSON"))?;
+        let value=doxa_protocol::peer::unique_json(text).ok_or_else(||invalid("invalid or duplicate peer JSON"))?;
+        if value.to_string().len()!=text.len(){return Err(invalid("noncanonical large peer JSON"));}
+        validate_large_frame(&value,bytes.len())?;
+    }
     let frame: PeerFrame = serde_json::from_slice(&bytes[..bytes.len()-1]).map_err(|_| invalid("invalid peer JSON"))?;
     if bytes.len()>frame_limit(&frame.body)||frame.from_id.is_empty()||!body_within_limit(&frame.body) {
         return Err(invalid("invalid peer identity or body"));
@@ -307,6 +322,7 @@ fn transmit(path: &Path, frame: &PeerFrame, receipt_id:Option<&str>) -> io::Resu
     let mut bytes = serde_json::to_vec(&value).map_err(io::Error::other)?;
     bytes.push(b'\n');
     if bytes.len() > frame_limit(&frame.body) { return Err(invalid("peer frame too large")); }
+    validate_large_frame(&value,bytes.len())?;
     let deadline = Instant::now() + TIMEOUT;
     let mut stream = connect_before(path, deadline).map_err(|error|
         io::Error::new(error.kind(), format!("peer connect: {error}")))?;

@@ -24,3 +24,13 @@ fn latest_three_maximum_escaped_fleet_reports_remain_complete_in_durable_history
     let messages=ledger.history_filtered("receiver","/repo","received",3,&|text:&str|text.to_owned()).unwrap();assert_eq!(messages.len(),3);assert!(serde_json::to_vec(&messages).unwrap().len()<=doxa_protocol::peer::MAX_HISTORY_BYTES);for message in &messages{assert_eq!(message.body,encoded);}
     assert_eq!(ledger.history("receiver","/repo",&|text:&str|text.to_owned()).unwrap().len(),3);
 }
+
+#[test]
+fn raw_fleet_socket_cannot_hide_oversized_unrelated_metadata_or_duplicate_fields(){
+    use std::{io::Write,os::unix::net::UnixStream};
+    let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();let inbox=Inbox::bind(dir.path(),"metadata").unwrap();
+    for field in ["unrelated","from_title"]{
+        let mut raw=json!({"from_id":"sender","from_title":"Sender","sent_at":"now","body":wire("ok"),"from_repo":"/repo","kind":"direct"});raw[field]=json!("x".repeat(100000));let mut bytes=raw.to_string().into_bytes();bytes.push(b'\n');let path=inbox.path().to_owned();let sender=std::thread::spawn(move||{let mut socket=UnixStream::connect(path).unwrap();socket.write_all(&bytes).unwrap();});assert!(inbox.receive(&|text:&str|text.to_owned()).unwrap_err().to_string().contains("metadata exceeds"));sender.join().unwrap();
+    }
+    let raw=format!("{{\"from_id\":\"sender\",\"from_title\":\"{}\",\"from_title\":\"small\",\"sent_at\":\"now\",\"body\":{}}}\n","x".repeat(100000),json!(wire("ok")));let path=inbox.path().to_owned();let sender=std::thread::spawn(move||{let mut socket=UnixStream::connect(path).unwrap();socket.write_all(raw.as_bytes()).unwrap();});assert!(inbox.receive(&|text:&str|text.to_owned()).unwrap_err().to_string().contains("duplicate"));sender.join().unwrap();
+}

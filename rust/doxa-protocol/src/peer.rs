@@ -29,7 +29,8 @@ pub fn fleet_wire_within_limit(wire:&str)->bool{
     value["body"]=serde_json::Value::Null;
     value.to_string().len()<=8*1024
 }
-fn unique_json(raw:&str)->Option<serde_json::Value>{
+/// Parse bounded transport JSON without silently discarding duplicate fields.
+pub fn unique_json(raw:&str)->Option<serde_json::Value>{
     use serde::{Deserialize,Deserializer,de::{self,Visitor,MapAccess,SeqAccess}};
     struct Unique(serde_json::Value);
     impl<'de> Deserialize<'de> for Unique{
