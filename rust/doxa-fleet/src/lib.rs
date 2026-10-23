@@ -12,8 +12,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, io::{self, Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
 
-pub const PREFIX: &str = "[DOXA-FLEET-V1] ";
-pub const MAX_BODY: usize = 6_000;
+pub const PREFIX: &str = doxa_protocol::peer::FLEET_PREFIX;
+pub const MAX_BODY: usize = doxa_protocol::peer::MAX_FLEET_BODY_BYTES;
+pub const MAX_ENVELOPE_BYTES:usize=doxa_protocol::peer::MAX_FLEET_ENVELOPE_BYTES;
+pub const MAX_RECENT_BODY_BYTES:usize=MAX_BODY;
+pub fn validate_body(body:&str)->io::Result<()>{if body.len()>MAX_BODY{Err(invalid(&doxa_protocol::peer::body_limit_error(body.len())))}else{Ok(())}}
 pub const MAX_STATE: u64 = 4 * 1024 * 1024;
 pub fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
 pub fn hash(value: &impl Serialize) -> io::Result<String> { Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?))) }
@@ -136,12 +139,13 @@ pub struct Envelope {
 }
 impl Envelope {
     pub fn issue(context:&Context,from:&str,to:&str,kind:Kind,body:String,reply:Option<String>)->io::Result<Self>{
+        validate_body(&body)?;
         let row=context.assignment(from)?;context.assignment(to)?;
         let hop=if let Some(parent)=&reply{transaction(context,|state|state.traces.get(parent).map(|trace|trace.hop.saturating_add(1)).ok_or_else(||invalid("unknown fleet reply ancestry")))?}else{0};
         Ok(Self{v:1,fleet_id:context.charter.fleet_id.clone(),message_id:uuid::Uuid::new_v4().to_string(),from_session:from.into(),to_session:to.into(),kind,assignment_id:row.id.clone(),charter_sha256:context.charter_sha256.clone(),in_reply_to:reply,body,artifact_refs:Vec::new(),requested_action:None,hop,readback:None,handoff_response:None})
     }
-    pub fn wire(&self)->io::Result<String>{Ok(format!("{PREFIX}{}",serde_json::to_string(self)?))}
-    pub fn parse(wire:&str)->io::Result<Self>{if wire.len()>24*1024{return Err(invalid("fleet envelope exceeds bounds"));}serde_json::from_str(wire.strip_prefix(PREFIX).ok_or_else(||invalid("free-form message cannot enter a supervised fleet"))?).map_err(|_|invalid("invalid fleet envelope schema"))}
+    pub fn wire(&self)->io::Result<String>{validate_body(&self.body)?;let wire=format!("{PREFIX}{}",serde_json::to_string(self)?);if wire.len()>MAX_ENVELOPE_BYTES{return Err(invalid("fleet envelope exceeds bounds"));}Ok(wire)}
+    pub fn parse(wire:&str)->io::Result<Self>{if wire.len()>MAX_ENVELOPE_BYTES{return Err(invalid("fleet envelope exceeds bounds"));}let envelope:Self=serde_json::from_str(wire.strip_prefix(PREFIX).ok_or_else(||invalid("free-form message cannot enter a supervised fleet"))?).map_err(|_|invalid("invalid fleet envelope schema"))?;validate_body(&envelope.body)?;Ok(envelope)}
     fn text_bytes(&self)->usize {
         self.body.len()
             +self.readback.as_ref().map_or(0,|row|row.next_action.len()+row.assumptions.iter().map(String::len).sum::<usize>()+row.open_questions.iter().map(String::len).sum::<usize>())
@@ -376,7 +380,8 @@ fn deterministic(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,stat
     let from=context.assignment(&envelope.from_session)?;let target=context.assignment(recipient)?;
     if !target.depends_on.is_empty()&&!state.dispatched_assignments.get(&target.id).copied().unwrap_or(false){return Err(invalid("dependent worker awaits host dispatch"));}
     if envelope.v!=1||envelope.fleet_id!=context.charter.fleet_id||envelope.charter_sha256!=context.charter_sha256||envelope.to_session!=recipient||from.pid!=pid||envelope.assignment_id!=from.id||envelope.from_session==recipient||uuid::Uuid::parse_str(&envelope.message_id).is_err(){return Err(invalid("fleet sender, assignment or scope is not verified"));}
-    if envelope.body.trim().is_empty()||envelope.body.len()>MAX_BODY||envelope.hop>4||!envelope.artifact_refs.iter().all(|id|state.artifacts.contains_key(id))||envelope.artifact_refs.len()>8{return Err(invalid("fleet message bounds or artifact provenance refused"));}
+    validate_body(&envelope.body)?;
+    if envelope.body.trim().is_empty()||envelope.hop>4||!envelope.artifact_refs.iter().all(|id|state.artifacts.contains_key(id))||envelope.artifact_refs.len()>8{return Err(invalid("fleet message bounds or artifact provenance refused"));}
     match envelope.kind {
         Kind::Ack if envelope.readback.as_ref().is_some_and(|row|row.validate().is_ok())&&envelope.handoff_response.is_none()=>{},
         Kind::Confirm if envelope.readback.is_none()&&envelope.handoff_response.as_ref().is_some_and(|row|row.validate().is_ok())=>{},
@@ -427,7 +432,7 @@ pub fn admit(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,semantic
         if admission.delivered{
             let seq=state.received.len() as u64+1;
             state.received.insert(envelope.message_id.clone(),unix_now());state.traces.insert(envelope.message_id.clone(),MessageTrace{from:envelope.from_session.clone(),to:recipient.into(),hop:envelope.hop,seq,kind:envelope.kind,artifact_refs:envelope.artifact_refs.clone(),in_reply_to:envelope.in_reply_to.clone(),readback:envelope.readback.clone(),handoff_response:envelope.handoff_response.clone()});state.message_count+=1;state.total_bytes+=envelope.text_bytes() as u64;
-            state.recent_messages.push(envelope.clone());while state.recent_messages.len()>8||state.recent_messages.iter().map(|row|row.body.len()).sum::<usize>()>12*1024{state.recent_messages.remove(0);}
+            state.recent_messages.push(envelope.clone());while state.recent_messages.len()>8||state.recent_messages.iter().map(|row|row.body.len()).sum::<usize>()>MAX_RECENT_BODY_BYTES{state.recent_messages.remove(0);}
         }
         record(state,json!({"event":"admission","admission":admission,"from":envelope.from_session,"to":recipient,"kind":envelope.kind,"input_sha256":hash(envelope)?,"at":unix_now()}));
         Ok(admission)

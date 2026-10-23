@@ -19,9 +19,37 @@ use std::time::Duration;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 const RING_CAPACITY: usize = 512;
 const CLIENT_QUEUE_CAPACITY: usize = 1024;
+const MAX_RING_BYTES:usize=RING_CAPACITY*MAX_FRAME_BYTES;
+const MAX_CLIENT_QUEUE_BYTES:usize=CLIENT_QUEUE_CAPACITY*MAX_FRAME_BYTES;
+const MAX_PEER_PENDING_BYTES:usize=256*1024;
 const PROMPT_QUEUE_CAPACITY: usize = 8;
 const QUEUE_PREVIEW_CHARS: usize = 120;
 const MAX_CONNECTIONS: usize = 64;
+
+#[derive(Default)]
+struct QueueBudget{bytes:usize,closed:bool}
+#[derive(Clone)]
+struct FrameSender{sender:SyncSender<Vec<u8>>,budget:Arc<Mutex<QueueBudget>>}
+struct FrameReceiver{receiver:mpsc::Receiver<Vec<u8>>,budget:Arc<Mutex<QueueBudget>>}
+fn frame_channel(capacity:usize)->(FrameSender,FrameReceiver){
+    let(sender,receiver)=mpsc::sync_channel(capacity);let budget=Arc::new(Mutex::new(QueueBudget::default()));
+    (FrameSender{sender,budget:budget.clone()},FrameReceiver{receiver,budget})
+}
+impl FrameSender{
+    fn try_send(&self,bytes:Vec<u8>)->Result<(),mpsc::TrySendError<Vec<u8>>>{
+        let mut budget=self.budget.lock().unwrap();
+        if budget.closed{return Err(mpsc::TrySendError::Disconnected(bytes));}
+        if budget.bytes.saturating_add(bytes.len())>MAX_CLIENT_QUEUE_BYTES{return Err(mpsc::TrySendError::Full(bytes));}
+        budget.bytes+=bytes.len();
+        self.sender.try_send(bytes).map_err(|error|{let bytes=match &error{mpsc::TrySendError::Full(bytes)|mpsc::TrySendError::Disconnected(bytes)=>bytes};budget.bytes-=bytes.len();error})
+    }
+}
+impl FrameReceiver{
+    fn recv(&self)->Result<Vec<u8>,mpsc::RecvError>{let bytes=self.receiver.recv()?;self.budget.lock().unwrap().bytes-=bytes.len();Ok(bytes)}
+    #[cfg(test)]
+    fn try_recv(&self)->Result<Vec<u8>,mpsc::TryRecvError>{let bytes=self.receiver.try_recv()?;self.budget.lock().unwrap().bytes-=bytes.len();Ok(bytes)}
+}
+impl Drop for FrameReceiver{fn drop(&mut self){let mut budget=self.budget.lock().unwrap();budget.closed=true;for bytes in self.receiver.try_iter(){budget.bytes-=bytes.len();}}}
 
 /// The engine seam. `prompt` may emit zero or more protocol event objects.
 /// Each event is wrapped in a sequence-numbered `event` frame by the daemon.
@@ -176,7 +204,7 @@ struct State {
     pending_inputs_complete: bool,
     next_seq: u64,
     ring: VecDeque<(u64, Vec<u8>)>,
-    clients: HashMap<u64, SyncSender<Vec<u8>>>,
+    clients: HashMap<u64, FrameSender>,
     remote_clients: HashMap<u64, String>,
     busy: bool,
     prompts: VecDeque<Prompt>,
@@ -404,8 +432,10 @@ impl Inner {
                         state.pending_inputs_complete = false;
                     }
                     state.pending_inputs.retain(|item| item["id"].as_str() != Some(id));
-                    let bytes = state.pending_inputs.iter().map(|item| item.to_string().len()).sum::<usize>();
-                    if state.pending_inputs.len() < 8 && bytes.saturating_add(data.to_string().len()) <= 48 * 1024 {
+                    let peer=doxa_protocol::large_peer::pending_peer_send(data);
+                    let bytes = state.pending_inputs.iter().filter(|item|doxa_protocol::large_peer::pending_peer_send(item)==peer).map(|item|item.to_string().len()).sum::<usize>();
+                    let cap=if peer{MAX_PEER_PENDING_BYTES}else{48*1024};
+                    if state.pending_inputs.len() < 8 && bytes.saturating_add(data.to_string().len()) <= cap {
                         state.pending_inputs.push(data.clone());
                     } else { state.pending_inputs_complete = false; }
                 } else { state.pending_inputs_complete = false; }
@@ -425,7 +455,7 @@ impl Inner {
         let frame = json!({"type":"event", "seq":seq, "turn":turn, "event":event});
         let bytes = encode_event(&frame);
         state.ring.push_back((seq, bytes.clone()));
-        if state.ring.len() > RING_CAPACITY { state.ring.pop_front(); }
+        while state.ring.len()>RING_CAPACITY||state.ring.iter().map(|(_,bytes)|bytes.len()).sum::<usize>()>MAX_RING_BYTES{state.ring.pop_front();}
         state.clients.retain(|_, tx| tx.try_send(bytes.clone()).is_ok());
     }
 
@@ -532,7 +562,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
     }
     let _guard = ConnectionGuard(inner.clone());
     let id = inner.next_client_id.fetch_add(1, Ordering::Relaxed);
-    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(CLIENT_QUEUE_CAPACITY);
+    let (tx, rx) = frame_channel(CLIENT_QUEUE_CAPACITY);
     let mut writer = match stream.try_clone() { Ok(s) => s, Err(_) => return };
     // Capture the replay cursor before reading the transcript boundary.
     // A provider can publish while the file is being inspected; using the
@@ -589,7 +619,9 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             Err(err) if err.kind() == io::ErrorKind::TimedOut || err.kind() == io::ErrorKind::WouldBlock => continue,
             Err(_) => break,
         }
-        let parsed = serde_json::from_slice::<Value>(&line);
+        let parsed = if line.len()>MAX_FRAME_BYTES{
+            doxa_protocol::decode_line(&line,doxa_protocol::Direction::ClientToServer).map_err(|_|())
+        }else{serde_json::from_slice::<Value>(&line).map_err(|_|())};
         line.clear();
         let Ok(frame) = parsed else { continue };
         if !frame.is_object() { continue; }
@@ -644,10 +676,10 @@ fn detach_client(inner: &Inner, id: u64) {
     if changed { inner.publish(None, json!({"type":"remote_driver_changed","data":{"identity":identity}})); }
 }
 #[cfg(test)]
-fn attach_client(inner: &Inner, id: u64, cursor: Option<u64>, tx: &SyncSender<Vec<u8>>) -> bool {
+fn attach_client(inner: &Inner, id: u64, cursor: Option<u64>, tx: &FrameSender) -> bool {
     attach_client_with_identity(inner, id, cursor, tx, None)
 }
-fn attach_client_with_identity(inner: &Inner, id: u64, cursor: Option<u64>, tx: &SyncSender<Vec<u8>>, login: Option<&str>) -> bool {
+fn attach_client_with_identity(inner: &Inner, id: u64, cursor: Option<u64>, tx: &FrameSender, login: Option<&str>) -> bool {
     let _admission = inner.controls.lock().unwrap();
     let mut state = inner.state.lock().unwrap();
     if inner.stopping.load(Ordering::Acquire) { return false; }
@@ -676,10 +708,10 @@ fn attach_client_with_identity(inner: &Inner, id: u64, cursor: Option<u64>, tx: 
 }
 
 #[cfg(test)]
-fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
+fn handle_prompt(inner: &Arc<Inner>, tx: &FrameSender, frame: &Value) {
     handle_prompt_attachments(inner,tx,frame,Vec::new());
 }
-fn handle_prompt_attachments(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value, attachments: Vec<Attachment>) -> bool {
+fn handle_prompt_attachments(inner: &Arc<Inner>, tx: &FrameSender, frame: &Value, attachments: Vec<Attachment>) -> bool {
     let Some(req_id) = frame["id"].as_u64() else { return false; };
     let Some(text) = frame["text"].as_str() else {
         send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"invalid prompt"})); return false;
@@ -742,7 +774,7 @@ fn handle_prompt_attachments(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame
     true
 }
 
-fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
+fn handle_call(inner: &Arc<Inner>, tx: &FrameSender, frame: &Value) {
     let Some(req_id) = frame["id"].as_u64() else { return; };
     let Some(method) = frame["method"].as_str() else { return; };
     let params = frame.get("params").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
@@ -937,7 +969,10 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         Ok(extra) if extra.is_object() => {
             let mut reply = json!({"type":"reply","id":req_id,"ok":true});
             for (key, value) in extra.as_object().unwrap() {
-                if key != "type" && key != "id" && key != "ok" { reply[key] = value.clone(); }
+                if key != "type" && key != "id" && key != "ok"&&key!=doxa_protocol::large_peer::MARKER&&key!=doxa_protocol::large_peer::RPC_FIELD { reply[key] = value.clone(); }
+            }
+            if matches!(method,"peer_history"|"get_state")&&serde_json::to_vec(&reply).is_ok_and(|raw|raw.len()+1>MAX_FRAME_BYTES){
+                reply[doxa_protocol::large_peer::RPC_FIELD]=json!(method);
             }
             send(tx, reply);
             if let Some(event) = changed { inner.publish(None, event); }
@@ -948,12 +983,10 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     if stop_ok { inner.stopping.store(true, Ordering::Release); }
 }
 
-fn send(tx: &SyncSender<Vec<u8>>, frame: Value) -> bool { tx.try_send(encode_reply(&frame)).is_ok() }
+fn send(tx: &FrameSender, frame: Value) -> bool { tx.try_send(encode_reply(&frame)).is_ok() }
 
 fn encode_reply(frame: &Value) -> Vec<u8> {
-    let mut bytes = serde_json::to_vec(frame).unwrap_or_default();
-    bytes.push(b'\n');
-    if bytes.len() <= MAX_FRAME_BYTES { bytes } else {
+    if let Ok(bytes)=doxa_protocol::encode_line(frame,doxa_protocol::Direction::ServerToClient){bytes}else{
         let fallback = json!({"type":frame["type"],"id":frame["id"],"ok":false,
             "error":"reply exceeded the frame cap"});
         let mut bytes = serde_json::to_vec(&fallback).unwrap_or_default();
@@ -963,9 +996,7 @@ fn encode_reply(frame: &Value) -> Vec<u8> {
 }
 
 fn encode_event(frame: &Value) -> Vec<u8> {
-    let mut original = serde_json::to_vec(frame).unwrap_or_default();
-    original.push(b'\n');
-    if original.len() <= MAX_FRAME_BYTES { return original; }
+    if let Ok(encoded)=doxa_protocol::encode_line(frame,doxa_protocol::Direction::ServerToClient){return encoded;}
     let kind = frame["event"]["type"].as_str().unwrap_or("unknown");
     let kind: String = kind.chars().take(128).collect();
     let slim = json!({"type":"event","seq":frame["seq"],"turn":frame["turn"],
@@ -979,7 +1010,7 @@ fn read_bounded(reader: &mut BufReader<UnixStream>, line: &mut Vec<u8>) -> io::R
         let available = reader.fill_buf()?;
         if available.is_empty() { return if line.is_empty() { Ok(0) } else { Err(io::ErrorKind::UnexpectedEof.into()) }; }
         let n = available.iter().position(|b| *b == b'\n').map_or(available.len(), |n| n + 1);
-        if line.len() + n > MAX_FRAME_BYTES { return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large")); }
+        if line.len() + n > doxa_protocol::large_peer::line_limit(line,&available[..n]) { return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large")); }
         let complete = available[n - 1] == b'\n';
         line.extend_from_slice(&available[..n]);
         reader.consume(n);
@@ -990,6 +1021,17 @@ fn read_bounded(reader: &mut BufReader<UnixStream>, line: &mut Vec<u8>) -> io::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_peer_frames_keep_the_original_total_client_queue_and_ring_byte_ceilings(){
+        let(tx,rx)=frame_channel(CLIENT_QUEUE_CAPACITY);let clone=tx.clone();
+        for _ in 0..64{tx.try_send(vec![0;1024*1024]).unwrap();}
+        assert_eq!(tx.budget.lock().unwrap().bytes,MAX_CLIENT_QUEUE_BYTES);
+        assert!(matches!(clone.try_send(vec![0]),Err(mpsc::TrySendError::Full(_))));rx.try_recv().unwrap();assert_eq!(tx.budget.lock().unwrap().bytes,MAX_CLIENT_QUEUE_BYTES-1024*1024);clone.try_send(vec![0;1024*1024]).unwrap();drop(rx);assert_eq!(tx.budget.lock().unwrap().bytes,0);assert!(matches!(tx.try_send(vec![0]),Err(mpsc::TrySendError::Disconnected(_))));
+        let dir=tempfile::tempdir().unwrap();let daemon=Daemon::bind(dir.path(),Session{session_id:"peer-ring".into(),cwd:"/fixture".into(),model:None,engine:"fixture".into(),doxa_version:"fixture".into()},Arc::new(StopHost(AtomicUsize::new(0)))).unwrap();
+        for _ in 0..400{daemon.inner.publish(None,json!({"type":"peer_message","data":{"body":"\u{1}".repeat(16384)}}));}
+        let state=daemon.inner.state.lock().unwrap();assert!(state.ring.len()<RING_CAPACITY);assert!(state.ring.iter().map(|(_,bytes)|bytes.len()).sum::<usize>()<=MAX_RING_BYTES);let last=serde_json::from_slice::<Value>(&state.ring.back().unwrap().1).unwrap();assert_eq!(last["event"]["data"]["body"],"\u{1}".repeat(16384));assert_ne!(last["event"]["data"]["truncated"],true);
+    }
 
     struct StopHost(AtomicUsize);
     impl Host for StopHost {
@@ -1008,7 +1050,7 @@ mod tests {
             session_id: "clear-stop-test".into(), cwd: "/tmp".into(), model: None,
             engine: "test".into(), doxa_version: "test".into(),
         }, host.clone()).unwrap();
-        let (tx, rx) = mpsc::sync_channel(CLIENT_QUEUE_CAPACITY);
+        let (tx, rx) = frame_channel(CLIENT_QUEUE_CAPACITY);
         let call = json!({"id":1,"method":"stop_if_idle","params":{}});
         daemon.inner.state.lock().unwrap().busy = true;
         handle_call(&daemon.inner, &tx, &call);
@@ -1206,7 +1248,7 @@ mod tests {
         let dir=tempfile::tempdir().unwrap();
         let daemon=Daemon::bind(dir.path(),Session{session_id:"remote-gate".into(),cwd:"/fixture".into(),
             model:None,engine:"test".into(),doxa_version:"test".into()},Arc::new(NoopHost)).unwrap();
-        let (tx,rx)=mpsc::sync_channel(CLIENT_QUEUE_CAPACITY);
+        let (tx,rx)=frame_channel(CLIENT_QUEUE_CAPACITY);
         daemon.inner.state.lock().unwrap().permission_mode="full-access".into();
         handle_prompt(&daemon.inner,&tx,&json!({"id":1,"text":"run","remote":true,"remote_allow_unrestricted":false}));
         assert_eq!(serde_json::from_slice::<Value>(&rx.try_recv().unwrap()).unwrap()["ok"],false);
@@ -1221,7 +1263,7 @@ mod tests {
             engine: "test".into(), doxa_version: "test".into(),
         }, Arc::new(NoopHost)).unwrap();
         daemon.inner.publish(None, json!({"type":"text_delta","data":{"text":"retained"}}));
-        let (tx, rx) = mpsc::sync_channel(CLIENT_QUEUE_CAPACITY);
+        let (tx, rx) = frame_channel(CLIENT_QUEUE_CAPACITY);
         drop(rx);
         assert!(!attach_client(&daemon.inner, 1, None, &tx));
         assert!(daemon.inner.state.lock().unwrap().clients.is_empty());
@@ -1247,7 +1289,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let daemon = Daemon::bind(dir.path(), Session { session_id:"remote-test".into(),cwd:"/repo".into(),
             model:None,engine:"test".into(),doxa_version:"test".into() }, Arc::new(StopHost(AtomicUsize::new(0)))).unwrap();
-        let (tx, rx) = mpsc::sync_channel(CLIENT_QUEUE_CAPACITY);
+        let (tx, rx) = frame_channel(CLIENT_QUEUE_CAPACITY);
         assert!(attach_client_with_identity(&daemon.inner, 1, None, &tx, Some("owner@example.com")));
         assert_eq!(remote_identity(&daemon.inner.state.lock().unwrap()), Some("owner@example.com".into()));
         let frame: Value = serde_json::from_slice(&rx.try_recv().unwrap()).unwrap();

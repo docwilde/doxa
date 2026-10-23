@@ -16,10 +16,30 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+pub const MAX_FLEET_FRAME_BYTES:usize=doxa_protocol::peer::MAX_PEER_WIRE_BYTES;
+pub const MAX_HISTORY_RECORD_BYTES:usize=doxa_protocol::peer::MAX_HISTORY_ROW_BYTES;
 pub const MAX_LEDGER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MAX_BODY_CHARS: usize = 8_000;
 const TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_RECEIPT_BYTES: usize = 1024;
+
+/// The larger opaque wire allowance is not fleet authority. The receiver must
+/// still validate the typed envelope, registered context and kernel sender PID.
+pub fn body_within_limit(body:&str)->bool{
+    if body.starts_with(doxa_protocol::peer::FLEET_PREFIX){
+        doxa_protocol::peer::fleet_wire_within_limit(body)
+    }else{body.chars().count()<=MAX_BODY_CHARS}
+}
+fn frame_limit(body:&str)->usize{if body.starts_with(doxa_protocol::peer::FLEET_PREFIX){MAX_FLEET_FRAME_BYTES}else{MAX_FRAME_BYTES}}
+fn validate_large_frame(value:&serde_json::Value,length:usize)->io::Result<()>{
+    if length<=MAX_FRAME_BYTES{return Ok(());}
+    if length>MAX_FLEET_FRAME_BYTES||value["body"].as_str().is_none_or(|body|!doxa_protocol::peer::fleet_wire_within_limit(body)){
+        return Err(invalid("invalid large fleet frame"));
+    }
+    let mut shell=value.clone();shell["body"]=serde_json::Value::Null;
+    if serde_json::to_vec(&shell).map_err(io::Error::other)?.len()+1>MAX_FRAME_BYTES{return Err(invalid("peer frame metadata exceeds bound"));}
+    Ok(())
+}
 
 /// Recipient admission only: Started/Queued never assert provider completion.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,7 +127,7 @@ fn read_frame(stream: &mut UnixStream) -> io::Result<PeerFrame> {
         };
         if n == 0 { break; }
         bytes.extend_from_slice(&buf[..n]);
-        if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
+        if bytes.len() > MAX_FLEET_FRAME_BYTES { return Err(invalid("peer frame too large")); }
         if bytes.contains(&b'\n') { break; }
     }
     parse_frame(&bytes)
@@ -115,8 +135,14 @@ fn read_frame(stream: &mut UnixStream) -> io::Result<PeerFrame> {
 fn parse_frame(bytes: &[u8]) -> io::Result<PeerFrame> {
     if bytes.is_empty() { return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty peer probe")); }
     if bytes.last() != Some(&b'\n') || bytes[..bytes.len()-1].contains(&b'\n') { return Err(invalid("peer frame must be one complete line")); }
+    if bytes.len()>MAX_FRAME_BYTES{
+        let text=std::str::from_utf8(&bytes[..bytes.len()-1]).map_err(|_|invalid("invalid peer JSON"))?;
+        let value=doxa_protocol::peer::unique_json(text).ok_or_else(||invalid("invalid or duplicate peer JSON"))?;
+        if value.to_string().len()!=text.len(){return Err(invalid("noncanonical large peer JSON"));}
+        validate_large_frame(&value,bytes.len())?;
+    }
     let frame: PeerFrame = serde_json::from_slice(&bytes[..bytes.len()-1]).map_err(|_| invalid("invalid peer JSON"))?;
-    if frame.from_id.is_empty() || frame.body.chars().count() > MAX_BODY_CHARS {
+    if bytes.len()>frame_limit(&frame.body)||frame.from_id.is_empty()||!body_within_limit(&frame.body) {
         return Err(invalid("invalid peer identity or body"));
     }
     Ok(frame)
@@ -177,7 +203,7 @@ impl Inbox {
                 Err(error) => { *pending = None; return Err(error); }
             };
             if n > 0 { frame.bytes.extend_from_slice(&buf[..n]); }
-            if frame.bytes.len() > MAX_FRAME_BYTES {
+            if frame.bytes.len() > MAX_FLEET_FRAME_BYTES {
                 *pending = None;
                 return Err(invalid("peer frame too large"));
             }
@@ -287,6 +313,7 @@ pub(crate) fn probe_socket(path: &Path, roster_deadline: Instant) -> bool {
 }
 
 fn transmit(path: &Path, frame: &PeerFrame, receipt_id:Option<&str>) -> io::Result<(UnixStream,Instant)> {
+    if !body_within_limit(&frame.body){return Err(invalid("invalid peer body"));}
     let meta = fs::symlink_metadata(path)?;
     if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() }
         || meta.permissions().mode() & 0o077 != 0 { return Err(invalid("unsafe peer socket")); }
@@ -294,7 +321,8 @@ fn transmit(path: &Path, frame: &PeerFrame, receipt_id:Option<&str>) -> io::Resu
     if let Some(id)=receipt_id{value["doxa_peer_receipt_id"]=serde_json::json!(id);}
     let mut bytes = serde_json::to_vec(&value).map_err(io::Error::other)?;
     bytes.push(b'\n');
-    if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
+    if bytes.len() > frame_limit(&frame.body) { return Err(invalid("peer frame too large")); }
+    validate_large_frame(&value,bytes.len())?;
     let deadline = Instant::now() + TIMEOUT;
     let mut stream = connect_before(path, deadline).map_err(|error|
         io::Error::new(error.kind(), format!("peer connect: {error}")))?;
@@ -429,7 +457,7 @@ impl Ledger {
         let meta = file.metadata()?;
         if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1
             || meta.mode() & 0o077 != 0 { return Err(invalid("unsafe ledger file")); }
-        const TAIL: u64 = 256 * 1024;
+        const TAIL: u64 = doxa_protocol::peer::MAX_HISTORY_TAIL_BYTES as u64;
         let offset = meta.len().saturating_sub(TAIL);
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = Vec::new(); file.take(TAIL).read_to_end(&mut bytes)?;
@@ -438,7 +466,7 @@ impl Ledger {
         if start >= end { return Ok(Vec::new()); }
         let mut result = Vec::new(); let mut output_bytes = 0usize;
         for line in bytes[start..end].split(|b| *b == b'\n').rev() {
-            if line.len() > 32 * 1024 { continue; }
+            if line.len() > MAX_HISTORY_RECORD_BYTES { continue; }
             let Ok(mut message) = serde_json::from_slice::<Message>(line) else { continue; };
             if message.sender.repo.as_deref() != Some(scope)
                 || (message.sender.session != session && !message.to.iter().any(|target| target == session))
@@ -448,8 +476,11 @@ impl Ledger {
             for value in [&mut message.sender.title, &mut message.sender.repo, &mut message.sender.model, &mut message.sender.engine] {
                 *value = value.take().map(|value| scrubber.scrub(&value));
             }
+            let fleet=message.body.starts_with(doxa_protocol::peer::FLEET_PREFIX);
+            if line.len()>32*1024&&!fleet{continue;}
             let length = serde_json::to_vec(&message).map_err(io::Error::other)?.len();
-            if output_bytes.saturating_add(length) > output_limit { break; }
+            let bound=if fleet{output_limit.max(doxa_protocol::peer::MAX_HISTORY_BYTES)}else{output_limit};
+            if output_bytes.saturating_add(length) > bound { break; }
             output_bytes += length; result.push(message);
             if result.len() == limit { break; }
         }
@@ -542,7 +573,7 @@ pub fn deliver_with_receipts(registry: &Registry, sender: &PeerRecord, recipient
 }
 fn deliver_internal(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
     turn_id: Option<&str>, in_reply_to: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber, receipts:bool, message_id:Option<&str>) -> io::Result<DeliveryResult> {
-    if body.trim().is_empty() || body.chars().count() > MAX_BODY_CHARS { return Err(invalid("invalid peer body")); }
+    if body.trim().is_empty() || !body_within_limit(body) { return Err(invalid("invalid peer body")); }
     if !matches!(kind, "direct" | "broadcast") { return Err(invalid("invalid peer kind")); }
     if in_reply_to.is_some_and(|id|Uuid::parse_str(id).is_err()) { return Err(invalid("invalid peer reply reference")); }
     if message_id.is_some_and(|id|!valid_reply_reference(id)){return Err(invalid("invalid peer message identity"));}

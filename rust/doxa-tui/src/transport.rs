@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 pub const PROTOCOL_NAME: &str = "doxa-daemon";
 pub use doxa_protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION};
 const MAX_QUEUED_FRAMES: usize = 1024;
+const MAX_QUEUED_BYTES:usize=MAX_QUEUED_FRAMES*MAX_FRAME_BYTES;
 // Darwin may report a queued AF_UNIX connection as established before the
 // listener accepts it. A short hello deadline keeps a full backlog bounded.
 #[cfg(target_os = "macos")]
@@ -126,6 +127,7 @@ pub struct DaemonClient {
     pub cursor: u64,
     next_id: u64,
     queued: VecDeque<Value>,
+    queued_bytes:usize,
     pending_bytes: Vec<u8>,
 }
 
@@ -185,6 +187,7 @@ impl DaemonClient {
         let mut client = Self {
             reader, writer, hello, cursor: attach_cursor.unwrap_or(0), next_id: 1,
             queued: VecDeque::new(),
+            queued_bytes:0,
             pending_bytes,
         };
         if deadline.is_some() { client.writer.set_write_timeout(Some(remaining()?))?; }
@@ -196,7 +199,7 @@ impl DaemonClient {
     /// Read one validated event or reply JSON object. An idle event stream
     /// blocks until a frame arrives or the daemon closes the socket.
     pub fn next_frame(&mut self) -> Result<Value, TransportError> {
-        if let Some(frame) = self.queued.pop_front() {
+        if let Some(frame) = self.take_queued(0) {
             return Ok(frame);
         }
         self.read_frame()
@@ -205,7 +208,7 @@ impl DaemonClient {
     /// Return `None` if no full frame arrives before `timeout`. Bytes from a
     /// partial line are retained for the next poll.
     pub fn poll_frame(&mut self, timeout: Duration) -> Result<Option<Value>, TransportError> {
-        if let Some(frame) = self.queued.pop_front() {
+        if let Some(frame) = self.take_queued(0) {
             return Ok(Some(frame));
         }
         let result = self.read_frame_until(Some(Instant::now() + timeout));
@@ -304,7 +307,7 @@ impl DaemonClient {
 
     fn await_reply(&mut self, id: u64) -> Result<Value, TransportError> {
         if let Some(index) = self.queued.iter().position(|f| f["type"] == "reply" && f["id"] == id) {
-            return Ok(self.queued.remove(index).unwrap());
+            return Ok(self.take_queued(index).unwrap());
         }
         self.await_reply_until(id, Instant::now() + REPLY_TIMEOUT)
     }
@@ -315,13 +318,16 @@ impl DaemonClient {
             if frame["type"] == "reply" && frame["id"] == id {
                 return Ok(frame);
             }
-            if self.queued.len() == MAX_QUEUED_FRAMES {
+            let bytes=serde_json::to_vec(&frame).map_err(|_|TransportError::Malformed("invalid queued frame"))?.len()+1;
+            if self.queued.len() == MAX_QUEUED_FRAMES||self.queued_bytes.saturating_add(bytes)>MAX_QUEUED_BYTES {
                 return Err(TransportError::QueueFull);
             }
             self.queued.push_back(frame);
+            self.queued_bytes+=bytes;
         })();
         result
     }
+    fn take_queued(&mut self,index:usize)->Option<Value>{let frame=self.queued.remove(index)?;self.queued_bytes-=serde_json::to_vec(&frame).unwrap().len()+1;Some(frame)}
 }
 
 fn read_snapshot(hello: &Value) -> Option<TranscriptSnapshot> {
@@ -399,13 +405,15 @@ fn read_json_until(reader: &mut BufReader<UnixStream>, pending: &mut Vec<u8>, de
         }
         let end = available.iter().position(|byte| *byte == b'\n');
         let amount = end.map_or(available.len(), |position| position + 1);
-        if pending.len() + amount > MAX_FRAME_BYTES {
+        if pending.len() + amount > doxa_protocol::large_peer::line_limit(pending,&available[..amount]) {
             return Err(TransportError::FrameTooLarge);
         }
         pending.extend_from_slice(&available[..amount]);
         reader.consume(amount);
         if end.is_some() {
-            let parsed = serde_json::from_slice(pending).map_err(|_| TransportError::Malformed("invalid JSON"));
+            let parsed = if pending.len()>MAX_FRAME_BYTES{
+                doxa_protocol::decode_line(pending,Direction::ServerToClient).map_err(map_wire_error)
+            }else{serde_json::from_slice(pending).map_err(|_|TransportError::Malformed("invalid JSON"))};
             pending.clear();
             return parsed;
         }

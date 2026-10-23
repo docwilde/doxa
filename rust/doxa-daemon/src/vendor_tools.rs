@@ -103,6 +103,13 @@ mod tests {
     use super::*;
     use serde_json::Map;
     use std::fs;
+    #[test]
+    fn fleet_peer_send_can_review_the_complete_escaped_body_without_expanding_other_desks(){
+        for body in ["x".repeat(16384),"🧪".repeat(4096),"\"".repeat(16384),"\u{1}".repeat(16384)]{
+            let desk=PeerDesk::default();let arguments=json!({"to":"peer","body":body});let(request,mut reply)=desk.begin(doxa_engines::peer_tools::SEND,&arguments).unwrap();assert_eq!(serde_json::from_str::<Value>(request["input_summary"].as_str().unwrap()).unwrap(),arguments);desk.answer(request["id"].as_str().unwrap(),&json!({"decision":"deny"})).unwrap();assert!(!reply.try_recv().unwrap());
+        }
+        let desk=PeerDesk::default();assert!(desk.begin("external",&json!({"text":"x".repeat(32*1024)})).is_err());
+    }
 
     fn call(path: &str) -> ToolCall {
         let mut arguments = Map::new();
@@ -164,7 +171,8 @@ struct PeerPending { id: String, sender: tokio::sync::oneshot::Sender<bool> }
 impl PeerDesk {
     fn begin(&self, tool: &str, arguments: &Value) -> Result<(Value, tokio::sync::oneshot::Receiver<bool>), ()> {
         let summary = arguments.to_string();
-        if summary.len() > 32 * 1024 { return Err(()); }
+        let limit=if tool==doxa_engines::peer_tools::SEND{doxa_protocol::peer::MAX_SEND_REQUEST_BYTES}else{32*1024};
+        if summary.len() > limit { return Err(()); }
         let mut pending = self.pending.lock().map_err(|_| ())?;
         if pending.as_ref().is_some_and(|ask| !ask.sender.is_closed()) { return Err(()); }
         let generation = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| ())?.as_nanos();

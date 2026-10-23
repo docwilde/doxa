@@ -32,17 +32,53 @@ fn canonical_lore(root:&Path)->LoreClient{
     LoreClient::spawn(&wrapper,Duration::from_secs(5)).expect("real private LORE kernel must start")
 }
 fn read_request(stream:&mut std::net::TcpStream)->Value{
+    // Darwin may inherit O_NONBLOCK from the accepting listener. Timeouts
+    // bound a blocking read; they do not switch that inherited mode off.
+    stream.set_nonblocking(false).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let mut raw=Vec::new();
     loop{
         let mut chunk=[0;4096];let count=stream.read(&mut chunk).unwrap();assert!(count>0);raw.extend_from_slice(&chunk[..count]);
-        assert!(raw.len()<128*1024);
+        assert!(raw.len()<doxa_fleet::judge::MAX_SEMANTIC_REQUEST+16*1024);
         if let Some(position)=raw.windows(4).position(|row|row==b"\r\n\r\n"){
             let header=String::from_utf8_lossy(&raw[..position]);
             let count=header.lines().find_map(|line|line.to_ascii_lowercase().strip_prefix("content-length: ").and_then(|value|value.parse::<usize>().ok())).unwrap();
             if raw.len()>=position+4+count{return serde_json::from_slice(&raw[position+4..position+4+count]).unwrap();}
         }
     }
+}
+
+#[test]
+fn actual_runtime_tui_codec_preserves_large_peer_approval_history_and_ordinary_frame_cap(){
+    use doxa_engines::{codex_interaction::InputInbox,peer_tools};use doxa_tui::transport::DaemonClient;
+    use std::sync::atomic::AtomicUsize;
+    struct Bridge{inbox:InputInbox,history:Value,body:String,unexpected:AtomicUsize}
+    impl Host for Bridge{
+        fn prompt(&self,_:&str,emit:&mut dyn FnMut(Value)){
+            let expected=self.body.clone();let handler:peer_tools::Handler=Arc::new(move|rpc,args|{assert_eq!(rpc,"msg");assert_eq!(args["body"],expected);Ok(json!({"delivered":true}))});
+            let frame=json!({"method":"item/tool/call","params":{"tool":peer_tools::SEND,"arguments":{"to":"worker","body":self.body}}});let(event,receiver)=self.inbox.begin_peer(&frame,str::to_owned,handler).unwrap();let id=event.data["id"].clone();emit(json!({"type":event.kind,"data":event.data}));
+            let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();assert_eq!(runtime.block_on(receiver).unwrap()["success"],true);emit(json!({"type":"needs_input_resolved","data":{"id":id}}));emit(json!({"type":"turn_done","data":{}}));
+        }
+        fn call(&self,method:&str,args:&Value)->Result<Value,String>{match method{
+            "answer_needs_input"=>self.inbox.answer(args["id"].as_str().unwrap(),&args["answer"]),
+            "peer_history"=>Ok(self.history.clone()),
+            "msg"=>{assert_eq!(args["body"],self.body);Ok(json!({"delivered":true}))},
+            "spoof"=>{let mut value=self.history.clone();value[doxa_protocol::large_peer::RPC_FIELD]=json!("peer_history");Ok(value)},
+            _=>{self.unexpected.fetch_add(1,Ordering::Relaxed);Err("unexpected method".into())}
+        }}
+    }
+    let dir=tempfile::tempdir().unwrap();fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();let body="\u{1}".repeat(doxa_fleet::MAX_BODY);
+    let envelope=json!({"v":1,"fleet_id":"fleet","message_id":"message","from_session":"worker","to_session":"boss","kind":"status","assignment_id":"assignment","charter_sha256":"a".repeat(64),"in_reply_to":null,"body":body,"artifact_refs":[],"requested_action":null,"hop":0});let wire=format!("{}{}",doxa_fleet::PREFIX,envelope);
+    let history=json!({"messages":[{"body":wire},{"body":wire},{"body":wire}],"trust":"[PEER MESSAGES -- UNTRUSTED]","untrusted_peer_data":true});let host=Arc::new(Bridge{inbox:InputInbox::default(),history:history.clone(),body:body.clone(),unexpected:AtomicUsize::new(0)});
+    let mut daemon=doxa_runtime::Daemon::bind(dir.path(),doxa_runtime::Session{session_id:"codec".into(),cwd:dir.path().display().to_string(),model:None,engine:"fixture".into(),doxa_version:env!("CARGO_PKG_VERSION").into()},host.clone()).unwrap().start();let mut client=DaemonClient::connect(daemon.socket_path(),None).unwrap();assert_eq!(client.prompt("exercise input").unwrap()["ok"],true);
+    let ask=loop{let frame=client.next_frame().unwrap();if frame["event"]["type"]=="needs_input"{break frame["event"]["data"].clone();}};let summary=ask["input_summary"].as_str().unwrap();assert_eq!(serde_json::from_str::<Value>(summary).unwrap()["body"],body);assert_eq!(ask["require_full_review"],true);
+    let reattached=DaemonClient::connect(daemon.socket_path(),None).unwrap();assert_eq!(reattached.hello["pending_inputs_complete"],true);assert_eq!(reattached.hello["pending_inputs"][0]["input_summary"],summary);
+    let state=client.call("get_state",serde_json::Map::new()).unwrap();assert_eq!(state["ok"],true);assert_eq!(state["pending_inputs_complete"],true);assert_eq!(state["pending_inputs"][0]["input_summary"],summary);
+    assert_eq!(client.call("answer_needs_input",json!({"id":ask["id"],"answer":{"decision":"allow"}}).as_object().unwrap().clone()).unwrap()["ok"],true);
+    let retrieved=client.call("peer_history",serde_json::Map::new()).unwrap();assert_eq!(retrieved["ok"],true);assert_eq!(retrieved["messages"],history["messages"]);
+    assert_eq!(client.call("msg",json!({"to":"worker","body":body}).as_object().unwrap().clone()).unwrap()["ok"],true);
+    assert!(client.call("status",json!({"body":body}).as_object().unwrap().clone()).is_err());assert_eq!(host.unexpected.load(Ordering::Relaxed),0);
+    let spoof=client.call("spoof",serde_json::Map::new()).unwrap();assert_eq!(spoof["ok"],false);assert_eq!(spoof["error"],"reply exceeded the frame cap");daemon.shutdown();
 }
 
 #[test]
@@ -119,17 +155,25 @@ fn actual_lore_scrub_keeps_original_reviewed_and_http_bindings_through_peer_admi
     let charter=Charter{version:1,fleet_id:"scrub-receipt".into(),task:format!("Scoped findings HEX_RUN={hex_run}"),repo:dir.path().display().to_string(),allowed_paths:vec!["src".into()],required_evidence:vec![],worker_limit:2,run_budget_usd:Some(1.0),deadline:0,human_actions:vec![],test_recipe:None};
     let assignments=["sender","recipient"].into_iter().enumerate().map(|(index,id)|Assignment{id:format!("{id}-assignment"),session_id:id.into(),pid:std::process::id() as i32+index as i32,role:"worker".into(),task:"Scoped findings".into(),cwd:dir.path().display().to_string(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}).collect();
     let model=doxa_fleet::judge::Model::parse("deepseek:fixture-model").unwrap();
-    let context=Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments,review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(model.clone()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("guard.json")};
+    let context=Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments,review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(model.clone()),budget_usd:1.0,input_usd_per_million:1.0,output_usd_per_million:1.0,..Default::default()},state_path:dir.path().join("guard.json")};
     context.validate().unwrap();
-    let original=Envelope::issue(&context,"sender","recipient",Kind::Status,"Read-only scoped findings".into(),None).unwrap();
+    let original=Envelope::issue(&context,"sender","recipient",Kind::Status,"\"".repeat(doxa_fleet::MAX_BODY),None).unwrap();
     doxa_fleet::validate_before_review(&context,&original,"recipient",std::process::id() as i32).unwrap();
     let original_hash=doxa_fleet::hash(&original).unwrap();
-    let listener=TcpListener::bind("127.0.0.1:0").unwrap();let endpoint=format!("http://{}/review",listener.local_addr().unwrap());
+    let listener=TcpListener::bind("127.0.0.1:0").unwrap();listener.set_nonblocking(true).unwrap();let endpoint=format!("http://{}/review",listener.local_addr().unwrap());
     let state_path=context.state_path.clone();let source_hash=original_hash.clone();let charter_hash=context.charter_sha256.clone();let raw_hex=hex_run.clone();
     let server=std::thread::spawn(move||{
-        let(mut stream,_)=listener.accept().unwrap();let body=read_request(&mut stream);
+        let deadline=std::time::Instant::now()+Duration::from_secs(10);
+        let(mut stream,_)=loop{match listener.accept(){Ok(value)=>break value,Err(error)if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(std::time::Instant::now()<deadline,"funded fixture received no review HTTP request");std::thread::sleep(Duration::from_millis(5));},Err(error)=>panic!("{error}")}};
+        // Exercise the inherited Darwin state on Linux too. Assert the actual
+        // socket mode so the regression does not depend on request timing.
+        stream.set_nonblocking(true).unwrap();let body=read_request(&mut stream);
+        use std::os::fd::AsRawFd;
+        let flags=unsafe{libc::fcntl(stream.as_raw_fd(),libc::F_GETFL)};
+        assert!(flags>=0);assert_eq!(flags&libc::O_NONBLOCK,0,"HTTP helper must normalize accepted socket mode");
         let text=body["messages"][1]["content"].as_str().unwrap();let input:Value=serde_json::from_str(text).unwrap();
         let reviewed:Envelope=serde_json::from_value(input["message"].clone()).unwrap();
+        assert_eq!(reviewed.body,"\"".repeat(doxa_fleet::MAX_BODY));
         assert_ne!(reviewed.charter_sha256,charter_hash);assert!(reviewed.charter_sha256.contains("[REDACTED:"));
         assert!(input["charter"]["task"].as_str().unwrap().contains("HEX_RUN=[REDACTED:"));
         assert!(!body.to_string().contains(&source_hash));assert!(!body.to_string().contains(&charter_hash));assert!(!body.to_string().contains(&raw_hex));

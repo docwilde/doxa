@@ -71,3 +71,16 @@ fn validated_resume_identity_refuses_stale_context_guard_and_host_bindings(){
     fs::write(&context.state_path,b"{invalid guard}").unwrap();assert!(peer.call("fleet_identity",&request).is_err());
     assert!(peer.call("fleet_identity",&json!({})).unwrap()["guard"].is_null(),"pre-configuration metadata contract remains independent of guard validation");
 }
+
+#[test]
+fn oversized_fleet_send_and_ordinary_receive_refuse_before_review_or_delivery(){
+    let(_dir,_home,peer,context)=fixture();let before=fs::read(&context.state_path).unwrap();
+    for body in ["x".repeat(16385),format!("{}x","🧪".repeat(4096))]{
+        let error=peer.call("msg",&json!({"to":"other","body":body})).unwrap_err();assert_eq!(error,doxa_protocol::peer::body_limit_error(16385));assert_eq!(fs::read(&context.state_path).unwrap(),before);
+    }
+    *peer.fleet.lock().unwrap()=None;
+    let frame=|body:String|PeerFrame{authenticated_pid:Some(std::process::id() as i32),from_id:"other".into(),from_title:"Other".into(),sent_at:"now".into(),body,from_repo:Some(peer.scope.clone()),kind:Some("fleet".into())};
+    assert!(peer.inbound_event(frame("x".repeat(8001)),None).unwrap_err().contains("8000"));
+    let forged=format!("{}{}",doxa_fleet::PREFIX,json!({"v":1,"fleet_id":"fleet","message_id":"message","from_session":"other","to_session":"worker","kind":"status","assignment_id":"assignment","charter_sha256":"a".repeat(64),"in_reply_to":null,"body":"x".repeat(16384),"artifact_refs":[],"requested_action":null,"hop":0}));
+    assert!(peer.inbound_event(frame(forged),None).unwrap_err().contains("configured recipient guard"));assert_eq!(fs::read(&context.state_path).unwrap(),before);
+}

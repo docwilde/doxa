@@ -9,6 +9,8 @@ use std::fmt;
 
 pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+pub mod peer;
+pub mod large_peer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction { ClientToServer, ServerToClient }
@@ -40,20 +42,28 @@ impl std::error::Error for WireError {}
 
 /// Decode one full newline-delimited frame, retaining extension fields.
 pub fn decode_line(line: &[u8], direction: Direction) -> Result<Value, WireError> {
-    if line.len() > MAX_FRAME_BYTES { return Err(WireError::FrameTooLarge); }
+    if line.len() > large_peer::line_limit(&[],line) { return Err(WireError::FrameTooLarge); }
     if !line.ends_with(b"\n") { return Err(WireError::IncompleteFrame); }
     let value: Value = serde_json::from_slice(line).map_err(|_| WireError::InvalidJson)?;
     validate(&value, direction)?;
+    if line.len()>MAX_FRAME_BYTES{
+        if line.len()>large_peer::limit(&value,direction)||encode_line(&value,direction)?.as_slice()!=line{return Err(WireError::FrameTooLarge);}
+    }
     Ok(value)
 }
 
-/// Encode a validated frame. This refuses output that a Python 1.x peer
-/// would drop because it exceeds `peers.MAX_FRAME_BYTES`.
+/// Frames through 64 KiB retain the existing wire representation. Larger
+/// canonical peer frames require extension-aware clients and daemons at both
+/// ends; their leading marker never exempts unrelated decoded payloads.
 pub fn encode_line(value: &Value, direction: Direction) -> Result<Vec<u8>, WireError> {
     validate(value, direction)?;
     let mut bytes = serde_json::to_vec(value).map_err(|_| WireError::InvalidJson)?;
     bytes.push(b'\n');
-    if bytes.len() > MAX_FRAME_BYTES { return Err(WireError::FrameTooLarge); }
+    if bytes.len()>MAX_FRAME_BYTES{
+        if large_peer::limit(value,direction)==MAX_FRAME_BYTES{return Err(WireError::FrameTooLarge);}
+        bytes=large_peer::mark_first(value).map_err(|_|WireError::InvalidJson)?;
+        if bytes.len()>large_peer::MAX_LARGE_PEER_BYTES{return Err(WireError::FrameTooLarge);}
+    }
     Ok(bytes)
 }
 
@@ -128,7 +138,7 @@ impl LineBuffer {
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, WireError> {
         let mut lines = Vec::new();
         for segment in bytes.split_inclusive(|byte| *byte == b'\n') {
-            if self.pending.len().saturating_add(segment.len()) > MAX_FRAME_BYTES {
+            if self.pending.len().saturating_add(segment.len()) > large_peer::line_limit(&self.pending,segment) {
                 self.pending.clear();
                 return Err(WireError::FrameTooLarge);
             }

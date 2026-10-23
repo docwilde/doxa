@@ -1,11 +1,12 @@
 [package]
 name = "doxa-fleet"
-version = "2.0.0-beta.73"
+version = "2.0.0-beta.74"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
 
 [dependencies]
+doxa-protocol = { path = "../doxa-protocol" }
 doxa-state = { path = "../doxa-state" }
 doxa-isolation = { path = "../doxa-isolation" }
 doxa-vendors = { path = "../doxa-vendors" }
