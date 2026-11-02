@@ -6,7 +6,7 @@ publish = false
 license = "AGPL-3.0-only"
 
 [dependencies]
-lore-core = { git = "https://github.com/docwilde/LORE", rev = "d0dcbcc9a06690a1c340c858c5590d23fe814b77" }
+lore-core = { git = "https://github.com/docwilde/LORE", rev = "a6eb853cbaabe9f8e4fc2db0e2c01987a1d2957b" }
 doxa-codegraph = { path = "../doxa-codegraph" }
 doxa-state = { path = "../doxa-state" }
 doxa-vendors = { path = "../doxa-vendors" }
