@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.75 — 2026-11-12
+
+**LORE 0.62.26**
+
+- Update **`lore-core`** to LORE 0.62.26. Memory replacements that normalize to empty text are refused before any entry, provenance or sync change; deletion still uses remove.
+- Report a `--match` that hits no memory or filemap entry, or several, as **`match_not_found`** or **`match_ambiguous`** instead of `review_changed` (LORE 0.62.25). DOXA's exact reviewed memory actions keep their `memory_changed` stale-snapshot refusal.
+- Fix the weekly **LORE bump** verification failing `router_compaction`: its private test root made fleet sockets exceed the 108-byte AF_UNIX path limit.
+
 ## 2.0.0-beta.74 — 2026-10-24
 
 **Fleet message capacity**
