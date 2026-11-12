@@ -68,7 +68,9 @@ jobs:
         run: |
           set -euo pipefail
           cargo +stable build --locked --package lore-core --bin lore-rs
-          native_tests=$(mktemp -d "$RUNNER_TEMP/lore-upgrade-XXXXXX")
+          # Keep the private test root as short as Rust CI's: fleet sockets
+          # beneath it must fit the 108-byte AF_UNIX path limit.
+          native_tests=$(mktemp -d "$HOME/.lu-XXXXXX")
           trap 'rm -rf "$native_tests"' EXIT
           export TMPDIR="$native_tests"
           HOME="$native_tests/home" "$DOXA_LORE_RS" memory show
