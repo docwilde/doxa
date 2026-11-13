@@ -12,7 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 pub const SUPPORTED_VERSION: &str = "0.165.0";
 pub const PROTECTED_AGENT_PREFIX: &str = "doxa_codex_rs/0.165.0 (doxa-precompact-fail-closed-v1; ";
 pub const SUPPORTED_SOURCE: &str = "360319d8dee62d87e2d59fc0c21805d79519cfed";
-pub const SUPPORTED_PATCH: &str = "128293eb2e10aebdff916ab1d8fbce30fa10eba2dfac01cc501f9c1591034484";
+pub const SUPPORTED_PATCH: &str = "376dc69901a97e62d19c6bf32377c4d464e93192340aa582d6992f2613f8ca46";
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
