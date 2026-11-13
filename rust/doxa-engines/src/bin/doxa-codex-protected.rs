@@ -20,7 +20,7 @@ use std::{
 
 const SOURCE: &str = "360319d8dee62d87e2d59fc0c21805d79519cfed";
 const CONTRACT: &str = "doxa-precompact-fail-closed-v1";
-const PATCH: &str = "128293eb2e10aebdff916ab1d8fbce30fa10eba2dfac01cc501f9c1591034484";
+const PATCH: &str = "376dc69901a97e62d19c6bf32377c4d464e93192340aa582d6992f2613f8ca46";
 const MAX_BINARY: u64 = 1024 * 1024 * 1024;
 
 #[derive(Deserialize)]

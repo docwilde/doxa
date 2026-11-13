@@ -3963,7 +3963,7 @@ import json, sys, tomllib
 
 def fixture_config():
     overrides = [sys.argv[i+1] for i, item in enumerate(sys.argv[:-1]) if item == '-c']
-    for flag in ('features.token_budget=false', 'features.async_compaction=false',
+    for flag in ('features.token_budget=false', 'features.context_management=false', 'features.async_compaction=false',
                  'agents.enabled=false', 'features.multi_agent_v2=false'):
         assert flag in overrides, flag
     def merge(target, incoming):
@@ -5038,7 +5038,7 @@ source.parent.mkdir(parents=True,exist_ok=True)
 if not source.exists(): source.write_text(json.dumps({'type':'session_meta','payload':{'id':'thread-1'}})+'\n')
 def fixture_config():
     overrides = [sys.argv[i+1] for i, item in enumerate(sys.argv[:-1]) if item == '-c']
-    for flag in ('features.token_budget=false', 'features.async_compaction=false',
+    for flag in ('features.token_budget=false', 'features.context_management=false', 'features.async_compaction=false',
                  'agents.enabled=false', 'features.multi_agent_v2=false'):
         assert flag in overrides, flag
     def merge(target, incoming):

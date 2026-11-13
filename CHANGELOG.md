@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.77 — 2026-11-12
+
+**Protected Codex hardening**
+
+- Fix **`persist_execpolicy_amendment`** writing a durable allow rule from a stale approval answered after live auto tightened the turn to never. The rule is now committed under the same lock that publishes the switch, and refused once it has happened. New regression: `doxa_auto_refuses_an_execpolicy_amendment_answered_after_the_switch`.
+- Pin and verify **`features.context_management=false`**. Experimental context management could re-enable the token budget at session start despite `features.token_budget=false`; startup now refuses unless both are off.
+- Provider patch `376dc699` replaces `128293eb` on the same Codex 0.165.0 source. Docker sessions saved with the beta.76 provider resume only with beta.76; earlier 0.163.0 and 0.164.0 sessions are unaffected.
+
 ## 2.0.0-beta.76 — 2026-11-12
 
 **Protected Codex 0.165.0**

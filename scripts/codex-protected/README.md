@@ -19,7 +19,10 @@ that foreground review. This path is deliberately disabled in the protected
 payload: the scheduler refuses it even with its feature enabled, and the direct
 background execution entry point returns `TurnAborted` before a request. DOXA
 also overrides and verifies `features.async_compaction=false`. Token-budget
-reset remains disabled. Background compaction may only be enabled after a
+reset remains disabled: DOXA overrides and verifies `features.token_budget=false`
+and `features.context_management=false`, because experimental context
+management would otherwise re-enable the token budget at session start for
+eligible accounts. Background compaction may only be enabled after a
 separate reviewed pre-inference authorization design and compiled proof.
 
 The private `doxaAuto` live update only tightens on-request approval to never.
@@ -48,7 +51,7 @@ python3 scripts/codex-protected/verify_code_mode.py --server PRIVATE_SERVER --sc
 ```
 
 List each Rust filter first and require a nonzero inventory: the current source
-has eight core guard tests and one hook guard test. The originating-turn,
+has nine core guard tests and one hook guard test. The originating-turn,
 environment-keyed permission-grant and strict Guardian review baselines must
 also remain passing. These focused checks do not replace the complete upstream
 test suite.
@@ -72,6 +75,13 @@ discovered as `System` hooks at `<environment:ID>/requirements.toml`, so they
 can stop compaction but never satisfy the required session-flags identity.
 No new caller replaces history or starts compaction inference outside the
 gate. The review record is `reviews/0.165.0.json`.
+
+Revision `376dc699` (`reviews/0.165.0-r2.json`) keeps the same 0.165.0 source.
+A stale command approval answered after the live-auto switch can no longer
+persist an execpolicy amendment: the durable allow rule is written under the
+same `active_turn` lock that publishes the switch, and refused once it has.
+Docker sessions saved with the earlier `128293eb` revision resume with
+beta.76.
 
 The 0.164.0 port preserved structured approval source and cancellation
 metadata when a live-auto switch refuses a stale result. It also made remote

@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "review_kind": "manual protected contract revision on unchanged upstream source; no automatic approval exception",
+  "before": {
+    "schema": 1,
+    "version": "0.165.0",
+    "tag": "rust-v0.165.0",
+    "source_commit": "360319d8dee62d87e2d59fc0c21805d79519cfed",
+    "patch_sha256": "128293eb2e10aebdff916ab1d8fbce30fa10eba2dfac01cc501f9c1591034484",
+    "contract": "doxa-precompact-fail-closed-v1",
+    "provider": "codex-0.165.0-precompact-v1"
+  },
+  "after": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "376dc69901a97e62d19c6bf32377c4d464e93192340aa582d6992f2613f8ca46",
+    "provider": "codex-0.165.0-precompact-v1",
+    "schema": 1,
+    "source_commit": "360319d8dee62d87e2d59fc0c21805d79519cfed",
+    "tag": "rust-v0.165.0",
+    "version": "0.165.0"
+  },
+  "patch_delta": "Adds only the live-auto guard in Session::persist_execpolicy_amendment (core/src/session/mod.rs) and its regression test (core/src/session/step_activation_tests.rs). All other hunks are byte-identical to 128293eb.",
+  "resolves": {
+    "execpolicy_amendment_after_switch": "persist_execpolicy_amendment, the only writer of execpolicy amendments, now holds the active_turn lock that apply_turn_settings uses to publish doxaAuto, and refuses to write once the active turn has switched. A stale exec approval with AcceptWithExecpolicyAmendment answered after the switch is still denied by request_command_approval and no longer leaves a durable allow rule in memory or on disk. The exec-policy update semaphore is a leaf lock, so holding active_turn across it cannot deadlock.",
+    "context_management_token_budget": "Host side, no patch change: DOXA passes features.context_management=false with the other protected overrides and refuses startup unless config/read reports it false. apply_experimental_context returns before enabling TokenBudget when ContextManagement is off. apply_model_defaults already honours the explicit features.token_budget override. The key exists, defaulting to false, in 0.163.0, 0.164.0 and 0.165.0."
+  },
+  "compatibility": "Retained contracts stay keyed by version, so the replaced 128293eb patch is not added to retained.json; it remains in the installer migration registry and as PREVIOUS_PATCHES for rollback. Docker sessions saved with the beta.76 provider are refused on resume with their data retained, and resume with beta.76.",
+  "required_new_regression": "doxa_auto_refuses_an_execpolicy_amendment_answered_after_the_switch",
+  "regression_negative_control": "With the guard disabled the regression fails at its unchanged-rules-file assertion: the approval is denied but the rule is written.",
+  "compiled_verification": "Separate hash-bound build and compiled guard proof required; this static review record is never an acceptance receipt.",
+  "automatic_sensitive_path_gate_changed": false
+}

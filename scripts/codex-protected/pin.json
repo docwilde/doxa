@@ -1,6 +1,6 @@
 {
   "contract": "doxa-precompact-fail-closed-v1",
-  "patch_sha256": "128293eb2e10aebdff916ab1d8fbce30fa10eba2dfac01cc501f9c1591034484",
+  "patch_sha256": "376dc69901a97e62d19c6bf32377c4d464e93192340aa582d6992f2613f8ca46",
   "provider": "codex-0.165.0-precompact-v1",
   "schema": 1,
   "source_commit": "360319d8dee62d87e2d59fc0c21805d79519cfed",

@@ -424,7 +424,7 @@ def configure(root, peer):
     home.mkdir(mode=0o700)
     config = '\n'.join(['model="gpt-6-sol"', 'model_provider="doxa_fixture"',
         'model_auto_compact_token_limit=100000000', 'model_post_turn_compact_threshold_percent=0',
-        '[agents]', 'enabled=false', '[features]', 'codex_hooks=true', 'token_budget=false', 'async_compaction=false', 'multi_agent_v2=false', 'code_mode_only=true',
+        '[agents]', 'enabled=false', '[features]', 'codex_hooks=true', 'token_budget=false', 'context_management=false', 'async_compaction=false', 'multi_agent_v2=false', 'code_mode_only=true',
         '[model_providers.doxa_fixture]', 'name="Owned code mode proof"',
         f'base_url="http://127.0.0.1:{peer.server.server_port}/v1"', 'wire_api="responses"',
         'requires_openai_auth=false', 'request_max_retries=0', 'stream_max_retries=0', 'supports_websockets=false'])
@@ -468,6 +468,7 @@ def provider_turn(server, root, peer, token, launcher=None):
         rpc.send({"method": "initialized"})
         config = rpc.request("config/read", {"cwd": str(root / "workspace"), "includeLayers": False})
         assert config["config"]["features"]["token_budget"] is False
+        assert config["config"]["features"]["context_management"] is False
         assert config["config"]["features"]["async_compaction"] is False
         assert config["config"]["agents"]["enabled"] is False
         assert config["config"]["features"]["multi_agent_v2"] is False

@@ -1928,10 +1928,45 @@ index e4a0481..d622696 100644
      shutdown(&sess).await;
  }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index aba4971..93cec01 100644
+index aba4971..16c8f6c 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -3034,6 +3034,11 @@ impl Session {
+@@ -2870,6 +2870,10 @@ impl Session {
+ 
+     /// Adds an execpolicy amendment to both the in-memory and on-disk policies so future
+     /// commands can use the newly approved prefix.
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "durable allow rules must be committed atomically with live-auto publication"
++    )]
+     pub(crate) async fn persist_execpolicy_amendment(
+         &self,
+         amendment: &ExecPolicyAmendment,
+@@ -2882,10 +2886,23 @@ impl Session {
+             .codex_home()
+             .clone();
+ 
++        // DOXA live auto: an amendment is a durable allow rule that later
++        // commands may use to skip the sandbox. A stale approval answered
++        // after the turn tightened to never must not write one. Commit at the
++        // same serialized boundary that publishes the tightening.
++        let active = self.active_turn.lock().await;
++        if active
++            .as_ref()
++            .and_then(|turn| turn.task.as_ref())
++            .is_some_and(|task| task.turn_context.doxa_switched_to_auto())
++        {
++            return Ok(());
++        }
+         self.services
+             .exec_policy
+             .append_amendment_and_update(&codex_home, amendment)
+             .await?;
++        drop(active);
+ 
+         Ok(())
+     }
+@@ -3034,6 +3051,11 @@ impl Session {
          available_decisions: Option<Vec<ReviewDecision>>,
          plugin_attribution_override: Option<PluginCommandAttribution>,
      ) -> ReviewDecision {
@@ -1943,7 +1978,7 @@ index aba4971..93cec01 100644
          let _elicitation = self.services.elicitations.register();
          //  command-level approvals use `call_id`.
          // `approval_id` identifies subcommand callbacks and stdin writes.
-@@ -3105,7 +3110,14 @@ impl Session {
+@@ -3105,7 +3127,14 @@ impl Session {
              parsed_cmd,
          });
          self.send_event(turn_context, event).await;
@@ -1959,7 +1994,7 @@ index aba4971..93cec01 100644
      }
  
      #[expect(
-@@ -3120,6 +3132,11 @@ impl Session {
+@@ -3120,6 +3149,11 @@ impl Session {
          reason: Option<String>,
          grant_root: Option<PathBuf>,
      ) -> ReviewDecision {
@@ -1971,7 +2006,7 @@ index aba4971..93cec01 100644
          let _elicitation = self.services.elicitations.register();
          // Add the tx_approve callback to the map before sending the request.
          let (tx_approve, rx_approve) = oneshot::channel();
-@@ -3147,7 +3164,14 @@ impl Session {
+@@ -3147,7 +3181,14 @@ impl Session {
              grant_root,
          });
          self.send_event(turn_context, event).await;
@@ -1987,7 +2022,7 @@ index aba4971..93cec01 100644
      }
  
      #[expect(
-@@ -3163,7 +3187,7 @@ impl Session {
+@@ -3163,7 +3204,7 @@ impl Session {
          cancellation_token: CancellationToken,
      ) -> Option<RequestPermissionsResponse> {
          let turn_context = &step_context.turn;
@@ -1996,7 +2031,7 @@ index aba4971..93cec01 100644
          let Some(environment) = step_context
              .environments
              .turn_environments()
-@@ -3231,6 +3255,13 @@ impl Session {
+@@ -3231,6 +3272,13 @@ impl Session {
                  ) => decision,
              };
              if let Some(decision) = decision {
@@ -2010,7 +2045,7 @@ index aba4971..93cec01 100644
                  let (permissions, scope) = match decision {
                      ReviewDecision::Approved
                      | ReviewDecision::ApprovedExecpolicyAmendment { .. }
-@@ -3269,11 +3300,13 @@ impl Session {
+@@ -3269,11 +3317,13 @@ impl Session {
                      response,
                      &context,
                  );
@@ -2029,7 +2064,7 @@ index aba4971..93cec01 100644
                  return Some(response);
              }
          }
-@@ -3282,6 +3315,15 @@ impl Session {
+@@ -3282,6 +3332,15 @@ impl Session {
          let (tx_response, rx_response) = oneshot::channel();
          let prev_entry = {
              let mut active = self.active_turn.lock().await;
@@ -2045,7 +2080,7 @@ index aba4971..93cec01 100644
              match active.as_mut() {
                  Some(at) => {
                      let mut ts = at.turn_state.lock().await;
-@@ -3426,6 +3468,15 @@ impl Session {
+@@ -3426,6 +3485,15 @@ impl Session {
          };
          match entry {
              Some(entry) => {
@@ -2061,7 +2096,7 @@ index aba4971..93cec01 100644
                  let sandbox_context = entry
                      .environment
                      .sandbox_context(/*additional_permissions*/ None);
-@@ -3434,11 +3485,13 @@ impl Session {
+@@ -3434,11 +3502,13 @@ impl Session {
                      response,
                      &sandbox_context.policy_context(),
                  );
@@ -2080,7 +2115,7 @@ index aba4971..93cec01 100644
                  entry.tx_response.send(response).ok();
              }
              None => {
-@@ -3476,14 +3529,24 @@ impl Session {
+@@ -3476,14 +3546,24 @@ impl Session {
          }
      }
  
@@ -2109,7 +2144,7 @@ index aba4971..93cec01 100644
          }
          match response.scope {
              PermissionGrantScope::Turn => {
-@@ -3501,6 +3564,7 @@ impl Session {
+@@ -3501,6 +3581,7 @@ impl Session {
                  );
              }
          }
@@ -2209,7 +2244,7 @@ index 48fe180..3aee52b 100644
  
          // Recheck the latest rules before applying the update.
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index a61493a..a881b22 100644
+index a61493a..be54251 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
 @@ -416,6 +416,13 @@ struct ActivationFixture {
@@ -2247,7 +2282,7 @@ index a61493a..a881b22 100644
      let prepared = session
          .new_turn_with_default_settings("step-activation-turn".to_string(), Default::default())
          .await;
-@@ -467,6 +481,389 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
+@@ -467,6 +481,469 @@ async fn activation_fixture(models: Vec<ModelInfo>) -> ActivationFixture {
      }
  }
  
@@ -2409,6 +2444,86 @@ index a61493a..a881b22 100644
 +        approval.await,
 +        codex_protocol::protocol::ReviewDecision::Denied { .. }
 +    ));
++    session.abort_all_tasks(TurnAbortReason::Replaced).await;
++}
++
++#[tokio::test]
++async fn doxa_auto_refuses_an_execpolicy_amendment_answered_after_the_switch() {
++    use codex_protocol::approvals::ExecPolicyAmendment;
++    use codex_protocol::protocol::ReviewDecision;
++
++    let amend = |command: &str| ReviewDecision::ApprovedExecpolicyAmendment {
++        proposed_execpolicy_amendment: ExecPolicyAmendment::new(vec![command.to_string()]),
++    };
++    // Positive control: without the switch the same answer writes a durable rule,
++    // so the refusal below is not vacuous.
++    let control = activation_fixture_with_model_switching(activation_models(), false).await;
++    let control_home = control.session.codex_home().await;
++    std::fs::create_dir_all(&control_home).expect("create codex home");
++    let control_rules = crate::exec_policy::default_policy_path(control_home.as_path());
++    crate::session::handlers::exec_approval(
++        &control.session,
++        "control-exec".into(),
++        Some(control.turn.sub_id.clone()),
++        amend("doxa-control-prefix"),
++    )
++    .await;
++    assert!(
++        std::fs::read_to_string(&control_rules)
++            .unwrap_or_default()
++            .contains("doxa-control-prefix")
++    );
++    control.session.abort_all_tasks(TurnAbortReason::Replaced).await;
++
++    let ActivationFixture { session, turn, .. } =
++        activation_fixture_with_model_switching(activation_models(), false).await;
++    let home = session.codex_home().await;
++    std::fs::create_dir_all(&home).expect("create codex home");
++    let rules = crate::exec_policy::default_policy_path(home.as_path());
++    let before = std::fs::read_to_string(&rules).ok();
++    #[allow(deprecated)]
++    let cwd = turn.cwd.clone();
++    let approval = session.request_command_approval(
++        &turn,
++        codex_protocol::approvals::ExecApprovalKind::Command,
++        crate::guardian::GuardianReviewContext::from(Arc::clone(&turn)).model_context(),
++        "pending-exec".into(),
++        /*approval_id*/ None,
++        /*environment_id*/ None,
++        vec!["doxa-switched-prefix".into()],
++        cwd.into(),
++        /*reason*/ None,
++        /*network_approval_context*/ None,
++        Some(ExecPolicyAmendment::new(vec!["doxa-switched-prefix".into()])),
++        /*additional_permissions*/ None,
++        /*available_decisions*/ None,
++        /*plugin_attribution_override*/ None,
++    );
++    tokio::pin!(approval);
++    assert!(futures::poll!(&mut approval).is_pending());
++    assert_eq!(
++        session
++            .apply_turn_settings(
++                &turn.sub_id,
++                TurnSettingsUpdate {
++                    doxa_auto: true,
++                    ..Default::default()
++                }
++            )
++            .await,
++        TurnSettingsUpdateOutcome::Applied
++    );
++    crate::session::handlers::exec_approval(
++        &session,
++        "pending-exec".into(),
++        Some(turn.sub_id.clone()),
++        amend("doxa-switched-prefix"),
++    )
++    .await;
++    assert!(matches!(approval.await, ReviewDecision::Denied { .. }));
++    // The on-disk write precedes the in-memory policy update, so an unchanged
++    // rules file shows the amendment was never committed.
++    assert_eq!(std::fs::read_to_string(&rules).ok(), before);
 +    session.abort_all_tasks(TurnAbortReason::Replaced).await;
 +}
 +
