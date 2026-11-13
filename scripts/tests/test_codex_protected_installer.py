@@ -153,7 +153,9 @@ sys.stdin.read()
         receipt["source_commit"] = installer.PREVIOUS_SOURCE
         receipt["code_mode_host_source_commit"] = installer.PREVIOUS_SOURCE
         receipt["patch_sha256"] = next(value for value in installer.PREVIOUS_PATCHES if value != installer.LEGACY_PATCH_SHA256)
-        receipt["toolchain"] = "1.95.0"
+        # The previous provider keeps the compiler it was actually built with.
+        receipt["toolchain"] = installer.LEGACY_BUILD_TOOLCHAINS.get(
+            (installer.PREVIOUS_SOURCE, receipt["patch_sha256"]), "1.99.1")
         receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n")
         old = self.root / "providers" / (installer.PREVIOUS_PROVIDER + "-" + installer.digest(receipt_path))
         self.destination.rename(old)

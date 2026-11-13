@@ -2,7 +2,8 @@
 //! Interactive requests require a host bridge; unknown requests are refused.
 //!
 //! The shapes below come from `codex app-server generate-ts --experimental`
-//! (Codex 0.164.0). Stdio is newline-delimited JSON-RPC without LSP headers.
+//! (Codex 0.164.0; the request shapes used here are unchanged in 0.165.0).
+//! Stdio is newline-delimited JSON-RPC without LSP headers.
 use std::io;
 use std::os::unix::{process::CommandExt, net::UnixStream, io::AsRawFd};
 use std::collections::VecDeque;
@@ -1264,9 +1265,9 @@ for line in sys.stdin:
 
     #[test]
     fn provider_version_uses_only_the_authoritative_product_prefix() {
-        let desktop = "Codex Desktop/0.164.0 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)";
+        let desktop = "Codex Desktop/0.165.0 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)";
         assert_eq!(provider_version(desktop), Some(crate::codex_compact::SUPPORTED_VERSION));
-        assert_eq!(provider_version("codex_cli_rs/0.164.0"), Some(crate::codex_compact::SUPPORTED_VERSION));
+        assert_eq!(provider_version("codex_cli_rs/0.165.0"), Some(crate::codex_compact::SUPPORTED_VERSION));
         let current = crate::codex_compact::SUPPORTED_VERSION;
         for agent in [
             format!("Codex Desktop/0.1.0 (doxa; {current})"),

@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.76 — 2026-11-12
+
+**Protected Codex 0.165.0**
+
+- Update **`codex-current`** to protected Codex **0.165.0**, pinned to `360319d8dee62d87e2d59fc0c21805d79519cfed`. Fixes the blocked automatic update (#284).
+- Port **`run_pre_compact_hooks`** to 0.165's environment hooks. Environment requirements hooks can stop compaction but cannot satisfy the trusted session-flags approval.
+- Retain the exact 0.164.0 contract for saved Docker sessions and installer rollback. Build inputs stay Rust 1.99.1 and V8 152.2.0.
+
 ## 2.0.0-beta.75 — 2026-11-12
 
 **LORE 0.62.26**

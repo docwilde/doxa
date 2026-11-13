@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "review_kind": "manual protected contract port; no automatic approval exception",
+  "before": {
+    "schema": 1,
+    "version": "0.164.0",
+    "tag": "rust-v0.164.0",
+    "source_commit": "6aaac694803004a63c6f393d153c96d22521a6b9",
+    "patch_sha256": "f8759872787029e5bf7064fe5be7166c5367b1db09b4b60362ea625117658924",
+    "contract": "doxa-precompact-fail-closed-v1",
+    "provider": "codex-0.164.0-precompact-v1"
+  },
+  "after": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "128293eb2e10aebdff916ab1d8fbce30fa10eba2dfac01cc501f9c1591034484",
+    "provider": "codex-0.165.0-precompact-v1",
+    "schema": 1,
+    "source_commit": "360319d8dee62d87e2d59fc0c21805d79519cfed",
+    "tag": "rust-v0.165.0",
+    "version": "0.165.0"
+  },
+  "upstream_diff_sha256": "c6321a9b013a3bfcf37777ec308ae90201874dc44f9471b6f8d4898761cf7472",
+  "changed_path_count": 685,
+  "guard_sensitive_path_count": 174,
+  "patch_delta": "Protection hunks are unchanged from 0.164.0 apart from release stamps (167 workspace Cargo.lock versions, one more crate than 0.164, and the initialize user-agent) and the hand-merged PreCompact hunk below.",
+  "reviewed_contracts": {
+    "compaction": "0.165 builds PreCompact hooks with environment requirements hooks. Those are discovered as HookSource::System at <environment:ID>/requirements.toml and cannot satisfy the required SessionFlags /<session-flags>/config.toml identity, so they can only stop compaction. Preview and run now share one hook set. Every history-replacement and compaction-inference caller (local, remote V2, token-budget new_context, Op::Compact entry points) is still dominated by run_pre_compact_hooks; there are no new callers. Async scheduler and direct background paths remain refused.",
+    "approval_result": "Live-auto checks remain on every user, reviewer, PermissionRequest-hook and Guardian path: command, write_stdin, apply_patch, network, MCP tool-call and request_permissions. run_permission_request_hooks gained a target environment and still runs between the pre- and post-review checks. Final grants are still sanitized and recorded under the active_turn lock that publishes the tightening.",
+    "execution": "Patched live approval-policy reads still sit on the live paths after upstream moved remote proxy launch into remote_network_proxy_launch. The executor-cannot-launch-proxy refusal stays fail-closed. New exec-server review-domain support checks are fail-closed.",
+    "turn_settings": "turn_processor and v2 turn settings are unchanged upstream. doxaAuto still cannot be combined with other updates, and the ThreadSettingsApplied resume de-duplication affects thread defaults only.",
+    "new_entrypoints": "Environment hook execution (hook_environment_executor) is unreachable: EnvironmentConfig has no Deserialize, environment_ready has no non-test caller, and every production constructor uses empty environment_hooks. Guardian recorded-item forwarding is off by default, and DOXA drops notifications for foreign thread ids. thread/memory/read, fork attachToSource and the gcp provider do not touch permissions, hooks or sandbox, and DOXA sends none of them. No new model tools. agents.enabled=false and multi_agent_v2=false still resolve to MultiAgentVersion::Disabled.",
+    "build_inputs": "Unchanged: Rust 1.99.1 (codex-rs/rust-toolchain.toml) and the official V8 152.2.0 archive/binding release manifests, byte-identical to 0.164.0."
+  },
+  "source_inputs": {
+    "codex-rs/rust-toolchain.toml": "913d7e9d7adcd7abfeb0c4554c39a5a57c3cf84a694bc6a6aeae038a1f6ae33b",
+    "third_party/v8/rusty_v8_152_2_0_release_manifests.sha256": "1dd7c7f7d3d91af7f06a2846bddc6a1da7725acc67ecd7ab2c7dfc980dd8c6d4"
+  },
+  "noted_not_regressions": {
+    "execpolicy_amendment_after_switch": "Present since 0.164.0: session/handlers.rs exec_approval persists an ApprovedExecpolicyAmendment before the live-auto post-review denial. Unreachable from DOXA, whose host answers only accept/decline and rejects amendment decisions. Candidate hardening for a later port.",
+    "context_management_token_budget": "Present since 0.164.0: with features.context_management=true, a supporting model and a Plus/Pro plan, session/token_budget.rs can enable TokenBudget at runtime despite the CLI override. Resets remain gated by run_pre_compact_hooks. Candidate hardening: also pin features.context_management=false."
+  },
+  "required_new_regression": null,
+  "compiled_verification": "Separate hash-bound build and compiled guard proof required; this static review record is never an acceptance receipt.",
+  "automatic_sensitive_path_gate_changed": false
+}
