@@ -1,7 +1,7 @@
 # Protected Codex provider
 
-The reviewed patch targets official `rust-v0.164.0`, commit
-`6aaac694803004a63c6f393d153c96d22521a6b9`. Source, patch, launcher,
+The reviewed patch targets official `rust-v0.165.0`, commit
+`360319d8dee62d87e2d59fc0c21805d79519cfed`. Source, patch, launcher,
 app-server and code-mode helper identities are checked independently. The
 installer uses a separate `source-<commit>-<patch>` checkout and publishes
 immutable receipt-addressed artifacts; it never resets old build sources.
@@ -62,24 +62,31 @@ none of these commands require account credentials or external model calls.
 See each verifier's `--help` for its exact options. These checks do not establish
 real-account model availability or live sandbox acceptance.
 
-## Reviewed 0.164.0 port
+## Reviewed 0.165.0 port
 
-The 0.163.0-to-0.164.0 safety diff remains subject to manual semantic review;
-the automatic updater still refuses unreviewed safety-sensitive paths. The
-protection port preserves 0.164's structured approval source/cancellation
-metadata when a live-auto switch refuses a stale result, and uses the live
-step policy for remote execution routing. A regression exercises both an
-already-pending approval and refusal before review. Current payloads use
-Rust 1.99.1 and the official source-pinned V8 152.2.0 archive/binding manifests;
-reviewed older receipts retain Rust 1.95.0 for migration and rollback.
+The 0.164.0-to-0.165.0 safety diff (174 guard-sensitive paths) was reviewed
+manually; the automatic updater still refuses unreviewed safety-sensitive
+paths. The protection hunks carry over unchanged. 0.165 builds PreCompact
+hooks together with executor environment requirements hooks. Those are
+discovered as `System` hooks at `<environment:ID>/requirements.toml`, so they
+can stop compaction but never satisfy the required session-flags identity.
+No new caller replaces history or starts compaction inference outside the
+gate. The review record is `reviews/0.165.0.json`.
+
+The 0.164.0 port preserved structured approval source and cancellation
+metadata when a live-auto switch refuses a stale result. It also made remote
+execution routing use the live step policy. Current payloads use Rust 1.99.1
+and the official source-pinned V8 152.2.0 archive/binding manifests; reviewed
+older receipts retain Rust 1.95.0 for migration and rollback.
 
 ## Retained Docker sessions after an upgrade
 
 Existing Docker sessions keep the exact image recorded in their isolation
 manifest. Installing a new host provider or selecting a new-session image
 does not replace that saved image. A saved Docker thread can resume with the
-exact reviewed 0.163.0 contract (source `83086188`, patch `3a7b8c09`) as well as
-the current 0.164.0 provider. The retained contract requires the protected
+exact reviewed 0.163.0 contract (source `83086188`, patch `3a7b8c09`) or 0.164.0
+contract (source `6aaac694`, patch `f8759872`) as well as the current 0.165.0
+provider. The retained contract requires the protected
 DOXA/live-auto initialize prefix and all normal hook, feature and launcher
 receipt checks. It is unavailable to fresh sessions or native providers.
 
