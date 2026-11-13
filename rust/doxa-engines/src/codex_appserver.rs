@@ -392,6 +392,12 @@ impl AppServerDriver {
                     if config["config"]["features"]["token_budget"] != false {
                         return Err(AppServerError::Protocol("Codex unhooked token-budget reset path is not disabled"));
                     }
+                    // Experimental context management re-enables TokenBudget at
+                    // session start for eligible accounts, regardless of the
+                    // token_budget override. Require it explicitly off as well.
+                    if config["config"]["features"]["context_management"] != false {
+                        return Err(AppServerError::Protocol("Codex context management can re-enable the token-budget reset path"));
+                    }
                     if config["config"]["features"]["async_compaction"] != false {
                         return Err(AppServerError::Protocol("Codex unreviewed asynchronous compaction path is not disabled"));
                     }

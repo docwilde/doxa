@@ -44,6 +44,7 @@ for i, item in enumerate(sys.argv[:-1]):
     if item == "-c":
         merge(config, tomllib.loads(sys.argv[i + 1]))
 assert config["features"]["token_budget"] is False
+assert config["features"]["context_management"] is False
 assert config["features"]["async_compaction"] is False
 assert config["features"]["multi_agent_v2"] is False
 assert config["agents"]["enabled"] is False

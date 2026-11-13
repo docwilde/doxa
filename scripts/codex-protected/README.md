@@ -19,7 +19,10 @@ that foreground review. This path is deliberately disabled in the protected
 payload: the scheduler refuses it even with its feature enabled, and the direct
 background execution entry point returns `TurnAborted` before a request. DOXA
 also overrides and verifies `features.async_compaction=false`. Token-budget
-reset remains disabled. Background compaction may only be enabled after a
+reset remains disabled: DOXA overrides and verifies `features.token_budget=false`
+and `features.context_management=false`, because experimental context
+management would otherwise re-enable the token budget at session start for
+eligible accounts. Background compaction may only be enabled after a
 separate reviewed pre-inference authorization design and compiled proof.
 
 The private `doxaAuto` live update only tightens on-request approval to never.

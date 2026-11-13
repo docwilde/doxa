@@ -173,7 +173,7 @@ query=read();assert query['method']=='initialize'
 reply(query,{'userAgent':'doxa_codex_rs/__DOXA_SUPPORTED_CODEX_VERSION__ (doxa-precompact-fail-closed-v1; fixture)'})
 assert read()['method']=='initialized'
 args=sys.argv[1:];overrides=[args[i+1] for i,value in enumerate(args[:-1]) if value=='-c']
-for flag in ['features.token_budget=false','features.async_compaction=false','agents.enabled=false','features.multi_agent_v2=false']:
+for flag in ['features.token_budget=false','features.context_management=false','features.async_compaction=false','agents.enabled=false','features.multi_agent_v2=false']:
  assert flag in overrides, flag
 def merge(target, incoming):
  for key,value in incoming.items():

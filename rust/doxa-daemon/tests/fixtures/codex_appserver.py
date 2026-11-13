@@ -64,7 +64,7 @@ def reply(request, value):
 
 def fixture_config():
     overrides = [sys.argv[i+1] for i, item in enumerate(sys.argv[:-1]) if item == '-c']
-    for flag in ('features.token_budget=false', 'features.async_compaction=false',
+    for flag in ('features.token_budget=false', 'features.context_management=false', 'features.async_compaction=false',
                  'agents.enabled=false', 'features.multi_agent_v2=false'):
         assert flag in overrides, flag
     def merge(target, incoming):

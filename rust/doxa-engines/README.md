@@ -22,7 +22,7 @@ Assistant text and reasoning are bounded and scrubbed as complete messages. The 
 
 ## Compaction protection
 
-Protected sessions require DOXA's private **Codex 0.165.0** app server with contract `doxa-precompact-fail-closed-v1`. Before thread startup, DOXA checks the build identity, trusted synchronous `PreCompact` hook hash, and disabled token-budget and asynchronous compaction flags. The protected payload also refuses speculative background compaction internally, regardless of client feature overrides. Stock or unsupported app servers fail before creating or resuming a protected thread.
+Protected sessions require DOXA's private **Codex 0.165.0** app server with contract `doxa-precompact-fail-closed-v1`. Before thread startup, DOXA checks the build identity, trusted synchronous `PreCompact` hook hash, and disabled token-budget, context-management and asynchronous compaction flags. The protected payload also refuses speculative background compaction internally, regardless of client feature overrides. Stock or unsupported app servers fail before creating or resuming a protected thread.
 
 The hook binds the actual provider thread and owned rollout, prepares a scrubbed snapshot, and waits for the native LORE reviewer. Manual `/compact` independently reviews the same bound source and rechecks its identity and digest before submission. Missing, failed, timed-out, changed, asynchronous, or duplicate review blocks replacement; a worker exit code without an exact receipt is insufficient. DOXA also waits for matching hook and compaction events after submission. It does not overwrite global Codex settings or trust unrelated user hooks.
 

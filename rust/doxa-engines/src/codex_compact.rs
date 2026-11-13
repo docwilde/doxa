@@ -200,7 +200,7 @@ impl CompactGate {
         let group = format!("{{matcher={},hooks=[{{type=\"command\",command={},timeout={},async=false}}]}}",
             string(MATCHER), string(&self.command), HOOK_TIMEOUT);
         let state = format!("{}={{enabled=true,trusted_hash={}}}", string(HOOK_KEY), string(&self.hash));
-        vec!["features.codex_hooks=true".into(), "features.token_budget=false".into(), "features.async_compaction=false".into(), format!("hooks={{PreCompact=[{group}],state={{{state}}}}}")]
+        vec!["features.codex_hooks=true".into(), "features.token_budget=false".into(), "features.context_management=false".into(), "features.async_compaction=false".into(), format!("hooks={{PreCompact=[{group}],state={{{state}}}}}")]
     }
     /// Call `hooks/list` after initialize and BEFORE starting/resuming a thread.
     /// Failure means this provider must not claim protected compaction.
