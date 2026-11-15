@@ -55,6 +55,11 @@ def run(args):
 def _run_terminal(args, state, display_number):
     with ExitStack() as cleanup:
         os.environ["DISPLAY"] = ":" + display_number
+        # Render only on this private X display. GTK prefers Wayland when the
+        # owner's session exposes it, which would capture an empty framebuffer
+        # and show the terminal on the owner's desktop instead.
+        os.environ["GDK_BACKEND"] = "x11"
+        os.environ.pop("WAYLAND_DISPLAY", None)
         import gi
         gi.require_version("Gtk", "3.0")
         gi.require_version("Vte", "2.91")

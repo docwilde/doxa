@@ -1,4 +1,5 @@
-//! Owner-approved content and a separate, isolated zero-grant plugin worker.
+//! Owner-approved content and a separate, isolated plugin worker for exactly
+//! approved zero-grant and `render-local-panel-v1` packages.
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::ffi::CString;
@@ -13,9 +14,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub const API_VERSION: u32 = 1;
 pub mod packages;
-// The worker contract is only called through the Linux CLI sandbox boundary.
+// The worker contracts are only executed behind the Linux sandbox boundary.
 #[allow(dead_code)]
 pub(crate) mod runner;
+pub(crate) use runner::PanelText;
 // The process component is only used by the cgroup-backed sandbox boundary.
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
@@ -43,6 +45,15 @@ pub(crate) fn installed_host_authority(home: &Path) -> io::Result<InstalledHostA
 pub(crate) fn installed_host_authority(_home: &Path) -> io::Result<InstalledHostAuthority> {
     Err(io::Error::new(io::ErrorKind::PermissionDenied,
         "installed plugin host authority requires Linux"))
+}
+
+/// A live test authority bound to `home`, watching `permit` for revocation
+/// and expiring after `lifetime`. It carries no signature or host identity.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn test_live_installed_host_authority(home: &Path, permit: &Path, lifetime: Duration)
+    -> InstalledHostAuthority
+{
+    host_authority::test_live_authority(home, permit, lifetime)
 }
 
 #[cfg(test)]
@@ -84,9 +95,12 @@ pub fn run_grantless_package(home: &Path, name: &str, cancel: &std::sync::atomic
         })?;
     match result {
         runner_sandbox::IsolatedOutcome::Return(value) => Ok(value),
-        other => Err(io::Error::other(format!("isolated plugin result: {}", outcome_class(other)))),
+        other => Err(io::Error::other(format!("isolated plugin result: {}", outcome_class(&other)))),
     }
 }
+
+#[cfg(target_os = "linux")]
+const TUI_RUN_DEADLINE: Duration = Duration::from_secs(5);
 
 /// TUI lifecycle seam: preserve the *same* review identity across installed
 /// host admission and the sandbox's final recheck. Only call behind an
@@ -96,21 +110,56 @@ pub(crate) fn run_reviewed_grantless_package(
     authority: &InstalledHostAuthority, home: &Path, review: &packages::Review,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> io::Result<i32> {
-    if !review.owner_approved || !review.requested_grants.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            "exact zero-grant approval required"));
+    let deadline = Instant::now() + TUI_RUN_DEADLINE;
+    let result = run_reviewed_contract(authority, home, review, cancel, runner::Contract::Grantless,
+        |worker| runner_sandbox::supervise_authorized(home, review, worker, cancel, deadline,
+            authority, runner::Contract::Grantless))?;
+    match result {
+        runner_sandbox::IsolatedOutcome::Return(value) => Ok(value),
+        other => Err(io::Error::other(format!("isolated plugin result: {}", outcome_class(&other)))),
+    }
+}
+
+/// `render-local-panel-v1` TUI seam. Only a package that requests, and whose
+/// exact identity the owner approved with, exactly that grant reaches the
+/// sandbox. The result is panel text that both the worker and this parent
+/// validated; any other outcome is an error and renders nothing.
+#[cfg(target_os = "linux")]
+pub(crate) fn run_reviewed_panel_package(
+    authority: &InstalledHostAuthority, home: &Path, review: &packages::Review,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> io::Result<PanelText> {
+    let deadline = Instant::now() + TUI_RUN_DEADLINE;
+    let result = run_reviewed_contract(authority, home, review, cancel, runner::Contract::RenderPanel,
+        |worker| runner_sandbox::supervise_authorized(home, review, worker, cancel, deadline,
+            authority, runner::Contract::RenderPanel))?;
+    match result {
+        runner_sandbox::IsolatedOutcome::Panel(panel) => Ok(panel),
+        other => Err(io::Error::other(format!("isolated plugin result: {}", outcome_class(&other)))),
+    }
+}
+
+/// Shared TUI admission: exact approval for the contract's grant set, then the
+/// launch under the permit watcher, which requests cancellation on expiry,
+/// revocation or host change while the worker runs.
+#[cfg(target_os = "linux")]
+fn run_reviewed_contract<L>(
+    authority: &InstalledHostAuthority, home: &Path, review: &packages::Review,
+    cancel: &std::sync::atomic::AtomicBool, contract: runner::Contract, launch: L,
+) -> io::Result<runner_sandbox::IsolatedOutcome>
+where L: FnOnce(&Path) -> io::Result<runner_sandbox::IsolatedOutcome>
+{
+    if !review.owner_approved || !contract.matches(&review.requested_grants) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, match contract {
+            runner::Contract::Grantless => "exact zero-grant approval required",
+            runner::Contract::RenderPanel => "exact render-local-panel-v1 approval required",
+        }));
     }
     let worker = std::env::current_exe()?.with_file_name("doxa-plugin-worker");
-    let deadline = Instant::now() + Duration::from_secs(5);
     if cancel.load(std::sync::atomic::Ordering::Acquire) {
         return Err(io::Error::new(io::ErrorKind::Interrupted, "plugin run cancelled"));
     }
-    let result = authority.supervise(home, cancel, ||
-        runner_sandbox::supervise_authorized(home, review, &worker, cancel, deadline, authority))?;
-    match result {
-        runner_sandbox::IsolatedOutcome::Return(value) => Ok(value),
-        other => Err(io::Error::other(format!("isolated plugin result: {}", outcome_class(other)))),
-    }
+    authority.supervise(home, cancel, || launch(&worker))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -118,6 +167,14 @@ pub(crate) fn run_reviewed_grantless_package(
     _authority: &InstalledHostAuthority, _home: &Path, _review: &packages::Review,
     _cancel: &std::sync::atomic::AtomicBool,
 ) -> io::Result<i32> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "isolated plugin runner requires Linux"))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn run_reviewed_panel_package(
+    _authority: &InstalledHostAuthority, _home: &Path, _review: &packages::Review,
+    _cancel: &std::sync::atomic::AtomicBool,
+) -> io::Result<PanelText> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "isolated plugin runner requires Linux"))
 }
 
@@ -153,14 +210,17 @@ where F: FnOnce(&Path, &packages::Review, &Path, &std::sync::atomic::AtomicBool,
 }
 
 #[cfg(target_os = "linux")]
-fn outcome_class(outcome: runner_sandbox::IsolatedOutcome) -> &'static str {
+fn outcome_class(outcome: &runner_sandbox::IsolatedOutcome) -> &'static str {
     use runner_sandbox::IsolatedOutcome;
     match outcome {
         IsolatedOutcome::Return(_) => "return",
+        IsolatedOutcome::Panel(_) => "panel",
         IsolatedOutcome::ModuleFailure(runner::WorkerFailure::InvalidModule) => "invalid-module",
         IsolatedOutcome::ModuleFailure(runner::WorkerFailure::InvalidSignature) => "invalid-signature",
         IsolatedOutcome::ModuleFailure(runner::WorkerFailure::FuelExhausted) => "fuel-exhausted",
         IsolatedOutcome::ModuleFailure(runner::WorkerFailure::Trap) => "module-trap",
+        IsolatedOutcome::ModuleFailure(runner::WorkerFailure::MemoryLimit) => "memory-limit",
+        IsolatedOutcome::ModuleFailure(runner::WorkerFailure::InvalidOutput) => "invalid-panel-output",
         IsolatedOutcome::Timeout => "deadline-exceeded",
         IsolatedOutcome::Cancelled => "cancelled",
         IsolatedOutcome::OutputLimit => "output-limit",
@@ -262,15 +322,87 @@ mod activation_tests {
         assert!(result.is_err());
     }
 
+    fn panel_review(grants: &[&str], approved: bool) -> (tempfile::TempDir, packages::Review) {
+        let home = package(grants, approved);
+        let review = packages::preflight(home.path(), "demo").unwrap();
+        (home, review)
+    }
+
+    #[test]
+    fn panel_admission_requires_exact_render_grant_approval_before_launch() {
+        let cancel = AtomicBool::new(false);
+        for (grants, approved) in [(&[][..], true), (&[packages::RENDER_PANEL_GRANT][..], false)] {
+            let (home, review) = panel_review(grants, approved);
+            let error = run_reviewed_contract(&test_installed_host_authority(), home.path(), &review,
+                &cancel, runner::Contract::RenderPanel, |_| panic!("panel launch without exact grant"))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        }
+        let (home, review) = panel_review(&[packages::RENDER_PANEL_GRANT], true);
+        let permit = home.path().join("permit");
+        private(&permit, b"permit");
+        let authority = test_live_installed_host_authority(home.path(), &permit, Duration::from_secs(10));
+        let launched = Cell::new(false);
+        let outcome = run_reviewed_contract(&authority, home.path(), &review, &cancel,
+            runner::Contract::RenderPanel, |_| {
+                launched.set(true);
+                Ok(runner_sandbox::IsolatedOutcome::Panel(runner::validate_panel(b"ok").unwrap()))
+            }).unwrap();
+        assert!(launched.get());
+        assert!(matches!(outcome, runner_sandbox::IsolatedOutcome::Panel(_)));
+        // The same exactly approved render package is not a zero-grant run.
+        assert_eq!(run_reviewed_contract(&authority, home.path(), &review, &cancel,
+            runner::Contract::Grantless, |_| panic!("grantless launch of a granted package"))
+            .unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn panel_worker_is_cancelled_and_reaped_on_permit_revocation_or_expiry() {
+        for revoke_by_unlink in [true, false] {
+            let (home, review) = panel_review(&[packages::RENDER_PANEL_GRANT], true);
+            let permit = home.path().join("permit");
+            private(&permit, b"permit");
+            let lifetime = if revoke_by_unlink { Duration::from_secs(10) } else { Duration::from_millis(300) };
+            let authority = test_live_installed_host_authority(home.path(), &permit, lifetime);
+            let cancel = AtomicBool::new(false);
+            let revoked = permit.clone();
+            let revoker = std::thread::spawn(move || if revoke_by_unlink {
+                std::thread::sleep(Duration::from_millis(100));
+                fs::remove_file(revoked).unwrap();
+            });
+            let mut capture = None;
+            let started = Instant::now();
+            let result = run_reviewed_contract(&authority, home.path(), &review, &cancel,
+                runner::Contract::RenderPanel, |_| {
+                    let mut command = std::process::Command::new("/bin/sleep");
+                    command.arg("30");
+                    let observed = runner_process::supervise(&mut command, &cancel,
+                        Instant::now() + Duration::from_secs(5))?;
+                    capture = Some(observed);
+                    Ok(runner_sandbox::IsolatedOutcome::Panel(runner::validate_panel(b"late").unwrap()))
+                });
+            revoker.join().unwrap();
+            assert!(result.is_err(), "revoked or expired permit accepted a panel");
+            assert!(cancel.load(std::sync::atomic::Ordering::Acquire));
+            let capture = capture.unwrap();
+            assert_eq!(capture.outcome, runner_process::Outcome::Cancelled,
+                "unlink={revoke_by_unlink}: worker was not cancelled by the permit watcher");
+            assert!(started.elapsed() < Duration::from_secs(3));
+            assert_eq!(unsafe { libc::kill(capture.group_id as i32, 0) }, -1, "worker group survived");
+        }
+    }
+
     #[test]
     fn failure_classes_never_report_a_return() {
         use runner_sandbox::IsolatedOutcome::*;
         for outcome in [
-            ModuleFailure(runner::WorkerFailure::Trap), Timeout, Cancelled,
+            ModuleFailure(runner::WorkerFailure::Trap), ModuleFailure(runner::WorkerFailure::MemoryLimit),
+            ModuleFailure(runner::WorkerFailure::InvalidOutput), Timeout, Cancelled,
             OutputLimit, WorkerAbnormalExit(137), SandboxOrPreEntryFailure(1),
             WrapperCrash(9), ProtocolFailure,
         ] {
-            assert_ne!(outcome_class(outcome), "return");
+            assert_ne!(outcome_class(&outcome), "return");
+            assert_ne!(outcome_class(&outcome), "panel");
         }
     }
 }

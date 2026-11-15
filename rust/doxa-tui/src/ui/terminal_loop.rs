@@ -520,7 +520,7 @@ fn run_loop_with_remote(
             Some("persistent tabset unavailable"),
             |(store, _, complete)| store.clear_preflight(&app, complete).err(),
         );
-        if event::poll(Duration::from_millis(10))? {
+        if event::poll(app.input_poll_timeout())? {
             changed |= app.handle(event::read()?);
         }
         if !app.remote_mode {
