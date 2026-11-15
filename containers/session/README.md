@@ -6,11 +6,20 @@ binaries. Each session receives an independent Git checkout and private home
 and cache. The Docker socket and host home are never mounted into a worker.
 
 Build the worker with `cargo build --locked -p doxa-isolation`. Use a local
-rootless Docker Engine and a reviewed Debian 12 (Bookworm) or Ubuntu 24.04
-(Noble) base image pinned as `NAME@sha256:DIGEST`. The pinned package versions
-are verified for `amd64` and `arm64`; the Dockerfile rejects other base
-architectures. Select the matching family; it checks the image's OS identity
-and rejects mismatches:
+rootless Docker Engine and a reviewed base image pinned as `NAME@sha256:DIGEST`:
+
+| Base family | glibc | Protected Codex provider |
+| --- | --- | --- |
+| `ubuntu-noble` (Ubuntu 24.04) | 2.39 | supported; **required** when `--codex-provider` is used |
+| `debian-bookworm` (Debian 12) | 2.36 | refused; valid only for images without Codex |
+
+The protected `codex-app-server` and its Code Mode payload need `GLIBC_2.39`, so
+the helper refuses `--codex-provider` with `--base-family debian-bookworm`
+before it contacts Docker. It also reads the verified provider binaries and
+refuses any base older than the newest `GLIBC_x.y` version they need. The pinned
+package versions are verified for `amd64` and `arm64`; the Dockerfile rejects
+other base architectures. Select the matching family; it checks the image's OS
+identity and rejects mismatches:
 
 Rebuild the image when DOXA's isolation worker changes. An older pinned image
 cannot answer the current worker's cgroup enforcement probe, so session
@@ -20,12 +29,15 @@ admission fails closed until its digest is updated in owner configuration.
 export TMPDIR="$HOME/ssd-cache/tmp"
 python3 scripts/build-session-image.py \
   --docker-host "unix:///run/user/$(id -u)/docker.sock" \
-  --base-image YOUR_REVIEWED_BASE_IMAGE_AT_SHA256 \
-  --base-family debian-bookworm \
+  --base-image YOUR_REVIEWED_UBUNTU_24_04_IMAGE_AT_SHA256 \
+  --base-family ubuntu-noble \
   --worker target/debug/doxa-isolation-worker \
   --claude-bin "$HOME/.local/bin/claude" \
   --codex-provider "$HOME/.local/share/doxa/providers/codex-current"
 ```
+
+For a Bookworm image, pass `--base-family debian-bookworm` with a Debian 12
+base and omit `--codex-provider`.
 
 The Codex receipt must match the current `scripts/install_codex_protected.py`
 source/contract and the SHA-256 of `scripts/codex-protected/precompact.patch`.
@@ -40,7 +52,9 @@ It never copies provider login files. DOXA prepares the selected provider's
 session-private authentication separately when the session starts.
 
 The script prints the exact local image content ID and writes build evidence
-to `target/isolation-image/last-build.json`. Set `DOXA_DOCKER_IMAGE` to that
+to `last-build.json` in its private build cache, outside the checkout:
+`$XDG_CACHE_HOME/doxa/session-image/` (or `~/.cache/doxa/session-image/`).
+Pass `--cache DIR` to choose another directory. Set `DOXA_DOCKER_IMAGE` to that
 `sha256:…` ID, or to a published `NAME@sha256:DIGEST`. Use
 `DOXA_DOCKER_HOST` for the same rootless Engine. A tag alone is insufficient.
 
@@ -50,14 +64,23 @@ updates, and security suites to snapshot `20260901T000000Z`. Their matching
 selected family, snapshot, and hashes of the source and package manifests.
 When updating packages, review a new snapshot date and package versions in the
 same change. The digest-pinned base supplies the initial OS package state; apt
-dependencies are resolved only from the fixed snapshot. Pass
-`--base-family ubuntu-noble` for an Ubuntu 24.04 image.
+dependencies are resolved only from the fixed snapshot.
+
+Both snapshots are fetched over verified HTTPS; `snapshot.ubuntu.com` redirects
+plain HTTP to HTTPS. The base images have no CA store, so apt verifies TLS
+against `apt/snapshot-ca.pem` while it installs the pinned `ca-certificates`
+package. That file holds only ISRG Root X1 and X2, copied from the Noble
+snapshot's `ca-certificates 20260601~24.04.1` package; the helper refuses a
+bundle whose SHA-256 differs from its reviewed value. apt still verifies the
+snapshots' signed `InRelease` files and package hashes. If a snapshot host
+changes certificate authority, review and update the bundle and its hash in
+the same change.
 
 The base must supply the toolchain required by the repository being edited.
-The Dockerfile adds exact versions of Git, Bash, Python and CA certificates;
-it does not select a Rust, Node or other project toolchain. Protected Codex's Code Mode binary
-requires glibc 2.39 or newer in the currently installed Linux package. Check
-the binaries against the chosen base and rebuild after a provider upgrade.
+The Dockerfile adds exact versions of Git, Bash, Python, ripgrep (`rg`) and
+CA certificates; it does not select a Rust, Node or other project toolchain.
+Rebuild after a provider upgrade: the helper rechecks the provider's glibc
+requirement against the selected base.
 
 The original `official_cli` receipt path is not relocated into the image.
 The protected launcher supports DOXA's `app-server` and Code Mode paths;
