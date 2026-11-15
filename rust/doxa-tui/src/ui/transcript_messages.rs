@@ -330,13 +330,18 @@ pub(super) fn enqueue(session: &mut Session, message: Message) -> (bool, bool) {
 }
 
 /// A started preview relinquishes its body to turn_started. Its queue identity
-/// and admission timestamp remain visible; cancelled/discarded bodies remain.
+/// and admission timestamp remain visible at the turn's start;
+/// cancelled/discarded bodies remain at their admission position.
 pub(super) fn settle(session: &mut Session, data: &Value, state: QueueState) -> (bool, bool) {
     let Some(id) = queue_id(data) else { return (false, false); };
     if let Some((range, mut message)) = find(&session.transcript, &id) {
         if message.state != Some(QueueState::Queued) { return (false, false); }
         message.state = Some(state);
-        if state == QueueState::Started { message.text.clear(); }
+        if state == QueueState::Started {
+            message.text.clear();
+            session.transcript.replace_range(range, "");
+            return (true, append_transcript(session, &format!("\n\n{}\n\n", message.encoded())));
+        }
         return (true, replace(session, range, &message));
     }
     let message = Message { queue_id: Some(id), state: Some(state), text: String::new(),
