@@ -1,6 +1,6 @@
 # Native DOXA plugin API
 
-Status: **data-only TUI v1 plus explicit isolated zero-grant execution; signed installed-host permits bind each TUI instance; nine-case installed-host and eight-case actual TUI acceptance passed on a private installation**.
+Status: **data-only TUI v1 plus explicit isolated zero-grant execution and the first grant, `render-local-panel-v1` (bounded local text panels); signed installed-host permits bind each TUI instance; nine-case installed-host and eight-case actual TUI acceptance passed on a private installation for zero-grant runs; installed-host acceptance for panels is outstanding**.
 This plan supersedes the Python/Textual `Plugin` and `PANE_COMMANDS` draft. The
 Rust frontend uses its own command registry, palette and help panel. Claude Code
 plugin adoption through `/plugins` is a separate provider feature.
@@ -12,6 +12,7 @@ plugin adoption through `/plugins` is a separate provider feature.
 - [Open extension work](#open-extension-work)
 - [Executable package preflight](#executable-package-preflight)
 - [Runner design and test seam](#runner-design-and-test-seam)
+- [The `render-local-panel-v1` grant](#the-render-local-panel-v1-grant)
 - [Acceptance bar](#acceptance-bar)
 
 ## Shipped slice
@@ -74,13 +75,15 @@ both digests and the requested grants exactly. A mismatch rejects the package;
 an absent entry yields a review-required result. No package is loaded at TUI
 startup, and neither preflight nor a matching config entry executes code. The
 TUI validates in a background worker and displays a read-only snapshot with
-an explicit CLI run command only for an exactly approved zero-grant package.
+an explicit CLI run command only for an exactly approved zero-grant package,
+or `/native-plugin panel NAME` only for an exactly approved
+`render-local-panel-v1` package.
 `/native-plugin run NAME` starts a cancellable local admission request that
 rechecks exact approval and identity, then checks the enrolled operator’s signed installed-host permit before dispatch.
 The worker remains isolated and cannot reach a provider.
 The CLI repeats the approval, byte and inode check at execution. The
-only reserved grant name is `render-local-panel-v1`; no runtime capability is
-implemented. See [Native text plugins](../native-plugins.md#executable-package-identity-review)
+only grant is `render-local-panel-v1`; it is implemented as a TUI-only text
+panel (see [below](#the-render-local-panel-v1-grant)). See [Native text plugins](../native-plugins.md#executable-package-identity-review)
 for the concrete format and owner review flow.
 
 Preflight now uses pinned `wasmparser` validation of the complete module and
@@ -90,15 +93,19 @@ inode matches against the earlier approved review, and retains the validated
 module bytes so a future runner need not race a second path open. Validation
 also rejects any memory or table without a declared maximum, memory above
 256 WebAssembly pages (16 MiB), and tables above 1,024 entries. These are
-static admission bounds, **not runtime enforcement**. Validation does not
-make the module safe to run.
+static admission bounds, **not runtime enforcement**, and validation does not
+make the module safe to run. Runtime enforcement is the isolated worker's,
+inside the cgroup, rlimit and namespace sandbox: fuel stops a running module,
+zero-grant modules get a 16 MiB store cap, and panel modules get a 4 MiB
+store cap that traps on instantiation or growth beyond it.
 
 The explicit `doxa native-plugin run NAME --grantless-prototype` command now
 routes an approved zero-grant package through the cgroup-gated child boundary.
 It refuses execution when the delegated cgroup controls are unavailable.
 Aggregate containment passed on a disposable delegated guest. TUI activation requires a separately signed, current operator permit.
-Broader plugin capabilities remain unavailable. Native shared libraries and
-in-process callbacks remain out of scope.
+Apart from `render-local-panel-v1`, broader plugin capabilities remain
+unavailable. Native shared libraries and in-process callbacks remain out of
+scope.
 
 ### Runner design and test seam
 
@@ -212,9 +219,9 @@ ambient credentials, home directory, repository path, or provider connection.
 The staged parent seam pipes the `RecheckedPackage` bytes to the dedicated
 child rather than passing a module path. The child independently validates the
 length, digest, module shape and export signature before instantiation. Only
-a fixed-size integer result and bounded failure code return. `render-local-panel-v1`
-remains a reserved name until a separate reviewed protocol and grant gate
-exist.
+a fixed-size integer result and bounded failure code return. The
+`render-local-panel-v1` grant has its own reviewed protocol and grant gate,
+described next; the CLI prototype still refuses it.
 
 The seven-case fixture passed on a disposable host with delegated
 controllers. It covered aggregate memory/CPU/PID enforcement, cancellation,
@@ -250,6 +257,95 @@ active worker and zero remaining worker cgroups. Memory peak reached exactly
 CPU throttling was observed. Private activation keys and owner homes were
 removed after the proof. The workstation owner installation was not changed.
 
+### The `render-local-panel-v1` grant
+
+`render-local-panel-v1` is the first nonzero grant and the smallest useful
+one: an approved package may return bounded, data-only text that DOXA draws
+in a local TUI panel. It is TUI-only, explicit (`/native-plugin panel NAME`)
+and one-shot. It adds no host import, provider, prompt, shell, file, network
+or clock access, and its text never reaches an agent, the daemon or a
+transcript.
+
+**Grant gate.** The manifest must request exactly `["render-local-panel-v1"]`
+and the owner's private config must approve the same manifest digest, module
+digest and grant list; `recheck_approved` also binds both opened inodes. The
+TUI refuses an unapproved package, an approved zero-grant package and an
+approval whose grants differ from the manifest before the installed-host
+gate. `run_reviewed_panel_package` repeats the exact grant check before the
+permit watcher starts, and the frame encoder repeats it after the sandbox's
+final recheck. A zero-grant package never gets a panel frame, a granted
+package never takes the integer path, and a payload of the other contract is
+a runner failure.
+
+**Worker contract.** A distinct request frame (`DOXAPQ1`, with the zero-grant
+frame's length, digest and 8 MiB bounds) selects the panel contract. The
+module's complete export list must be exactly `memory` and
+`doxa_render_panel: () -> i64`; imports and start functions stay refused. The
+return value packs the text's byte length (high 32 bits) and offset (low 32
+bits) in the exported memory. The worker copies at most 4 KiB, validates it
+and writes a bounded response (`DOXAPR1`, a status byte, a u16 length and at
+most 4,096 bytes of text; failures carry no text). The parent decodes only
+the protocol its request named and validates the text again, so unsafe text
+from a worker that claims success is a protocol failure.
+
+**Text rule.** Refuse, never strip or repair: 1–4,096 bytes of UTF-8 (one
+trailing LF ignored), at most 32 LF-separated lines of at most 80 cells by
+`unicode-width`, no `char::is_control` character (all C0 including ESC, CR
+and TAB; DEL; C1 including CSI, OSC and NEL), and no invisible,
+bidirectional, zero-width, combining, filler, variation-selector, tag or
+noncharacter code point. Every terminal control sequence starts with ESC or
+a C1 control, so none can reach the terminal. The TUI draws the lines with
+its existing panel widget below a DOXA-written header (package name, grant,
+module SHA-256) and a `│` gutter; the generic panel sanitizer and clipping
+still apply.
+
+**Runtime enforcement.** While the module runs, the interpreter enforces
+5,000,000 fuel, a 4 MiB store-limiter memory cap with `trap_on_grow_failure`,
+1,024 table entries, and one memory, table and instance. The memory cap is a
+quarter of the 16 MiB admission bound, so it, not the declared maximum, is
+the binding guard. Instantiation or `memory.grow` past 64 pages reports
+`memory-limit`, an infinite loop reports `fuel-exhausted`, and deep recursion
+traps on Wasmi's stack limit. The zero-grant path's five-second wall
+deadline, cgroup (256 MiB, no swap, 16 PIDs, one CPU), rlimits and private
+namespaces apply unchanged.
+
+**Lifecycle.** A panel request uses the zero-grant TUI lifecycle: one request
+at a time, the signed instance-bound operator permit, the atomic dispatch
+fence, and cancellation on panel, tab, owner and window exit. The permit
+watcher cancels on revocation or expiry, and the cgroup is killed, verified
+empty and removed before a result is accepted. A late or cancelled result
+renders nothing.
+
+Decisions this plan left open, each taken in the more restrictive direction:
+
+- A separate `panel` verb instead of `run` returning text. The typed request
+  fixes the contract, so a zero-grant package can never produce a panel.
+- Exact grant-set equality, not "contains the grant".
+- Text returned through exported memory and a packed `i64`, with no host
+  import, instead of a host write function.
+- Whole-output refusal instead of stripping, so a plugin cannot rely on
+  DOXA's repair to smuggle a sequence. Combining and zero-width characters
+  are refused even though some scripts need them.
+- A 4 MiB runtime memory cap below the 16 MiB admission bound.
+- Validation in both worker and parent.
+- No plugin-controlled styling, colour or position. A DOXA header and gutter
+  mark every plugin line.
+- No CLI panel path: `doxa native-plugin run` stays zero-grant only.
+- The signed operator permit format is unchanged. It attests host
+  containment and is still required for panels, but it does not name grants;
+  owner approval is the only per-package grant authority. Binding allowed
+  grants into the permit needs a new permit format and activation tooling, so
+  it is left to the installed-host acceptance work.
+
+Local tests cover approval binding, refusal without the grant, digest and
+inode changes after approval, the export contract, every text rule, range
+checks, parent revalidation of a forged worker response, and fuel and memory
+exhaustion, both in-process and in the real worker binary, including inside
+Bubblewrap. They also cover contract confusion, and panel close, tab detach,
+window exit, real process-group reaping, and permit unlink and expiry
+cancelling a running worker. Each safety check has a negative control that
+fails when its guard is removed.
+
 ### Other extensions
 
 The Python draft also proposed transcript renderers, lifecycle hooks, LORE
@@ -276,3 +372,23 @@ for new Claude sessions, not native TUI extensions.
 - A status-only manifest stays owner-allowlisted; malformed, linked, oversized
   stale or loose-permission owner files never display a value. Slow or failing reads
   consume a visible bounded ledger and disable after three failures.
+- A `render-local-panel-v1` panel appears only for a package whose exact
+  digests, inodes and grant the owner approved, behind a current signed
+  permit. Unapproved, zero-grant, mismatched or changed packages, and text
+  outside the panel rule, render nothing. Fuel and memory exhaustion stop the
+  module, and every close, revocation and expiry path removes the worker's
+  cgroup before a result is accepted. Local unit, worker-binary and
+  Bubblewrap tests pass.
+- **Outstanding for panels** (needs a disposable delegated guest, not this
+  workstation):
+  - a delegated-host fixture case sending an approved panel package through
+    the production review, frame, worker and sandbox path, with stale
+    approval refused before cgroup creation and cleanup after success, fuel,
+    memory-limit and invalid-output outcomes;
+  - an installed-host proof case for panels, with the permit's case list
+    updated if a case is added;
+  - PTY TUI driver cases: refusal without a permit, a rendered panel through
+    the real slash command with no plugin control bytes in the terminal
+    stream, revocation of a running panel worker, panel and window close
+    cleanup, expiry refusal, and refusal of a zero-grant package;
+  - a decision on whether the operator permit should name allowed grants.

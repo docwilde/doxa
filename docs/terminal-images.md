@@ -129,13 +129,38 @@ supported. A selected file must be regular; symlinks are refused.
 
 Images reach Claude stream-json and Codex app-server as native image content,
 including Docker sessions. Bounded socket chunks carry bytes without adding
-host mounts or enabling network access. GLM, DeepSeek, Router and legacy Codex
-exec accept text files and explicitly refuse image attachments. Provider/model
-errors remain possible if the selected model does not support images. DOXA's
-transcript omits image pixels; the provider keeps its own image history. Text
-file contents follow the prompt's normal persistence and scrubbing. Live prompt
-cards show file labels; questions over 8 KiB show an explicit excerpt. The
-provider and stored transcript retain the full input.
+host mounts or enabling network access. Provider/model errors remain possible
+there if the selected model does not support images; the provider keeps its own
+image history. Legacy Codex exec accepts text files and refuses images.
+
+DeepSeek, GLM and Router API workers accept images only when the exact target
+model has sourced [model facts](plans/model-registry.md#image-input) for image
+input **and** a per-image token bound. Today that is DeepSeek `deepseek-flash`,
+at most 1,024 input tokens per image
+([vision guide](https://api-docs.deepseek.com/guides/vision), checked
+2026-11-14). DeepSeek lists `deepseek-v4-pro` as not supporting vision. Z.AI
+documents image input for `glm-5.3-flash` and `glm-5.3-flashx`, but publishes no
+per-image token charge, so DOXA refuses them rather than under-count cost. Every
+other model is unknown and refused; a family name never implies support. The
+refusal happens at upload or prompt admission, before any provider request, and
+names its reason. The draft keeps its files for **Alt+Up** recovery.
+
+API workers send each image as an OpenAI-compatible `image_url` content part
+with a base64 data URL, after the text part, on every request of that turn
+(including tool continuations). Images are turn-local: DOXA's history,
+transcript and later requests keep the `[Attached image: NAME]` label and the
+model's answer, never the pixels. A later turn, or a different Router target,
+therefore receives no image bytes. Request byte caps count each image by its
+documented token bound instead of its base64 size. Cost estimates and budgets
+use provider-reported input tokens, which DeepSeek bills together with text
+tokens. In Router sessions an image turn narrows eligibility to image-capable
+API targets; the pin, or in Auto the configured fallback, must accept images.
+See [Router image turns](jev-router.md#image-attachments).
+
+DOXA's transcript omits image pixels for every engine. Text file contents follow
+the prompt's normal persistence and scrubbing. Live prompt cards show file
+labels; questions over 8 KiB show an explicit excerpt. The provider and stored
+transcript retain the full text input.
 
 **Ctrl+V** checks for PNG clipboard content before falling back to text on
 Linux. It requires `wl-paste` (Wayland, package `wl-clipboard`) or `xclip`
@@ -150,5 +175,7 @@ Ctrl+C keeps its cancel behavior. Desktop copy uses a helper where available,
 with OSC 52 as a terminal-dependent fallback.
 
 The provider image formats follow the installed Codex schema,
-[Codex app-server](https://developers.openai.com/codex/app-server/) and
-[Claude streaming input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode).
+[Codex app-server](https://developers.openai.com/codex/app-server/),
+[Claude streaming input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode),
+DeepSeek's [vision guide](https://api-docs.deepseek.com/guides/vision) and
+Z.AI's [GLM-5.3-Flash page](https://docs.z.ai/guides/vlm/glm-5.3-flash).

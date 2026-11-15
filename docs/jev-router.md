@@ -159,6 +159,32 @@ The fallback also has to remain eligible. An ineligible pin or an empty eligible
 set refuses the turn; it does not switch to another engine. DeepSeek thinking
 targets can be ineligible for retained assistant/tool history.
 
+### Image attachments
+
+An image turn narrows eligibility in the same way as `requires_tools`: only API
+targets whose exact model passes the registry's
+[image admission](plans/model-registry.md#image-input) stay eligible. That
+needs sourced image support and a per-image token bound; currently only DeepSeek
+`deepseek-flash` qualifies. Each image adds that target's bound (1,024 tokens
+for `deepseek-flash`) to its measured input before the context-cap check, and
+Jev sees only the narrowed candidates. CLI targets are ineligible for image
+turns because their worker receives a text history packet.
+
+Because the fallback must stay eligible, Auto accepts images only when the
+configured fallback accepts them, and a pin only when the pinned target does.
+Otherwise the attachment is refused at upload or prompt admission, and again
+before any catalog, Jev or worker request, with the reason. DOXA never drops the
+image, swaps the fallback, or sends it to a non-vision model. Pin an
+image-capable target (for example `/model ds-chat` in the template above) or use
+a config whose fallback accepts images.
+
+Worker holds are unchanged: they already reserve the full request cap for every
+allowed request, and the image bound is counted inside that cap. Settlement
+uses the provider-reported usage; usage above the hold makes accounting
+unknown. The selection record and receipt add `image_input` with the image
+count, bound, source and date. Images are turn-local, so canonical history,
+later turns and other targets carry only the `[Attached image: NAME]` label.
+
 ### Authenticated CLI candidates
 
 Add an exact connected-account model and effort as a configured target, with
