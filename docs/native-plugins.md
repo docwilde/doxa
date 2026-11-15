@@ -74,8 +74,9 @@ declare static commands.
 ## Executable package identity review
 
 The `native-plugin` commands let the owner inspect a proposed WebAssembly
-package and, on Linux, explicitly run a zero-grant package behind installed-host
-authority. They do not change the data-only `native_plugins` list.
+package and, on Linux, explicitly run a zero-grant package or render a
+`render-local-panel-v1` panel behind installed-host authority. They do not
+change the data-only `native_plugins` list.
 The command reads only the name you provide; it never searches a repository or
 enumerates packages.
 
@@ -92,24 +93,29 @@ requested_grants = ["render-local-panel-v1"]
 
 Run `doxa native-plugin preflight demo`. It prints the exact manifest and module
 SHA-256 digests, requested grants, opened inode/device identities, and review
-state. The only recognized proposed grant is `render-local-panel-v1`; it is a
-reserved name, not a capability the current DOXA grants or exercises. The
+state. The only recognized grant is `render-local-panel-v1`, which lets an
+exactly approved package draw bounded plain text into a local TUI panel (see
+[Local text panel](#local-text-panel-render-local-panel-v1)). The
 command fully validates a WebAssembly 1.0 core module using the pinned
 `wasmparser` validator. Imports and start functions are refused because no host
 ABI or safe startup contract exists. Newer WebAssembly proposals are also
 refused until a runner explicitly supports them. Modules that contain memory
 or tables must declare maxima no greater than 16 MiB and 1,024 entries. Those
-static bounds do not enforce runtime use.
+static admission bounds do not enforce runtime use by themselves; the
+isolated worker enforces fuel and store limits while the module runs.
 
 In the Rust TUI, `/native-plugin preflight demo` opens the same read-only,
 explicit-name review in a local panel. Package validation runs in a background
 thread so it cannot stall terminal input. A matching zero-grant review displays
-the exact CLI command below; the panel is a snapshot, and the CLI rechecks
-approval, bytes and inodes before its cgroup/Bubblewrap admission.
+the exact CLI command below; an exactly approved `render-local-panel-v1`
+review displays `/native-plugin panel demo` instead. The panel is a snapshot,
+and every run path rechecks approval, bytes and inodes before its
+cgroup/Bubblewrap admission.
 
 `/native-plugin run demo` opens a local lifecycle panel. Its background task
 validates exact owner approval, refuses every requested grant, and rechecks the
-reviewed bytes and inodes. Execution also requires the enrolled operator's
+reviewed bytes and inodes. `/native-plugin panel demo` uses the same lifecycle
+but requires exactly the approved `render-local-panel-v1` grant. Execution also requires the enrolled operator's
 current signed permit for this running frontend. A missing, expired, revoked,
 wrong-instance or changed-host permit refuses dispatch. Closing the panel or
 its tab, changing tabs, or exiting the window cancels the task and drops late
@@ -223,7 +229,10 @@ Its maximum lifetime is 900 seconds, measured against signed absolute
 `CLOCK_BOOTTIME` issuance and expiry on the pinned boot. The TUI verifies the signature and exact
 current identities before each launch, and the launcher verifies the opened
 worker and Bubblewrap descriptors against the permit again. Package bytes,
-owner allowlist and zero grants remain independently checked.
+owner allowlist and the exact grant set remain independently checked. The
+permit attests the host's containment, not grants: it does not name
+`render-local-panel-v1`, and it is required, but never sufficient, for both
+zero-grant runs and panels.
 
 Delete the permit to revoke this instance, increment `epoch` or remove/change
 the enrolled key to revoke all existing permits. Any owner config edit
@@ -286,8 +295,9 @@ closed; an unapproved package remains review-only. Approval alone is not an
 execution switch. The digests pin local bytes; they do not authenticate a publisher. A
 fresh `recheck_approved` call re-opens both files, checks their digests, opened
 inodes and current owner approval against the earlier review, and returns the
-validated module bytes. The grantless runner uses those bytes without re-opening
-a path and isolates crashes and resource use; nonempty grants remain unavailable.
+validated module bytes. Both runner paths use those bytes without re-opening
+a path and isolate crashes and resource use. The only nonempty grant set that
+can run is exactly `["render-local-panel-v1"]`, and only as a TUI panel.
 
 For an approved package whose `requested_grants` and config `grants` are both
 empty (`[]` in both files), run
@@ -304,8 +314,9 @@ that parent. Without this layout, admission fails closed before spawning the
 worker. A disposable delegated Ubuntu guest passed the seven-case acceptance
 fixture, including the approved Wasm worker, aggregate limits, namespace
 boundary and cleanup. TUI execution uses the separately signed operator permit.
-Nonempty grants, native shared libraries, scripts, provider backends, hooks and
-automatic startup remain unsupported.
+The CLI never renders panels: it refuses every requested grant, including
+`render-local-panel-v1`. Other grants, native shared libraries, scripts,
+provider backends, hooks and automatic startup remain unsupported.
 
 Cleanup treats `cgroup.events` as bounded evidence: it requires exactly one
 valid `populated` value before removing a worker cgroup. Missing, duplicated,
@@ -319,6 +330,67 @@ aggregate limits under fork and process-group escape attempts; no host file or
 network access; and removal of all descendants after return, timeout and
 cancellation. The disposable guest passed these checks; broader activation
 still requires a reviewed operator path and installed-host acceptance.
+
+### Local text panel (`render-local-panel-v1`)
+
+`render-local-panel-v1` lets an owner-approved package draw bounded plain text
+into a local TUI panel. It adds nothing else: no host function, import,
+provider, prompt, shell, file, network or clock. The text never reaches an
+agent, the daemon, a transcript or the shell, and the panel is a one-shot
+snapshot; run the command again to refresh it.
+
+The manifest requests exactly that grant (the example above), and the owner
+approves the exact manifest and module digests with
+`grants = ["render-local-panel-v1"]`. A package that requests the grant
+without a matching approval, an approval whose grants differ from the
+manifest, or an approved zero-grant package is refused before any worker
+starts. Approval binds the opened inodes as well as the digests: replacing
+either file, even with identical bytes, refuses the panel until a new review.
+
+The module has no imports and exports exactly two items, its linear `memory`
+and `doxa_render_panel: () -> i64`. The return value packs the text's byte
+length into the high 32 bits and its offset in that memory into the low 32:
+
+```wat
+(module
+  (memory (export "memory") 1 1)
+  (data (i32.const 16) "Queue: 3 jobs\nNext: deploy")
+  (func (export "doxa_render_panel") (result i64)
+    i64.const 0x0000001a_00000010))
+```
+
+With a current signed operator permit for this TUI, run
+`/native-plugin panel demo`. The panel shows a DOXA-written header with the
+package name and module SHA-256, then each plugin line after a `│` gutter, so
+plugin text cannot pose as DOXA's own lines. DOXA renders it with its own
+widgets; the plugin cannot choose colours, styles or cursor positions.
+
+The text is refused, never truncated or repaired, unless it is:
+
+- 1–4,096 bytes of UTF-8 (one trailing line feed is ignored);
+- at most 32 lines separated by line feeds, each at most 80 terminal cells
+  (wide characters count two);
+- free of control characters: ESC, CR, TAB, BEL, NUL, DEL and C1 controls
+  such as CSI are refused, so no escape sequence can reach the terminal;
+- free of invisible, bidirectional, zero-width, combining, filler,
+  variation-selector, tag and noncharacter code points.
+
+A violation, or a range outside the module's memory, renders nothing; the
+panel only says the isolated worker failed (internal result class
+`invalid-panel-output`). The worker checks the text before writing its
+bounded response. The TUI decodes the response and checks it again, so a
+worker that skips its own check is a protocol failure, not a panel.
+
+The interpreter enforces these limits while the module runs: 5,000,000 fuel,
+a 4 MiB linear-memory cap from the store limiter, and 1,024 table entries. A
+module may declare up to 256 pages, but instantiation or growth past 64
+pages traps. An infinite loop stops with result class `fuel-exhausted`, an
+allocation bomb with `memory-limit`; neither renders anything. The
+five-second deadline and the same cgroup (256 MiB, no
+swap, 16 PIDs, one CPU), rlimit and namespace sandbox as zero-grant runs still
+apply. Closing the panel or its tab, changing tabs, exiting the window, or
+permit revocation or expiry cancels the worker. Once a worker is admitted,
+DOXA waits for its cgroup cleanup before accepting a result or exiting.
 
 ### Delegated-host acceptance fixture
 

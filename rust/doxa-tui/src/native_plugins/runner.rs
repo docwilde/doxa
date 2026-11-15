@@ -755,7 +755,19 @@ mod tests {
         let recursion = wasm("(module (memory (export \"memory\") 1 1)\
             (func $deep (result i64) call $deep)\
             (func (export \"doxa_render_panel\") (result i64) call $deep))");
-        assert!(matches!(execute_panel(&recursion), Err(WorkerFailure::Trap | WorkerFailure::FuelExhausted)));
+        // Wasmi's call-depth limit traps long before the fuel budget runs out.
+        assert_eq!(execute_panel(&recursion), Err(WorkerFailure::Trap));
+    }
+
+    #[test]
+    fn documented_panel_example_renders() {
+        // Kept identical to the example in docs/native-plugins.md.
+        let example = wasm(r#"(module
+  (memory (export "memory") 1 1)
+  (data (i32.const 16) "Queue: 3 jobs\nNext: deploy")
+  (func (export "doxa_render_panel") (result i64)
+    i64.const 0x0000001a_00000010))"#);
+        assert_eq!(execute_panel(&example).unwrap().lines().collect::<Vec<_>>(), ["Queue: 3 jobs", "Next: deploy"]);
     }
 
     #[test]
