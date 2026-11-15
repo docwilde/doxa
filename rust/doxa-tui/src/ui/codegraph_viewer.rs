@@ -230,6 +230,13 @@ impl App {
         self.input_cursor = 0;
     }
 
+    /// Input wait for one terminal-loop turn. Like a daemon frame, a pending
+    /// code-graph answer must not wait through an otherwise idle 10 ms input
+    /// poll: it is noticed within 1 ms of its worker finishing.
+    pub(super) fn input_poll_timeout(&self) -> Duration {
+        Duration::from_millis(if self.codegraph_pending.is_some() { 1 } else { 10 })
+    }
+
     /// Prepare only the active local worktree, on one background worker.
     /// Rapid switching is throttled; every explicit query independently
     /// invalidates changed inventories before using any prepared facts.
@@ -398,6 +405,28 @@ mod tests {
                 assert!(!lines.contains("original"));
             }
         }
+    }
+
+    #[test]
+    fn pending_query_shortens_input_poll_only_until_its_answer_arrives() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(Command::new("git").args(["init", "-q"]).arg(root.path()).status().unwrap().success());
+        fs::write(root.path().join("lib.rs"), "fn original() {}\n").unwrap();
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 96, 32); app.rail_visible = false;
+        app.groups[0].tabs.push("session".into());
+        app.session_cwds.insert("session".into(), root.path().to_path_buf());
+        assert_eq!(app.input_poll_timeout(), Duration::from_millis(10));
+        app.open_codegraph("file lib.rs");
+        assert!(app.codegraph_pending.is_some());
+        assert_eq!(app.input_poll_timeout(), Duration::from_millis(1));
+        for _ in 0..500 {
+            if app.poll_codegraph() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.codegraph_pending.is_none());
+        assert!(app.chip_info.as_ref().unwrap().lines.join("\n").contains("file lib.rs"));
+        assert_eq!(app.input_poll_timeout(), Duration::from_millis(10));
     }
 
     #[test]
