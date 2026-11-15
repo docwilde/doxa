@@ -81,7 +81,9 @@ Linux **Ctrl+V** reads a PNG screenshot or text after an explicit paste action;
 it needs `xclip` or `wl-paste`. Terminal **Ctrl+Shift+V** carries text. **Ctrl+C**
 copies selected transcript text through a desktop helper or OSC52. Files never
 submit until Enter; unsent attachments are not restored after TUI exit. Images
-work with direct Claude/Codex, including Docker; other engines accept text files.
+work with direct Claude/Codex, including Docker, and with DeepSeek/Router API
+models that have sourced image facts (currently `deepseek-flash`); other engines
+and models accept text files and refuse images before submission.
 [Formats, limits and clipboard setup](../docs/terminal-images.md#prompt-attachments).
 
 Typing `/` shows completion; unsupported DOXA commands stay in the draft with an error. `/model`, `/effort`, `/mode`, and `/engine` show supported choices. Live model changes require an idle session and empty queue. Claude permission-mode changes also apply during an active turn; switching to `auto` retries ordinary waiting approvals under Claude's classifier. Selecting another engine starts a new session. `/queue` previews or cancels waiting prompts. `/cd PATH` opens a tab in a verified directory without moving an existing daemon.

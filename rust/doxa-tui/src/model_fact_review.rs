@@ -84,6 +84,10 @@ pub fn report(engine: &str, model: &str, review_before: Option<&str>) -> Result<
         row(&mut lines, label, value(fact).map(|v| format!("${v}/million tokens")),
             fact.provenance, before, &mut review_count, &mut unknown_count);
     }
+    let images = facts.image_input.value.map(|accepts| if accepts { "accepted" } else { "not supported" }.to_owned());
+    row(&mut lines, "Image input", images, facts.image_input.provenance, before, &mut review_count, &mut unknown_count);
+    row(&mut lines, "Image token bound", value(facts.image_tokens_per_image).map(|v| format!("at most {v} input tokens per image")),
+        facts.image_tokens_per_image.provenance, before, &mut review_count, &mut unknown_count);
     lines.push(String::new());
     lines.push(format!("{} review candidates · {} unknown fields", review_count, unknown_count));
     lines.push("To refresh a fact, check its exact model ID against its primary source and update the registry in a reviewed code change.".into());
@@ -108,6 +112,12 @@ mod tests {
         assert!(!same_day.contains(" · REVIEW"));
         let no_cutoff = report("deepseek", "deepseek-flash", None).unwrap();
         assert!(no_cutoff.contains("0 review candidates · 0 unknown fields"));
+        assert!(no_cutoff.contains("Image input: accepted · checked 2026-11-14\n  source: https://api-docs.deepseek.com/guides/vision"));
+        assert!(no_cutoff.contains("Image token bound: at most 1024 input tokens per image · checked 2026-11-14"));
+        let glm = report("glm", "glm-5.3-flash", None).unwrap();
+        assert!(glm.contains("Image input: accepted · checked 2026-11-14\n  source: https://docs.z.ai/guides/vlm/glm-5.3-flash"));
+        assert!(glm.contains("Image token bound: unknown"));
+        assert!(report("deepseek", "deepseek-v4-pro", None).unwrap().contains("Image input: not supported"));
     }
 
     #[test]
@@ -115,9 +125,10 @@ mod tests {
         let sol = report("codex", "gpt-5.6-sol", Some("2026-10-10")).unwrap();
         assert!(sol.contains("Native budget input bound: unknown"));
         assert!(sol.contains("Native budget output bound: unknown"));
-        assert!(sol.contains("4 review candidates · 2 unknown fields"));
+        assert!(sol.contains("4 review candidates · 4 unknown fields"));
+        assert!(sol.contains("Image input: unknown"));
         let alias = report("codex", "gpt-5.6-sol-latest", Some("2026-10-10")).unwrap();
-        assert!(alias.contains("0 review candidates · 6 unknown fields"));
+        assert!(alias.contains("0 review candidates · 8 unknown fields"));
         assert!(!alias.contains("developers.openai.com"));
     }
 
