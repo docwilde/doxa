@@ -20,14 +20,24 @@ DOXA keeps one engine per session. The model picker shows choices reported by or
 | Reasoning effort | Reported choices | Reported choices | Model-dependent | Model-dependent | Fixed per configured target; effective effort in route status |
 | Tool permissions | Provider controls plus DOXA peer/LORE review | On-request, auto, or full-access; full-access admits built-in peer tools | DOXA peer/LORE review | DOXA peer/LORE review | Native manual/default or explicit idle Auto; target-specific DOXA reviews |
 | Compaction | LORE review before provider compaction | Trusted `PreCompact` review in private build | Reviewed summary checkpoint | Reviewed summary checkpoint | Reviewed API summary; CLI summary target refused, originals retained |
-| Prompt files | Images and UTF-8 text | Images and UTF-8 text | UTF-8 text | UTF-8 text | UTF-8 text; images refused |
+| Prompt files | Images and UTF-8 text | Images and UTF-8 text | UTF-8 text; images on `deepseek-flash` | UTF-8 text; images refused (per-image charge unpublished) | UTF-8 text; images only to image-capable API targets |
 
 Provider tool features depend on the installed CLI, model, and account. `/model`, `/effort`, and `/mode` expose only supported choices. Model and effort changes wait for the current turn and queue to finish; the supported active permission transitions are described below. The picker can show separately sourced context, thinking, and price facts for an exact model ID; unknown fields stay unknown and facts do not make a model selectable. [Model fact provenance](plans/model-registry.md).
 
+`doxa model-facts ENGINE MODEL --check-availability` reports whether the current account lists an exact model ID: `listed`, `unlisted` or `unknown`. The report includes the observation time, source and listing latency. Codex uses the provider's `account/read` and `model/list`; DeepSeek uses its documented `GET /models`. GLM and Claude report `unknown` because their providers document no account-scoped listing. The check runs only when requested and stores nothing. It does not change the picker, effort choices or budget admission. [Availability details](plans/model-registry.md#account-availability-observations).
+
 The **Attach** chip, **Alt+A** and Linux PNG clipboard paste send bounded image
 content directly to Claude/Codex, including Docker sessions. Text files are
-quoted input for all engines. Legacy Codex exec refuses images; PDF and remote-hub
-attachment submission remain unsupported. See [attachment formats and limits](terminal-images.md#prompt-attachments).
+quoted input for all engines. DeepSeek, GLM and Router API workers receive images
+only when the exact model has sourced image support and a per-image token bound
+in the [model facts registry](plans/model-registry.md#image-input); currently
+that is DeepSeek `deepseek-flash`. Other models, including GLM-5.3-Flash whose
+per-image charge is unpublished, refuse before submission with the reason. API
+images are OpenAI-compatible `image_url` data-URL parts and stay turn-local:
+history keeps the label, not the pixels. Router image turns narrow eligibility
+to image-capable API targets and require an image-capable pin or fallback.
+Legacy Codex exec refuses images; PDF and remote-hub attachment submission
+remain unsupported. See [attachment formats and limits](terminal-images.md#prompt-attachments).
 
 ## Review and accounting
 

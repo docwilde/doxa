@@ -36,6 +36,24 @@ fn worker_hold(candidate: &Candidate) -> Option<u64> {
 fn summary_hold(candidate: &Candidate) -> Option<u64> {
     priced(candidate.context_tokens.checked_sub(candidate.max_output_tokens)?, candidate.max_output_tokens, candidate)
 }
+/// Image turns may only reach an API target whose exact model has sourced
+/// image support and a per-image token bound. CLI targets receive a text
+/// history packet, so they never take images in this slice.
+fn image_target(candidate: &Candidate) -> Result<doxa_engines::model_registry::ImageBound, String> {
+    if candidate.provider.is_cli() {
+        return Err(format!("Router CLI target {} does not take image attachments", candidate.id));
+    }
+    let engine = candidate.provider.engine_id();
+    doxa_engines::model_registry::lookup(engine, &candidate.model).image_admission()
+        .map_err(|refusal| format!("Router target {}: {}", candidate.id, refusal.message(engine, &candidate.model)))
+}
+/// Measured input for one candidate: conservative text bytes plus this exact
+/// target's documented per-image token bound for every image. `None` makes
+/// the candidate ineligible for the turn.
+fn image_turn_input(input: u64, candidate: &Candidate, images: u64) -> Option<u64> {
+    if images == 0 { return Some(input); }
+    image_target(candidate).ok()?.tokens_per_image.checked_mul(images)?.checked_add(input)
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -390,7 +408,7 @@ impl RouterHost {
         self.save(&mut state)?;
         Ok(json!({"allocation":allocation,"retained_on_startup_failure":true}))
     }
-    fn eligible(&self, input: u64, tools: bool, assistant: bool, held: u64, pinned: Option<&str>, summary: bool) -> Vec<String> {
+    fn eligible(&self, input: u64, tools: bool, assistant: bool, held: u64, pinned: Option<&str>, summary: bool, images: u64) -> Vec<String> {
         let mut catalogs = Vec::new();
         for provider in [Provider::Deepseek, Provider::Glm] {
             if pinned.is_some_and(|id| !self.config.candidates.iter().any(|candidate|candidate.id == id && candidate.provider == provider)) { continue; }
@@ -417,7 +435,7 @@ impl RouterHost {
             if let Some(rows) = advertised.filter(|rows| !rows.is_empty()) { catalogs.push((provider, rows)); }
         }
         let mut cli_catalogs=Vec::new();
-        if !summary { for provider in [Provider::Claude,Provider::Codex] {
+        if !summary && images == 0 { for provider in [Provider::Claude,Provider::Codex] {
             if !self.config.candidates.iter().any(|candidate|candidate.provider == provider
                 && pinned.is_none_or(|id|candidate.id == id)) { continue; }
             if self.cancel.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) { break; }
@@ -425,6 +443,9 @@ impl RouterHost {
         } }
         self.config.candidates.iter().filter(|candidate| {
             if pinned.is_some_and(|id| candidate.id != id) { return false; }
+            // Each image adds this exact target's documented token bound to
+            // its measured input; unsupported or unpriced targets drop out.
+            let Some(input) = image_turn_input(input, candidate, images) else { return false; };
             if candidate.provider.is_cli() {
                 if summary || candidate.billing != Billing::CliAccount || tools && !candidate.supports_tools
                     || candidate.context_tokens.checked_sub(candidate.max_output_tokens).is_none_or(|cap|cap < input) { return false; }
@@ -470,7 +491,7 @@ impl RouterHost {
         let input_bytes = candidate.context_tokens.checked_sub(candidate.max_output_tokens).ok_or("Invalid summary byte cap")?;
         let required = self.inner.compaction_input_bytes(vendor(candidate.provider), &candidate.model, &candidate.effort, candidate.max_output_tokens)?;
         if required > input_bytes { return Err("Managed compaction request exceeds the configured byte cap".into()); }
-        if !self.eligible(required, false, false, held, Some(&candidate.id), true).contains(&candidate.id) {
+        if !self.eligible(required, false, false, held, Some(&candidate.id), true, 0).contains(&candidate.id) {
             return Err("Compaction target fails credentials, catalog, effort, context cap, price or aggregate allowance".into());
         }
         if self.cancel.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) {
@@ -707,7 +728,25 @@ impl RouterHost {
         emit(event);Ok(())
     }
 
-    fn route(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) -> Result<(), String> {
+    /// Static image admission: the pin, or in Auto the configured fallback
+    /// that must remain eligible, has to accept images. Checked at upload,
+    /// prompt admission and again before any compaction, Jev or worker call.
+    fn image_admission_locked(&self, pinned: Option<&str>) -> Result<(), String> {
+        let id = pinned.unwrap_or(&self.config.fallback_id);
+        let candidate = self.config.candidate(id).ok_or("Router image target is invalid")?;
+        image_target(candidate).map(|_| ()).map_err(|reason| if pinned.is_some() { reason } else {
+            format!("Router Auto keeps its configured fallback eligible, and image turns narrow eligibility to image-capable targets. {reason}. Pin an image-capable target or use a config whose fallback accepts images")
+        })
+    }
+
+    fn route(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, images: &[doxa_input::Attachment], emit: &mut dyn FnMut(Value)) -> Result<(), String> {
+        if !images.is_empty() {
+            if text.split_whitespace().next() == Some("/compact") { return Err("Use /compact without attachments".into()); }
+            if !images.iter().all(doxa_input::Attachment::is_image) { return Err("Only image attachments travel as provider image content".into()); }
+            let pinned = self.state.lock().unwrap().pinned.clone();
+            self.image_admission_locked(pinned.as_deref())?;
+        }
+        let image_count = images.len() as u64;
         if text.split_whitespace().next() == Some("/compact") {
             if text.trim() != "/compact" { return Err("Use /compact without arguments".into()); }
             return self.compact(false,emit);
@@ -762,8 +801,16 @@ impl RouterHost {
             if state.receipts.len() >= 1024 { return Err("Router receipt capacity reached; further turns withheld".into()); }
             (state.held().ok_or("Router aggregate allowance overflow")?, state.pinned.clone())
         };
-        let allowed = self.eligible(input_tokens, tools, assistant, held, pinned.as_deref(), false);
-        if allowed.is_empty() { return Err("No configured target satisfies credentials, catalog, effort, tools, context cap and aggregate allowance".into()); }
+        if image_count > 0 { self.image_admission_locked(pinned.as_deref())?; }
+        let allowed = self.eligible(input_tokens, tools, assistant, held, pinned.as_deref(), false, image_count);
+        if allowed.is_empty() { return Err(if image_count > 0 {
+            "No image-capable configured target satisfies credentials, catalog, effort, tools, context cap with image token bounds and aggregate allowance"
+        } else { "No configured target satisfies credentials, catalog, effort, tools, context cap and aggregate allowance" }.into()); }
+        // Jev sees a context requirement that covers the largest per-image
+        // bound among the narrowed candidates.
+        let input_tokens = input_tokens.checked_add(allowed.iter().filter_map(|id| self.config.candidate(id))
+            .filter_map(|candidate| image_target(candidate).ok()).map(|bound| bound.tokens_per_image).max().unwrap_or(0)
+            .checked_mul(image_count).ok_or("Router image token bound overflow")?).ok_or("Router image token bound overflow")?;
         // A pinned target replaces the selection fallback only for this turn;
         // it does not alter the durable configuration identity or allowance.
         let mut turn_config = self.config.clone();
@@ -771,7 +818,7 @@ impl RouterHost {
         let required_output = allowed.iter().filter_map(|id| turn_config.candidate(id).map(|candidate| candidate.max_output_tokens)).min().unwrap();
         let prepared = doxa_router::prepare(&turn_config, &RoutingInput { summary, estimated_input_tokens: input_tokens,
             max_output_tokens: required_output, requires_tools: tools, allowed_candidate_ids: allowed })
-            .map_err(|_| "Router input or configured fallback is ineligible")?;
+            .map_err(|_| if image_count > 0 { "Router input or configured fallback is ineligible for this image turn" } else { "Router input or configured fallback is ineligible" })?;
         let key = turn_config.decision().credential().ok();
         let reservation = {
             let mut state = self.state.lock().unwrap();
@@ -834,12 +881,22 @@ impl RouterHost {
                 "latency_ms":outcome.latency_ms,"cost_usd":outcome.router_cost_usd_micros.map(|cost|cost as f64 / 1_000_000.0),
                 "cost_is_estimate":true,"context_basis":"operator_request_byte_cap","provider_window":provider_window,
                 "input_cap_bytes":candidate.context_tokens-candidate.max_output_tokens,"output_cap_tokens":candidate.max_output_tokens,"max_tool_requests":candidate.max_tool_requests.unwrap_or(25)});
+            let mut selection = selection;
+            // Eligibility already required this evidence for an image turn.
+            if let Some(bound) = (image_count > 0).then(|| image_target(candidate).ok()).flatten() {
+                selection["image_input"] = json!({"count":image_count,"max_tokens_per_image":bound.tokens_per_image,
+                    "source":bound.source,"read_on":bound.as_of});
+            }
             state.worker.retained_reservation_usd_micros = state.worker.retained_reservation_usd_micros.checked_add(reserve).ok_or("Worker allowance overflow")?;
             state.selection = Some(selection.clone());
             self.save(&mut state)?;
             selection
         };
         if candidate.provider.is_cli() {
+            if image_count > 0 {
+                let mut state = self.state.lock().unwrap(); state.incomplete = false; self.save(&mut state)?;
+                return Err("Router CLI targets do not take image attachments".into());
+            }
             return self.run_cli(text,candidate,&selection,&outcome,peer_origin,emit);
         }
         if let Err(error) = self.inner.select_route(vendor(candidate.provider), &candidate.model, &candidate.effort, selection.clone(),
@@ -851,7 +908,7 @@ impl RouterHost {
         }
         emit(json!({"type":"routing_selected","data":selection}));
         let mut completed = None;
-        self.inner.prompt_with_peer_origin(text, peer_origin, &mut |mut event| {
+        self.inner.prompt_with_images(text, images, peer_origin, &mut |mut event| {
             if self.cancel.load(Ordering::Acquire) && event["type"] == "turn_started" { let _ = self.inner.call("interrupt", &json!({})); }
             if event["type"] == "turn_done" {
                 let mut state = self.state.lock().unwrap();
@@ -902,7 +959,7 @@ impl RouterHost {
         Ok(())
     }
 
-    fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+    fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, images: &[doxa_input::Attachment], emit: &mut dyn FnMut(Value)) {
         if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
             emit(json!({"type":"turn_refused","data":{"reason":"routing","message":"Invalid host peer provenance"}}));
             return;
@@ -916,7 +973,7 @@ impl RouterHost {
         impl Drop for Active<'_> { fn drop(&mut self) { self.0.store(false, Ordering::Release); } }
         let _active = Active(&self.active);
         let mut emit_mcp = |mut event| { self.inner.decorate_mcp(&mut event); emit(event); };
-        if let Err(message) = self.route(text, peer_origin, &mut emit_mcp) {
+        if let Err(message) = self.route(text, peer_origin, images, &mut emit_mcp) {
             emit_mcp(json!({"type":"turn_refused","data":{"reason":"routing","message":message}}));
         }
     }
@@ -925,10 +982,18 @@ impl RouterHost {
 impl Host for RouterHost {
     fn take_native_tool_audit(&self)->Option<Value>{self.inner.take_native_tool_audit()}
     fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
-        self.prompt_impl(text, origin, emit);
+        self.prompt_impl(text, origin, &[], emit);
     }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
-        self.prompt_impl(text, None, emit);
+        self.prompt_impl(text, None, &[], emit);
+    }
+    fn supports_images(&self) -> bool { self.image_admission().is_ok() }
+    fn image_admission(&self) -> Result<(), String> {
+        let pinned = self.state.lock().unwrap().pinned.clone();
+        self.image_admission_locked(pinned.as_deref())
+    }
+    fn prompt_with_images(&self, text: &str, images: &[doxa_input::Attachment], origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, origin, images, emit);
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
@@ -1016,5 +1081,23 @@ mod request_bound_tests {
     fn reservation_matches_the_reviewed_whole_turn_http_limit(){
         let mut row:Candidate=serde_json::from_value(json!({"id":"ds","provider":"deepseek","model":"deepseek-flash","effort":"none","description":"Bounded fixture","context_tokens":40000,"max_output_tokens":4096,"max_tool_requests":6,"supports_tools":true,"input_usd_micros_per_million":300000,"output_usd_micros_per_million":1200000})).unwrap();
         assert_eq!(worker_hold(&row),Some(69543));row.max_tool_requests=Some(4);assert_eq!(worker_hold(&row),Some(48000));row.max_tool_requests=None;assert_eq!(worker_hold(&row),Some(274196));row.context_tokens=35000;row.max_output_tokens=2048;row.max_tool_requests=Some(4);assert_eq!(worker_hold(&row),Some(42000));
+    }
+    #[test]
+    fn image_turns_add_each_exact_target_bound_and_leave_the_hold_cap_based(){
+        let ds:Candidate=serde_json::from_value(json!({"id":"ds","provider":"deepseek","model":"deepseek-flash","effort":"none","description":"Bounded fixture","context_tokens":6000,"max_output_tokens":512,"supports_tools":true,"input_usd_micros_per_million":300000,"output_usd_micros_per_million":1200000})).unwrap();
+        // DeepSeek documents at most 1024 tokens per image for deepseek-flash.
+        assert_eq!(image_turn_input(1000,&ds,0),Some(1000));assert_eq!(image_turn_input(1000,&ds,4),Some(5096));
+        let cap=ds.context_tokens-ds.max_output_tokens;
+        assert!(image_turn_input(1000,&ds,4).unwrap()<=cap);assert!(image_turn_input(2000,&ds,4).unwrap()>cap,"image bounds can exhaust the request cap");
+        assert_eq!(image_turn_input(u64::MAX,&ds,1),None);
+        // The worker hold already covers every request up to the cap, so an
+        // admitted image turn needs no separate, smaller reservation.
+        assert_eq!(worker_hold(&ds),priced(cap*25,512,&ds));
+        for (provider,model,billing) in [("glm","glm-5.3-flash",""),("deepseek","deepseek-v4-pro",""),("glm","glm-5.3",""),("claude","claude-model","cli_account")] {
+            let mut row=json!({"id":"other","provider":provider,"model":model,"effort":"high","description":"Bounded fixture","context_tokens":6000,"max_output_tokens":512,"supports_tools":true});
+            if billing.is_empty(){row["input_usd_micros_per_million"]=json!(1_400_000);row["output_usd_micros_per_million"]=json!(4_400_000);}else{row["billing"]=json!(billing);}
+            let row:Candidate=serde_json::from_value(row).unwrap();
+            assert_eq!(image_turn_input(1000,&row,0),Some(1000));assert_eq!(image_turn_input(1000,&row,1),None,"{model}");assert!(image_target(&row).is_err());
+        }
     }
 }
