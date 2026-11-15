@@ -129,7 +129,9 @@ def prepare_source(cache):
         run(["git", "-C", str(source), "add", "-N", "codex-rs/core/src/doxa_precompact.rs"])
     # Include staged changes as well as the worktree. Intent-to-add retains the
     # new gate in this complete HEAD comparison; unrelated staged code fails.
-    actual_patch = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary"])
+    # Explicit prefixes keep mnemonicPrefix/noprefix settings out of the reviewed comparison.
+    actual_patch = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary",
+                                            "--src-prefix=a/", "--dst-prefix=b/"])
     if actual_patch != PATCH.read_bytes():
         raise ValueError("provider source changes do not match the reviewed patch")
     untracked = subprocess.check_output(["git", "-C", str(source), "ls-files", "--others", "--exclude-standard"])
