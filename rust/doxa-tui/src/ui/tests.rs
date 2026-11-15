@@ -8758,3 +8758,44 @@ fn identity_writer_handles_close_reopen_close_and_stop_without_roster_authority(
     save_identity_intent(&mut app,&mut store,&mut seen);
     assert!(store.saved_tabs().unwrap().is_empty());
 }
+
+#[test]
+fn listed_account_observation_never_offers_or_admits_the_model() {
+    // Negative control: an explicit account listing names an exact ID that
+    // this session's provider catalog omits. The observation is evidence only.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/models", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") && request.len() < 8192 {
+            let mut byte = [0]; stream.read_exact(&mut byte).unwrap(); request.push(byte[0]);
+        }
+        let body = br#"{"object":"list","data":[{"id":"fixture-listed-only","object":"model","owned_by":"fixture"}]}"#;
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+        stream.write_all(body).unwrap();
+    });
+    let observed = crate::model_catalog::deepseek_at(&url, Ok(Some("fixture-key".into())),
+        "fixture-listed-only", Duration::from_secs(2));
+    server.join().unwrap();
+    assert_eq!(observed.status, crate::model_catalog::CatalogStatus::Listed);
+
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"deepseek",
+        "model":"deepseek-flash","cwd":"/tmp","can_set_model":true}));
+    app.open_model_picker();
+    app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"s","ok":true,
+        "models":["deepseek-flash","deepseek-v4-pro"],
+        "capabilities":[{"model":"deepseek-flash","efforts":["high"]},{"model":"deepseek-v4-pro","efforts":["high"]}]}));
+    assert_eq!(app.model_picker.as_ref().unwrap().models, ["deepseek-flash", "deepseek-v4-pro"]);
+    for _ in 0..3 { app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))); }
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    assert_eq!(app.pending_model_changes, vec![("s".to_owned(), "deepseek-v4-pro".to_owned())],
+        "the picker offers only the provider catalog");
+    assert!(app.session_effort_levels("s", "deepseek", "fixture-listed-only").is_empty());
+    // Budget admission still finds no sourced price or bound for the listed ID.
+    let facts = doxa_engines::model_registry::lookup("deepseek", "fixture-listed-only");
+    assert!(facts.budget_bound_pair().is_none() && facts.priced_pair().is_none());
+}

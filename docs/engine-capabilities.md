@@ -24,6 +24,8 @@ DOXA keeps one engine per session. The model picker shows choices reported by or
 
 Provider tool features depend on the installed CLI, model, and account. `/model`, `/effort`, and `/mode` expose only supported choices. Model and effort changes wait for the current turn and queue to finish; the supported active permission transitions are described below. The picker can show separately sourced context, thinking, and price facts for an exact model ID; unknown fields stay unknown and facts do not make a model selectable. [Model fact provenance](plans/model-registry.md).
 
+`doxa model-facts ENGINE MODEL --check-availability` reports whether the current account lists an exact model ID: `listed`, `unlisted` or `unknown`. The report includes the observation time, source and listing latency. Codex uses the provider's `account/read` and `model/list`; DeepSeek uses its documented `GET /models`. GLM and Claude report `unknown` because their providers document no account-scoped listing. The check runs only when requested and stores nothing. It does not change the picker, effort choices or budget admission. [Availability details](plans/model-registry.md#account-availability-observations).
+
 The **Attach** chip, **Alt+A** and Linux PNG clipboard paste send bounded image
 content directly to Claude/Codex, including Docker sessions. Text files are
 quoted input for all engines. Legacy Codex exec refuses images; PDF and remote-hub

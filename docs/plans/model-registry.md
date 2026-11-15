@@ -3,12 +3,16 @@
 Status: **first slice implemented** in Rust. The provider catalog still decides
 which models and effort levels a connected session may use. This registry adds
 sourced facts to an exact `(engine, model)` key; it never grants availability.
+An explicit [account availability check](#account-availability-observations)
+records whether the current Codex or DeepSeek account lists an exact ID, as
+dated evidence only.
 
 ## Contents
 
 - [Current design](#current-design)
 - [What is known](#what-is-known)
 - [Where it appears](#where-it-appears)
+- [Account availability observations](#account-availability-observations)
 - [Token-budget bounds](#token-budget-bounds)
 - [Remaining work](#remaining-work)
 
@@ -111,6 +115,53 @@ does not prove a Responses call will succeed, its billed tier, latency, or
 review quality. The flag is accepted only for the `codex` engine and never runs
 implicitly during fact review or model selection.
 
+## Account availability observations
+
+`doxa model-facts ENGINE MODEL --check-availability` explicitly asks whether
+the engine's current account lists that exact model ID. It prints `listed`,
+`unlisted` or `unknown` with a fixed reason, the UTC observation time, the
+listing source, and the latency of the listing call itself. The result is
+printed and dropped. No cache exists for a later path to mistake for an
+availability grant, and model selection, effort choices and budget admission
+never read it. Provider error text and credentials are never printed.
+
+| Engine | Listing source | Result without a usable listing |
+| --- | --- | --- |
+| Codex | Provider `account/read`, then `model/list` with `includeHidden: false`, using the executable and project directory of a new session. DOXA reads up to 10 pages or 1,000 visible rows; one malformed row fails the listing. | `unknown` when unauthenticated, refused, malformed, timed out (20 s including start-up), or absent from a listing cut off at DOXA's bound. |
+| DeepSeek | [`GET https://api.deepseek.com/models`](https://api-docs.deepseek.com/api/list-models/) with the key a DeepSeek session resolves. It uses the same fixed-request limits as `--check-catalog`. | `unknown` for a missing key, refusal, redirect, malformed or oversized body, duplicate row, or 5 s timeout. |
+| GLM | None. Z.AI's [API reference index](https://docs.z.ai/llms.txt) documents no model-listing endpoint (checked 2026-11-14). | Always `unknown`; no request is made. |
+| Claude | None. Claude Code describes [`supportedModels()`](https://code.claude.com/docs/en/agent-sdk/typescript) only as available models with display info, not as an account-scoped list of exact IDs (checked 2026-11-14). | Always `unknown`; no request is made. |
+
+The GLM picker's existing catalog request to `/api/paas/v4/models` is
+undocumented, so it is not availability evidence. Anthropic's Models API lists models for an API
+key, which need not be the Claude CLI login. An `unlisted` result means only
+that a complete, successful listing omitted the exact ID. Hidden Codex rows
+do not count as listed. No family, prefix or alias match is made.
+
+Codex can answer `model/list` from its own `models_cache.json`. The account
+state can therefore predate the observation time, and the latency can be a
+local reply rather than a network round trip. A listing does not prove that a
+request will succeed, its quality, or its inference latency.
+
+Neither listing states a billed tier, so billed tier stays `unknown`. Codex
+0.167 `model/list` rows can state a `defaultServiceTier`. When every row for the
+exact ID agrees, the report names it as a catalog default, not the billed tier
+of any request. DeepSeek documents no tier field.
+
+Fixture app-servers and HTTP fixtures cover listed, unlisted, unauthenticated,
+refused, malformed, truncated and timed-out listings. They also confirm that no
+thread or turn starts. A UI negative control keeps a listed-only model out of
+the picker, its effort choices and priced-budget admission. A CLI test
+confirms that an observation writes no state beyond the credential store's
+existing empty lock file.
+
+On 2026-11-15 at 04:26 UTC, a live check used the stock Codex 0.167.0 CLI and
+an existing login, because no protected provider build was installed. It
+reported registry models as both listed and unlisted without starting a thread.
+The first listing took 694 ms; later ones took 5–9 ms from the provider cache.
+The protected 0.165.0 provider build was not exercised, and its listing can
+differ. No DeepSeek credential was present, so DeepSeek used fixtures only.
+
 ## Token-budget bounds
 
 OpenAI's [pricing table](https://developers.openai.com/api/docs/pricing)
@@ -181,3 +232,9 @@ per-request tier would allow tighter accounting in a later slice.
   task-specific evaluation method.
 - Capture provider billing mode and per-request tier when available so a budget
   can use an exact billed rate rather than the documented upper token bound.
+- Account availability is observed only on explicit request, for Codex and
+  DeepSeek. GLM and Claude remain `unknown` until their providers document an
+  account-scoped listing. The protected provider's `model/list` has fixture
+  coverage only; a live check on that Linux build remains open. Inference
+  latency, billed tier and provider charge remain unknown, because the
+  observation measures only its own listing call.
