@@ -7,6 +7,64 @@ impl Host for Idle {
     fn prompt(&self,_:&str,_:&mut dyn FnMut(Value)){}
     fn call(&self,_:&str,_:&Value)->Result<Value,String>{Ok(json!({}))}
 }
+
+#[test]
+fn docker_peer_delivery_and_provider_history_omit_host_paths() {
+    use doxa_peers::delivery::{Message, Sender, TurnRef};
+    struct Container {
+        callback: Mutex<Option<doxa_runtime::PeerToolHandler>>,
+        docker: AtomicBool,
+    }
+    impl Host for Container {
+        fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
+        fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+        fn isolation_status(&self) -> Option<Value> {
+            Some(json!({"profile":if self.docker.load(Ordering::Relaxed) {"docker-offline"} else {"native"}}))
+        }
+        fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool {
+            *self.callback.lock().unwrap() = Some(handler); true
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let _home = ParentHome::isolated(dir.path());
+    let inner = Arc::new(Container {callback:Mutex::new(None),docker:AtomicBool::new(true)});
+    let (tx, _) = std::sync::mpsc::sync_channel(1);
+    let mut peer = PeerHost::new(inner.clone(), dir.path().into(), dir.path(), "recipient".into(), "Recipient".into(), tx).unwrap();
+    *peer.lore.lock().unwrap() = Some(canonical_lore(dir.path()));
+    peer.agent_tools_enabled = true;
+    let peer = Arc::new(peer);
+    let inbox = delivery::Inbox::bind(dir.path(), "sender").unwrap();
+    let record: PeerRecord = serde_json::from_value(json!({"session_id":"sender","pid":std::process::id(),
+        "socket_path":inbox.path(),"cwd":peer.scope,"repo_root":peer.scope,
+        "title":"Sender","started_at":now(),"heartbeat_at":now()})).unwrap();
+    Registry::open(dir.path()).unwrap().write(&record).unwrap();
+    let frame = || PeerFrame {authenticated_pid:Some(std::process::id() as i32),from_id:"sender".into(),
+        from_title:"Sender".into(),body:"Bounded status".into(),from_repo:Some(peer.scope.clone()),sent_at:now(),kind:Some("direct".into())};
+    let event = peer.inbound_event(frame(), None).unwrap();
+    assert!(event["data"]["from_repo"].is_null());
+    let (prompt, origin) = PeerHost::peer_prompt(&event).unwrap();
+    assert!(!prompt.contains(&peer.scope));
+    assert!(origin.from_repo.is_none());
+    let (path, _, _) = peer.peer_history_snapshot().unwrap().unwrap();
+    let row: Value = serde_json::from_str(fs::read_to_string(path).unwrap().lines().next().unwrap()).unwrap();
+    assert!(row["data"]["from_repo"].is_null());
+    peer.ledger.append(Message {v:1,id:delivery::new_message_id(),ts:now(),sender:Sender {session:"sender".into(),
+        title:Some("Sender".into()),repo:Some(peer.scope.clone()),model:None,engine:None},
+        to:vec!["recipient".into()],kind:"direct".into(),in_reply_to:None,body:"Bounded status".into(),
+        body_sha256:String::new(),latency_ms:None,turn:TurnRef {id:None,state:"idle".into()}}, &|text:&str| text.to_owned()).unwrap();
+    assert!(peer.connect_provider_tools());
+    let handler = inner.callback.lock().unwrap().clone().unwrap();
+    let history = handler("peer_history", &json!({})).unwrap();
+    assert_eq!(history["messages"].as_array().unwrap().len(), 1);
+    assert!(history["messages"][0]["from"]["repo"].is_null());
+    assert!(!history.to_string().contains(&peer.scope));
+    assert_eq!(history["messages"][0]["body"], "Bounded status");
+    inner.docker.store(false, Ordering::Relaxed);
+    let native = peer.inbound_event(frame(), None).unwrap();
+    assert_eq!(native["data"]["from_repo"], peer.scope);
+    assert_eq!(handler("peer_history", &json!({})).unwrap()["messages"][0]["from"]["repo"], peer.scope);
+}
 struct ParentHome(Vec<(&'static str,Option<std::ffi::OsString>)>);
 impl ParentHome{
     fn isolated(root:&Path)->Self{
