@@ -25,9 +25,51 @@ pub const MAX_TURN_DURATION: Duration = Duration::from_secs(3600);
 
 /// Optional routed-turn transport bounds. Input bytes include the complete
 /// serialized request (including tools), not an estimated token count. The
-/// output allowance is shared across every request in the tool loop.
+/// output allowance is shared across every request in the tool loop. Inline
+/// image parts are measured by their documented per-image token bound
+/// instead of their base64 bytes; see [`TurnImages`].
 #[derive(Clone, Copy, Debug)]
 pub struct TurnLimits { pub input_bytes: usize, pub output_tokens: u64, pub max_requests:Option<u8> }
+
+pub const MAX_TURN_IMAGES: usize = 4;
+/// Serialized image parts for one turn: base64 of the 4 MiB attachment
+/// aggregate plus data-URL framing.
+pub const MAX_TURN_IMAGE_WIRE_BYTES: usize = 6 * 1024 * 1024;
+
+/// Inline images for one user turn, already normalized and frozen by the
+/// host attachment pipeline. Only OpenAI-compatible `image_url` parts with a
+/// base64 PNG/JPEG data URL are accepted; the transport never sends a remote
+/// URL. Images are turn-local: every request of the turn (including tool
+/// continuations) carries them, but returned history keeps only the text.
+#[derive(Clone, Debug)]
+pub struct TurnImages { parts: Vec<Value>, tokens_per_image: u64 }
+
+impl TurnImages {
+    /// `tokens_per_image` is the exact model's documented upper bound. The
+    /// caller obtains it from sourced registry facts; zero is never a bound.
+    pub fn new(parts: Vec<Value>, tokens_per_image: u64) -> Result<Self, Error> {
+        if parts.is_empty() || parts.len() > MAX_TURN_IMAGES || tokens_per_image == 0 { return Err(Error::InvalidImageInput); }
+        let mut wire = 0usize;
+        for part in &parts {
+            let url = part.as_object().filter(|fields| fields.len() == 2 && part["type"] == "image_url")
+                .and_then(|_| part["image_url"].as_object()).filter(|fields| fields.len() == 1)
+                .and_then(|_| part["image_url"]["url"].as_str()).ok_or(Error::InvalidImageInput)?;
+            let data = url.strip_prefix("data:image/png;base64,").or_else(|| url.strip_prefix("data:image/jpeg;base64,"))
+                .ok_or(Error::InvalidImageInput)?;
+            if data.is_empty() || data.len() % 4 != 0
+                || !data.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')) {
+                return Err(Error::InvalidImageInput);
+            }
+            wire = wire.saturating_add(serde_json::to_vec(part).map_err(|_| Error::InvalidImageInput)?.len());
+        }
+        if wire > MAX_TURN_IMAGE_WIRE_BYTES { return Err(Error::InvalidImageInput); }
+        Ok(Self { parts, tokens_per_image })
+    }
+    pub fn len(&self) -> usize { self.parts.len() }
+    pub fn is_empty(&self) -> bool { self.parts.is_empty() }
+    /// Conservative input tokens for one request carrying these images.
+    pub fn token_bound(&self) -> Option<u64> { (self.parts.len() as u64).checked_mul(self.tokens_per_image) }
+}
 const BALANCE_URL: &str = "https://api.deepseek.com/user/balance";
 const BALANCE_BODY_MAX: usize = 4096;
 
@@ -435,6 +477,7 @@ pub enum Error {
     ToolResultTooLarge,
     UsageOverflow,
     AdmissionDenied,
+    InvalidImageInput,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -881,6 +924,7 @@ pub async fn run_turn(
         deadline,
         on_delta,
         None,
+        None,
     )
     .await
 }
@@ -902,7 +946,7 @@ pub async fn run_turn_local(
 ) -> Result<TurnOutcome, Error> {
     validate_local_endpoint(endpoint)?;
     run_turn_at(
-        vendor, endpoint, model, effort, history, prompt, gate, cancel, deadline, on_delta, None,
+        vendor, endpoint, model, effort, history, prompt, gate, cancel, deadline, on_delta, None, None,
     )
     .await
 }
@@ -913,7 +957,7 @@ pub async fn run_turn_limited(vendor: Vendor, model: &str, effort: &str,
     cancel: watch::Receiver<bool>, deadline: Duration, on_delta: impl FnMut(Delta),
     limits: TurnLimits) -> Result<TurnOutcome, Error> {
     run_turn_at(vendor, vendor.endpoint(), model, effort, history, prompt, gate,
-        cancel, deadline, on_delta, Some(limits)).await
+        cancel, deadline, on_delta, Some(limits), None).await
 }
 
 #[cfg(feature = "local-test-server")]
@@ -924,7 +968,29 @@ pub async fn run_turn_limited_local(vendor: Vendor, endpoint: &str, model: &str,
     limits: TurnLimits) -> Result<TurnOutcome, Error> {
     validate_local_endpoint(endpoint)?;
     run_turn_at(vendor, endpoint, model, effort, history, prompt, gate,
-        cancel, deadline, on_delta, Some(limits)).await
+        cancel, deadline, on_delta, Some(limits), None).await
+}
+
+/// One user turn with inline images. The host must already have admitted the
+/// exact model from sourced registry facts; `limits` is optional as above.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_turn_with_images(vendor: Vendor, model: &str, effort: &str,
+    history: &mut Vec<Value>, prompt: &str, images: &TurnImages, gate: Option<&mut dyn ToolGate>,
+    cancel: watch::Receiver<bool>, deadline: Duration, on_delta: impl FnMut(Delta),
+    limits: Option<TurnLimits>) -> Result<TurnOutcome, Error> {
+    run_turn_at(vendor, vendor.endpoint(), model, effort, history, prompt, gate,
+        cancel, deadline, on_delta, limits, Some(images)).await
+}
+
+#[cfg(feature = "local-test-server")]
+#[allow(clippy::too_many_arguments)]
+pub async fn run_turn_with_images_local(vendor: Vendor, endpoint: &str, model: &str, effort: &str,
+    history: &mut Vec<Value>, prompt: &str, images: &TurnImages, gate: Option<&mut dyn ToolGate>,
+    cancel: watch::Receiver<bool>, deadline: Duration, on_delta: impl FnMut(Delta),
+    limits: Option<TurnLimits>) -> Result<TurnOutcome, Error> {
+    validate_local_endpoint(endpoint)?;
+    run_turn_at(vendor, endpoint, model, effort, history, prompt, gate,
+        cancel, deadline, on_delta, limits, Some(images)).await
 }
 
 fn validate_tool_definitions(definitions: &[Value]) -> Result<(), Error> {
@@ -990,6 +1056,7 @@ async fn run_turn_at(
     deadline: Duration,
     mut on_delta: impl FnMut(Delta),
     limits: Option<TurnLimits>,
+    images: Option<&TurnImages>,
 ) -> Result<TurnOutcome, Error> {
     let request_limit=limits.and_then(|limits|limits.max_requests).map(usize::from).unwrap_or(MAX_TOOL_STEPS+1);
     if !(1..=MAX_TOOL_STEPS+1).contains(&request_limit){return Err(Error::ToolLimit);}
@@ -1011,13 +1078,36 @@ async fn run_turn_at(
     let key = credentials::resolve(vendor).map_err(|_| Error::CredentialStore)?
         .ok_or(Error::MissingCredential(vendor.env_var()))?;
     let mut messages = history.clone();
-    messages.push(json!({"role":"user","content":prompt}));
+    let image_parts = images.map(|images| images.parts.as_slice()).unwrap_or_default();
+    if images.is_some_and(TurnImages::is_empty) { return Err(Error::InvalidImageInput); }
+    let user_index = messages.len();
+    messages.push(if image_parts.is_empty() { json!({"role":"user","content":prompt}) } else {
+        // Documented OpenAI-compatible multimodal user message: a text part
+        // followed by inline `image_url` data-URL parts.
+        let mut content = vec![json!({"type":"text","text":prompt})];
+        content.extend(image_parts.iter().cloned());
+        json!({"role":"user","content":content})
+    });
     let known = credentials::known_keys().map_err(|_| Error::CredentialStore)?;
     for message in &mut messages {
         *message = scrub_json(std::mem::take(message), &key);
         for key in &known { *message = scrub_json(std::mem::take(message), key); }
     }
     check_history(&messages)?;
+    // Byte caps measure each image by its documented token bound, never by
+    // base64 size; text bytes are already a conservative token bound.
+    let (image_wire_bytes, image_tokens) = match images {
+        Some(images) => {
+            let parts = messages[user_index]["content"].as_array().ok_or(Error::InvalidImageInput)?;
+            let mut wire = 0usize;
+            for part in parts.iter().skip(1) {
+                wire = wire.checked_add(serde_json::to_vec(part).map_err(|_| Error::InvalidImageInput)?.len())
+                    .ok_or(Error::InvalidImageInput)?;
+            }
+            (wire, usize::try_from(images.token_bound().ok_or(Error::InvalidImageInput)?).map_err(|_| Error::InvalidImageInput)?)
+        }
+        None => (0, 0),
+    };
     let mut outcome = TurnOutcome {
         text: String::new(),
         reasoning: String::new(),
@@ -1050,7 +1140,10 @@ async fn run_turn_at(
             body["tool_choice"] = json!("auto");
         }
         if let Some(limits) = limits {
-            if serde_json::to_vec(&body).map_err(|_| Error::HistoryTooLarge)?.len() > limits.input_bytes {
+            let measured = serde_json::to_vec(&body).map_err(|_| Error::HistoryTooLarge)?.len()
+                .checked_sub(image_wire_bytes).and_then(|bytes| bytes.checked_add(image_tokens))
+                .ok_or(Error::RequestTooLarge)?;
+            if measured > limits.input_bytes {
                 return Err(Error::RequestTooLarge);
             }
         }
@@ -1127,6 +1220,12 @@ async fn run_turn_at(
             }
             messages.push(assistant);
             check_history(&messages)?;
+            if images.is_some() {
+                // Turn-local pixels: later turns, other targets and saved
+                // history see only the scrubbed text with attachment labels.
+                let text = messages[user_index]["content"][0]["text"].as_str().ok_or(Error::InvalidImageInput)?.to_owned();
+                messages[user_index]["content"] = json!(text);
+            }
             *history = messages;
             return Ok(outcome);
         }

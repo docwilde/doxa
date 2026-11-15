@@ -70,8 +70,10 @@ impl App {
             &&!self.offline_ids.contains(&target.session);
         let unchanged=if self.prompt_owner()==owner{self.input==target.draft&&self.input_cursor==target.cursor}else{self.input_drafts.get(&owner).is_some_and(|(draft,cursor)|*draft==target.draft&&*cursor==target.cursor)};
         if !exists||!unchanged{self.notice="Attachment discarded · original prompt changed or closed".into();return true;}
-        if value.is_image()&&self.session_identity.get(&target.session).and_then(|p|p.0.as_deref()).is_some_and(|engine|!matches!(engine,"claude"|"codex")){
-            self.notice="Image attachments currently require Claude or Codex".into();return true;
+        // API engines accept images only for exact models with sourced image
+        // facts; the daemon decides at upload and its refusal keeps the draft.
+        if value.is_image()&&self.session_identity.get(&target.session).and_then(|p|p.0.as_deref()).is_some_and(|engine|!matches!(engine,"claude"|"codex"|"deepseek"|"glm"|"router")){
+            self.notice="Image attachments require Claude, Codex or an image-capable API model".into();return true;
         }
         let values=self.prompt_attachments.entry(owner).or_default();
         if values.len()>=doxa_input::MAX_COUNT||values.iter().map(|v|v.bytes.len()).sum::<usize>()+value.bytes.len()>doxa_input::MAX_TOTAL{self.notice="Attachment limit: 4 files and 4 MiB per prompt".into();return true;}
@@ -117,6 +119,21 @@ impl App {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Tab,KeyModifiers::ALT)));assert_eq!(app.active_group,1);app.input="other".into();app.input_cursor=5;
         assert!(app.poll_clipboard());assert_eq!(app.input,"other");assert_eq!(app.prompt_attachments[&(0,"a".into())].len(),1);assert!(app.pending_prompts.is_empty());
         let target=app.clipboard_target();app.clipboard_image_job=Some(crate::clipboard::ImageJob::fixture(target,Ok(Some(image()))));app.input.push('!');app.input_cursor+=1;app.poll_clipboard();assert!(!app.prompt_attachments.contains_key(&(1,"b".into())));assert!(app.notice.contains("discarded"));
+    }
+    #[test]fn api_engine_images_reach_the_draft_for_daemon_admission_and_rejections_keep_bytes(){
+        for (engine,accepted) in [("deepseek",true),("glm",true),("router",true),("fixture",false)] {
+            let mut app=app();app.session_identity.insert("a".into(),(Some(engine.into()),None));
+            let target=app.clipboard_target();app.clipboard_image_job=Some(crate::clipboard::ImageJob::fixture(target,Ok(Some(image()))));app.poll_clipboard();
+            assert_eq!(app.prompt_attachments.get(&(0,"a".into())).is_some_and(|values|values.len()==1),accepted,"{engine}");
+            if !accepted {assert!(app.notice.contains("image-capable API model"));}
+        }
+        // A daemon refusal for an unsupported or unpriced exact model is a
+        // rejected delivery: the original text and frozen bytes stay recoverable.
+        let mut app=app();let original=image();
+        app.apply_worker_frame(WorkerFrame::AttachmentFailed{session_id:"a".into(),text:"look".into(),attachments:vec![original.clone()],
+            message:"glm model glm-5.3-flash accepts images, but its per-image token charge is unpublished".into(),delivery:PromptDelivery::Rejected});
+        assert!(app.notice.contains("per-image token charge is unpublished")&&app.notice.contains("not submitted")&&app.notice.contains("Alt+Up"));
+        let (text,files)=&app.rejected_attachment_prompts["a"][0];assert_eq!(text,"look");assert_eq!(files[0].bytes,original.bytes);
     }
     #[test]fn attachments_menu_preserves_text_and_removes_without_submitting(){
         let mut app=app();app.size=Rect::new(0,0,110,30);app.prompt_attachments.insert((0,"a".into()),vec![image()]);app.open_attachments();
