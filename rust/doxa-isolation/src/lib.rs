@@ -37,6 +37,7 @@ mod command_runner;
 mod disk;
 mod source_git;
 pub mod root_client;
+pub mod socket_budget;
 pub use source_git::staged_diff;
 pub use disk::{check_disk_budget, DiskSnapshot};
 pub fn check_turn_budget(manifest:&Manifest)->io::Result<()> {
@@ -454,6 +455,7 @@ impl Runtime {
         if path.exists() {
             if !resume { return Err(error("session isolation manifest already exists; resume the saved session explicitly")); }
             let mut manifest = read_manifest(&path)?;
+            socket_budget::check_docker_socket_paths(home, id.len(), manifest.profile)?;
             if requested.is_some_and(|p| p != manifest.profile) { return Err(error("resume isolation differs from saved policy; attach and change it while idle or explicitly migrate the session")); }
             if source != manifest.checkout && source != manifest.source { return Err(error("resume project does not match isolation manifest")); }
             if manifest.profile==Profile::DockerHardened {
@@ -464,6 +466,7 @@ impl Runtime {
             return Ok(Self { path, manifest, migration_stop:false, providers: Default::default() });
         }
         let profile = requested.unwrap_or(configured_profile(home)?);
+        socket_budget::check_docker_socket_paths(home, id.len(), profile)?;
         if resume && profile.docker() { return Err(error("saved native session has no Docker manifest; automatic backend migration is forbidden")); }
         // ROOT provisioning is checked before making a client mirror. No
         // direct Engine socket or caller-owned policy can satisfy this gate.
