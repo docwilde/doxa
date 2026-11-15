@@ -52,6 +52,10 @@ fn availability_flag_is_explicit_observational_and_writes_no_state() {
     let run = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_doxa-rs")).args(args).current_dir(&work)
         .env("DOXA_HOME", &home).env("HOME", &home).env("XDG_DATA_HOME", home.join("data"))
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        // The Python fixture must not write bytecode caches under the private
+        // HOME (macOS /usr/bin/python3 uses ~/Library/Caches/com.apple.python);
+        // only DOXA's own writes are under test.
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .env_remove("DEEPSEEK_API_KEY").env_remove("ZAI_API_KEY")
         .env_remove("OPENAI_API_KEY").env_remove("ANTHROPIC_API_KEY")
         .output().unwrap();
@@ -102,6 +106,7 @@ fn availability_flag_is_explicit_observational_and_writes_no_state() {
     // lock; no observation, cache or setting is written.
     let after = tree(&home);
     let added = after.iter().filter(|entry| !before.contains(entry)).collect::<Vec<_>>();
-    assert!(added.iter().all(|(name, bytes)| name == ".credentials.lock" && bytes.is_empty()), "{added:?}");
+    assert!(added.iter().all(|(name, bytes)| name == ".credentials.lock" && bytes.is_empty()),
+        "unexpected writes: {:?}", added.iter().map(|(name, bytes)| (name, bytes.len())).collect::<Vec<_>>());
     assert!(before.iter().all(|entry| after.contains(entry)));
 }
