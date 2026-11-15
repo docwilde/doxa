@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.78 — 2026-11-12
+
+**LORE 0.62.29**
+
+- Update **`lore-core`** and the bundled **`lore-rs`** carrier to LORE 0.62.29. Startup and refresh snapshots keep curated memory available when pending-proposal enumeration fails, and report the pending count as unknown with its diagnostic code (0.62.27).
+- Include graph context in Codex startup snapshots when `LORE_GRAPH_CONTEXT=1`, and keep startup memory available if graph retrieval fails. LORE's Codex plugin also gains a `UserPromptSubmit` hook; after updating the plugin, review hooks with `/hooks` and reinstall the carrier.
+
 ## 2.0.0-beta.77 — 2026-11-12
 
 **Protected Codex hardening**
