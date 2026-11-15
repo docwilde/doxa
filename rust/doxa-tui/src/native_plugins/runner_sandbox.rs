@@ -1,4 +1,5 @@
-//! Linux sandbox admission for the explicit grantless plugin CLI prototype.
+//! Linux sandbox admission for the grantless CLI prototype and the TUI's
+//! zero-grant and `render-local-panel-v1` worker contracts.
 //! A command is constructed only after a private cgroup v2 budget is installed.
 //! TUI admission additionally requires a signed, instance-bound operator permit.
 //! Each installed host and artifact still needs its own fresh acceptance.
@@ -20,6 +21,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use super::runner::Contract;
 
 const BWRAP: &str = "/usr/bin/bwrap";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
@@ -543,9 +545,11 @@ fn read_wrapper_status(mut file: File) -> io::Result<WrapperStatus> {
 /// entry. Bubblewrap's child-pid is a namespace helper, not proof that the
 /// worker binary reached main; pre-entry failures remain one conservative
 /// class. It also cannot distinguish a signal from deliberate nonzero exit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum IsolatedOutcome {
     Return(i32),
+    /// Panel text that this parent validated again after decoding.
+    Panel(super::runner::PanelText),
     ModuleFailure(super::runner::WorkerFailure),
     Timeout,
     Cancelled,
@@ -556,7 +560,8 @@ pub(crate) enum IsolatedOutcome {
     ProtocolFailure,
 }
 
-fn classify(capture: &super::runner_process::Capture, status: WrapperStatus) -> IsolatedOutcome {
+fn classify(capture: &super::runner_process::Capture, status: WrapperStatus,
+    contract: Contract) -> IsolatedOutcome {
     use super::runner_process::Outcome;
     match capture.outcome {
         Outcome::Timeout => IsolatedOutcome::Timeout,
@@ -569,10 +574,19 @@ fn classify(capture: &super::runner_process::Capture, status: WrapperStatus) -> 
             IsolatedOutcome::ProtocolFailure,
         Outcome::Exit(0) if capture.stderr != super::runner::READY_MARKER =>
             IsolatedOutcome::ProtocolFailure,
-        Outcome::Exit(0) => match super::runner::decode_response(capture.stdout.as_slice()) {
-            Ok(Ok(value)) => IsolatedOutcome::Return(value),
-            Ok(Err(failure)) => IsolatedOutcome::ModuleFailure(failure),
-            Err(_) => IsolatedOutcome::ProtocolFailure,
+        // Each contract decodes only its own response protocol; a panel can
+        // never satisfy a zero-grant request, nor an integer a panel request.
+        Outcome::Exit(0) => match contract {
+            Contract::Grantless => match super::runner::decode_response(capture.stdout.as_slice()) {
+                Ok(Ok(value)) => IsolatedOutcome::Return(value),
+                Ok(Err(failure)) => IsolatedOutcome::ModuleFailure(failure),
+                Err(_) => IsolatedOutcome::ProtocolFailure,
+            },
+            Contract::RenderPanel => match super::runner::decode_panel_response(capture.stdout.as_slice()) {
+                Ok(Ok(panel)) => IsolatedOutcome::Panel(panel),
+                Ok(Err(failure)) => IsolatedOutcome::ModuleFailure(failure),
+                Err(_) => IsolatedOutcome::ProtocolFailure,
+            },
         },
         Outcome::Exit(code) => IsolatedOutcome::WorkerAbnormalExit(code),
     }
@@ -589,24 +603,27 @@ pub(crate) fn supervise_reviewed(
     cancel: &AtomicBool,
     deadline: Instant,
 ) -> io::Result<IsolatedOutcome> {
-    supervise_reviewed_impl(home, review, worker, cancel, deadline, None)
+    supervise_reviewed_impl(home, review, worker, cancel, deadline, None, Contract::Grantless)
 }
 
+/// TUI seam for either worker contract behind a signed installed-host permit.
+/// The contract's exact grant set is enforced again by the frame encoder
+/// after the final identity recheck.
 pub(super) fn supervise_authorized(home: &Path, review: &super::packages::Review,
     worker: &Path, cancel: &AtomicBool, deadline: Instant,
-    authority: &super::InstalledHostAuthority) -> io::Result<IsolatedOutcome> {
+    authority: &super::InstalledHostAuthority, contract: Contract) -> io::Result<IsolatedOutcome> {
     authority.check(home)?;
     if host_observation(&std::env::current_exe()?, worker)? != authority.host {
         return Err(unavailable("installed plugin host changed after authorization"));
     }
-    supervise_reviewed_impl(home, review, worker, cancel, deadline, Some(authority))
+    supervise_reviewed_impl(home, review, worker, cancel, deadline, Some(authority), contract)
 }
 
 fn supervise_reviewed_impl(home: &Path, review: &super::packages::Review,
     worker: &Path, cancel: &AtomicBool, deadline: Instant,
-    authority: Option<&super::InstalledHostAuthority>) -> io::Result<IsolatedOutcome> {
+    authority: Option<&super::InstalledHostAuthority>, contract: Contract) -> io::Result<IsolatedOutcome> {
     let package = super::packages::recheck_approved(home, review)?;
-    let frame = super::runner::encode_request(&package)?;
+    let frame = super::runner::encode_contract_request(&package, contract)?;
     let mut budget = CgroupBudget::create()?;
     if let Some(authority) = authority {
         authority.check(home)?;
@@ -626,10 +643,10 @@ fn supervise_reviewed_impl(home: &Path, review: &super::packages::Review,
     if matches!(capture.outcome, super::runner_process::Outcome::Timeout
         | super::runner_process::Outcome::Cancelled
         | super::runner_process::Outcome::OutputLimit) {
-        return Ok(classify(&capture, WrapperStatus::default()));
+        return Ok(classify(&capture, WrapperStatus::default(), contract));
     }
     let status = read_wrapper_status(status)?;
-    Ok(classify(&capture, status))
+    Ok(classify(&capture, status, contract))
 }
 
 #[cfg(test)]
@@ -951,7 +968,7 @@ mod tests {
         let worker = dir.path().join("worker");
         script(&worker, "ls -l /proc/self/fd | grep -E 'doxa-plugin-bwrap-status|/usr/bin/bwrap|/home/' >/dev/null && exit 9; printf 'DOXA-WORKER-READY-v1\\n' >&2; printf 'DOXAR1\\000\\000\\000\\001\\000\\000\\000'");
         let (capture, wrapper) = run_bwrap(command_impl(&worker, &[], None).unwrap());
-        assert_eq!(classify(&capture, wrapper), IsolatedOutcome::Return(1));
+        assert_eq!(classify(&capture, wrapper, Contract::Grantless), IsolatedOutcome::Return(1));
     }
 
     #[test]
@@ -962,11 +979,42 @@ mod tests {
         script(&worker, "printf 'DOXA-WORKER-READY-v1\\n' >&2; kill -KILL $$");
         let (capture, wrapper) = run_bwrap(command_impl(&worker, &[], None).unwrap());
         assert!(wrapper.child_started);
-        assert_eq!(classify(&capture, wrapper), IsolatedOutcome::WorkerAbnormalExit(137));
+        assert_eq!(classify(&capture, wrapper, Contract::Grantless), IsolatedOutcome::WorkerAbnormalExit(137));
 
         script(&worker, "printf 'DOXA-WORKER-READY-v1\\n' >&2; exit 0");
         let (capture, wrapper) = run_bwrap(command_impl(&worker, &[], None).unwrap());
-        assert_eq!(classify(&capture, wrapper), IsolatedOutcome::ProtocolFailure);
+        assert_eq!(classify(&capture, wrapper, Contract::Grantless), IsolatedOutcome::ProtocolFailure);
+    }
+
+    #[test]
+    fn panel_response_is_decoded_only_for_a_panel_request() {
+        if !sandbox_available() { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let worker = dir.path().join("worker");
+        script(&worker, "printf 'DOXA-WORKER-READY-v1\\n' >&2; printf 'DOXAPR1\\000\\000\\005\\000hello'");
+        let (capture, wrapper) = run_bwrap(command_impl(&worker, &[], None).unwrap());
+        let panel = super::super::runner::validate_panel(b"hello").unwrap();
+        assert_eq!(classify(&capture, wrapper, Contract::RenderPanel), IsolatedOutcome::Panel(panel));
+        assert_eq!(classify(&capture, wrapper, Contract::Grantless), IsolatedOutcome::ProtocolFailure);
+        // An integer response never satisfies a panel request.
+        script(&worker, "printf 'DOXA-WORKER-READY-v1\\n' >&2; printf 'DOXAR1\\000\\000\\000\\052\\000\\000\\000'");
+        let (capture, wrapper) = run_bwrap(command_impl(&worker, &[], None).unwrap());
+        assert_eq!(classify(&capture, wrapper, Contract::RenderPanel), IsolatedOutcome::ProtocolFailure);
+    }
+
+    #[test]
+    fn parent_refuses_escape_sequences_from_a_worker_that_claims_success() {
+        if !sandbox_available() { return; }
+        let dir = tempfile::tempdir().unwrap();
+        let worker = dir.path().join("worker");
+        // A compromised worker skips its own validation and reports success.
+        for (length, body) in [("\\011", "\\033[2Jhello"), ("\\012", "\\033]52;c;eA\\007"),
+            ("\\003", "a\\rb"), ("\\002", "\\302\\233")] {
+            script(&worker, &format!("printf 'DOXA-WORKER-READY-v1\\n' >&2; printf 'DOXAPR1\\000\\000{length}\\000{body}'"));
+            let (capture, wrapper) = run_bwrap(command_impl(&worker, &[], None).unwrap());
+            assert_eq!(classify(&capture, wrapper, Contract::RenderPanel), IsolatedOutcome::ProtocolFailure,
+                "parent accepted unsafe panel bytes {body}");
+        }
     }
 
     #[test]
@@ -989,7 +1037,7 @@ mod tests {
         // Bubblewrap may report its namespace helper PID even when a mount
         // fails before the worker enters. Only the worker receipt proves entry.
         assert!(!capture.stderr.starts_with(super::super::runner::READY_MARKER));
-        assert!(matches!(classify(&capture, wrapper), IsolatedOutcome::SandboxOrPreEntryFailure(_)));
+        assert!(matches!(classify(&capture, wrapper, Contract::Grantless), IsolatedOutcome::SandboxOrPreEntryFailure(_)));
     }
 
     #[test]

@@ -236,6 +236,20 @@ pub(super) fn test_authority() -> InstalledHostAuthority {
 }
 
 #[cfg(test)]
+pub(super) fn test_live_authority(home: &Path, permit: &Path, lifetime: Duration) -> InstalledHostAuthority {
+    let file = File::open(permit).unwrap();
+    let mut authority = test_authority();
+    authority.home = home.to_owned();
+    authority.membership = fs::read_to_string("/proc/self/cgroup").unwrap();
+    authority.expires_at = now().unwrap() + lifetime.as_secs() + 1;
+    authority.expires_boottime_ms = boottime_ms().unwrap() + lifetime.as_millis() as u64;
+    authority.deadline = Instant::now() + lifetime;
+    authority.watched.push(Watched { path: permit.to_owned(), metadata: file.metadata().unwrap(),
+        file, directory: false });
+    authority
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ring::signature::{Ed25519KeyPair, KeyPair};
