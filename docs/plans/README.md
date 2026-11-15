@@ -21,6 +21,11 @@ every proposed extension exists in Rust.
 | [Collection triage](collection-triage.md) | Suggested names, settled opt-in group sorting and verified local LORE pending rank exist. Beta.16 added verified project heading hues and hidden-tab urgency; beta.17 added pane-row navigation, manual collection hues and label rename. Beta.18 adds `/collection project-label` for freshly verified canonical roots; unresolved or mixed roots stay read-only. |
 | [macOS daemon process coverage](https://github.com/docwilde/doxa/issues/197) | Portable crates and daemon process suites run in macOS CI. The MCP fixture separates cold child startup from tool-attempt timeout and verifies cancellation/descendant exit. A full-backlog fixture now holds its listener until client refusal, with a bounded regression watchdog; loaded repetitions and a blocking mutation check passed. Actual macOS CI passed the integrated Router/MCP and hardened-runtime Rust candidate. Required Linux, macOS and Android checks gate release merges. Authenticated macOS acceptance is explicitly deferred; protected Codex remains Linux-only. |
 
+Two measurement plans await owner review: the
+[Jev routing quality experiment](jev-routing-quality-experiment.md) and the
+[fleet supervision accuracy experiment](fleet-supervision-accuracy-experiment.md).
+Neither has been run.
+
 Native UI, LORE, provider and remote parity is tracked in
 [the Rust parity record](../rust-1.19-parity.md). Older split-pane, rail,
 peer-publishing, engine and provider-plugin plans primarily preserve design

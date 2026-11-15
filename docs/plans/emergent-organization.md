@@ -1,10 +1,14 @@
 # Does hierarchy emerge among peer agents, or do we always put it there?
 
-**Status: plan for review. Nothing implemented.** The messaging substrate this
-rests on (`peer_list` / `peer_send` / `peer_history`, the ledger, the browser
-graph) is itself unbuilt — see the design notes that precede this. This
-document is the experiment those tools exist to make possible, written first
-so the instrument is built for the measurement rather than the reverse.
+**Status: plan for review; the experiment has not been run.** Most of the
+substrate it rests on now exists: native `peer_list` / `peer_send` /
+`peer_history`, broadcast delivery under each recipient's explicit wake grant,
+the peer receipt ledger, and Claude, Codex, DeepSeek and GLM engines for the
+mixed-vendor arms. Still missing is prerequisite 5, the harness that starts N
+sessions, delivers the identical prompt at once, and collects and tears down.
+The ledger also needs checking against the per-message fields listed below
+before any run. This document was written before those tools, so that the
+instrument would be built for the measurement rather than the reverse.
 
 ## The question
 
