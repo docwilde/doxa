@@ -55,6 +55,7 @@ impl Host for IsolationHost {
     fn set_request_budget(&self, remaining: f64) -> Result<(), String> { self.inner.set_request_budget(remaining) }
     fn take_native_tool_audit(&self)->Option<Value>{self.inner.take_native_tool_audit()}
     fn supports_images(&self)->bool{self.inner.supports_images()}
+    fn image_admission(&self)->Result<(),String>{self.inner.image_admission()}
     fn prompt_with_images(&self,text:&str,images:&[doxa_input::Attachment],origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){
         self.prompt_with_origin_images(text,origin,images,emit);
     }

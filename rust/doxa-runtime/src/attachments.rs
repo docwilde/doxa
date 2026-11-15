@@ -10,15 +10,17 @@ pub(crate) struct Uploads { values:HashMap<String,Upload>, next:u64, updated:Ins
 impl Default for Uploads {fn default()->Self{Self{values:HashMap::new(),next:0,updated:Instant::now()}}}
 impl Uploads {
     pub fn clear(&mut self){self.values.clear();}
-    pub fn call(&mut self,method:&str,params:&Value,images:bool)->Result<Value,String>{
+    /// `images` is the host's current image admission, evaluated only when
+    /// an operation needs it; a refusal carries the host's exact reason.
+    pub fn call(&mut self,method:&str,params:&Value,images:impl FnOnce()->Result<(),String>)->Result<Value,String>{
         if self.updated.elapsed()>Duration::from_secs(60){self.clear();}self.updated=Instant::now();
         match method {
-            "attachment_capabilities"=>Ok(json!({"images":images,"text":true,"max_count":MAX_COUNT,"max_total":MAX_TOTAL})),
+            "attachment_capabilities"=>{let admission=images();Ok(json!({"images":admission.is_ok(),"image_refusal":admission.err(),"text":true,"max_count":MAX_COUNT,"max_total":MAX_TOTAL}))},
             "attachment_clear"=>{self.clear();Ok(json!({}))},
             "attachment_begin"=>{
                 let name=params["name"].as_str().filter(|s|doxa_input::valid_name(s)).ok_or("Invalid attachment filename")?;
                 let mime=params["mime"].as_str().filter(|s|matches!(*s,"text/plain"|"image/png"|"image/jpeg")).ok_or("Unsupported attachment media type")?;
-                if mime.starts_with("image/")&&!images{return Err("This provider does not accept image attachments".into());}
+                if mime.starts_with("image/"){images()?;}
                 let total=params["bytes"].as_u64().and_then(|n|usize::try_from(n).ok()).filter(|n|*n>0&&*n<=MAX_IMAGE).ok_or("Attachment exceeds 1 MiB")?;
                 if self.values.len()>=MAX_COUNT||self.values.values().map(|u|u.total).sum::<usize>()+total>MAX_TOTAL{return Err("Attachment batch is full".into());}
                 self.next=self.next.checked_add(1).ok_or("Attachment IDs exhausted")?;let id=format!("a{}",self.next);
@@ -57,11 +59,15 @@ impl Uploads {
 #[cfg(test)]mod tests {
     use super::*;
     #[test]fn uploads_bind_to_connection_and_reject_partial_reordered_or_duplicate_ids(){
-        let mut a=Uploads::default();let id=a.call("attachment_begin",&json!({"name":"x.txt","mime":"text/plain","bytes":3}),false).unwrap()["attachment_id"].clone();
-        assert!(a.resolve(&json!([id])).is_err());assert!(a.call("attachment_chunk",&json!({"attachment_id":id,"offset":1,"data":"YWJj"}),false).is_err());
-        a.call("attachment_chunk",&json!({"attachment_id":id,"offset":0,"data":"YWJj"}),false).unwrap();
-        a.call("attachment_finish",&json!({"attachment_id":id}),false).unwrap();assert_eq!(&**a.resolve(&json!([id])).unwrap()[0].bytes,b"abc");
+        let mut a=Uploads::default();let id=a.call("attachment_begin",&json!({"name":"x.txt","mime":"text/plain","bytes":3}),||Err("no".into())).unwrap()["attachment_id"].clone();
+        assert!(a.resolve(&json!([id])).is_err());assert!(a.call("attachment_chunk",&json!({"attachment_id":id,"offset":1,"data":"YWJj"}),||Ok(())).is_err());
+        a.call("attachment_chunk",&json!({"attachment_id":id,"offset":0,"data":"YWJj"}),||Ok(())).unwrap();
+        a.call("attachment_finish",&json!({"attachment_id":id}),||Ok(())).unwrap();assert_eq!(&**a.resolve(&json!([id])).unwrap()[0].bytes,b"abc");
         assert!(a.resolve(&json!([id,id])).is_err());assert!(Uploads::default().resolve(&json!([id])).is_err());a.clear();assert!(a.resolve(&json!([id])).is_err());
     }
-    #[test]fn image_input_is_explicit_and_never_a_host_path(){let mut a=Uploads::default();assert!(a.call("attachment_begin",&json!({"name":"x.png","mime":"image/png","bytes":10}),false).is_err());assert!(a.call("attachment_begin",&json!({"name":"/etc/passwd","mime":"text/plain","bytes":10}),true).is_err());}
+    #[test]fn image_input_is_explicit_and_never_a_host_path(){let mut a=Uploads::default();assert_eq!(a.call("attachment_begin",&json!({"name":"x.png","mime":"image/png","bytes":10}),||Err("exact model refusal".into())).unwrap_err(),"exact model refusal");assert!(a.call("attachment_begin",&json!({"name":"/etc/passwd","mime":"text/plain","bytes":10}),||Ok(())).is_err());
+        assert!(a.call("attachment_begin",&json!({"name":"x.png","mime":"image/png","bytes":10}),||Ok(())).is_ok());
+        let caps=a.call("attachment_capabilities",&json!({}),||Err("unpriced".into())).unwrap();assert_eq!(caps["images"],false);assert_eq!(caps["image_refusal"],"unpriced");
+        // Text uploads never consult image admission.
+        assert!(a.call("attachment_begin",&json!({"name":"x.txt","mime":"text/plain","bytes":3}),||panic!("text upload consulted image admission")).is_ok());}
 }

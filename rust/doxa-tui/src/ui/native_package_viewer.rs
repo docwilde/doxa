@@ -1,23 +1,28 @@
 //! Explicit, read-only package review. A separate instance-bound installed-host
-//! permit is required before a TUI run can start the isolated worker.
+//! permit is required before a TUI run or panel can start the isolated worker.
 use super::{App, ChipInfo};
-use crate::native_plugins::packages::Review;
+use crate::native_plugins::packages::{Review, RENDER_PANEL_GRANT};
 use std::path::Path;
 use std::sync::mpsc::{self, TryRecvError};
 
-const USAGE: &str = "Usage: /native-plugin preflight NAME | run NAME (signed installed-host authority required)";
+const USAGE: &str = "Usage: /native-plugin preflight NAME | run NAME | panel NAME (signed installed-host authority required)";
 
-enum Request<'a> { Preflight(&'a str), Run(&'a str) }
+#[derive(Debug)]
+enum Request<'a> { Preflight(&'a str), Run(&'a str), Panel(&'a str) }
 
 fn request(args: &str) -> Result<Request<'_>, &'static str> {
     let parts = args.split_whitespace().collect::<Vec<_>>();
-    let [verb @ ("preflight" | "run"), name] = parts.as_slice() else { return Err(USAGE); };
+    let [verb @ ("preflight" | "run" | "panel"), name] = parts.as_slice() else { return Err(USAGE); };
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > 48 || !bytes[0].is_ascii_lowercase()
         || !bytes.iter().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-') {
         return Err("Package name must be 1–48 lowercase ASCII letters, digits or hyphens, starting with a letter");
     }
-    Ok(if *verb == "run" { Request::Run(name) } else { Request::Preflight(name) })
+    Ok(match *verb {
+        "run" => Request::Run(name),
+        "panel" => Request::Panel(name),
+        _ => Request::Preflight(name),
+    })
 }
 
 fn review_lines(review: &Review) -> Vec<String> {
@@ -27,8 +32,12 @@ fn review_lines(review: &Review) -> Vec<String> {
         lines.push("Eligible for explicit zero-grant execution on an accepted delegated Linux host:".into());
         lines.push(format!("doxa native-plugin run {} --grantless-prototype", review.name));
         lines.push("The CLI rechecks owner approval, bytes and inodes immediately before cgroup/Bubblewrap admission.".into());
+    } else if review.owner_approved && review.requested_grants == [RENDER_PANEL_GRANT] {
+        lines.push("Eligible to render a bounded local text panel on an accepted delegated Linux host:".into());
+        lines.push(format!("/native-plugin panel {}", review.name));
+        lines.push("The panel task rechecks owner approval, bytes and inodes, then validates the plugin's text before drawing it.".into());
     } else {
-        lines.push("Execution unavailable: exact owner approval and zero requested grants are required.".into());
+        lines.push("Execution unavailable: exact owner approval of zero grants, or of exactly render-local-panel-v1, is required.".into());
     }
     lines.push("This is a read-only snapshot. TUI run requires a current signed operator permit for this instance.".into());
     lines
@@ -47,6 +56,7 @@ impl App {
         match request {
             Request::Preflight(name) => self.open_native_package_review_at(&home, name),
             Request::Run(name) => self.open_native_package_run_at(&home, name),
+            Request::Panel(name) => self.open_native_package_panel_at(&home, name),
         }
     }
 
@@ -162,21 +172,31 @@ mod tests {
 
     #[test]
     fn unapproved_and_grantful_reviews_never_offer_run() {
-        for (approved, grants) in [(false, &[][..]), (true, &["render-local-panel-v1"][..])] {
+        for (approved, grants) in [(false, &[][..]), (true, &["render-local-panel-v1"][..]),
+            (false, &["render-local-panel-v1"][..])] {
             let home = fixture(approved, grants);
             let mut app = App::default();
             app.handle(crossterm::event::Event::Resize(100, 30));
             app.open_native_package_review_at(home.path(), "demo");
             let lines = finished(&mut app);
             assert!(!lines.iter().any(|line| line.starts_with("doxa native-plugin run ")));
-            assert!(lines.iter().any(|line| line.contains("Execution unavailable")));
+            let offers_panel = lines.iter().any(|line| line == "/native-plugin panel demo");
+            assert_eq!(offers_panel, approved, "panel offered only for an exactly approved render grant");
+            if !approved { assert!(lines.iter().any(|line| line.contains("Execution unavailable"))); }
         }
+        let home = fixture(true, &[]);
+        let mut app = App::default();
+        app.handle(crossterm::event::Event::Resize(100, 30));
+        app.open_native_package_review_at(home.path(), "demo");
+        assert!(!finished(&mut app).iter().any(|line| line.starts_with("/native-plugin panel")),
+            "a zero-grant package must not be offered a panel");
     }
 
     #[test]
     fn invalid_forms_are_consumed_locally_without_a_worker() {
         for draft in ["/native-plugin", "/native-plugin run ../demo", "/native-plugin preflight ../demo",
-            "/native-plugin preflight demo extra", "/native-plugin unknown demo"] {
+            "/native-plugin preflight demo extra", "/native-plugin unknown demo",
+            "/native-plugin panel ../demo", "/native-plugin panel demo extra", "/native-plugin panel"] {
             let mut app = App::default();
             app.input = draft.into();
             assert!(app.submit_local_command(), "{draft}");
@@ -201,6 +221,25 @@ mod tests {
         assert!(app.chip_info.as_ref().unwrap().lines.iter()
             .any(|line| line.contains("installed host has no trusted delegation acceptance")));
         assert!(app.local_shell_jobs.is_empty() && app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn explicit_panel_form_reaches_only_closed_tui_admission() {
+        assert!(matches!(request("panel demo"), Ok(Request::Panel("demo"))));
+        for (grants, refusal) in [(&["render-local-panel-v1"][..], "installed host has no trusted delegation acceptance"),
+            (&[][..], "exactly render-local-panel-v1")] {
+            let home = fixture(true, grants);
+            let mut app = App::default();
+            app.handle(crossterm::event::Event::Resize(100, 30));
+            app.open_native_package_panel_at(home.path(), "demo");
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !app.poll_native_package_run() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(app.native_package_run.is_none());
+            assert!(app.chip_info.as_ref().unwrap().lines.iter().any(|line| line.contains(refusal)), "{grants:?}");
+            assert!(app.local_shell_jobs.is_empty() && app.pending_prompts.is_empty());
+        }
     }
 
     #[test]

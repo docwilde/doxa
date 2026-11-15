@@ -816,7 +816,16 @@ impl Drop for ActiveTurn<'_> {
 }
 
 impl VendorHost {
-    fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+    /// Sourced exact-model image admission for the current target. Unknown
+    /// support or an unknown per-image token bound refuses before submission.
+    pub(super) fn image_bound(&self) -> Result<doxa_engines::model_registry::ImageBound, String> {
+        let engine = self.vendor().engine_id();
+        let model = self.model.lock().unwrap().clone();
+        doxa_engines::model_registry::lookup(engine, &model).image_admission()
+            .map_err(|refusal| refusal.message(engine, &model))
+    }
+
+    fn prompt_impl(&self, text: &str, peer_origin: Option<&PeerTurnOrigin>, images: &[doxa_input::Attachment], emit: &mut dyn FnMut(Value)) {
         if let Ok(mut audit)=self.native_tool_audit.lock(){*audit=None;}
         if peer_origin.is_some_and(|origin| origin.validate().is_err()) {
             emit(done("Invalid host peer provenance"));
@@ -824,6 +833,18 @@ impl VendorHost {
         }
         let mut decorated = |mut event| { self.decorate_mcp(&mut event); emit(event); };
         let emit: &mut dyn FnMut(Value) = &mut decorated;
+        // Re-check at the turn boundary: the exact target decides, and an
+        // unsupported or unpriced model never receives any image bytes.
+        let turn_images = if images.is_empty() { None } else {
+            let refuse = |message: String| json!({"type":"turn_refused","data":{"reason":"images","message":message}});
+            if text.split_whitespace().next() == Some("/compact") { emit(refuse("Use /compact without attachments".into())); return; }
+            let bound = match self.image_bound() { Ok(bound) => bound, Err(message) => { emit(refuse(message)); return; } };
+            if !images.iter().all(doxa_input::Attachment::is_image) { emit(refuse("Only image attachments travel as provider image content".into())); return; }
+            match doxa_vendors::TurnImages::new(images.iter().map(doxa_input::Attachment::chat_image_part).collect(), bound.tokens_per_image) {
+                Ok(parts) => Some((parts, bound)),
+                Err(_) => { emit(refuse("Image attachments exceed the provider request bounds".into())); return; }
+            }
+        };
         if text.split_whitespace().next() == Some("/compact") {
             if text.trim() == "/compact" { self.compact(emit); }
             else { emit(done("Use /compact without arguments")); }
@@ -918,7 +939,10 @@ impl VendorHost {
                     let definitions = gate.definitions();
                     if !definitions.is_empty() { full["tools"] = json!(definitions); base["tools"] = full["tools"].clone(); }
                 }
-                let request_bytes = serde_json::to_vec(&base).map_err(|_| "Continuation request cannot be measured")?.len();
+                // Images count by their documented per-image token bound.
+                let request_bytes = serde_json::to_vec(&base).map_err(|_| "Continuation request cannot be measured")?.len()
+                    .saturating_add(turn_images.as_ref().and_then(|(parts, _)| parts.token_bound())
+                        .map_or(0, |tokens| usize::try_from(tokens).unwrap_or(usize::MAX)));
                 let history_bytes = serde_json::to_vec(&full).map_err(|_| "Continuation request cannot be measured")?.len().saturating_sub(request_bytes);
                 crate::recovery_context::assess(&self.store,
                     crate::recovery_context::Budget::api(self.vendor().engine_id(),&selected_model,limits),
@@ -972,7 +996,22 @@ impl VendorHost {
             .enable_all()
             .build();
         let result = match runtime {
-            Ok(runtime) => {
+            Ok(runtime) => if let Some((parts, _)) = turn_images.as_ref() {
+                #[cfg(feature = "local-test-server")]
+                if let Some(endpoint) = self.endpoint.as_deref() {
+                    runtime.block_on(doxa_vendors::run_turn_with_images_local(self.vendor(), endpoint,
+                        &selected_model, &effort, &mut history, &prompt, parts, gate, cancel,
+                        MAX_TURN_DURATION, &mut on_delta, limits))
+                } else {
+                    runtime.block_on(doxa_vendors::run_turn_with_images(self.vendor(),
+                        &selected_model, &effort, &mut history, &prompt, parts, gate, cancel,
+                        MAX_TURN_DURATION, &mut on_delta, limits))
+                }
+                #[cfg(not(feature = "local-test-server"))]
+                runtime.block_on(doxa_vendors::run_turn_with_images(self.vendor(),
+                    &selected_model, &effort, &mut history, &prompt, parts, gate, cancel,
+                    MAX_TURN_DURATION, &mut on_delta, limits))
+            } else {
                 #[cfg(feature = "local-test-server")]
                 if let Some(endpoint) = self.endpoint.as_deref() {
                     if let Some(limits) = limits {
@@ -1149,7 +1188,7 @@ impl VendorHost {
                         outcome.model_consistent && outcome.model.as_deref() == Some(selected_model.as_str()),
                         outcome.usage.prompt_tokens, outcome.usage.completion_tokens);
                     if let (Ok(mut stored),Ok(audit))=(self.native_tool_audit.lock(),native_tool_audit.lock()){*stored=Some(audit.clone());}
-                    emit(json!({"type":"turn_done","data":{"is_error":false,
+                    let mut finished = json!({"type":"turn_done","data":{"is_error":false,
                         "duration_ms":started.elapsed().as_millis() as u64,
                         "num_turns":turns,"model":model,
                         "prompt_tokens":outcome.usage.prompt_tokens,
@@ -1161,7 +1200,15 @@ impl VendorHost {
                         "cost_basis":"priced_conservative","cost_is_estimate":true,
                         "price_source":crate::budget_host::vendor_price(self.vendor().engine_id(), &selected_model).map(|price| price.source),
                         "price_read_on":crate::budget_host::vendor_price(self.vendor().engine_id(), &selected_model).map(|price| price.as_of),
-                        "ctx_percentage":null,"ctx_tokens":null,"ctx_max_tokens":null}}));
+                        "ctx_percentage":null,"ctx_tokens":null,"ctx_max_tokens":null}});
+                    if let Some((parts, bound)) = &turn_images {
+                        // Settled cost uses the reported input tokens; the
+                        // documented bound served admission and request caps.
+                        finished["data"]["image_input"] = json!({"count":parts.len(),
+                            "max_tokens_per_image":bound.tokens_per_image,"source":bound.source,"read_on":bound.as_of,
+                            "billing":"provider_reported_input_tokens"});
+                    }
+                    emit(finished);
                 } else {
                     emit(done("LORE scrub failed; provider output withheld"));
                 }
@@ -1228,11 +1275,17 @@ impl Host for VendorHost {
     }
 
     fn prompt_with_peer_origin(&self, text: &str, origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
-        self.prompt_impl(text, origin, emit);
+        self.prompt_impl(text, origin, &[], emit);
     }
 
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
-        self.prompt_impl(text, None, emit);
+        self.prompt_impl(text, None, &[], emit);
+    }
+
+    fn supports_images(&self) -> bool { self.image_bound().is_ok() }
+    fn image_admission(&self) -> Result<(), String> { self.image_bound().map(|_| ()) }
+    fn prompt_with_images(&self, text: &str, images: &[doxa_input::Attachment], origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
+        self.prompt_impl(text, origin, images, emit);
     }
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
@@ -1334,7 +1387,7 @@ fn done_vendor_error(error:&Error)->Value {
         Error::ToolFailed=>"tool_failed",Error::InvalidToolDefinitions=>"tool_definitions_invalid",
         Error::HistoryTooLarge=>"history_limit",Error::MissingReasoningHistory=>"reasoning_history_missing",
         Error::ToolResultTooLarge=>"tool_result_limit",Error::UsageOverflow=>"usage_overflow",
-        Error::AdmissionDenied=>"admission_denied",
+        Error::AdmissionDenied=>"admission_denied",Error::InvalidImageInput=>"image_input_invalid",
     };
     let message=match error {
         Error::Cancelled=>"Vendor turn cancelled",Error::Timeout=>"Vendor turn timed out",

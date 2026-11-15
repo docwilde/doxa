@@ -11,7 +11,7 @@ provider or platform; see [remaining verification](#remaining-verification).
 
 | Area | Current behavior and remaining boundary |
 | --- | --- |
-| Prompt files and clipboard | Attach chip/menu or Alt+A adds images and UTF-8 text to the owning pane/session draft. Linux Ctrl+V reads PNG or text through an explicit helper; Ctrl+C copies selected text with OSC52 fallback. Direct Claude/Codex receive image blocks, including Docker. PDF, Router/vendor images, macOS clipboard images and remote-hub attachments remain unsupported. [Formats and limits](terminal-images.md#prompt-attachments). |
+| Prompt files and clipboard | Attach chip/menu or Alt+A adds images and UTF-8 text to the owning pane/session draft. Linux Ctrl+V reads PNG or text through an explicit helper; Ctrl+C copies selected text with OSC52 fallback. Direct Claude/Codex receive image blocks, including Docker. DeepSeek and Router API workers receive images only for exact models with sourced image support and a per-image token bound (currently `deepseek-flash`). PDF, GLM images (per-image charge unpublished), Router CLI-target images, macOS clipboard images and remote-hub attachments remain unsupported. [Formats and limits](terminal-images.md#prompt-attachments). |
 | Session windows and fonts | Diff opens as a vertical split within its session window. Other tabs stack indented below the first tab. Selection precedes the normal-tab/fleet/supervisor/worker marker. Nerd Font Auto uses icons only for recognized direct Kitty/WezTerm clients; other terminals receive portable labels. [Workspace guide](../rust/README.md#use-the-workspace). |
 | Fleet access and review | Start Fleet/N launches a reviewed form; live workers attach from the sidebar and M browses Messages & alignment. Workers/coordinator default independently to offline Docker; internet and native access require explicit role confirmations. Idle migration rebinds the verified daemon and holds supervised continuation for the owner. [Fleet access](fleet-access.md). |
 | Offline provider connectivity | Claude/Codex and Router CLI workers use a session-bound fixed-provider HTTPS gateway while Docker stays networkless. Web tools remain disabled; approved online coordinators handle worker research requests. Provider-host access does not isolate credentials or inspect encrypted paths. [Boundary](session-isolation.md#provider-connectivity). |
@@ -103,8 +103,9 @@ remains unsupported.
 - Standalone local Markdown images now render in the Rust transcript with
   bounded previews and alt-text fallback; see [terminal images](terminal-images.md).
   Prompt image attachments are a separate supported input path for direct
-  Claude/Codex sessions; the limits are listed above. Mermaid has opt-in local
-  previews and a passed pinned real CLI suite; see its plan for terminal QA.
+  Claude/Codex sessions and sourced image-capable API models; the limits are
+  listed above. Mermaid has opt-in local previews and a passed pinned real CLI
+  suite; see its plan for terminal QA.
   Missing historical provider data cannot be reconstructed from a newer runtime.
 - Only verified owned session, transcript, worktree and ledger identities authorize
   resume or mutation. Unknown legacy ownership stays protected. Deleted work
