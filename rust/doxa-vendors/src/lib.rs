@@ -428,6 +428,7 @@ pub enum Error {
     ToolLimit,
     OutputLimit,
     RequestTooLarge,
+    SpendLimit,
     ToolFailed,
     InvalidToolDefinitions,
     HistoryTooLarge,
@@ -808,6 +809,8 @@ fn validate_local_endpoint(endpoint: &str) -> Result<(), Error> {
 /// The host owns permission decisions and tool implementations. Returning an error
 /// aborts the turn without putting the error text in a provider request or log.
 pub trait ToolGate {
+    fn admit_request(&mut self, _body: &mut Value) -> Result<(), Error> { Ok(()) }
+    fn settle_request(&mut self, _completion: &Completion) -> Result<(), Error> { Ok(()) }
     /// OpenAI-compatible function definitions this gate is prepared to execute.
     fn definitions(&self) -> Vec<Value>;
     fn execute<'a>(&'a mut self, call: &'a ToolCall) -> BoxFuture<'a, Result<Value, ()>>;
@@ -1054,6 +1057,7 @@ async fn run_turn_at(
                 return Err(Error::RequestTooLarge);
             }
         }
+        if let Some(gate) = gate.as_mut() { gate.admit_request(&mut body)?; }
         let mut completion = stream_at_with_key(
             vendor,
             endpoint,
@@ -1080,6 +1084,7 @@ async fn run_turn_at(
                 call.arguments = arguments.as_object().cloned().unwrap_or_default();
             }
         }
+        if let Some(gate) = gate.as_mut() { gate.settle_request(&completion)?; }
         outcome.requests += 1;
         outcome.model_consistent &= !completion.model_conflict && completion.model.as_deref() == Some(model);
         outcome.usage_complete &= completion.usage.as_ref().is_some_and(|usage| {

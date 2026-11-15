@@ -4,6 +4,7 @@ mod mcp;
 mod claude_host;
 mod recovery_context;
 mod budget_host;
+mod request_budget;
 mod account_turn_host;
 mod codex_host;
 mod peer_host;

@@ -323,7 +323,20 @@ artifact IDs must exist in the host journal. A positive verdict never clears a
 pause or marks an implementation complete.
 
 `--review-budget` is reserved from the total fleet allocation; the remainder
-sets worker ceilings. All reviewer calls share durable call/spend limits,
+sets worker ceilings.
+
+Direct DeepSeek and GLM workers reserve a conservative input and output bound
+before every API request, including tool continuations and managed compaction.
+The host caps output to the remaining allowance and settles each hold only
+after checking exact-model usage. Missing usage or usage above a hold stops
+the turn and makes accounting unknown. A spend-limit error remains visible;
+DOXA retains the original conversation when a turn cannot finish.
+Native Claude and Codex dollar ceilings still apply between turns; their
+provider-internal request loops do not expose equivalent reservations. The
+billing snapshot labels this scope as `between_turns_only`. Router CLI account
+charges remain outside the routing/API allowance.
+
+All reviewer calls share durable call/spend limits,
 including failed calls. For LLMs, reservations use a conservative input token
 bound and a hard 512 output token cap at the recorded owner-approved rates.
 Defaults are $100/M input and output, not a claim about the selected model's

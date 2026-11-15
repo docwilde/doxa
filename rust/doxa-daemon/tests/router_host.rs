@@ -2,6 +2,7 @@
 #[path = "../src/agent_tools.rs"] mod agent_tools;
 #[path = "../src/recovery_context.rs"] mod recovery_context;
 #[path = "../src/budget_host.rs"] mod budget_host;
+#[path = "../src/request_budget.rs"] mod request_budget;
 #[path = "../src/vendor_host.rs"] mod vendor_host;
 #[path = "../src/vendor_tools.rs"] mod vendor_tools;
 #[path = "../src/vendor_mcp.rs"] mod vendor_mcp;
