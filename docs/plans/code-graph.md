@@ -212,6 +212,16 @@ not complete TUI latency, and an empty answer cache is not a cold filesystem.
 The previous warmed exact-answer benchmark remains historical evidence.
 Repeated mutable observations do not establish an atomic repository snapshot.
 
+The [release TUI measurement](../codegraph-tui-release-latency-2026-11-14.md)
+drives the production Crossterm loop through a PTY. It times Enter until the
+answer's first rows are on screen. On a Core Ultra 9 285H laptop under the
+`performance` profile, prepared DOXA queries had p95 62.8 ms warm and 53.5 ms
+with sources evicted. Under the `quiet` profile with concurrent builds they
+had p95 229.0/217.9 ms, which matched that host's release library p95 of
+224.9 ms. Cold DOXA queries took 0.5–0.6 s and 1.4–1.8 s in those two
+regimes. A pending query now polls terminal input every 1 ms rather than
+10 ms, so its answer no longer waits for the next idle poll.
+
 ## Explicit snapshot export
 
 `doxa codegraph --lore-map [--root WORKTREE] file|imports|calls|modules PATH`
@@ -300,7 +310,18 @@ is read-only and creates no second memory authority.
 - Decide whether other languages justify a parser dependency and coverage bar.
   Python runtime module resolution, dynamic imports, and type-aware
   binding remain outside the shipped syntax slice.
-- Prepared library queries meet the DOXA p95 target in the measured workload.
-  Larger/cold-source/viewer measurements are now recorded separately. A release
-  TUI measurement and representative user workloads may justify further work;
-  no timing result is a universal latency guarantee.
+- Release TUI latency is now measured from Enter to the on-screen answer,
+  through the production loop in a PTY, on DOXA, a 200-source fixture and an
+  8,000-source fixture. Warm and source-evicted cases and two power profiles
+  are [recorded](../codegraph-tui-release-latency-2026-11-14.md). The DOXA
+  100 ms p95 target for prepared queries was met under the laptop's
+  `performance` profile. It was not met under its `quiet` profile with
+  concurrent builds, and the library alone missed it there too.
+- Still unmeasured: terminal emulator paint and display, and sessions
+  attached to a real daemon with concurrent agent output. Other hosts and
+  operating systems, battery and thermal states, and recorded user query
+  mixes on other repositories are also unmeasured. Two costs remain
+  unprofiled and unchanged: the per-answer fixed floor of four Git launches
+  plus per-file reader hand-offs, and a cold-start query that waits for
+  automatic preparation and then verifies again. No timing result is a
+  universal latency guarantee.
