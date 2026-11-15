@@ -1,4 +1,4 @@
-//! Explicit, read-only identity review for future executable plugins.
+//! Explicit, read-only identity review for executable plugin packages.
 //! Nothing in this module loads, compiles, instantiates, or runs the module.
 use super::{identifier, invalid, open_child, open_dir, plain, private, MAX_CONFIG};
 use serde::Deserialize;
@@ -13,12 +13,15 @@ use wasmparser::{Parser, Payload, Validator, WasmFeatures};
 const MAX_PACKAGE_MANIFEST: u64 = 16 * 1024;
 pub(super) const MAX_MODULE: u64 = 8 * 1024 * 1024;
 const MAX_PACKAGES: usize = 16;
-// Admission bounds for a future runner, not a substitute for a runtime store
-// limiter and an operating-system memory limit in a separate process.
+// Static admission bounds. The worker enforces its own runtime store limits
+// (16 MiB zero-grant, 4 MiB panel), fuel, and the cgroup/rlimit budget.
 const MAX_MEMORY_PAGES: u64 = 256; // 16 MiB at the WebAssembly 1.0 page size
 const MAX_TABLE_ENTRIES: u64 = 1024;
 const WASM_CORE_V1: &[u8; 8] = b"\0asm\x01\0\0\0";
-const GRANTS: &[&str] = &["render-local-panel-v1"];
+/// The only grant. An approved package with exactly this grant may render
+/// bounded, validated text into a local TUI panel and nothing else.
+pub(crate) const RENDER_PANEL_GRANT: &str = "render-local-panel-v1";
+const GRANTS: &[&str] = &[RENDER_PANEL_GRANT];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,8 +43,8 @@ struct OwnerApproval {
     grants: Vec<String>,
 }
 
-/// A review result, never an activation token. The grantless CLI runner uses
-/// a fresh recheck and enforces its own sandbox and resource limits.
+/// A review result, never an activation token. Each runner path uses a fresh
+/// recheck and enforces its own sandbox and resource limits.
 #[derive(Debug)]
 pub struct Review {
     pub name: String,
@@ -55,7 +58,7 @@ pub struct Review {
 }
 
 /// Immutable bytes from a fresh approved identity recheck. This is not an
-/// executable handle: only the explicit grantless sandbox route can run it.
+/// executable handle: only the explicit sandboxed runner routes can run it.
 #[derive(Debug)]
 pub struct RecheckedPackage {
     review: Review,
@@ -71,9 +74,13 @@ impl Review {
     pub fn report(&self) -> String {
         let grants = if self.requested_grants.is_empty() { "none".to_owned() }
             else { self.requested_grants.join(", ") };
-        let execution = if self.owner_approved && self.requested_grants.is_empty() {
+        let execution = if !self.owner_approved {
+            "unavailable (requires exact owner approval)"
+        } else if self.requested_grants.is_empty() {
             "explicit Linux grantless CLI prototype eligible; delegated cgroup still required"
-        } else { "unavailable (requires exact zero-grant approval)" };
+        } else if self.requested_grants == [RENDER_PANEL_GRANT] {
+            "local TUI text panel eligible (/native-plugin panel); signed operator permit and delegated cgroup still required"
+        } else { "unavailable (unsupported grant set)" };
         format!("Package: {} {}\nFormat: wasm-core-v1 (fully validated WebAssembly 1.0, no imports or start)\nManifest SHA-256: {}\nModule SHA-256: {}\nRequested grants: {}\nOwner approval: {}\nOpened inodes (device:inode): manifest {}:{}, module {}:{}\nExecution: {execution}\n",
             self.name, self.version, self.manifest_sha256, self.module_sha256,
             grants, if self.owner_approved { "exact identity and grants match" } else { "review required" },
@@ -274,6 +281,7 @@ mod tests {
         write(&dir.path().join("config.toml"), approval());
         let review = preflight(dir.path(), "demo").unwrap();
         assert!(review.owner_approved);
+        assert!(review.report().contains("Execution: local TUI text panel eligible"));
         assert!(super::super::load(dir.path(), &[]).unwrap().commands.is_empty());
         assert!(preflight(dir.path(), "hidden").is_err());
     }
