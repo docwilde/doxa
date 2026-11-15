@@ -422,7 +422,8 @@ sys.stdin.read()
         head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
         gate.write_text("new reviewed patch\n")
         reviewed = self.root / "fixture.patch"
-        reviewed.write_bytes(subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary"]))
+        reviewed.write_bytes(subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary",
+                                                     "--src-prefix=a/", "--dst-prefix=b/"]))
         gate.write_text("retained previous patch\n")
         (source / "untracked").write_text("retained user edit\n")
         before = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary"])
@@ -457,7 +458,8 @@ sys.stdin.read()
         head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
         first.write_text("reviewed change\n")
         patch_file = self.root / "fixture.patch"
-        patch_file.write_bytes(subprocess.check_output(["git", "-C", str(source), "diff", "--binary"]))
+        patch_file.write_bytes(subprocess.check_output(["git", "-C", str(source), "diff", "--binary",
+                                                       "--src-prefix=a/", "--dst-prefix=b/"]))
         with patch.multiple(installer, SOURCE=head, PATCH=patch_file, PATCH_SHA256=installer.digest(patch_file)):
             versioned = self.root / ("source-" + head + "-" + installer.digest(patch_file))
             source.rename(versioned)
@@ -468,6 +470,30 @@ sys.stdin.read()
             subprocess.run(["git", "-C", str(source), "add", "Cargo.toml"], check=True)
             with self.assertRaisesRegex(ValueError, "do not match the reviewed patch"):
                 installer.prepare_source(self.root)
+
+    def test_source_verification_ignores_git_diff_prefix_settings(self):
+        source = self.root / "source"
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "Fixture"], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email", "fixture@example.invalid"], check=True)
+        first = source / "first"
+        first.write_text("original\n")
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm", "test: fixture source"], check=True)
+        head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        first.write_text("reviewed change\n")
+        patch_file = self.root / "fixture.patch"
+        patch_file.write_bytes(subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary",
+                                                       "--src-prefix=a/", "--dst-prefix=b/"]))
+        versioned = self.root / ("source-" + head + "-" + installer.digest(patch_file))
+        source.rename(versioned)
+        with patch.multiple(installer, SOURCE=head, PATCH=patch_file, PATCH_SHA256=installer.digest(patch_file)):
+            for name in ("diff.mnemonicPrefix", "diff.noprefix"):
+                with self.subTest(setting=name):
+                    subprocess.run(["git", "-C", str(versioned), "config", name, "true"], check=True)
+                    self.assertEqual(versioned, installer.prepare_source(self.root))
+                    self.assertEqual("reviewed change\n", (versioned / "first").read_text())
+                    subprocess.run(["git", "-C", str(versioned), "config", name, "false"], check=True)
 
 
 if __name__ == "__main__":
