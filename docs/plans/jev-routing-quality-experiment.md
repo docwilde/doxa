@@ -1,207 +1,275 @@
 # Jev routing quality: experiment plan
 
-Status: **plan for owner review; nothing run.** This plan turns the open
-[Jev router](jev-router.md#open-work) items "worker task success, latency and
-aggregate execution cost" and "representative routing mistakes and
-direct-selection baselines" into a measurement. It uses the implemented
-[representative routing repair benchmark](../representative-routing-benchmark.md)
-and follows its matched evaluation protocol. Everything marked **owner decision**
-must be frozen before any holdout result is opened.
+Status: **plan for owner review; nothing run.** This plan turns two open
+[Jev router](jev-router.md#open-work) items into a measurement: "worker task
+success, latency and aggregate execution cost", and "representative routing
+mistakes and direct-selection baselines". Results must be **comparable with
+published agent-benchmark numbers**, so the held-out evaluation uses a standard
+public task set instead of DOXA's own tasks. Everything marked **owner
+decision** must be frozen before any held-out result is opened.
 
 ## Contents
 
 - [Questions](#questions)
-- [Why a counterfactual matrix](#why-a-counterfactual-matrix)
+- [Task sets](#task-sets)
+- [Why the harness must be held fixed](#why-the-harness-must-be-held-fixed)
 - [Arms](#arms)
+- [The routed endpoint](#the-routed-endpoint)
 - [Design](#design)
 - [Metrics](#metrics)
 - [Pre-registered decision rules](#pre-registered-decision-rules)
-- [Statistical power and its limits](#statistical-power-and-its-limits)
+- [Statistical power](#statistical-power)
 - [Budget](#budget)
 - [Prerequisites](#prerequisites)
 - [Phases and stop rules](#phases-and-stop-rules)
 - [Threats to validity](#threats-to-validity)
+- [References](#references)
 
 ## Questions
 
-1. **Success.** Does Jev-routed repair succeed as often as always using the
-   strongest candidate?
-2. **Cost.** At that success rate, how much execution cost does routing save,
-   counting Jev's own decision cost?
-3. **Mistakes.** How often does Jev choose a candidate that fails when another
-   would have succeeded (*avoidable failure*)? How often does it overspend on a
-   task a cheaper candidate solved (*overspend*)?
-4. **Latency.** What decision latency does routing add, and how does the
-   end-to-end wall clock compare?
+1. **Success.** Does Jev routing between configured models solve standard agent
+   tasks as often as always using the strongest model?
+2. **Cost.** At that success rate, how much does routing save, counting Jev's
+   own decisions?
+3. **Comparability.** Are the numbers on the same scale as published leaderboard
+   results, so DOXA's routing can be placed against them?
+4. **Latency.** How much time do routing decisions add, per call and per task?
 
-A router matching a difficulty label is not evidence it chose a successful
-repair. Only graded repairs answer these questions.
+## Task sets
 
-## Why a counterfactual matrix
+| Role | Task set | Why |
+| --- | --- | --- |
+| **Held-out, primary** | **Terminal-Bench 2.0**: 89 tasks across 16 categories and three difficulty tiers, each checked by three human reviewers | It is the agentic benchmark the candidates' own vendors report. DeepSeek's V4 paper and Z.ai's GLM-5 papers both report Terminal-Bench 2.0. Each task is a Docker container with a human-written oracle solution and tests on the final container state. It has an official harness (Harbor), a reference agent (Terminus-2) and a public leaderboard. |
+| Held-out, secondary (optional) | **SWE-bench Pro**, public set: 731 instances from 11 repositories | Issue resolution in real repositories, which Terminal-Bench does not cover. OpenAI recommends it over SWE-bench Verified, which it stopped reporting in February 2026 because of contamination and flawed tests. Public images and an MIT-licensed harness. |
+| Development only | DOXA's [18-task repair benchmark](../representative-routing-benchmark.md) | Cheap, offline and graded locally. Used to build and debug the routed endpoint and to tune candidate descriptions. It is machine-authored with no human labels, so it **never supplies a reported result**. |
 
-Running every candidate on every task produces an **outcome matrix**: success,
-tokens, cost and latency per (task, candidate, repetition). Any routing policy
-that picks one candidate per task at task start can then be scored by looking up
-its choice's outcome in the same repetition. All policies are evaluated on
-identical draws, so their comparisons are paired, and a new policy costs only
-its decision calls. The benchmark protocol already requires this full matrix
-(three candidates × 18 tasks × three repetitions = 162 trials).
+Terminal-Bench 2.0 is never used for tuning. Held-out tasks are not opened
+before the configuration is frozen, which keeps the comparison honest.
+**SWE-bench Verified is not used:** it is widely reported as saturated and
+contaminated.
 
-The lookup assumes routing happens once per task. DOXA routes *per turn*, so a
-multi-turn repair could switch models midway. A separate, smaller **live-routed
-arm** checks whether the counterfactual estimate holds when Jev actually drives
-a Router session.
+## Why the harness must be held fixed
+
+Published agent scores depend heavily on the harness. On SWE-bench Pro, the
+same Opus 4.5 model scored 45.9% under SWE-agent and 49.8–51.8% under other
+agents. Running DOXA's own agent on Terminal-Bench would therefore measure
+DOXA's harness and its routing at once, and would not be comparable with any
+leaderboard row.
+
+The design keeps the **official reference agent, Terminus-2 in Harbor, for every
+comparable arm**, and varies only which model answers each call. Any difference
+between arms is then the routing, measured on the same scale as published
+Terminus-2 rows. DOXA's own harness is an optional, separately labelled arm.
 
 ## Arms
 
-| Arm | Policy | Source |
-| --- | --- | --- |
-| F0 | Always `deepseek-flash`, thinking `none` | Benchmark baseline |
-| F1 | Always `deepseek-flash`, thinking `high` | Benchmark baseline |
-| P | Always `deepseek-v4-pro`, thinking `high` | Strongest fixed arm |
-| M | Provisional difficulty mapping (easy→F0, intermediate→F1, difficult→P) | Declared before results; uses benchmark difficulty labels Jev never sees |
-| J | Jev 1.13.0 selection from the frozen candidate descriptions | Router under test |
-| S | SubQ Snap Preview selection (optional) | Second router |
-| O | Per-task oracle: cheapest candidate that succeeded in that repetition | Upper bound, not a policy |
+All comparable arms run Terminus-2 in Harbor under the official rules: five
+trials per task, and no timeout or CPU, memory or storage overrides.
 
-M is a strong baseline: it knows the difficulty labels. If Jev cannot beat M on
-cost-adjusted success, routing is not yet adding value over a static rule.
+| Arm | Model behind Terminus-2 | Purpose |
+| --- | --- | --- |
+| **A0, anchor** | One fixed candidate that has a published Terminus-2 Terminal-Bench 2.0 score | **Checks the setup**: our run must reproduce the published number before anything else counts |
+| F-cheap | Always the cheapest candidate, for example `deepseek-flash` without thinking | Cost floor |
+| F-mid | Always the mid candidate, for example `deepseek-flash` with high thinking or a GLM model | Middle baseline |
+| F-strong | Always the strongest candidate, for example `deepseek-v4-pro` with high thinking | Quality ceiling among candidates |
+| **J** | Jev 1.13.0 choosing a candidate on **every call**, through the [routed endpoint](#the-routed-endpoint) | Routing under test |
+| S (optional) | SubQ Snap Preview through the same endpoint | Second router |
+| H (optional) | DOXA's own API-worker harness as a Harbor custom agent, with Jev routing | Harness effect. **Not comparable** to leaderboard rows; reported separately |
+
+**Owner decision:** the exact candidate list, model IDs and thinking settings.
+The candidates must be configured identically in the fixed arms and in Jev's
+candidate config. A0 is preferably the F-strong model, if its vendor published a
+Terminus-2 score under the official rules.
+
+## The routed endpoint
+
+This is the main new component: an **OpenAI-compatible endpoint inside DOXA**
+that Terminus-2 calls as if it were a single model.
+
+- Each request is one routing turn. The endpoint passes the conversation to the
+  Router's existing decision path with the frozen candidate config. It then
+  forwards the request unchanged to the chosen candidate and returns that
+  candidate's response unchanged.
+- Pinning is off. Jev sees the conversation as the Router normally does, and
+  nothing about the benchmark task: no task ID, category or difficulty.
+- Every call journals the decision, the candidate chosen, tokens, cost under the
+  registry's price bounds, decision latency and call latency. These are the
+  same fields the Router already records.
+- Budget admission works as it does today: a call with an unknown priced bound
+  is refused, and that refusal is recorded as an infrastructure failure, not
+  silently retried.
+- The endpoint only *chooses* a model. It never changes a request's content or
+  tools, so the harness stays the official one.
 
 ## Design
 
-- **Corpus and splits.** Use the frozen 18-task corpus with its family-level
-  development/holdout split; related variants never cross splits. Jev's
-  candidate descriptions, the Router config and any prompt changes are tuned on
-  development only. **Owner decision:** the holdout family assignment, recorded
-  with the corpus hash before tuning starts.
-- **Execution.** Every candidate gets the same editing tools, public tests,
-  context, wall-clock budget, repair-attempt budget and output allowance: 32,768
-  generated tokens per arm, with at least 16,384 for thinking where thinking is
-  enabled. Each trial is a real DOXA API-worker session in `docker-offline`
-  isolation, so no network leaks into the repair. Grading uses the benchmark's
-  offline Docker grader; evaluator-only cases never reach a prompt.
-- **Repetitions.** Three independent repetitions. Infrastructure failures, caps
-  and timeouts are recorded separately from functional failures and are not
-  silently retried.
-- **Jev decisions.** One Jev decision per (task, repetition), from the task text
-  and frozen candidate descriptions only, with no difficulty label. The decision
-  request, response, usage and latency are journalled with the trial.
-- **Live-routed validation.** A real `/model auto` Router session runs each
-  holdout task once. Its success and cost are compared with arm J's counterfactual
-  value for the same task. A disagreement beyond repetition noise invalidates
-  the counterfactual claims for multi-turn work.
+- **Splits.** All 89 Terminal-Bench 2.0 tasks are held out. Development uses the
+  in-house corpus and, for plumbing only, Harbor's example tasks. **Owner
+  decision:** whether a few Terminal-Bench tasks may be used to smoke-test the
+  endpoint. If yes, they are listed and excluded from the reported results.
+- **Anchor first.** Run A0 before any other held-out arm. If the reproduced
+  score misses the published number by more than the tolerance (see
+  [decision rules](#pre-registered-decision-rules)), stop and fix the setup.
+- **Two stages.** Stage 1 runs every arm with **one trial per task** (89 runs
+  per arm), to measure pass rates, token use and cost. Stage 2 runs the
+  **decisive comparison**, J against the best fixed arm (and S if run), under
+  the official five trials. Other arms may stay at one trial if the budget
+  requires it.
+- **Paired comparison.** All arms run the same tasks with the same versions and
+  resource limits, close together in time, so results can be compared task by
+  task.
+- **Network.** Terminal-Bench decides per task whether a container has network
+  access; DOXA's `docker-offline` policy doesn't apply inside the benchmark. The
+  routed endpoint itself runs on the host and is the only route to model
+  providers.
+- **Official set, then the fork.** Report the official Terminal-Bench 2.0 set
+  for comparability. Z.ai's "Terminal-Bench 2.0 Verified" fork fixes
+  environment issues; if run, report it separately and never mix it with
+  official results.
+- **SWE-bench Pro (optional, after Terminal-Bench).** A stratified sample of
+  about 100 public instances across the 11 repositories, with mini-swe-agent as
+  the fixed harness (the harness behind most rows on Scale's leaderboard). Use
+  the same arms and endpoint, and the same anchor rule against a published
+  mini-swe-agent score. Task content comes from copyleft repositories, so none
+  of it is committed into DOXA.
 
 ## Metrics
 
-Per trial:
-- all-tests success and per-requirement pass;
-- input, output and thinking tokens as reported;
-- cost under the registry's source-dated price bounds and, where a provider
-  exposes it, the billed amount;
-- decision latency and execution wall clock;
-- repair attempts used, cleanup result and infrastructure status.
+Per trial: pass or fail by the benchmark's tests; tokens; cost (registry price
+bounds, plus billed amounts where a provider exposes them); wall clock; number
+of calls; and, for routed arms, the model chosen on each call and the decision
+latency.
 
-Per policy, over holdout tasks × repetitions:
-- **success rate** and **mean cost per task**, including router decision cost;
-- **cost per success** (total cost ÷ successes);
-- **avoidable-failure rate**: the policy failed but some candidate succeeded in
-  that repetition;
-- **overspend**: on tasks the policy solved, the cost above the oracle's
-  cheapest success;
-- **regret vs oracle** on cost-adjusted success;
-- decision-latency p50/p95 and end-to-end wall clock.
+Per arm:
+- **Accuracy**: the share of trials passed, the leaderboard's own metric, with a
+  95% interval from bootstrap over tasks. Per-category accuracy across the 16
+  categories is reported too.
+- **Mean cost per task** and **cost per solved task**, including decision cost.
+- **Model mix**: for routed arms, how often each candidate was chosen, overall
+  and by task category.
+- **Decision overhead**: decision latency p50/p95 per call, and decision time as
+  a share of task wall clock.
 
-Variation is reported per task across repetitions. Confidence intervals come from
-a paired bootstrap over tasks, resampling whole tasks with all their repetitions.
+Comparisons:
+- **J minus F-strong** and **J minus F-cheap** in accuracy, paired by task.
+- **Cost ratio** J to F-strong.
+- **Routing headroom**: the tasks some fixed arm solved that J missed, and the
+  tasks J solved that no fixed arm did. There is no per-call oracle, so routing
+  mistakes are reported this way, at task level.
 
 ## Pre-registered decision rules
 
-**Owner decision:** freeze these thresholds before the holdout. The values below
-are proposals, not defaults.
+**Owner decision:** freeze these before the held-out stage. The values are
+proposals, not defaults.
 
-- **Non-inferiority:** J's success rate is no more than 10 percentage points
-  below P's, judged by the lower bound of the paired 90% interval of J − P.
-- **Savings:** J's mean cost per task, including decisions, is at most 60% of P's.
-- **Beats the static rule:** J's cost per success is lower than M's, with the
-  interval excluding zero. Otherwise report "no evidence routing beats the
-  difficulty mapping".
-- **Mistake ceiling:** J's avoidable-failure rate is at most 15%.
+- **Anchor validity.** A0's accuracy over five trials must fall within ±5
+  percentage points of its published Terminus-2 score, or its 95% interval must
+  contain that score. Otherwise no other arm is reported as comparable.
+- **Non-inferiority.** J's accuracy is no more than 5 points below F-strong's,
+  judged by the lower bound of the paired 90% interval of J minus F-strong.
+- **Savings.** J's mean cost per task is at most 60% of F-strong's.
+- **Better than always cheap.** J's accuracy is above F-cheap's, with the
+  paired interval excluding zero. Otherwise routing has not shown it adds value
+  over always using the cheap model.
 
-All four passing supports a claim of measured routing value *on this corpus*. A
-failure is reported as the result, not tuned away; a new attempt needs a fresh
-holdout.
+All four passing supports a claim of measured routing value **on Terminal-Bench
+2.0 with Terminus-2**, which outsiders can check against the leaderboard. A
+failure is reported as the result. A new attempt needs a new frozen
+configuration, and the results must be labelled as a second look at the same
+public tasks.
 
-## Statistical power and its limits
+## Statistical power
 
-Eighteen tasks with roughly six in the holdout is small. Repetitions measure
-stochastic variation, not task diversity, and do not multiply the effective
-sample. With six holdout tasks, only very large differences, such as one arm
-solving every task the other fails, can separate from noise. Phase 1 therefore
-reports **estimates with intervals, not verdicts**, unless a rule is met with
-margin.
-
-To make the decision rules meaningful, extend the corpus to **at least 60 tasks
-in about 20 families** (the builder supports new families), keeping the same
-difficulty definitions, before the decisive run. The consented real-case arm
-from the Jev open work is a separate external-validity check. It is not a
-substitute for the controlled corpus.
+Eighty-nine tasks with five trials each gives far more power than the 18
+in-house tasks. Trials of one task are correlated, though, so the effective
+sample size is closer to the number of tasks than to the number of trials.
+**Compute the minimum detectable difference from stage 1**, using how often
+two arms disagree on the same task. The 5-point non-inferiority margin is only
+meaningful if stage 1 shows a test of that size is achievable. If not, the owner
+widens the margin *before* stage 2, or adds SWE-bench Pro tasks.
 
 ## Budget
 
-Upper bounds in tokens; convert with `doxa model-facts` price bounds at run time,
-because prices change.
+Terminal-Bench tasks are long, multi-turn agent runs, so the cost per run is
+measured, not guessed.
 
-| Item | Trials | Generated tokens (upper bound) |
-| --- | --- | --- |
-| Outcome matrix, 18 tasks | 162 | 162 × 32,768 ≈ 5.3 M |
-| Outcome matrix, 60-task extension | 540 | ≈ 17.7 M |
-| Jev decisions | 54 (or 180) | about 0.2 k each; negligible |
-| Live-routed validation | 6–20 | ≤ 0.7 M |
+| Stage | Runs |
+| --- | --- |
+| A0 anchor, 5 trials | 445 |
+| Stage 1: F-cheap, F-mid, F-strong, J (and S), 1 trial | 356 (445 with S) |
+| Stage 2: J and F-strong (and S), 5 trials | 890 (1,335 with S) |
+| Optional SWE-bench Pro, about 100 instances × 4 arms × 1 trial | 400 |
 
-Input tokens depend on repository context and attempt count. Record them, and
-cap them per trial with the existing API budget admission, which refuses an
-unknown priced bound. Set a hard total allowance for the run before it starts.
+Stage 1 gives token use per run for each candidate. Turn those into a dollar
+estimate with `doxa model-facts` price bounds, and set a **hard allowance per
+stage** before it starts. Stop when the allowance is reached, not when the
+spending looks reasonable. Jev decisions add about 0.2 thousand tokens per
+call; their real share is measured in stage 1.
 
 ## Prerequisites
 
-1. **Candidate runner.** A harness that prepares a benchmark workspace, starts a
-   real DOXA API-worker session with a pinned model and effort, gives it the
-   task text and attempt budget, then hands the result to the existing grader.
-   It journals usage, cost and latency. This is the only new component.
-2. **Router decision capture.** Journal Jev decisions without executing a worker,
-   for the counterfactual arms. The Router already records decisions; it needs a
-   decision-only mode or an extraction from journals.
-3. **Analysis script.** Builds the outcome matrix, scores the policies, runs the
-   paired bootstrap and prints the decision-rule table. It fails closed on
-   missing trials.
-4. A rootless Docker engine and the pinned grader image, verified by the
-   benchmark's nonbillable `self_check.py`.
+1. **Harbor and Terminal-Bench 2.0** installed against the rootless Docker
+   engine. Verify that the Harbor version, the task images and the official
+   resource limits work rootless before running A0. If they don't, record why,
+   and use a dedicated rootful runner rather than changing limits.
+2. **The routed endpoint** described above, with journals and budget admission.
+   It is the only new production component, and needs its own tests: that it
+   forwards requests unchanged, that budget refusals are counted, and that
+   decisions are journalled.
+3. **Analysis script**: reads Harbor results and endpoint journals, computes
+   accuracy, cost and paired intervals, and prints the decision-rule table. It
+   fails closed on missing trials.
+4. **Published reference values** for the anchor model, with source URL and
+   date, recorded before running A0.
+5. Optional: a **Harbor custom-agent adapter** for DOXA's API worker (arm H),
+   and the SWE-bench Pro harness with mini-swe-agent.
 
 ## Phases and stop rules
 
 | Phase | Work | Exit |
 | --- | --- | --- |
-| 0 | Build runner and analysis; nonbillable self-check; one F0 dry run on one development task | Grader, journals and cost capture verified end to end |
-| 1 | Development split, 1 repetition, all arms | Tune candidate descriptions; freeze config, splits and decision rules |
-| 2 | Holdout, 3 repetitions, full matrix + J/S decisions | Decision-rule table |
-| 3 | Live-routed validation on holdout | Counterfactual agreement check |
-| 4 | Report under `docs/qa/`; update the Jev plan's open items | Owner review |
+| 0 | Build the endpoint and analysis; plumbing runs on the in-house corpus and Harbor examples | Endpoint forwards unchanged; journals and costs verified |
+| 1 | Freeze candidates, config and rules; run the A0 anchor, 5 trials | Anchor within tolerance, or stop |
+| 2 | Stage 1, all arms, 1 trial | Pass rates, token use, cost per arm; compute power; owner confirms margins |
+| 3 | Stage 2, J vs F-strong (and S), 5 trials | Decision-rule table |
+| 4 | Optional SWE-bench Pro and arm H | Separate result tables |
+| 5 | Report under `docs/qa/`; update the Jev plan's open items | Owner review |
 
-**Stop rules:** halt if the run's allowance is reached, if infrastructure
-failures exceed 10% of trials (fix, then restart that phase), or if any trial
-shows network access from `docker-offline`.
+**Stop rules:**
+- Halt a stage when its allowance is reached.
+- Halt if infrastructure failures exceed 10% of a stage's trials: fix, then
+  restart that stage.
+- Halt if any run needed a timeout or resource override, because the result
+  would no longer be official.
 
 ## Threats to validity
 
-- **Stochastic outputs.** Providers don't guarantee seeds. Three repetitions
-  bound, but don't remove, the variation.
-- **Provider drift.** A model name can change behaviour over time. Record model
-  IDs, dates and response metadata, and run each repetition close in time.
-- **Leakage.** Jev must not see difficulty labels, evaluator cases or other
-  arms' results. Candidate descriptions are frozen from development only.
-- **Narrow domain.** Small Python repair repositories don't represent UI work,
-  long features or other languages. Claims stay scoped to this corpus.
-- **Cost evidence.** Registry price bounds are estimates. Billed amounts are
-  used where providers expose them, and reported separately.
-- **Not alignment evidence.** These task oracles are not human labels and cannot
-  feed the [supervision accuracy gate](fleet-supervision-accuracy-experiment.md).
+- **Contamination.** Terminal-Bench 2.0 has been public since 2025, and newer
+  models may have seen it. All arms share that exposure, so the *differences*
+  between arms remain fair, but absolute scores are reported with this caveat.
+- **Provider drift.** A model name can change behaviour over time, and
+  published numbers were measured on earlier versions. The anchor checks the
+  current state. Record model IDs and dates, and run the arms close together.
+- **Per-call routing in a loop.** Switching models mid-task can help or hurt in
+  ways a single choice per task wouldn't. That is part of what is being measured
+  and is reported through the model-mix metrics. It is not a flaw in the design.
+- **Leakage.** Jev must see only what the Router normally sees: no task IDs,
+  categories, difficulty or results from other arms.
+- **Benchmark quality.** Environment bugs in the official set affect every arm
+  equally. The Verified fork shows their size, but only as a separate result.
+- **Narrow claim.** A pass supports "Jev routing with these candidates is
+  non-inferior and cheaper on Terminal-Bench 2.0 under Terminus-2". It is not a
+  general quality claim and not alignment evidence; that is covered by the
+  [supervision accuracy plan](fleet-supervision-accuracy-experiment.md).
+
+## References
+
+- Terminal-Bench, ICLR 2026: [paper](https://proceedings.iclr.cc/paper_files/paper/2026/file/444a3737adaee10d86ad2ef5f74468e6-Paper-Conference.pdf); [documentation](https://tbench.ai/docs); [leaderboard](https://snorkel.ai/leaderboard/terminal-bench-2-0/); [Harbor example](https://mintlify.com/harbor-framework/harbor/examples/terminal-bench)
+- [Terminal-Bench 2.0 Verified (Z.ai fork)](https://huggingface.co/datasets/zai-org/terminal-bench-2-verified)
+- [DeepSeek-V4 paper (Terminal-Bench 2.0 results)](https://arxiv.org/pdf/2606.19348); [GLM-5 paper](https://arxiv.org/pdf/2602.15763)
+- SWE-bench Pro: [paper](https://arxiv.org/pdf/2509.16941); [harness](https://github.com/scaleapi/SWE-bench_Pro-os); [leaderboard](https://labs.scale.com/leaderboard/swe_bench_pro)
+- [Why OpenAI no longer evaluates SWE-bench Verified](https://openai.com/index/why-we-no-longer-evaluate-swe-bench-verified/)
+- Harness effect: [The Scaffold Effect in Coding Agents](https://arxiv.org/pdf/2607.22585); [harness comparison](https://futureagi.com/blog/coding-agent-harness-benchmark/)
+
+Values quoted from third-party pages above (scores, counts) were collected on
+2026-11-14 and must be rechecked against primary sources before use as anchors.
