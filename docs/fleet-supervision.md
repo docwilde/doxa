@@ -429,6 +429,14 @@ returns a nonzero exit status. This check makes no model calls and never changes
 admission. See [the gate procedure](fleet-message-gate.md) for the private-file
 schema, approval attestations and limits on the result.
 
+Checkpoint Choices have a separate [offline evaluator](fleet-checkpoint-gate.md).
+Run `doxa fleet evaluate-checkpoints-development` on private development rows,
+then freeze the gate before using `evaluate-checkpoints` with a separately
+grouped holdout. It reports four-way outcomes, raw alignment confidence,
+whole-fleet bootstrap quantiles, citations and latency from attested recordings.
+Synthetic references supply development checks only. The commands make no
+model calls, enable no enforcement and establish no general supervisor quality.
+
 After a supervised native run finishes, `doxa fleet debrief RUN --root /absolute/fleet/root`
 reads the owned manifest and private host guard journal. It reports worker
 completion admission only when its recorded diff and passing test receipts

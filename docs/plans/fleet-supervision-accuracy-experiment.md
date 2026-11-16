@@ -39,7 +39,7 @@ be frozen before any holdout result is opened.
 | --- | --- | --- |
 | Unit | One peer message, before delivery | One host checkpoint (charter, assignments, evidence, guard observations, budget, phase) |
 | Output | Risk score against the frozen threshold | `aligned`, `uncertain`, `drifted` or `blocked`, plus confidence and citations |
-| Evaluator today | `doxa fleet evaluate-messages` with a frozen [gate](../fleet-message-gate.md) | **None.** It must be built (see [Prerequisites](#prerequisites)) |
+| Evaluator today | `doxa fleet evaluate-messages` with a frozen [gate](../fleet-message-gate.md) | `doxa fleet evaluate-checkpoints` with a frozen [gate](../fleet-checkpoint-gate.md) |
 | Labelling tool | `scripts/fleet-evaluation/blind_review.py` | Needs a checkpoint card format |
 
 The two are evaluated separately. A message judge that passes its gate says
@@ -169,14 +169,17 @@ Most of the cost is **human labelling time and fleet runs**, not judge calls.
 
 ## Prerequisites
 
-1. **Checkpoint evaluator.** `doxa fleet evaluate-checkpoints`, mirroring
-   `evaluate-messages`:
-   - a frozen gate with a development hash and prior-approval attestation;
-   - refusal of synthetic or model-labelled holdouts, and of groups that cross
-     splits;
-   - output of the confusion matrix, recall and false-pause rates with exact
-     bounds, abstention, calibration bins and deadline exceedances;
-   - no reviewer calls of its own and no policy change.
+1. **Checkpoint evaluator: implemented.** The offline
+   [checkpoint commands](../fleet-checkpoint-gate.md) bind a frozen gate to a
+   development hash, exact model, threshold and prior-approval attestation.
+   They refuse synthetic or model-labelled holdouts, repeated source hashes,
+   controlled-task holdouts and groups that cross splits or collection contexts.
+   Reports include a directed confusion matrix, raw alignment calibration,
+   recall and false pauses with item-wise exact bounds, a whole-fleet bootstrap,
+   abstention, citations and latency. Provenance and projection fields remain
+   operator attestations; the bounds state their independence and denominator
+   assumptions. Fixture checks supply no supervisor quality evidence. The
+   evaluator makes no reviewer calls and changes no policy.
 2. **Checkpoint cards** in `blind_review.py`: the host evidence a supervisor
    receives, sealed and blinded, plus a join step for the four-way verdict.
 3. **Re-scoring harness.** Replays the stored judge and supervisor inputs to each
@@ -191,7 +194,7 @@ Most of the cost is **human labelling time and fleet runs**, not judge calls.
 
 | Phase | Work | Exit |
 | --- | --- | --- |
-| 0 | Build the evaluator, checkpoint cards, re-scoring harness and induced-risk kit; write the label guide | Dry run on synthetic fixtures; the tools refuse them as holdout |
+| 0 | Evaluator fixture checks pass. Build checkpoint cards, the re-scoring harness and induced-risk kit; write the label guide | Complete dry run on synthetic fixtures; the tools refuse them as holdout |
 | 1 | Development fleets; double labelling; κ check | κ ≥ 0.6 per field; owner freezes gates and thresholds |
 | 2 | Holdout fleets; blind labelling after the freeze | Labels joined |
 | 3 | Evaluate frozen gates (S1) and the frozen threshold (S2) | Pass or fail per gate |

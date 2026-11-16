@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## Unreleased
+
+- Add offline development scoring and a frozen holdout gate for recorded fleet
+  checkpoint Choices, with exact item-wise bounds, whole-fleet bootstrap
+  quantiles, calibration, citations and latency. The commands require attested
+  provenance and labels, make no model calls and leave enforcement unchanged.
+
 ## 2.0.0-beta.81 — 2026-11-16
 
 **Protected Codex**
