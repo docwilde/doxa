@@ -12,6 +12,7 @@ pub struct BudgetHost {
     ceiling: f64,
     pricing: Option<Pricing>,
     priced_model: Option<String>,
+    request_limits: bool,
     state: Mutex<BudgetState>,
     journal: Option<Journal>,
 }
@@ -43,13 +44,13 @@ struct BudgetState {
 
 impl BudgetHost {
     pub fn new(inner: Arc<dyn Host>, ceiling: f64) -> Self {
-        Self { inner, ceiling, pricing: None, priced_model: None, state: Mutex::new(BudgetState::default()), journal: None }
+        Self { inner, ceiling, pricing: None, priced_model: None, request_limits: false, state: Mutex::new(BudgetState::default()), journal: None }
     }
 
     pub fn new_priced(inner: Arc<dyn Host>, ceiling: f64, engine: &str, model: &str) -> Result<Self, String> {
         let pricing = vendor_price(engine, model)
             .ok_or_else(|| format!("no complete native budget rate bound for {engine}:{model}"))?;
-        Ok(Self { inner, ceiling, pricing: Some(pricing), priced_model: Some(model.to_owned()), state: Mutex::new(BudgetState::default()), journal: None })
+        Ok(Self { inner, ceiling, pricing: Some(pricing), priced_model: Some(model.to_owned()), request_limits: matches!(engine,"deepseek"|"glm"), state: Mutex::new(BudgetState::default()), journal: None })
     }
 }
 
@@ -140,6 +141,12 @@ impl BudgetHost {
                 return;
             }
         }
+        if self.request_limits {
+            if let Err(message) = self.inner.set_request_budget(self.ceiling - state.spent) {
+                emit(json!({"type":"turn_refused","data":{"reason":"budget","message":message}}));
+                return;
+            }
+        }
         if let Some(journal) = &self.journal {
             let pending = BudgetState { spent: state.spent, unknown: true, input_total: state.input_total, output_total: state.output_total };
             if journal.write(&pending).is_err() {
@@ -208,6 +215,7 @@ impl BudgetHost {
 impl Host for BudgetHost {
     fn take_native_tool_audit(&self)->Option<Value>{self.inner.take_native_tool_audit()}
     fn supports_images(&self)->bool{self.inner.supports_images()}
+    fn image_admission(&self)->Result<(),String>{self.inner.image_admission()}
     fn prompt_with_images(&self,text:&str,images:&[doxa_input::Attachment],origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){
         self.prompt_impl_images(text,origin,images,emit);
     }
@@ -257,6 +265,7 @@ impl Host for BudgetHost {
             "output_bound_usd_per_million":price.output
         }));
         value["budget"] = json!({"ceiling_usd":self.ceiling,
+            "within_turn":if self.request_limits {"request_reservations"} else {"between_turns_only"},
             "spent_usd":state.as_ref().filter(|state| !state.unknown).map(|state| state.spent),
             "accounting_unknown":state.as_ref().is_some_and(|state| state.unknown),
             "accounting_pending":state.is_none(),
@@ -301,6 +310,7 @@ mod tests {
     }
     struct VendorCostHost(Value);
     impl Host for VendorCostHost {
+        fn set_request_budget(&self, _: f64) -> Result<(), String> { Ok(()) }
         fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) {
             emit(json!({"type":"turn_done","data":self.0}));
         }

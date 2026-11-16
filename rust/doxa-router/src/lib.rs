@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fs, io::{self, Read}, os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, path::Path, sync::atomic::{AtomicBool, Ordering}, time::{Duration, Instant}};
 
 pub use doxa_vendors::decisions::DecisionModel;
-pub const SUBQ_MODEL: &str = "subq-snap-preview";
+pub const SUBQ_MODEL: &str = "subq-snap-1.2";
 pub const JEV_MODEL: &str = "jev-1.13.0";
 pub const JEV_INPUT_USD_MICROS_PER_MILLION: u64 = 42_000;
 pub const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";

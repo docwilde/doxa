@@ -823,8 +823,8 @@ mod tests {
         fs::write(&path,journal.to_string()).unwrap();fs::set_permissions(&path,fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(saved_router_budget("saved-router").unwrap(),Some(1234567));
         let config_path=home.join("original-router.json");fs::write(&config_path,router_fixture().to_string()).unwrap();fs::set_permissions(&config_path,fs::Permissions::from_mode(0o600)).unwrap();
-        let original=doxa_router::Config::load_with_model(&config_path,Some("subq-snap-preview")).unwrap();
-        journal["config_path"]=serde_json::json!(config_path);journal["config_model"]=serde_json::json!("subq-snap-preview");journal["identity"]["config_sha256"]=serde_json::json!(original.hash().unwrap());
+        let original=doxa_router::Config::load_with_model(&config_path,Some("subq-snap-1.2")).unwrap();
+        journal["config_path"]=serde_json::json!(config_path);journal["config_model"]=serde_json::json!("subq-snap-1.2");journal["identity"]["config_sha256"]=serde_json::json!(original.hash().unwrap());
         fs::write(&path,journal.to_string()).unwrap();
         let (restored_path,restored,restored_home)=router_resume_config("saved-router").unwrap();assert_eq!(restored_path,config_path);assert_eq!(restored,original);assert_eq!(restored_home,home);
         journal["identity"]["ceiling_usd_micros"]=serde_json::Value::Null;fs::write(&path,journal.to_string()).unwrap();

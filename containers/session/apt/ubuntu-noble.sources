@@ -1,4 +1,6 @@
 # Review and advance the snapshot date together with ubuntu-noble.packages.
-deb [check-valid-until=no] http://snapshot.ubuntu.com/ubuntu/20260901T000000Z noble main universe
-deb [check-valid-until=no] http://snapshot.ubuntu.com/ubuntu/20260901T000000Z noble-updates main universe
-deb [check-valid-until=no] http://snapshot.ubuntu.com/ubuntu/20260901T000000Z noble-security main universe
+# snapshot.ubuntu.com redirects HTTP to HTTPS. Base images have no CA store, so
+# apt verifies TLS with the pinned snapshot-ca.pem until ca-certificates installs.
+deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260901T000000Z noble main universe
+deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260901T000000Z noble-updates main universe
+deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20260901T000000Z noble-security main universe

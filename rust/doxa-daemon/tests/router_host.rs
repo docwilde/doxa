@@ -2,6 +2,7 @@
 #[path = "../src/agent_tools.rs"] mod agent_tools;
 #[path = "../src/recovery_context.rs"] mod recovery_context;
 #[path = "../src/budget_host.rs"] mod budget_host;
+#[path = "../src/request_budget.rs"] mod request_budget;
 #[path = "../src/vendor_host.rs"] mod vendor_host;
 #[path = "../src/vendor_tools.rs"] mod vendor_tools;
 #[path = "../src/vendor_mcp.rs"] mod vendor_mcp;
@@ -545,5 +546,224 @@ mod tests {
             assert_eq!(server.bodies().len(),1);assert_eq!(env.state()["worker"],state["worker"]);
             resumed.shutdown();
         }
+    }
+
+    fn fixture_png() -> doxa_input::Attachment {
+        let png=doxa_input::decode_chunk("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8pcHFwMDAxMDAwMDAAAAPKgEwVo7a6wAAAABJRU5ErkJggg==").unwrap();
+        doxa_input::Attachment::from_source("fixture.png",png).unwrap()
+    }
+    fn image_parts(body:&Value)->Vec<Value> {
+        body["messages"].as_array().unwrap().iter().filter_map(|message|message["content"].as_array())
+            .flat_map(|parts|parts.iter().filter(|part|part["type"]=="image_url").cloned()).collect()
+    }
+    fn saved_files(env:&Env,id:&str)->(String,String) {
+        let project=fs::read_dir(env.root.path().join("projects")).unwrap().next().unwrap().unwrap().path();
+        (fs::read_to_string(project.join(format!("{id}.messages.json"))).unwrap_or_default(),
+            fs::read_to_string(project.join(format!("{id}.jsonl"))).unwrap_or_default())
+    }
+    struct Direct { client:doxa_tui::transport::DaemonClient, _daemon:doxa_runtime::DaemonHandle, host:Arc<dyn Host> }
+    fn direct(env:&Env,host:Arc<dyn Host>,id:&str,engine:&str)->Direct {
+        let session=doxa_runtime::Session{session_id:id.into(),cwd:env.cwd().to_string_lossy().into_owned(),model:None,engine:engine.into(),doxa_version:"test".into()};
+        let daemon=doxa_runtime::Daemon::bind(env.root.path().join(format!("run-{id}")),session,host.clone()).unwrap().start();
+        let client=doxa_tui::transport::DaemonClient::connect(daemon.socket_path(),None).unwrap();
+        Direct{client,_daemon:daemon,host}
+    }
+    fn vendor_host(env:&Env,vendor:doxa_vendors::Vendor,model:&str,effort:&str,id:&str,server:&Server)->Arc<super::vendor_host::VendorHost> {
+        Arc::new(super::vendor_host::VendorHost::new(vendor,model.into(),effort.into(),&env.cwd(),id,false,Some(server.endpoint.clone())).unwrap())
+    }
+    fn terminal(client:&mut doxa_tui::transport::DaemonClient)->Value {
+        let deadline=Instant::now()+Duration::from_secs(10);
+        loop {
+            assert!(Instant::now()<deadline,"turn did not finish");
+            if let Some(frame)=client.poll_frame(Duration::from_millis(50)).unwrap() {
+                if matches!(frame["event"]["type"].as_str(),Some("turn_done"|"turn_refused")) {return frame["event"].clone();}
+            }
+        }
+    }
+
+    #[test]
+    fn direct_vendor_images_follow_exact_model_facts_and_unsupported_models_receive_no_bytes() {
+        use doxa_vendors::Vendor;
+        let env=Env::new();
+        let server=Server::new(|method,body|{assert_eq!(method,"POST");worker(body,false)});
+        // Negative controls: documented non-vision, vision without a published
+        // per-image token charge, and a model without image facts.
+        for (vendor,model,id,expected) in [(Vendor::DeepSeek,"deepseek-v4-pro","refuse-pro","does not accept image input"),
+            (Vendor::Glm,"glm-5.3-flash","refuse-flash","per-image token charge is unpublished"),
+            (Vendor::Glm,"glm-5.3","refuse-glm","Image input is not established")] {
+            let host=vendor_host(&env,vendor,model,"high",id,&server);
+            let error=host.image_admission().unwrap_err();assert!(error.contains(expected),"{error}");assert!(error.contains(model));
+            let mut direct=direct(&env,host.clone(),id,vendor.engine_id());
+            let image=fixture_png();
+            // Refused at upload: the TUI receives a rejected reply and keeps the
+            // draft and frozen bytes for Alt+Up recovery.
+            let reply=direct.client.prompt_attachments("describe",&[image.clone()]).unwrap();
+            assert_eq!(reply["ok"],false);assert_eq!(reply["error"],json!(error));
+            // Defense in depth at the turn boundary, bypassing upload admission.
+            let mut events=Vec::new();
+            direct.host.prompt_with_images("describe\n\n[Attached image: fixture.png]",&[image],None,&mut|event|events.push(event));
+            assert_eq!(events.len(),1,"{events:?}");assert_eq!(events[0]["type"],"turn_refused");assert_eq!(events[0]["data"]["message"],json!(error));
+            // Text attachments and prompts still reach every engine.
+            let text=doxa_input::Attachment::from_source("notes.txt",b"plain notes".to_vec()).unwrap();
+            assert_eq!(direct.client.prompt_attachments("summarize",&[text]).unwrap()["ok"],true);
+            assert_eq!(terminal(&mut direct.client)["data"]["is_error"],false);
+            host.shutdown();
+        }
+        let bodies=server.bodies();assert_eq!(bodies.len(),3,"only the three text turns reached a provider");
+        assert!(bodies.iter().all(|body|image_parts(body).is_empty() && !body.to_string().contains("image_url")));
+        assert!(bodies.iter().all(|body|!body.to_string().contains(&fixture_png().encoded())));
+        // A sourced vision model with a documented per-image bound succeeds.
+        let host=vendor_host(&env,Vendor::DeepSeek,"deepseek-flash","none","vision-direct",&server);
+        assert!(host.image_admission().is_ok());
+        let mut direct=direct(&env,host.clone(),"vision-direct","deepseek");
+        let image=fixture_png();
+        assert_eq!(direct.client.prompt_attachments("describe",&[image.clone()]).unwrap()["ok"],true);
+        let done=terminal(&mut direct.client);assert_eq!(done["type"],"turn_done");assert_eq!(done["data"]["is_error"],false,"{done}");
+        assert_eq!(done["data"]["image_input"],json!({"count":1,"max_tokens_per_image":1024,
+            "source":"https://api-docs.deepseek.com/guides/vision","read_on":"2026-11-14","billing":"provider_reported_input_tokens"}));
+        let expected=(3.0*0.3+4.0*1.2)/1_000_000.0;
+        assert!((done["data"]["cost_usd"].as_f64().unwrap()-expected).abs()<1e-12,"reported usage is priced at the dated input rate");
+        let bodies=server.bodies();let request=bodies.last().unwrap();
+        assert_eq!(request["model"],"deepseek-flash");assert_eq!(image_parts(request),vec![image.chat_image_part()]);
+        let user=request["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(user["content"][0]["type"],"text");assert!(user["content"][0]["text"].as_str().unwrap().ends_with("[Attached image: fixture.png]"));
+        let (messages,transcript)=saved_files(&env,"vision-direct");
+        assert!(messages.contains("[Attached image: fixture.png]"));
+        assert!(!messages.contains(&image.encoded()) && !transcript.contains(&image.encoded()),"DOXA history omits pixels");
+        host.shutdown();
+    }
+
+    #[test]
+    fn failed_image_delivery_commits_nothing_and_recovered_retry_sends_identical_frozen_bytes() {
+        let env=Env::new();let mut posts=0;
+        let server=Server::new(move|_,body|{
+            posts+=1;
+            // The first stream ends without [DONE]: an incomplete delivery.
+            if posts==1 {return ("text/event-stream".into(),format!("data: {}\n\n",json!({"model":"deepseek-flash","choices":[{"delta":{"content":"partial"}}]})),Duration::ZERO);}
+            worker(body,false)
+        });
+        let host=vendor_host(&env,doxa_vendors::Vendor::DeepSeek,"deepseek-flash","none","vision-retry",&server);
+        let mut direct=direct(&env,host.clone(),"vision-retry","deepseek");
+        // The recovered draft owns the same frozen attachment value.
+        let image=fixture_png();
+        assert_eq!(direct.client.prompt_attachments("describe",&[image.clone()]).unwrap()["ok"],true);
+        let failed=terminal(&mut direct.client);
+        assert_eq!(failed["data"]["is_error"],true);assert_eq!(failed["data"]["failure_category"],"incomplete_stream");
+        let (messages,transcript)=saved_files(&env,"vision-retry");
+        assert!(!messages.contains("fixture.png") && transcript.is_empty(),"a failed image turn commits no history");
+        assert_eq!(direct.client.prompt_attachments("describe",&[image.clone()]).unwrap()["ok"],true);
+        assert_eq!(terminal(&mut direct.client)["data"]["is_error"],false);
+        let bodies=server.bodies();assert_eq!(bodies.len(),2);
+        assert_eq!(image_parts(&bodies[0]),image_parts(&bodies[1]));assert_eq!(image_parts(&bodies[1]),vec![image.chat_image_part()]);
+        let (messages,_)=saved_files(&env,"vision-retry");let saved:Value=serde_json::from_str(&messages).unwrap();
+        let users=saved["messages"].as_array().unwrap().iter().filter(|row|row["role"]=="user").collect::<Vec<_>>();
+        assert_eq!(users.len(),1);assert!(users[0]["content"].as_str().unwrap().ends_with("[Attached image: fixture.png]"));
+        assert!(!messages.contains(&image.encoded()));
+        host.shutdown();
+    }
+
+    #[test]
+    fn priced_budget_refuses_unknown_image_pricing_and_counts_reported_image_usage() {
+        use doxa_vendors::Vendor;
+        let env=Env::new();
+        let server=Server::new(|_,body| {
+            // A tiny encoded PNG can consume more tokens than its wire bytes.
+            let input=serde_json::to_vec(body).unwrap().len()+500;
+            ("text/event-stream".into(),format!("data: {}\n\ndata: [DONE]\n\n",json!({
+                "model":body["model"],"choices":[{"finish_reason":"stop","delta":{"content":"Image answer"}}],
+                "usage":{"prompt_tokens":input,"completion_tokens":4}})),Duration::ZERO)
+        });
+        // GLM-5.3-Flash has dated token prices, but no published per-image
+        // token charge: a priced session refuses rather than under-count.
+        let glm=vendor_host(&env,Vendor::Glm,"glm-5.3-flash","high","budget-glm",&server);
+        let budget:Arc<dyn Host>=Arc::new(super::budget_host::BudgetHost::new_priced(glm.clone(),1.0,"glm","glm-5.3-flash").unwrap());
+        let error=budget.image_admission().unwrap_err();assert!(error.contains("refuses rather than under-count"),"{error}");
+        let mut session=direct(&env,budget,"budget-glm","glm");
+        let reply=session.client.prompt_attachments("describe",&[fixture_png()]).unwrap();
+        assert_eq!(reply["ok"],false);assert_eq!(reply["error"],json!(error));
+        assert!(server.bodies().is_empty());glm.shutdown();
+        let ds=vendor_host(&env,Vendor::DeepSeek,"deepseek-flash","none","budget-ds",&server);
+        let budget:Arc<dyn Host>=Arc::new(super::budget_host::BudgetHost::new_priced(ds.clone(),1.0,"deepseek","deepseek-flash").unwrap());
+        let mut session=direct(&env,budget,"budget-ds","deepseek");
+        assert_eq!(session.client.prompt_attachments("describe",&[fixture_png()]).unwrap()["ok"],true);
+        let done=terminal(&mut session.client);assert_eq!(done["data"]["is_error"],false,"{done}");
+        assert_eq!(done["data"]["cost_basis"],"priced_conservative");
+        let input=serde_json::to_vec(&server.bodies()[0]).unwrap().len() as f64+500.0;
+        assert!((done["data"]["session_cost_usd"].as_f64().unwrap()-(input*0.3+4.0*1.2)/1_000_000.0).abs()<1e-12);
+        assert_eq!(image_parts(&server.bodies()[0]).len(),1);ds.shutdown();
+    }
+
+    #[test]
+    fn router_image_turns_narrow_to_sourced_vision_targets_and_later_turns_send_no_pixels() {
+        let env=Env::new();let criteria=Arc::new(Mutex::new(Vec::new()));let seen=criteria.clone();let mut routed=0;
+        let server=Server::new(move|method,body| {
+            if method=="GET" {return catalog();}
+            if body["model"]==doxa_router::JEV_MODEL {
+                routed+=1;
+                let mut ids=body["questions"]["target"]["criteria"].as_object().unwrap().keys().cloned().collect::<Vec<_>>();ids.sort();
+                seen.lock().unwrap().push(ids);
+                return choice(body,if routed==1 {"ds"} else {"glm"});
+            }
+            worker(body,false)
+        });
+        let host=make_host(&env,config(),&server,false,Some(2.0));
+        assert!(host.image_admission().is_ok(),"the Auto fallback accepts images");
+        let image=fixture_png();let mut events=Vec::new();
+        host.prompt_with_images("describe\n\n[Attached image: fixture.png]",&[image.clone()],None,&mut|event|events.push(event));
+        assert_eq!(events.last().unwrap()["data"]["is_error"],false,"{events:?}");
+        let selected=events.iter().find(|event|event["type"]=="routing_selected").unwrap();
+        assert_eq!(selected["data"]["target_id"],"ds");
+        assert_eq!(selected["data"]["image_input"],json!({"count":1,"max_tokens_per_image":1024,
+            "source":"https://api-docs.deepseek.com/guides/vision","read_on":"2026-11-14"}));
+        // A text turn may route to GLM; its canonical history keeps only labels.
+        let events=prompt(&host,"and its colour?");assert_eq!(events.last().unwrap()["data"]["is_error"],false,"{events:?}");
+        assert_eq!(*criteria.lock().unwrap(),vec![vec!["ds".to_owned(),"thinking".to_owned()],vec!["ds".to_owned(),"glm".to_owned()]],
+            "the image turn excluded the GLM target; the text turn did not");
+        let bodies=server.bodies();
+        let workers=bodies.iter().filter(|row|row["model"]!=doxa_router::JEV_MODEL).collect::<Vec<_>>();
+        assert_eq!(workers.iter().map(|row|row["model"].as_str().unwrap()).collect::<Vec<_>>(),["deepseek-flash","glm-5.3-flash"]);
+        assert_eq!(image_parts(workers[0]),vec![image.chat_image_part()]);
+        assert!(image_parts(workers[1]).is_empty() && !workers[1].to_string().contains(&image.encoded()),"negative control: GLM received no image bytes");
+        assert!(workers[1]["messages"].as_array().unwrap().iter().any(|row|row["content"].as_str().is_some_and(|text|text.ends_with("[Attached image: fixture.png]"))));
+        assert!(bodies.iter().filter(|row|row["model"]==doxa_router::JEV_MODEL).all(|row|!row.to_string().contains(&image.encoded())));
+        let state=env.state();assert_eq!(state["incomplete"],false);assert_eq!(state["worker"]["accounting_unknown"],false);
+        assert_eq!(state["worker"]["retained_reservation_usd_micros"],0);
+        assert_eq!(state["receipts"][0]["selection"]["image_input"]["count"],1);assert!(state["receipts"][1]["selection"].get("image_input").is_none());
+        let (messages,transcript)=saved_files(&env,"routed");
+        assert!(!messages.contains(&image.encoded()) && !transcript.contains(&image.encoded()));
+        host.shutdown();
+    }
+
+    #[test]
+    fn router_refuses_non_vision_pins_fallbacks_and_unpriced_image_bounds_before_any_http() {
+        let env=Env::new();let server=Server::new(|method,body|{if method=="GET"{return catalog();}worker(body,false)});
+        let host=make_host(&env,config(),&server,false,Some(2.0));
+        host.call("set_model",&json!({"model":"glm"})).unwrap();
+        let error=host.image_admission().unwrap_err();
+        assert!(error.contains("Router target glm") && error.contains("per-image token charge is unpublished"),"{error}");
+        let mut events=Vec::new();
+        host.prompt_with_images("describe\n\n[Attached image: fixture.png]",&[fixture_png()],None,&mut|event|events.push(event));
+        assert_eq!(events.len(),1);assert_eq!(events[0]["type"],"turn_refused");assert_eq!(events[0]["data"]["message"],json!(error));
+        assert!(server.requests.lock().unwrap().is_empty(),"no catalog, Jev or worker request");
+        let state=env.state();assert_eq!(state["router"]["calls"],0);assert_eq!(state["incomplete"],false);assert_eq!(state["worker"]["accounting_unknown"],false);
+        // The refusal leaves the allowance usable for a text turn.
+        assert_eq!(prompt(&host,"text only").last().unwrap()["data"]["is_error"],false);
+        host.call("set_model",&json!({"model":"ds"})).unwrap();assert!(host.image_admission().is_ok());
+        host.shutdown();drop(host);
+        // Auto keeps the fallback eligible, so a non-vision fallback refuses
+        // instead of silently routing elsewhere or dropping the image.
+        let mut cfg=config();cfg.fallback_id="glm".into();
+        let auto=RouterHost::new(cfg,&env.cwd(),"glm-fallback",false,Some(2.0),Some(server.endpoint.clone())).unwrap();
+        let error=auto.image_admission().unwrap_err();assert!(error.contains("fallback") && error.contains("Pin an image-capable target"),"{error}");
+        let before=server.requests.lock().unwrap().len();let mut events=Vec::new();
+        auto.prompt_with_images("describe\n\n[Attached image: fixture.png]",&[fixture_png()],None,&mut|event|events.push(event));
+        assert_eq!(events[0]["type"],"turn_refused");assert_eq!(server.requests.lock().unwrap().len(),before);
+        auto.call("set_model",&json!({"model":"ds"})).unwrap();assert!(auto.image_admission().is_ok());auto.shutdown();
+        // A target model without image facts stays unknown and is refused.
+        let mut cfg=config();cfg.candidates[1].model="glm-5.3".into();cfg.candidates[1].input_usd_micros_per_million=1_400_000;cfg.candidates[1].output_usd_micros_per_million=4_400_000;
+        let unknown=RouterHost::new(cfg,&env.cwd(),"unknown-images",false,Some(2.0),Some(server.endpoint.clone())).unwrap();
+        unknown.call("set_model",&json!({"model":"glm"})).unwrap();
+        assert!(unknown.image_admission().unwrap_err().contains("Image input is not established for glm model glm-5.3"));
+        unknown.shutdown();
     }
 }

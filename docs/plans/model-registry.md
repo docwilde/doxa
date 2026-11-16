@@ -3,12 +3,17 @@
 Status: **first slice implemented** in Rust. The provider catalog still decides
 which models and effort levels a connected session may use. This registry adds
 sourced facts to an exact `(engine, model)` key; it never grants availability.
+An explicit [account availability check](#account-availability-observations)
+records whether the current Codex or DeepSeek account lists an exact ID, as
+dated evidence only.
 
 ## Contents
 
 - [Current design](#current-design)
 - [What is known](#what-is-known)
+- [Image input](#image-input)
 - [Where it appears](#where-it-appears)
+- [Account availability observations](#account-availability-observations)
 - [Token-budget bounds](#token-budget-bounds)
 - [Remaining work](#remaining-work)
 
@@ -16,14 +21,17 @@ sourced facts to an exact `(engine, model)` key; it never grants availability.
 
 [`doxa-engines/src/model_registry.rs`](../../rust/doxa-engines/src/model_registry.rs)
 returns facts for context, Standard API fresh-input and output prices, native
-budget input/output bounds, and thinking behavior. Each fact carries its own
+budget input/output bounds, thinking behavior, image input and a per-image
+token bound. Each fact carries its own
 value and provenance. A field without evidence is `unknown`, with no default. Known
 static facts include their source URL and the date checked. Lookup requires an
 exact engine and model ID; aliases do not inherit facts.
 
 The connected engine's `list_models` result remains the authority for picker
 availability and effort choices. The registry is advisory, and neither model
-selection nor the provider's session controls depend on it.
+selection nor the provider's session controls depend on it. Image attachments
+for API workers are the exception that the registry gates, and only as a
+refusal: without sourced facts, images are refused.
 
 The daemon's native price rows live in this single registry. `BudgetHost`
 consumes a separate budget-bound pair only if both fields share a source and date
@@ -83,6 +91,41 @@ those controls. Runtime observations and effort labels do not establish an
 unknown field. No benchmark score, speed tier, or inferred family capability
 is recorded.
 
+## Image input
+
+DeepSeek, GLM and Router API workers send an image attachment only when
+`ModelFacts::image_admission` succeeds for the exact `(engine, model)` key. It
+requires a dated `image_input: true` fact, a dated positive
+`image_tokens_per_image` bound and the complete budget price pair. Anything
+unknown refuses before submission with its reason; an unknown never means
+supported and a model family name supplies nothing. These facts were checked
+on 2026-11-14:
+
+| Exact key | Image input | Per-image token bound | Primary source |
+| --- | --- | --- | --- |
+| `deepseek` / `deepseek-flash` | Accepted | At most 1,024 tokens, billed with text input tokens | [DeepSeek vision guide](https://api-docs.deepseek.com/guides/vision) |
+| `deepseek` / `deepseek-v4-pro` | Not supported | — | [DeepSeek models & pricing](https://api-docs.deepseek.com/quick_start/pricing/) (Vision: "Not supported") |
+| `glm` / `glm-5.3-flash`, `glm-5.3-flashx` | Accepted | Unknown (not published) | [Z.AI GLM-5.3-Flash](https://docs.z.ai/guides/vlm/glm-5.3-flash) |
+
+DeepSeek's guide names `deepseek-flash`, documents OpenAI-compatible
+`image_url` content parts with base64 data URLs, PNG/JPEG/GIF/WebP input, and
+says images are resized so that each costs at most 1,024 tokens, counted
+independently per image; its pricing page bills total input and output
+tokens. The legacy `deepseek-v4-flash-vision-exp` name is retired and has
+no facts here. Z.AI's page lists `glm-5.3-flash`, `glm-5.3-flashx` and
+`glm-5.3-flashx-legal` with image input through `image_url` (URL or base64 data
+URL); its pricing page has no image-input charge or per-image token count, so
+the GLM bound stays unknown and DOXA refuses GLM images rather than under-count.
+`glm-5.3-flashx-legal` has no registry price row and stays unknown.
+
+The per-image bound is used for admission: request byte caps count each image
+by it instead of its base64 size, and Router eligibility adds it per candidate.
+Settled usage and cost estimates use the provider-reported input tokens.
+DeepSeek's [token usage page](https://api-docs.deepseek.com/quick_start/token_usage)
+calls the API-returned usage the source of truth for image tokens; DOXA does
+not add a second image charge on top of it. A Router worker whose reported
+usage exceeds its reservation still makes accounting unknown.
+
 ## Where it appears
 
 The TUI model picker continues to show the live provider catalog. For its
@@ -92,7 +135,8 @@ sends the exact catalog model ID. The registry does not change the fleet's
 owner-approved price ceiling or its fail-closed accounting behavior.
 
 `doxa model-facts ENGINE MODEL [--review-before YYYY-MM-DD]` prints every
-field's value or `unknown`, full primary-source URL, and check date for one
+field's value or `unknown` (including image input and its per-image token
+bound), full primary-source URL, and check date for one
 exact registry key. With an operator-chosen cutoff, it marks facts checked
 before that date for review. The command is read-only: the date is a queue
 filter, not an expiry or live verification. Refreshing a fact requires an
@@ -110,6 +154,53 @@ exact ID was absent from that successful catalog response. A listed result
 does not prove a Responses call will succeed, its billed tier, latency, or
 review quality. The flag is accepted only for the `codex` engine and never runs
 implicitly during fact review or model selection.
+
+## Account availability observations
+
+`doxa model-facts ENGINE MODEL --check-availability` explicitly asks whether
+the engine's current account lists that exact model ID. It prints `listed`,
+`unlisted` or `unknown` with a fixed reason, the UTC observation time, the
+listing source, and the latency of the listing call itself. The result is
+printed and dropped. No cache exists for a later path to mistake for an
+availability grant, and model selection, effort choices and budget admission
+never read it. Provider error text and credentials are never printed.
+
+| Engine | Listing source | Result without a usable listing |
+| --- | --- | --- |
+| Codex | Provider `account/read`, then `model/list` with `includeHidden: false`, using the executable and project directory of a new session. DOXA reads up to 10 pages or 1,000 visible rows; one malformed row fails the listing. | `unknown` when unauthenticated, refused, malformed, timed out (20 s including start-up), or absent from a listing cut off at DOXA's bound. |
+| DeepSeek | [`GET https://api.deepseek.com/models`](https://api-docs.deepseek.com/api/list-models/) with the key a DeepSeek session resolves. It uses the same fixed-request limits as `--check-catalog`. | `unknown` for a missing key, refusal, redirect, malformed or oversized body, duplicate row, or 5 s timeout. |
+| GLM | None. Z.AI's [API reference index](https://docs.z.ai/llms.txt) documents no model-listing endpoint (checked 2026-11-14). | Always `unknown`; no request is made. |
+| Claude | None. Claude Code describes [`supportedModels()`](https://code.claude.com/docs/en/agent-sdk/typescript) only as available models with display info, not as an account-scoped list of exact IDs (checked 2026-11-14). | Always `unknown`; no request is made. |
+
+The GLM picker's existing catalog request to `/api/paas/v4/models` is
+undocumented, so it is not availability evidence. Anthropic's Models API lists models for an API
+key, which need not be the Claude CLI login. An `unlisted` result means only
+that a complete, successful listing omitted the exact ID. Hidden Codex rows
+do not count as listed. No family, prefix or alias match is made.
+
+Codex can answer `model/list` from its own `models_cache.json`. The account
+state can therefore predate the observation time, and the latency can be a
+local reply rather than a network round trip. A listing does not prove that a
+request will succeed, its quality, or its inference latency.
+
+Neither listing states a billed tier, so billed tier stays `unknown`. Codex
+0.167 `model/list` rows can state a `defaultServiceTier`. When every row for the
+exact ID agrees, the report names it as a catalog default, not the billed tier
+of any request. DeepSeek documents no tier field.
+
+Fixture app-servers and HTTP fixtures cover listed, unlisted, unauthenticated,
+refused, malformed, truncated and timed-out listings. They also confirm that no
+thread or turn starts. A UI negative control keeps a listed-only model out of
+the picker, its effort choices and priced-budget admission. A CLI test
+confirms that an observation writes no state beyond the credential store's
+existing empty lock file.
+
+On 2026-11-15 at 04:26 UTC, a live check used the stock Codex 0.167.0 CLI and
+an existing login, because no protected provider build was installed. It
+reported registry models as both listed and unlisted without starting a thread.
+The first listing took 694 ms; later ones took 5–9 ms from the provider cache.
+The protected 0.165.0 provider build was not exercised, and its listing can
+differ. No DeepSeek credential was present, so DeepSeek used fixtures only.
 
 ## Token-budget bounds
 
@@ -169,6 +260,10 @@ per-request tier would allow tighter accounting in a later slice.
   it does not establish an unknown provider context window or model quality.
 - Continue filling unknown context and thinking fields only when primary
   provider sources state exact values for exact model IDs.
+- GLM image attachments need a primary-source per-image token count or charge
+  for the exact IDs. Z.AI's [tokenizer](https://docs.z.ai/api-reference/tools/tokenizer)
+  reports `image_tokens`, but its schema lists only `glm-4.6`, and a
+  per-request count is not a published bound.
 - Ingest trustworthy provider-supplied capability metadata where available,
   preserving its own source and observation time. Do not replace an unknown
   with a guessed family value.
@@ -181,3 +276,9 @@ per-request tier would allow tighter accounting in a later slice.
   task-specific evaluation method.
 - Capture provider billing mode and per-request tier when available so a budget
   can use an exact billed rate rather than the documented upper token bound.
+- Account availability is observed only on explicit request, for Codex and
+  DeepSeek. GLM and Claude remain `unknown` until their providers document an
+  account-scoped listing. The protected provider's `model/list` has fixture
+  coverage only; a live check on that Linux build remains open. Inference
+  latency, billed tier and provider charge remain unknown, because the
+  observation measures only its own listing call.

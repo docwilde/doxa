@@ -791,3 +791,114 @@ async fn inactive_key_in_provider_tool_identity_never_reaches_gate_or_history() 
     let (requests, _) = task.join().unwrap();
     assert!(!requests.iter().any(|request| request.to_string().contains("saved-inactive-fixture-key")));
 }
+
+// A 2×2 PNG; the transport validates data-URL framing, the host pipeline
+// owns decoding, metadata stripping and size limits.
+const PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8pcHFwMDAxMDAwMDAAAAPKgEwVo7a6wAAAABJRU5ErkJggg==";
+fn image_part(data: &str) -> serde_json::Value {
+    json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{data}")}})
+}
+
+#[tokio::test]
+async fn image_turn_sends_documented_parts_on_every_request_and_returns_text_only_history() {
+    use doxa_vendors::{run_turn_with_images_local, TurnImages};
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
+    std::env::set_var("ZAI_API_KEY", "glm-secret-5678");
+    // Same OpenAI-compatible shape for both vendors: DeepSeek's vision guide
+    // and Z.AI's GLM-5.3-Flash page document `image_url` data-URL parts.
+    for (vendor, model, effort) in [(Vendor::DeepSeek, "deepseek-flash", "none"), (Vendor::Glm, "glm-5.3-flash", "high")] {
+        let tool = format!("data: {}\n\ndata: [DONE]\n\n", json!({"model":model,"choices":[{"finish_reason":"tool_calls",
+            "delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"lookup","arguments":"{\"x\":1}"}}]}}],
+            "usage":{"prompt_tokens":1030,"completion_tokens":3}}));
+        let answer = format!("data: {}\n\ndata: [DONE]\n\n", json!({"model":model,"choices":[{"finish_reason":"stop",
+            "delta":{"content":"a small square"}}],"usage":{"prompt_tokens":1040,"completion_tokens":4}}));
+        let (url, task) = multi_server(vec![Box::leak(tool.into_boxed_str()), Box::leak(answer.into_boxed_str())]);
+        let images = TurnImages::new(vec![image_part(PNG_B64)], 1024).unwrap();
+        let mut history = vec![json!({"role":"user","content":"earlier"}), json!({"role":"assistant","content":"earlier answer"})];
+        let mut gate = LookupGate { calls: Vec::new() };
+        let (_, cancel) = watch::channel(false);
+        let prompt = "describe\n\n[Attached image: shot.png]";
+        let outcome = run_turn_with_images_local(vendor, &url, model, effort, &mut history, prompt, &images,
+            Some(&mut gate), cancel, Duration::from_secs(3), |_| {}, None).await.unwrap();
+        assert_eq!(outcome.requests, 2);
+        assert_eq!(outcome.usage.prompt_tokens, 2070, "provider-reported input usage is the settled count");
+        let (requests, _) = task.join().unwrap();
+        for request in &requests {
+            let messages = request["messages"].as_array().unwrap();
+            assert_eq!(messages[0], json!({"role":"user","content":"earlier"}));
+            assert_eq!(messages[2], json!({"role":"user","content":[{"type":"text","text":prompt}, image_part(PNG_B64)]}),
+                "the tool continuation keeps the image within the turn");
+            assert_eq!(request.to_string().matches(PNG_B64).count(), 1);
+        }
+        assert_eq!(gate.calls, ["1"]);
+        // Pixels are turn-local; returned history carries the labelled text only.
+        assert_eq!(history[2], json!({"role":"user","content":prompt}));
+        assert!(!serde_json::to_string(&history).unwrap().contains(PNG_B64));
+        // Negative control: the next turn, to any model, carries no image bytes.
+        let follow = format!("data: {}\n\ndata: [DONE]\n\n", json!({"model":model,"choices":[{"finish_reason":"stop",
+            "delta":{"content":"ok"}}],"usage":{"prompt_tokens":5,"completion_tokens":1}}));
+        let (url, task) = multi_server(vec![Box::leak(follow.into_boxed_str())]);
+        let (_, cancel) = watch::channel(false);
+        run_turn_local(vendor, &url, model, effort, &mut history, "and now?", None, cancel, Duration::from_secs(3), |_| {}).await.unwrap();
+        let (requests, _) = task.join().unwrap();
+        assert!(!requests[0].to_string().contains(PNG_B64));
+        assert!(!requests[0].to_string().contains("image_url"));
+        assert!(requests[0]["messages"].as_array().unwrap().iter().all(|message| message["content"].is_string()));
+    }
+}
+
+#[tokio::test]
+async fn request_caps_count_image_token_bounds_instead_of_base64_bytes() {
+    use doxa_vendors::{run_turn_with_images_local, TurnImages};
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
+    // 40 KiB of base64 framing would exceed a 16 KiB byte cap, but the
+    // documented bound (1024 tokens) fits: the request is admitted.
+    let large = "A".repeat(40 * 1024);
+    let answer = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"seen\"}}],\"usage\":{\"prompt_tokens\":1100,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n";
+    let (url, task) = multi_server(vec![answer]);
+    let images = TurnImages::new(vec![image_part(&large)], 1024).unwrap();
+    let limits = TurnLimits { input_bytes: 16384, output_tokens: 64, max_requests: None };
+    let mut history = Vec::new(); let (_, cancel) = watch::channel(false);
+    run_turn_with_images_local(Vendor::DeepSeek, &url, "deepseek-flash", "none", &mut history, "look", &images,
+        None, cancel, Duration::from_secs(3), |_| {}, Some(limits)).await.unwrap();
+    let (requests, _) = task.join().unwrap();
+    assert_eq!(requests[0]["max_tokens"], 64);
+    assert!(requests[0].to_string().contains(&large));
+    // A bound that exceeds the cap refuses before any connection.
+    for (tokens, count) in [(16384, 1), (4096, 4)] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap(); listener.set_nonblocking(true).unwrap();
+        let images = TurnImages::new(vec![image_part(PNG_B64); count], tokens).unwrap();
+        let mut history = Vec::new(); let (_, cancel) = watch::channel(false);
+        let result = run_turn_with_images_local(Vendor::DeepSeek, &format!("http://{}/chat", listener.local_addr().unwrap()),
+            "deepseek-flash", "none", &mut history, "look", &images, None, cancel, Duration::from_secs(3), |_| {}, Some(limits)).await;
+        assert!(matches!(result, Err(Error::RequestTooLarge)), "{result:?}");
+        assert!(listener.accept().is_err(), "no image bytes may leave before the cap check");
+        assert!(history.is_empty());
+    }
+}
+
+#[test]
+fn turn_images_accept_only_bounded_inline_png_or_jpeg_data_urls() {
+    use doxa_vendors::TurnImages;
+    assert!(TurnImages::new(vec![image_part(PNG_B64)], 1024).is_ok());
+    assert!(TurnImages::new(vec![json!({"type":"image_url","image_url":{"url":format!("data:image/jpeg;base64,{PNG_B64}")}})], 1).is_ok());
+    for parts in [
+        vec![],
+        vec![image_part(PNG_B64); 5],
+        vec![json!({"type":"image_url","image_url":{"url":"https://example.invalid/remote.png"}})],
+        vec![json!({"type":"image_url","image_url":{"url":format!("data:image/gif;base64,{PNG_B64}")}})],
+        vec![json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{PNG_B64}"),"detail":"high"}})],
+        vec![json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{PNG_B64}")},"extra":true})],
+        vec![json!({"type":"text","text":"not an image"})],
+        vec![image_part("not base64!")],
+        vec![image_part("abc")],
+        vec![image_part("")],
+        vec![image_part(&"A".repeat(doxa_vendors::MAX_TURN_IMAGE_WIRE_BYTES))],
+    ] {
+        assert!(matches!(TurnImages::new(parts, 1024), Err(Error::InvalidImageInput)));
+    }
+    assert!(matches!(TurnImages::new(vec![image_part(PNG_B64)], 0), Err(Error::InvalidImageInput)), "zero is never a token bound");
+    assert_eq!(TurnImages::new(vec![image_part(PNG_B64); 4], 1024).unwrap().token_bound(), Some(4096));
+}

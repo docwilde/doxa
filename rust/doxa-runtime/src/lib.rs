@@ -118,8 +118,14 @@ fn valid_peer_session_id(value: &str) -> bool {
 }
 
 pub use doxa_input::Attachment;
+pub const NO_IMAGE_INPUT: &str = "This provider does not accept image attachments";
 
 pub trait Host: Send + Sync + 'static {
+    /// Install the remaining host allowance for the next API turn. Providers
+    /// must reserve each request before sending it and validate its usage.
+    fn set_request_budget(&self, _remaining_usd: f64) -> Result<(), String> {
+        Err("This provider cannot enforce a dollar ceiling within a turn".into())
+    }
     /// One-shot out-of-band native execution receipt. Raw provider/CLI event
     /// fields cannot grant this capability; only the native tool gate supplies it.
     fn take_native_tool_audit(&self)->Option<Value>{None}
@@ -132,9 +138,15 @@ pub trait Host: Send + Sync + 'static {
         self.prompt(text, emit)
     }
     fn supports_images(&self) -> bool { false }
+    /// Admission for image attachments at upload and prompt time, before any
+    /// provider work. Hosts whose answer depends on the exact current model
+    /// return a specific refusal; the prompt path must check again at turn start.
+    fn image_admission(&self) -> Result<(), String> {
+        if self.supports_images() { Ok(()) } else { Err(NO_IMAGE_INPUT.into()) }
+    }
     fn prompt_with_images(&self, text: &str, images: &[Attachment], origin: Option<&PeerTurnOrigin>, emit: &mut dyn FnMut(Value)) {
         if images.is_empty() { self.prompt_with_peer_origin(text, origin, emit); }
-        else { emit(json!({"type":"turn_refused","data":{"message":"This provider does not accept image attachments"}})); }
+        else { emit(json!({"type":"turn_refused","data":{"message":NO_IMAGE_INPUT}})); }
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String>;
     fn initial_model(&self) -> Option<String> { None }
@@ -647,7 +659,9 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
                 }
             }
             Some("call") if frame["method"].as_str().is_some_and(|method|method.starts_with("attachment_")) => {
-                let result=uploads.call(frame["method"].as_str().unwrap(), &frame["params"], inner.host.supports_images());
+                let images=|| std::panic::catch_unwind(std::panic::AssertUnwindSafe(||inner.host.image_admission()))
+                    .unwrap_or_else(|_|Err(NO_IMAGE_INPUT.into()));
+                let result=uploads.call(frame["method"].as_str().unwrap(), &frame["params"], images);
                 send(&tx,match result {Ok(value)=>json!({"type":"reply","id":frame["id"],"ok":true,"result":value}),Err(error)=>json!({"type":"reply","id":frame["id"],"ok":false,"error":error})});
             }
             Some("call") => handle_call(&inner, &tx, &frame),
@@ -716,8 +730,10 @@ fn handle_prompt_attachments(inner: &Arc<Inner>, tx: &FrameSender, frame: &Value
     let Some(text) = frame["text"].as_str() else {
         send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"invalid prompt"})); return false;
     };
-    if attachments.iter().any(Attachment::is_image) && !inner.host.supports_images() {
-        send(tx,json!({"type":"reply","id":req_id,"ok":false,"error":"This provider does not accept image attachments"}));return false;
+    if attachments.iter().any(Attachment::is_image) {
+        let admission=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||inner.host.image_admission()))
+            .unwrap_or_else(|_|Err(NO_IMAGE_INPUT.into()));
+        if let Err(error)=admission {send(tx,json!({"type":"reply","id":req_id,"ok":false,"error":error}));return false;}
     }
     if text.trim().is_empty() && attachments.is_empty() {
         send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"empty prompt"})); return false;

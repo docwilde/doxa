@@ -630,7 +630,7 @@ impl App {
             if ["derive_secs", "consult_floor", "graph_context"].contains(&row.setting.key) {
                 lines.push(Line::from(" Claude session memory control; Codex/vendor use their engine's snapshot policy."));
             }
-            if row.setting.key == "session_budget_usd" && !matches!(menu.engine.as_str(),"claude"|"router"|"deepseek"|"glm") {
+            if row.setting.key == "session_budget_usd" && !matches!(menu.engine.as_str(),"claude"|"codex"|"router"|"deepseek"|"glm") {
                 lines.push(Line::from(
                     " This engine reports no session dollar cost; ceiling cannot be enforced.",
                 ));

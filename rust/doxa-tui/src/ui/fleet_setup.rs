@@ -7,13 +7,17 @@ const LABELS:[&str;15]=["Task","Directory","Worker engine","Worker model (blank 
 pub(super) struct Wizard{values:[String;15],selected:usize,editing:bool}
 impl Wizard{
     fn new(cwd:PathBuf)->Self{Self{values:[String::new(),cwd.to_string_lossy().into_owned(),"glm".into(),String::new(),"3".into(),"glm".into(),String::new(),"docker-offline".into(),"docker-offline".into(),"5".into(),"off".into(),"off".into(),"jev:jev-1.13.0".into(),"0.5".into(),String::new()],selected:0,editing:false}}
-    fn choices(&self)->Option<&'static [&'static str]>{match self.selected{2=>Some(&["glm","deepseek","claude","codex","router"]),5=>Some(&["off","glm","deepseek","claude","codex","router"]),7|8=>Some(&["docker-offline","docker-open","native"]),10=>Some(&["off","jev:jev-1.13.0","subq:subq-snap-preview"]),11=>Some(&["off","shadow","enforce"]),_=>None}}
+    fn choices(&self)->Option<&'static [&'static str]>{match self.selected{2=>Some(&["glm","deepseek","claude","codex","router"]),5=>Some(&["off","glm","deepseek","claude","codex","router"]),7|8=>Some(&["docker-offline","docker-open","native"]),10=>Some(&["off","jev:jev-1.13.0","subq:subq-snap-1.2"]),11=>Some(&["off","shadow","enforce"]),_=>None}}
     fn cycle(&mut self,back:bool){if let Some(options)=self.choices(){let i=options.iter().position(|row|*row==self.values[self.selected]).unwrap_or(0);self.values[self.selected]=options[(i+if back{options.len()-1}else{1})%options.len()].into();}}
     fn lines(&self)->Vec<String>{
-        let mut lines=vec!["New fleet · ↑↓ field · ←→ preset · Enter edit/select · F10 review · Esc".into(),
+        let mut lines=vec!["New fleet · ↑↓ field · ←→ preset · Enter edit · PgUp/PgDn scroll · F10 review · Esc".into(),
             "Defaults: Docker offline. Native and internet require owner confirmation.".into(),
             "Router uses exact configured target IDs in the model fields. Review its private config below.".into()];
-        for (index,label) in LABELS.iter().enumerate(){lines.push(format!("{} {label}: {}{}",if self.selected==index{"▸"}else{" "},safe_label(&self.values[index]),if self.selected==index&&self.editing{" ▏"}else{""}));}
+        for (index,label) in LABELS.iter().enumerate(){
+            let value = if index == 0 { crate::markdown::sanitize(&self.values[index]).replace('\n', " ") }
+                else { safe_label(&self.values[index]) };
+            lines.push(format!("{} {label}: {}{}",if self.selected==index{"▸"}else{" "},value,if self.selected==index&&self.editing{" ▏"}else{""}));
+        }
         lines.push("An online coordinator can answer offline workers' research questions. Alignment reviewers are separate read-only API calls with no tools.".into());lines
     }
     fn args(&self)->io::Result<Vec<String>>{
@@ -37,6 +41,14 @@ impl App{
         self.chip_info=Some(ChipInfo{kind:"fleet_setup",label:String::new(),lines,scroll:0,owner:None});self.fleet_setup=Some(wizard);
     }
     pub(super) fn fleet_setup_key(&mut self,key:KeyEvent)->bool{
+        if self.fleet_setup.is_some() && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+            let page = self.active_chooser_rect().map(|area| usize::from(area.height.saturating_sub(3))).unwrap_or(10).max(1);
+            if let Some(info) = self.chip_info.as_mut() {
+                info.scroll = if key.code == KeyCode::PageUp { info.scroll.saturating_sub(page) }
+                    else { info.scroll.saturating_add(page) };
+            }
+            return true;
+        }
         let Some(wizard)=self.fleet_setup.as_mut()else{return false;};
         if key.code==KeyCode::Esc{if wizard.editing{wizard.editing=false;}else{self.fleet_setup=None;self.chip_info=None;return true;}}
         else if wizard.editing{match key.code{KeyCode::Enter=>wizard.editing=false,KeyCode::Backspace=>{wizard.values[wizard.selected].pop();},KeyCode::Char(c) if !c.is_control()&&wizard.values[wizard.selected].len()<16*1024=>wizard.values[wizard.selected].push(c),_=>{}}}
@@ -52,12 +64,32 @@ impl App{
         }}
         if let Some(wizard)=&self.fleet_setup{
             let lines=wizard.lines();let selected=wizard.selected;let area=self.active_chooser_rect();
-            if let Some(info)=self.chip_info.as_mut(){info.lines=lines;if let Some(area)=area{let row=info.lines.iter().take(3+selected).flat_map(|line|crate::memory_menu::wrap_review(line,usize::from(area.width.saturating_sub(3)).max(1))).count();info.scroll=row.saturating_sub(usize::from(area.height.saturating_sub(2))/2);}}
+            if let Some(info)=self.chip_info.as_mut(){info.lines=lines;if let Some(area)=area{
+                let width=usize::from(area.width.saturating_sub(3)).max(1);
+                let mut row=info.lines.iter().take(3+selected).flat_map(|line|crate::memory_menu::wrap_review(line,width)).count();
+                if wizard.editing { row+=crate::memory_menu::wrap_review(&info.lines[3+selected],width).len().saturating_sub(1); }
+                info.scroll=row.saturating_sub(usize::from(area.height.saturating_sub(2))/2);
+            }}
         }true
     }
 }
 #[cfg(test)]mod tests{
     use super::*;
+    #[test]fn full_task_is_visible_and_scrollable_without_changing_submission(){
+        use crossterm::event::KeyModifiers;
+        let mut app=App::default();app.open_fleet_setup();
+        let task=format!("{} visible ending 界", "Detail ".repeat(200));
+        app.fleet_setup.as_mut().unwrap().values[0]=task.clone();
+        app.fleet_setup_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert!(app.chip_info.as_ref().unwrap().lines[3].contains("visible ending 界"));
+        let before=app.chip_info.as_ref().unwrap().scroll;
+        app.fleet_setup_key(KeyEvent::new(KeyCode::PageDown,KeyModifiers::NONE));
+        assert!(app.chip_info.as_ref().unwrap().scroll>before);
+        app.fleet_setup_key(KeyEvent::new(KeyCode::PageUp,KeyModifiers::NONE));
+        assert_eq!(app.chip_info.as_ref().unwrap().scroll,before);
+        let args=app.fleet_setup.as_ref().unwrap().args().unwrap();
+        assert!(args.windows(2).any(|pair|pair[0]=="--prompt"&&pair[1]==task));
+    }
     #[test]fn wizard_keeps_role_defaults_offline_and_never_adds_access_acknowledgements(){let mut wizard=Wizard::new(std::env::current_dir().unwrap());wizard.values[0]="Review code".into();let args=wizard.args().unwrap();let review=crate::fleet_control::Spec::parse(&args).unwrap().review().unwrap();assert_eq!(review["access"]["worker_isolation"],"docker-offline");assert_eq!(review["access"]["supervisor_isolation"],"docker-offline");assert!(!args.iter().any(|value|value.starts_with("--allow-")||value.starts_with("--confirm-")));}
     #[test]fn wizard_router_roles_forward_exact_pins_and_explicit_config_to_existing_review(){
         let mut wizard=Wizard::new(std::env::current_dir().unwrap());

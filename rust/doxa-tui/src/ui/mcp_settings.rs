@@ -64,10 +64,10 @@ mod tests {
         assert!(!crate::operations::settings_report().unwrap().contains(secret));
         select(&mut app,"router_model");key(&mut app,KeyCode::Enter);
         key(&mut app,KeyCode::Down);key(&mut app,KeyCode::Down);key(&mut app,KeyCode::Enter);
-        assert_eq!(app.settings_menu.as_ref().unwrap().effective_value("router_model"),"subq-snap-preview");
+        assert_eq!(app.settings_menu.as_ref().unwrap().effective_value("router_model"),"subq-snap-1.2");
         key(&mut app,KeyCode::Char('2'));select(&mut app,"fleet_alignment_supervisor");key(&mut app,KeyCode::Enter);
         key(&mut app,KeyCode::Down);key(&mut app,KeyCode::Down);key(&mut app,KeyCode::Enter);
-        assert_eq!(app.settings_menu.as_ref().unwrap().effective_value("fleet_alignment_supervisor"),"subq:subq-snap-preview");
+        assert_eq!(app.settings_menu.as_ref().unwrap().effective_value("fleet_alignment_supervisor"),"subq:subq-snap-1.2");
         assert!(app.pending_prompts.is_empty());assert!(app.pending_launches.is_empty());
     }
     #[test]

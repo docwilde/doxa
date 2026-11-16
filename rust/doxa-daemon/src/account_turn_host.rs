@@ -183,6 +183,7 @@ impl Host for AccountTurnHost {
     fn prompt_with_images(&self,text:&str,images:&[doxa_input::Attachment],origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){self.prompt_images(text,images,origin,emit)}
     fn take_native_tool_audit(&self)->Option<Value>{self.inner.take_native_tool_audit()}
     fn supports_images(&self)->bool{self.inner.supports_images()}
+    fn image_admission(&self)->Result<(),String>{self.inner.image_admission()}
     fn call(&self,method:&str,params:&Value)->Result<Value,String>{
         if method=="set_model"{return Err("model changes require a newly reviewed account turn policy".into());}
         if method=="isolation_migration_plan"{let mut plan=self.inner.call(method,params)?;plan["account_turn_allowance"]=self.allowance();return Ok(plan);}

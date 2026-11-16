@@ -82,8 +82,9 @@ Commands:
                        Observe this host's delegation and exact runner binary identities
   native-plugin run NAME --grantless-prototype
                        Run a zero-grant, owner-approved package in a Linux cgroup sandbox
-  model-facts ENGINE MODEL [--review-before YYYY-MM-DD] [--check-catalog]
+  model-facts ENGINE MODEL [--review-before YYYY-MM-DD] [--check-catalog] [--check-availability]
                        Review static facts; optionally check OpenAI API catalog listing
+                       or observe whether the engine's current account lists MODEL
   codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH
                        Query Rust/Python syntax with source hashes; semantic binding is unknown
   codegraph --lore-map [--root WORKTREE] file|imports|calls|modules PATH
@@ -177,22 +178,33 @@ fn update() -> io::Result<()> {
     run_update_installer(&bin_dir, Path::new("/bin/sh"))
 }
 
-fn model_facts_args(args: &[String]) -> io::Result<(&str, &str, Option<&str>, bool)> {
-    const USAGE: &str = "usage: doxa model-facts ENGINE MODEL [--review-before YYYY-MM-DD] [--check-catalog]";
+/// Network checks run only when their flag is present.
+#[derive(Debug, PartialEq, Eq)]
+struct ModelFactsArgs<'a> {
+    engine: &'a str,
+    model: &'a str,
+    before: Option<&'a str>,
+    check_catalog: bool,
+    check_availability: bool,
+}
+
+fn model_facts_args(args: &[String]) -> io::Result<ModelFactsArgs<'_>> {
+    const USAGE: &str = "usage: doxa model-facts ENGINE MODEL [--review-before YYYY-MM-DD] [--check-catalog] [--check-availability]";
     if args.len() < 3 { return Err(invalid(USAGE)); }
-    let mut before = None;
-    let mut check_catalog = false;
+    let mut parsed = ModelFactsArgs { engine: &args[1], model: &args[2], before: None,
+        check_catalog: false, check_availability: false };
     let mut index = 3;
     while index < args.len() {
         match args[index].as_str() {
-            "--review-before" if before.is_none() && index + 1 < args.len() => {
-                before = Some(args[index + 1].as_str()); index += 2;
+            "--review-before" if parsed.before.is_none() && index + 1 < args.len() => {
+                parsed.before = Some(args[index + 1].as_str()); index += 2;
             }
-            "--check-catalog" if !check_catalog => { check_catalog = true; index += 1; }
+            "--check-catalog" if !parsed.check_catalog => { parsed.check_catalog = true; index += 1; }
+            "--check-availability" if !parsed.check_availability => { parsed.check_availability = true; index += 1; }
             _ => return Err(invalid(USAGE)),
         }
     }
-    Ok((&args[1], &args[2], before, check_catalog))
+    Ok(parsed)
 }
 
 fn run(args: &[String]) -> io::Result<()> {
@@ -213,11 +225,16 @@ fn run(args: &[String]) -> io::Result<()> {
                 return update();
             }
             "model-facts" => {
-                let (engine, model, before, check_catalog) = model_facts_args(args)?;
+                let ModelFactsArgs { engine, model, before, check_catalog, check_availability } = model_facts_args(args)?;
                 let report = doxa_tui::model_fact_review::report(engine, model, before).map_err(invalid)?;
                 let catalog = if check_catalog { Some(doxa_tui::model_catalog::check(engine, model)?) } else { None };
+                // Printed and dropped: the observation never feeds selection or budgets.
+                let availability = if check_availability {
+                    Some(doxa_tui::model_catalog::check_availability(engine, model)?)
+                } else { None };
                 println!("{report}");
                 if let Some(status) = catalog { println!("OpenAI API catalog: {}", status.as_str()); }
+                if let Some(observation) = availability { println!("\n{}", observation.render(engine, model)); }
                 return Ok(());
             }
             "codegraph" => {
@@ -537,15 +554,7 @@ fn run(args: &[String]) -> io::Result<()> {
             let mut checks = vec![("daemon", daemon), ("runtime", runtime)];
             match options.engine {
                 launch::Engine::Codex => {
-                    checks.push((
-                        "codex",
-                        launch::executable(
-                            options
-                                .codex_bin
-                                .as_deref()
-                                .unwrap_or(std::path::Path::new("codex")),
-                        ),
-                    ));
+                    checks.push(("codex", launch::codex_executable(&options)));
                 }
                 launch::Engine::Claude => {checks.push(("claude",launch::claude_executable(&options)));}
                 launch::Engine::Fixture => {}
@@ -575,6 +584,15 @@ fn run(args: &[String]) -> io::Result<()> {
                     println!("router doctor is read-only; no decision or worker request was sent");
                 }
             }
+            let socket_check = doxa_isolation::home().and_then(|home| {
+                let profile = options.isolation.map(Ok)
+                    .unwrap_or_else(|| doxa_isolation::configured_profile(&home))?;
+                doxa_isolation::socket_budget::check_docker_socket_paths(
+                    &home, doxa_isolation::socket_budget::SESSION_ID_BYTES, profile,
+                )?;
+                Ok(home)
+            });
+            checks.push(("isolation socket paths", socket_check));
             for (name, result) in checks {
                 match result {
                     Ok(path) => println!("ok {name}: {}", path.display()),
@@ -831,12 +849,18 @@ mod tests {
     fn model_facts_catalog_network_is_only_explicitly_selected() {
         let words = |parts: &[&str]| parts.iter().map(|part| (*part).to_owned()).collect::<Vec<_>>();
         let plain = words(&["model-facts", "codex", "gpt-6-astra"]);
-        assert_eq!(model_facts_args(&plain).unwrap(), ("codex", "gpt-6-astra", None, false));
+        assert_eq!(model_facts_args(&plain).unwrap(), ModelFactsArgs { engine: "codex", model: "gpt-6-astra",
+            before: None, check_catalog: false, check_availability: false });
         let selected = words(&["model-facts", "codex", "gpt-6-astra", "--check-catalog", "--review-before", "2026-10-09"]);
-        assert_eq!(model_facts_args(&selected).unwrap(), ("codex", "gpt-6-astra", Some("2026-10-09"), true));
+        assert_eq!(model_facts_args(&selected).unwrap(), ModelFactsArgs { engine: "codex", model: "gpt-6-astra",
+            before: Some("2026-10-09"), check_catalog: true, check_availability: false });
+        let observed = words(&["model-facts", "deepseek", "deepseek-flash", "--check-availability"]);
+        assert_eq!(model_facts_args(&observed).unwrap(), ModelFactsArgs { engine: "deepseek", model: "deepseek-flash",
+            before: None, check_catalog: false, check_availability: true });
         for bad in [
             words(&["model-facts", "codex"]),
             words(&["model-facts", "codex", "gpt-6-astra", "--check-catalog", "--check-catalog"]),
+            words(&["model-facts", "codex", "gpt-6-astra", "--check-availability", "--check-availability"]),
             words(&["model-facts", "codex", "gpt-6-astra", "--review-before"]),
             words(&["model-facts", "codex", "gpt-6-astra", "--unknown"]),
         ] { assert!(model_facts_args(&bad).is_err()); }

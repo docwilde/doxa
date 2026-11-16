@@ -16,6 +16,7 @@
 ## Contents
 
 - [Install and start](#install-and-start)
+- [Recent development](#recent-development)
 - [Workspace and sessions](#workspace-and-sessions)
 - [Engines and review](#engines-and-review)
 - [Remote access](#remote-access)
@@ -39,14 +40,25 @@ doxa new --engine codex
 doxa list
 ```
 
-Choose an installed engine in place of `codex`. Claude needs its CLI; protected Codex needs its private provider build on Linux. DeepSeek and GLM need API credentials through `/setup` or environment variables. `doxa help` lists CLI commands. From a checkout, use `./task build`, `./task run`, or `./task install`.
+Choose an installed engine in place of `codex`. Claude needs its CLI; protected Codex needs its private provider build on Linux. DeepSeek and GLM need API credentials through `/setup` or environment variables. `doxa help` lists CLI commands. From a checkout, use `./task build`, `./task run`, or `./task install`. The repository's `./task` is a development shell script; the leading `./` distinguishes it from Taskwarrior or another installed `task` command. `./task install` installs committed `HEAD`; commit changes before installing them.
+
+## Recent development
+
+The latest tagged release is **2.0.0-beta.80**, with **LORE 0.62.30** and protected **Codex 0.166.0**. It includes these updates:
+
+- **Account model availability.** `doxa model-facts ENGINE MODEL --check-availability` checks the signed-in Codex account or DeepSeek API account and reports `listed`, `unlisted` or `unknown`, with the observation time and request latency. Claude and GLM remain `unknown`. These observations do not change the picker, price bounds or budget admission. [Model facts](docs/engine-capabilities.md).
+- **Images for API workers.** DeepSeek `deepseek-flash` and eligible Router API targets accept image attachments. DOXA requires documented vision support, an image token bound and a price bound. GLM images remain unavailable until all three facts are sourced. [Image input](docs/terminal-images.md#prompt-attachments).
+- **Native plugin panels.** `/native-plugin panel NAME` opens an owner-approved `render-local-panel-v1` WebAssembly panel under a signed operator permit. DOXA bounds execution, memory and text output, and stops the worker when the panel closes or its authority expires. [Plugin setup](docs/native-plugins.md).
+- **Measured code-graph response time.** The release TUI's prepared DOXA queries measured **62.8 ms p95** on the recorded laptop under its performance power profile. The terminal loop checks pending answers every 1 ms. The report also records slower quiet-profile results and the measurement's scope. [Benchmark and receipts](docs/codegraph-tui-release-latency-2026-11-14.md).
+
+Build from the development checkout with `./task run` to use changes beyond the tagged release.
 
 ## Workspace and sessions
 
 - **Work in parallel.** Open tabs with Ctrl+T, split with Alt+V or Alt+H, and keep a prompt in each pane. The project rail groups live and recoverable sessions. Saved layouts restore on launch.
 - **Detach and return.** Ctrl+W closes a tab while its daemon runs; Ctrl+Q exits the window and leaves sessions detached. `/resume` finds saved sessions, including closed tabs. Ctrl+X stops the active daemon and retains its transcript.
 - **Review the work.** Expand reasoning and tool calls, inspect diffs and worktrees, and use the action palette or slash commands. The Peers chip opens the active session's peer map, and restored peer receipts retain sender provenance. Context values survive session restore only as a clearly marked **Last reported** snapshot; reported context categories and subscription quota bars appear only when providers supply them. Select transcript text and press Ctrl+C to copy through a supported desktop helper, with OSC52 as a terminal-dependent fallback; Ctrl+V pastes into the prompt draft that started the read. LORE facts, beliefs, and pending proposals have TUI review controls; verified pending proposals affect local rail urgency. Project headings can use a verified-root hue and an explicit `/collection project-label`; `/collection view panes` groups live tabs by pane and names a hidden tab needing attention. Bounded local Markdown images and opt-in Mermaid previews appear in the transcript; Mermaid PNGs use a private session cache. `/codegraph` opens bounded Rust and Python syntax queries and reviewed LORE snapshots with source and complete-scan freshness checks. Background preparation reuses parsed declarations while every answer rechecks the complete source inventory and hashes; queries do not write to LORE.
-- **Attach input.** Use **Attach** or Alt+A for images and UTF-8 files. Linux Ctrl+V pastes a clipboard PNG or text into its owning draft. Images reach direct Claude/Codex in native and Docker sessions; adding files never submits them. [Formats, limits and clipboard helpers](docs/terminal-images.md#prompt-attachments).
+- **Attach input.** Use **Attach** or Alt+A for images and UTF-8 files. Linux Ctrl+V pastes a clipboard PNG or text into its owning draft. Images reach direct Claude/Codex in native and Docker sessions, plus DeepSeek `deepseek-flash` and eligible Router API targets. A Router image turn requires a qualifying pin or fallback; DOXA refuses an incompatible target before making a request. Adding files never submits them. [Formats, limits and clipboard helpers](docs/terminal-images.md#prompt-attachments).
 - **Choose isolation.** Start in `native`, `docker-open`, or `docker-offline`. Linux Docker profiles use a private rootless worker and checkout, with effective cgroup memory, CPU, PID, and swap limits checked before admission and CLI provider turns. Administrator-provisioned `docker-hardened` sessions add a separate Engine identity, ROOT-controlled policy, enforcing project quota and live kernel authority; start their reserved session ID through the daemon and attach the frontend. The isolation chip shows the verified policy. Change an idle native/open/offline session with `/isolation PROFILE --confirm`; hardened migration refuses before stopping the provider. [Setup and limits](docs/session-isolation.md).
 
 The [Rust guide](rust/README.md) covers keys, session recovery, worktrees, settings, and review behavior.
@@ -66,6 +78,7 @@ The [Model Router](docs/jev-router.md) keeps one canonical conversation while se
 
 Enable it in **`/settings` → Session → default engine → Model Router**. Choose **Jev 1.13.0** or **SubQ Snap Preview** as the routing decision model and enter its masked API key. Set the private candidate-config path, press **Ctrl+P** to review current authentication and catalogs, then **Ctrl+S** to save the default for new sessions. Selecting a fixed engine disables that default. New Session also offers the reviewed Router targets in its clickable model dropdown. [Settings walkthrough](docs/router-settings.md).
 `doxa model-facts ENGINE MODEL [--review-before YYYY-MM-DD]` prints exact sourced facts and flags operator-selected review candidates. Add `--check-catalog` for an explicit read-only OpenAI API listing check with `OPENAI_API_KEY`; it reports listed, unlisted, or unknown without changing model or budget admission.
+Use `--check-availability` for an opt-in account observation through the selected provider. Codex uses authenticated account and model-list reads; DeepSeek uses its documented model-list endpoint. The command makes no inference request, saves no availability cache, and leaves the billed service tier unknown.
 
 Fleets can run an acting coordinator and workers under a reviewed charter, typed host gates, and spending limits. A separately selected alignment supervisor, including pinned **Jev 1.13.0** or **SubQ Snap Preview**, evaluates fleet scope and host evidence; a distinct fast LLM, Jev or Snap message judge reviews peer messages. Neither reviewer inherits worker authority or history. Dependent Docker-isolated workers wait for a host checkpoint, receiver read-back, sender agreement, and explicit human release; later turns and handoffs invalidate the review. `/fleet dependency-review` shows the evidence in the TUI. An owner-reviewed offline recipe can produce snapshot-bound test receipts; opt-in `--auto-test` runs it after host-observed turns. Receipts do not release dependencies. `doxa fleet debrief RUN --root PATH` summarizes bounded host evidence after a run without opening peer bodies or making model calls. A private scorer can evaluate consented, labeled real-message verdicts; no such corpus ships and evaluation does not change enforcement. [Fleet supervision](docs/fleet-supervision.md).
 
@@ -89,14 +102,19 @@ GLM exposes an owner-declared API bundle profile and a separate optional quota
 monitor; cash balance and bundle remainder remain unknown.
 [GLM account reporting](docs/glm-account-reporting.md).
 
+Owner-approved native plugins can provide text commands, status files and bounded
+WebAssembly panels through `render-local-panel-v1`. Executable plugins also need
+a signed operator permit; owner approval alone does not start a worker. Panel
+closure, revocation and permit expiry stop execution. [Native plugin grants and setup](docs/native-plugins.md).
+
 ## Gallery
 
-These beta.50 screenshots capture the production Ratatui app in a real GTK/VTE terminal, using illustrative session data. The [capture record](docs/rust-gallery.md) explains each scene and how to reproduce it. Browser and Android screenshots have their [own gallery](docs/remote-gallery.md).
+These beta.78 screenshots capture the production Ratatui app in a real GTK/VTE terminal, using illustrative session data. The [capture record](docs/rust-gallery.md) explains each scene and how to reproduce it. Browser and Android screenshots have their [own gallery](docs/remote-gallery.md).
 
 <!-- gallery-carousel:start -->
 **Workspace** — Three engine tabs, a project rail, and a Markdown turn in the production Ratatui app.
 
-[![DOXA workspace with three engine tabs, a project rail, and a Markdown turn](assets/shots/rust-2.0.0-beta.50-hero.png)](assets/shots/rust-2.0.0-beta.50-hero.png)
+[![DOXA workspace with three engine tabs, a project rail, and a Markdown turn](assets/shots/rust-2.0.0-beta.78-hero.png)](assets/shots/rust-2.0.0-beta.78-hero.png)
 
 [← Code graph](docs/gallery/scenes/codegraph.md) · [Next: Model Router settings →](docs/gallery/scenes/settings-router.md)
 <!-- gallery-carousel:end -->

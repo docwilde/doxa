@@ -51,6 +51,11 @@ def main():
     child = []
     try:
         os.environ["DISPLAY"] = display_name
+        # Render only on this private X display. GTK prefers Wayland when the
+        # owner's session exposes it, which would capture an empty framebuffer
+        # and show the terminal on the owner's desktop instead.
+        os.environ["GDK_BACKEND"] = "x11"
+        os.environ.pop("WAYLAND_DISPLAY", None)
         os.environ.pop("NO_COLOR", None)
         import gi
         gi.require_version("Gtk", "3.0")

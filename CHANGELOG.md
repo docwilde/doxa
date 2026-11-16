@@ -5,6 +5,39 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.80 — 2026-11-15
+
+**Protected Codex**
+
+- Update **`codex-current`** to protected Codex **0.166.0**, pinned to `6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`.
+- Retain compiled compaction refusal, permission checks and complete helper provenance; incompatible upstream releases stop the updater.
+
+## 2.0.0-beta.79 — 2026-11-14
+
+**LORE 0.62.30**
+
+- Pin **`lore-core`** and the bundled **`lore-rs`** carrier to the immutable
+  LORE 0.62.30 release commit. The carrier adds bounded pending pages,
+  protected retention plans, and opt-in signed skill usage counters.
+- Retain DOXA's complete-proposal review and source-session completeness
+  requirements. Automatic trace retention and skill usage sync remain off
+  by default; LORE's documented recovery and verification gaps remain open.
+
+**Code graph**
+
+- Poll for pending code-graph answers every 1 ms in the terminal loop. Other
+  input polls retain their 10 ms interval.
+
+**Local plugin panels**
+
+- Let exactly approved installed packages draw bounded plain text into a
+  local TUI panel with the `render-local-panel-v1` grant.
+
+**Image attachments**
+
+- Accept image input for DeepSeek and Router API workers according to the
+  reviewed model capabilities.
+
 ## 2.0.0-beta.78 — 2026-11-12
 
 **LORE 0.62.29**

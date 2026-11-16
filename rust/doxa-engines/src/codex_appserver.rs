@@ -28,6 +28,31 @@ mod reviewed_compact;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REASONING_BYTES: usize = 256 * 1024;
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+/// `account/read` reported no ChatGPT or API-key account for this provider.
+pub const ACCOUNT_UNAVAILABLE: &str = "current Codex account authentication unavailable";
+const OBSERVED_PAGES: usize = 10;
+const OBSERVED_ROWS: usize = 1000;
+
+/// One visible `model/list` row kept for an explicit availability observation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedModel {
+    pub model: String,
+    /// The row's `defaultServiceTier`: a catalog default, never the billed
+    /// tier of a request. Absent or malformed values stay unknown.
+    pub default_service_tier: Option<String>,
+}
+
+/// Account-scoped `model/list` evidence for `doxa model-facts
+/// --check-availability`. The caller prints and drops it; the picker, effort
+/// choices and budget admission continue to use only their own paths.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelListing {
+    pub models: Vec<ListedModel>,
+    /// False when DOXA's page or row bound stopped before the final page.
+    pub complete: bool,
+    /// The `model/list` round trips alone, excluding provider start-up.
+    pub latency: Duration,
+}
 
 /// Read the provider's product/version prefix, never a client or platform suffix.
 fn provider_version(agent: &str) -> Option<&str> {
@@ -534,7 +559,7 @@ impl AppServerDriver {
     pub async fn verify_authenticated(&mut self) -> Result<(), AppServerError> {
         let response = self.request("account/read", json!({"refreshToken":false})).await?;
         if !matches!(response["account"]["type"].as_str(), Some("chatgpt" | "apiKey")) {
-            return Err(AppServerError::Protocol("current Codex account authentication unavailable"));
+            return Err(AppServerError::Protocol(ACCOUNT_UNAVAILABLE));
         }
         Ok(())
     }
@@ -567,6 +592,54 @@ impl AppServerDriver {
             if cursor.as_str().is_none_or(|value| value.len() > 1024) { return Err(AppServerError::Protocol("invalid catalog cursor")); }
         }
         Ok(rows)
+    }
+
+    /// Explicit availability evidence for the authenticated account. It never
+    /// creates a thread or turn. A listing without account evidence is an
+    /// error, not a preset catalog. Unlike `list_models`, a malformed row or a
+    /// truncated listing is reported rather than skipped.
+    pub async fn observe_account_models(options: AppServerOptions, deadline: Duration)
+        -> Result<ModelListing, AppServerError> {
+        let started = tokio::time::Instant::now();
+        // Dropping an unfinished initialization kills its unsupervised child.
+        let mut driver = timeout(deadline, Self::initialize(options, str::to_owned)).await
+            .map_err(|_| AppServerError::TimedOut)??;
+        let remaining = deadline.saturating_sub(started.elapsed());
+        let result = timeout(remaining, async {
+            driver.verify_authenticated().await?;
+            driver.observe_listing().await
+        }).await.unwrap_or(Err(AppServerError::TimedOut));
+        driver.shutdown().await;
+        result
+    }
+
+    async fn observe_listing(&mut self) -> Result<ModelListing, AppServerError> {
+        let started = std::time::Instant::now();
+        let mut models = Vec::new();
+        let mut cursor = Value::Null;
+        for _ in 0..OBSERVED_PAGES {
+            let result = self.request("model/list", json!({"cursor":cursor,"limit":100,"includeHidden":false})).await?;
+            for row in result["data"].as_array().ok_or(AppServerError::Protocol("invalid model catalog"))? {
+                let model = row["model"].as_str().filter(|value| !value.is_empty() && value.len() <= 128
+                    && !value.chars().any(char::is_control))
+                    .ok_or(AppServerError::Protocol("invalid model catalog row"))?;
+                if row["hidden"] == true { continue; }
+                if models.len() == OBSERVED_ROWS {
+                    return Ok(ModelListing { models, complete: false, latency: started.elapsed() });
+                }
+                let tier = row["defaultServiceTier"].as_str().filter(|tier| !tier.is_empty() && tier.len() <= 32
+                    && tier.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')));
+                models.push(ListedModel { model: model.to_owned(), default_service_tier: tier.map(str::to_owned) });
+            }
+            cursor = result["nextCursor"].clone();
+            if cursor.is_null() {
+                return Ok(ModelListing { models, complete: true, latency: started.elapsed() });
+            }
+            if cursor.as_str().is_none_or(|value| value.is_empty() || value.len() > 1024) {
+                return Err(AppServerError::Protocol("invalid catalog cursor"));
+            }
+        }
+        Ok(ModelListing { models, complete: false, latency: started.elapsed() })
     }
 
     pub fn set_selection(&mut self, model: Option<String>, effort: Option<String>) {
@@ -1269,11 +1342,97 @@ for line in sys.stdin:
         assert_eq!(unsafe { libc::kill(pid,0) },-1,"cancelled app-server child was not reaped");
     }
 
+    #[tokio::test]
+    async fn availability_listing_is_account_scoped_strict_and_never_starts_a_thread() {
+        if std::env::var_os(doxa_isolation::ACTIVE_MANIFEST).is_some() { return; }
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let fixture = r#"#!/usr/bin/env python3
+import json, pathlib, sys, time
+mode = pathlib.Path('mode').read_text()
+for line in sys.stdin:
+    request = json.loads(line)
+    with open('calls.jsonl', 'a') as calls:
+        calls.write(json.dumps(request) + '\n')
+    method = request['method']
+    if method == 'initialized':
+        continue
+    if method == 'initialize':
+        result = {'userAgent': 'codex_cli_rs/0.167.0'}
+    elif method == 'account/read':
+        result = {'account': None if mode == 'signed-out' else {'type': 'chatgpt', 'email': None, 'planType': 'pro'}}
+    elif method == 'model/list':
+        assert request['params']['includeHidden'] is False
+        cursor = request['params']['cursor']
+        if mode == 'slow':
+            time.sleep(5)
+        if mode == 'refused':
+            print(json.dumps({'id': request['id'], 'error': {'message': 'private provider detail'}}), flush=True)
+            continue
+        if mode == 'malformed':
+            result = {'data': [{'model': 7}], 'nextCursor': None}
+        elif mode == 'endless':
+            page = 0 if cursor is None else int(cursor.split('-')[1])
+            result = {'data': [{'model': 'fixture-%d' % page}], 'nextCursor': 'page-%d' % (page + 1)}
+        elif cursor is None:
+            result = {'data': [{'model': 'fixture-hidden', 'hidden': True},
+                {'model': 'fixture-a', 'defaultServiceTier': 'flex'}], 'nextCursor': 'page-2'}
+        else:
+            result = {'data': [{'model': 'fixture-b', 'defaultServiceTier': 'bad tier!'}], 'nextCursor': None}
+    else:
+        raise AssertionError('availability started an unexpected operation: ' + method)
+    print(json.dumps({'id': request['id'], 'result': result}), flush=True)
+"#;
+        let observe = |mode: &'static str, deadline: Duration| {
+            let root = tempfile::tempdir().unwrap();
+            let executable = root.path().join("codex-fixture");
+            fs::write(&executable, fixture).unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(root.path().join("mode"), mode).unwrap();
+            let options = AppServerOptions { executable, cwd: root.path().to_owned(), model: None,
+                sandbox: SandboxMode::ReadOnly, permission: CodexPermission::OnRequest,
+                resume_thread: None, turn_timeout: deadline };
+            async move {
+                let result = AppServerDriver::observe_account_models(options, deadline).await;
+                let calls = fs::read_to_string(root.path().join("calls.jsonl")).unwrap_or_default();
+                let methods = calls.lines().map(|line| serde_json::from_str::<Value>(line).unwrap()["method"]
+                    .as_str().unwrap().to_owned()).collect::<Vec<_>>();
+                assert!(methods.iter().all(|method| matches!(method.as_str(),
+                    "initialize" | "initialized" | "account/read" | "model/list")), "{methods:?}");
+                (result, methods)
+            }
+        };
+        let (listing, methods) = observe("paged", Duration::from_secs(10)).await;
+        let listing = listing.unwrap();
+        assert!(listing.complete);
+        assert_eq!(listing.models, [
+            ListedModel { model: "fixture-a".into(), default_service_tier: Some("flex".into()) },
+            ListedModel { model: "fixture-b".into(), default_service_tier: None },
+        ]);
+        assert_eq!(methods, ["initialize", "initialized", "account/read", "model/list", "model/list"]);
+
+        let (listing, _) = observe("endless", Duration::from_secs(10)).await;
+        let listing = listing.unwrap();
+        assert!(!listing.complete, "a page bound must not turn an unseen model into an unlisted one");
+        assert_eq!(listing.models.len(), OBSERVED_PAGES);
+
+        let (signed_out, methods) = observe("signed-out", Duration::from_secs(10)).await;
+        assert!(matches!(signed_out, Err(AppServerError::Protocol(ACCOUNT_UNAVAILABLE))), "{signed_out:?}");
+        assert!(!methods.iter().any(|method| method == "model/list"), "a preset list is not account evidence");
+        let (malformed, _) = observe("malformed", Duration::from_secs(10)).await;
+        assert!(matches!(malformed, Err(AppServerError::Protocol("invalid model catalog row"))), "{malformed:?}");
+        let (refused, _) = observe("refused", Duration::from_secs(10)).await;
+        assert!(matches!(refused, Err(AppServerError::Server(_))), "{refused:?}");
+        let started = std::time::Instant::now();
+        let (slow, _) = observe("slow", Duration::from_millis(1500)).await;
+        assert!(matches!(slow, Err(AppServerError::TimedOut)), "{slow:?}");
+        assert!(started.elapsed() < Duration::from_secs(4), "the deadline must bound the listing call");
+    }
+
     #[test]
     fn provider_version_uses_only_the_authoritative_product_prefix() {
-        let desktop = "Codex Desktop/0.165.0 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)";
+        let desktop = "Codex Desktop/0.166.0 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)";
         assert_eq!(provider_version(desktop), Some(crate::codex_compact::SUPPORTED_VERSION));
-        assert_eq!(provider_version("codex_cli_rs/0.165.0"), Some(crate::codex_compact::SUPPORTED_VERSION));
+        assert_eq!(provider_version("codex_cli_rs/0.166.0"), Some(crate::codex_compact::SUPPORTED_VERSION));
         let current = crate::codex_compact::SUPPORTED_VERSION;
         for agent in [
             format!("Codex Desktop/0.1.0 (doxa; {current})"),

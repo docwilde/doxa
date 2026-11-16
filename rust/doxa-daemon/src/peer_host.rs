@@ -112,10 +112,18 @@ impl PeerHost {
         self.inner.set_peer_tool_handler(Arc::new(move |name, params| {
             if !matches!(name, "peers" | "msg" | "peer_history") { return Err("Unsupported provider peer method".into()); }
             let peer = weak.upgrade().ok_or("Peer session is closed")?;
-            if name == "msg" { peer.msg_with_target_mode(params, true) }
+            let result = if name == "msg" { peer.msg_with_target_mode(params, true) }
             else if name == "peers" && params.as_object().is_some_and(|rows|rows.is_empty()) { peer.call(name,&json!({"limit":25})) }
-            else { peer.call(name, params) }
+            else { peer.call(name, params) };
+            result.map(|mut value| {
+                if peer.container_recipient() { omit_host_peer_paths(&mut value); }
+                value
+            })
         }))
+    }
+    fn container_recipient(&self) -> bool {
+        self.inner.isolation_status().is_some_and(|status|
+            status["profile"].as_str().is_some_and(|profile| profile.starts_with("docker-")))
     }
     pub fn configure_spawner(self:&Arc<Self>,config:crate::session_spawn::SpawnConfig)->io::Result<()> {
         let manager=Arc::new(crate::session_spawn::SpawnManager::new(config,self.events.clone())?);
@@ -647,6 +655,7 @@ impl PeerHost {
             if body.chars().count()>delivery::MAX_BODY_CHARS{return Err("Scrubbed ordinary peer message exceeds 8000 characters".into());}
             (body,None)
         };
+        let repo = if self.container_recipient() { None } else { repo };
         Ok(
             json!({"type":"peer_message","data":{"fleet_admission":fleet_admission,"from_id":frame.from_id,
             "from_title":title,"body":body,"from_repo":repo,"sent_at":sent_at,"kind":kind,"origin":remote_origin,"message_id":message_id}}),
@@ -705,6 +714,7 @@ impl PeerHost {
 impl Host for PeerHost {
     fn take_native_tool_audit(&self)->Option<Value>{self.inner.take_native_tool_audit()}
     fn supports_images(&self)->bool{self.inner.supports_images()}
+    fn image_admission(&self)->Result<(),String>{self.inner.image_admission()}
     fn prompt_with_images(&self,text:&str,images:&[doxa_input::Attachment],origin:Option<&PeerTurnOrigin>,emit:&mut dyn FnMut(Value)){
         self.prompt_with_origin_images(text,origin,images,emit);
     }
@@ -944,6 +954,20 @@ fn valid_peer_message_id(value: &str) -> bool { delivery::valid_message_id(value
 // These are display labels only: transport/session identity and the original
 // scope used for authorization remain unchanged. Origin limits count bytes;
 // native model/repo/branch titles count characters and may exceed those limits.
+/// Host transport paths remain internal to peer delivery and ledger matching.
+fn omit_host_peer_paths(value: &mut Value) {
+    match value {
+        Value::Object(rows) => for (key, value) in rows {
+            if matches!(key.as_str(), "from_repo" | "repo" | "repo_root" | "cwd"
+                | "scope" | "scope_key" | "socket_path" | "daemon_socket" | "ledger_path") {
+                *value = Value::Null;
+            } else { omit_host_peer_paths(value); }
+        },
+        Value::Array(rows) => for row in rows { omit_host_peer_paths(row); },
+        _ => {}
+    }
+}
+
 fn peer_origin_label(text:&str,limit:usize)->String {
     let text:String=text.chars().map(|ch|if ch.is_control(){' '}else{ch}).collect();
     if text.trim().is_empty(){return "Unknown peer label".into();}

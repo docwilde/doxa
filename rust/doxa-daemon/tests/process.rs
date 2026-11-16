@@ -2448,7 +2448,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     }
 
     #[test]
-    fn priced_vendor_budget_blocks_the_next_socket_prompt() {
+    fn priced_vendor_budget_rejects_excess_usage_and_withholds_followup() {
         let dir = tempfile::tempdir().unwrap();
         let body = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"answer\"}}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000}}\n\ndata: [DONE]\n\n";
         let (endpoint, server) = fake_vendor_frames(vec![body.to_owned()]);
@@ -2470,14 +2470,14 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
         send(&mut socket, json!({"type":"prompt","id":1,"text":"question"}));
         assert_eq!(receive(&mut reader)["ok"], true);
         let started = receive(&mut reader);
-        let (text, done, _) = finish_vendor_turn(&mut reader, &started);
-        assert_eq!(text, "answer");
-        assert_eq!(done["event"]["data"]["cost_usd"], 1.5);
+        let (_, done, _) = finish_vendor_turn(&mut reader, &started);
+        assert_eq!(done["event"]["data"]["is_error"], true);
+        assert_eq!(done["event"]["data"]["failure_category"], "spend_limit");
         send(&mut socket, json!({"type":"prompt","id":2,"text":"again"}));
         assert_eq!(receive(&mut reader)["ok"], true);
         let refused = receive(&mut reader);
         assert_eq!(refused["event"]["type"], "turn_refused");
-        assert_eq!(refused["event"]["data"]["spent_usd"], 1.5);
+        assert!(refused["event"]["data"]["spent_usd"].is_null());
         send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
         assert_eq!(receive(&mut reader)["ok"], true);
         wait_until(|| process.exited());
