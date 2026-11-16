@@ -96,6 +96,7 @@ mod tests {
     #[test]
     fn authenticated_catalog_requires_account_evidence_beyond_provider_identity() {
         for account in [json!({}),json!({"apiProvider":"firstParty"}),json!({"email":"local@example.test"}),
+            json!({"apiProvider":"firstParty","subscriptionType":"test-only-plan"}),
             json!({"apiKeySource":"none","tokenSource":"profile"}),json!({"tokenSource":"bad\nsource"})] {
             assert!(!authenticated(&json!({"account":account})));
         }

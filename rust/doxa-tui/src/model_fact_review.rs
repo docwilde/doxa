@@ -48,8 +48,11 @@ fn value<T: ToString>(fact: Fact<T>) -> Option<String> { fact.value.map(|value| 
 /// Show evidence for one exact registry key. `review_before` is an operator's
 /// sorting choice, not a freshness rule or a live-provider verification.
 pub fn report(engine: &str, model: &str, review_before: Option<&str>) -> Result<String, String> {
-    if !exact_id(engine) || !exact_id(model) {
-        return Err("engine and model must be exact IDs (1–100 ASCII letters, digits, '.', '_' or '-')".into());
+    let valid_model = if engine == "claude" {
+        model.len() <= 100 && exact_id(model.strip_suffix("[1m]").unwrap_or(model))
+    } else { exact_id(model) };
+    if !exact_id(engine) || !valid_model {
+        return Err("engine and model require 1–100 ASCII letters, digits, '.', '_' or '-'; Claude models may end in '[1m]'".into());
     }
     let before = review_before.map(review_date).transpose()?;
     let facts = model_registry::lookup(engine, model);
@@ -130,6 +133,19 @@ mod tests {
         let alias = report("codex", "gpt-5.6-sol-latest", Some("2026-10-10")).unwrap();
         assert!(alias.contains("0 review candidates · 8 unknown fields"));
         assert!(!alias.contains("developers.openai.com"));
+    }
+
+    #[test]
+    fn claude_context_variants_are_bounded_and_have_unknown_static_facts() {
+        for model in ["opus[1m]", "claude-opus-5[1m]"] {
+            let text = report("claude", model, None).unwrap();
+            assert!(text.starts_with(&format!("Model facts · claude/{model}\n")));
+            assert!(text.contains("0 review candidates · 8 unknown fields"), "context variants inherit no base facts");
+        }
+        for (engine, model) in [("codex","opus[1m]"),("claude","[1m]"),
+            ("claude","opus[2m]"),("claude","opus[1m][1m]"),("claude","opus\n[1m]")] {
+            assert!(report(engine, model, None).is_err());
+        }
     }
 
     #[test]

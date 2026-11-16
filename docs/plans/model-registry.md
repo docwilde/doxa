@@ -158,9 +158,9 @@ implicitly during fact review or model selection.
 ## Account availability observations
 
 `doxa model-facts ENGINE MODEL --check-availability` explicitly asks whether
-the engine's current account lists that exact model ID. It prints `listed`,
+the engine's catalog lists that model ID or advertised Claude alias. It prints `listed`,
 `unlisted` or `unknown` with a fixed reason, the UTC observation time, the
-listing source, and the latency of the listing call itself. The result is
+listing source, and listing latency. Claude includes CLI startup in that timing. The result is
 printed and dropped. No cache exists for a later path to mistake for an
 availability grant, and model selection, effort choices and budget admission
 never read it. Provider error text and credentials are never printed.
@@ -170,13 +170,19 @@ never read it. Provider error text and credentials are never printed.
 | Codex | Provider `account/read`, then `model/list` with `includeHidden: false`, using the executable and project directory of a new session. DOXA reads up to 10 pages or 1,000 visible rows; one malformed row fails the listing. | `unknown` when unauthenticated, refused, malformed, timed out (20 s including start-up), or absent from a listing cut off at DOXA's bound. |
 | DeepSeek | [`GET https://api.deepseek.com/models`](https://api-docs.deepseek.com/api/list-models/) with the key a DeepSeek session resolves. It uses the same fixed-request limits as `--check-catalog`. | `unknown` for a missing key, refusal, redirect, malformed or oversized body, duplicate row, or 5 s timeout. |
 | GLM | None. Z.AI's [API reference index](https://docs.z.ai/llms.txt) documents no model-listing endpoint (checked 2026-11-14). | Always `unknown`; no request is made. |
-| Claude | None. Claude Code describes [`supportedModels()`](https://code.claude.com/docs/en/agent-sdk/typescript) only as available models with display info, not as an account-scoped list of exact IDs (checked 2026-11-14). | Always `unknown`; no request is made. |
+| Claude | CLI `initialize` catalog, using the same executable, project and isolated credentials as launch. Match advertised aliases and [`resolvedModel` IDs](https://code.claude.com/docs/en/agent-sdk/typescript#modelinfo) exactly, including `[1m]` variants. | `unknown` when discovery is refused, malformed or timed out (20 s including startup). |
 
 The GLM picker's existing catalog request to `/api/paas/v4/models` is
 undocumented, so it is not availability evidence. Anthropic's Models API lists models for an API
-key, which need not be the Claude CLI login. An `unlisted` result means only
-that a complete, successful listing omitted the exact ID. Hidden Codex rows
-do not count as listed. No family, prefix or alias match is made.
+key, which need not be the Claude CLI login. Claude availability therefore uses
+the advertised CLI catalog. This observation verifies neither account
+authentication nor entitlement; Router admission retains its separate checks.
+Ordinary credential isolation may prepare
+the private CLI configuration; the observation itself is never saved.
+An `unlisted` result means the successful catalog omitted the requested spelling.
+The Claude catalog advertises supported stubs and resolved IDs; absence does not
+prove an exact API model ID is unusable. Hidden Codex rows do not count as listed.
+No family, prefix or guessed alias resolution is used.
 
 Codex can answer `model/list` from its own `models_cache.json`. The account
 state can therefore predate the observation time, and the latency can be a
@@ -276,9 +282,9 @@ per-request tier would allow tighter accounting in a later slice.
   task-specific evaluation method.
 - Capture provider billing mode and per-request tier when available so a budget
   can use an exact billed rate rather than the documented upper token bound.
-- Account availability is observed only on explicit request, for Codex and
-  DeepSeek. GLM and Claude remain `unknown` until their providers document an
-  account-scoped listing. The protected provider's `model/list` has fixture
+- Account catalog membership is observed only on explicit request, for Codex,
+  Claude and DeepSeek. GLM remains `unknown` without a documented listing.
+  The protected provider's `model/list` has fixture
   coverage only; a live check on that Linux build remains open. Inference
   latency, billed tier and provider charge remain unknown, because the
   observation measures only its own listing call.

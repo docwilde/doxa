@@ -2,7 +2,8 @@
 //! never claim that a listed model can complete a request.
 //!
 //! `check` reads OpenAI's API catalog for an API key. `check_availability`
-//! asks whether an engine's current account lists one exact model ID. Each
+//! observes engine catalog membership. Claude reports advertised aliases/IDs
+//! without verifying account authentication or entitlement. Each
 //! result is printed for the operator and dropped: no cache, picker row,
 //! effort choice or budget admission reads it, and `unknown` stays unknown.
 use doxa_engines::codex_appserver::{
@@ -27,11 +28,9 @@ const DEEPSEEK_LISTING_DOCS: &str = "https://api-docs.deepseek.com/api/list-mode
 /// 2026-11-14). The picker's `/paas/v4/models` catalog path is undocumented,
 /// so it is not used as account availability evidence.
 const GLM_NO_LISTING: &str = "https://docs.z.ai/llms.txt";
-/// Claude Code documents `supportedModels()` only as "available models with
-/// display info", not as an account-scoped list of exact model IDs. The
-/// Anthropic Models API lists models for an API key, which need not be the
-/// Claude CLI login (checked 2026-11-14).
-const CLAUDE_NO_LISTING: &str = "https://code.claude.com/docs/en/agent-sdk/typescript";
+/// Claude's initialize catalog advertises CLI aliases and their
+/// optional `resolvedModel` IDs. It does not enumerate all API entitlements.
+const CLAUDE_LISTING_DOCS: &str = "https://code.claude.com/docs/en/agent-sdk/typescript#modelinfo";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogStatus { Listed, Unlisted, Unknown }
@@ -41,7 +40,7 @@ impl CatalogStatus {
     }
 }
 
-/// One explicit account-listing observation for an exact model ID.
+/// One explicit catalog observation; Claude includes advertised aliases.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Observation {
     pub status: CatalogStatus,
@@ -51,7 +50,7 @@ pub struct Observation {
     pub source: String,
     /// UTC time when this result was determined (RFC 3339, whole seconds).
     pub observed_at: String,
-    /// Duration of the listing request alone; None when none completed.
+    /// Listing duration; Claude includes CLI startup. None when none completed.
     pub latency: Option<Duration>,
     /// A default service tier the listing states for this exact row. It is a
     /// catalog default, not the billed tier of any request.
@@ -77,15 +76,20 @@ impl Observation {
             |latency| format!("{} ms", latency.as_millis()));
         let tier = self.catalog_default_tier.as_deref().map_or_else(String::new,
             |tier| format!("; the listing states catalog default service tier {tier}, not a billed request tier"));
-        [
-            format!("Account availability · {engine}/{model}: {status}"),
+        let mut lines = vec![
+            format!("{} · {engine}/{model}: {status}", if engine == "claude" { "CLI catalog membership" } else { "Account availability" }),
             format!("  observed: {}", self.observed_at),
             format!("  source: {}", self.source),
             format!("  listing latency: {latency}"),
             format!("  billed tier: unknown{tier}"),
             "Observation only: a listing does not select a model, add effort choices, admit a budget, \
              or prove that a request will succeed.".into(),
-        ].join("\n")
+        ];
+        if engine == "claude" {
+            lines.push("Account authentication and entitlement: unverified by this metadata check.".into());
+            lines.push("Claude membership covers advertised CLI aliases and resolved IDs; absence does not prove a model is unusable. CLI startup is included in listing latency.".into());
+        }
+        lines.join("\n")
     }
 }
 
@@ -105,6 +109,12 @@ fn exact_id(value: &str) -> bool {
         byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+fn claude_id(value: &str) -> bool {
+    let base = value.strip_suffix("[1m]").unwrap_or(value);
+    !base.is_empty() && value.len() <= 128 && base.bytes().all(|byte|
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 /// Uses the same OPENAI_API_KEY as an independent `codex:` fleet reviewer.
 /// A missing key or failed catalog read yields `unknown`, never an assertion
 /// of unavailable inference access. Only the explicit CLI flag calls this.
@@ -121,11 +131,11 @@ pub fn check(engine: &str, model: &str) -> io::Result<CatalogStatus> {
     Ok(check_at(MODELS_URL, &key, model, DEADLINE))
 }
 
-/// Only the explicit `--check-availability` flag calls this. Missing
-/// credentials, refused or malformed listings, timeouts and engines without a
-/// documented account listing yield `unknown`; no other path runs it.
+/// Only the explicit `--check-availability` flag calls this. Unavailable or
+/// malformed listings and timeouts yield `unknown`. Claude's CLI metadata
+/// remains separate from account authentication; no other path runs this check.
 pub fn check_availability(engine: &str, model: &str) -> io::Result<Observation> {
-    if !exact_id(model) {
+    if !(if engine == "claude" { claude_id(model) } else { exact_id(model) }) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "availability check requires an exact model ID"));
     }
     Ok(match engine {
@@ -139,12 +149,31 @@ pub fn check_availability(engine: &str, model: &str) -> io::Result<Observation> 
         "glm" => Observation::unknown(
             format!("none; the Z.AI API reference lists no model-listing endpoint ({GLM_NO_LISTING}, checked 2026-11-14)"),
             "Z.AI documents no model-listing endpoint", None),
-        "claude" => Observation::unknown(
-            format!("none; Claude Code documents no account-scoped exact-ID model listing ({CLAUDE_NO_LISTING}, checked 2026-11-14)"),
-            "no documented account listing for the Claude CLI", None),
+        "claude" => claude_catalog(model, || {
+            let cwd = std::env::current_dir().map_err(|_| "Claude working directory unavailable")?;
+            crate::new_session_catalog::load_catalog(crate::launch::Engine::Claude, &cwd)
+        }),
         _ => return Err(io::Error::new(io::ErrorKind::InvalidInput,
             "availability check supports claude, codex, deepseek or glm")),
     })
+}
+
+/// Use the picker's metadata discovery, separate from Router authentication.
+/// No prompt, turn, setting change or inference is sent.
+fn claude_catalog(model: &str, discover: impl FnOnce() -> Result<serde_json::Value, &'static str>) -> Observation {
+    let source = format!("Claude CLI initialize models and resolvedModel ({CLAUDE_LISTING_DOCS}; startup included)");
+    let started = Instant::now();
+    let value = match discover() {
+        Ok(value) => value,
+        Err(_) => return Observation::unknown(source, "Claude CLI catalog unavailable", None),
+    };
+    let Some(models) = value["models"].as_array().filter(|rows| !rows.is_empty() && rows.len() <= 128
+        && rows.iter().all(|row| row.as_str().is_some_and(claude_id))) else {
+        return Observation::unknown(source, "malformed Claude CLI catalog", None);
+    };
+    Observation::observed(if models.iter().any(|row| row.as_str() == Some(model)) {
+        CatalogStatus::Listed
+    } else { CatalogStatus::Unlisted }, source, started.elapsed(), None)
 }
 
 /// Codex can answer `model/list` from its own model cache, so the account
@@ -511,18 +540,50 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn engines_without_a_documented_account_listing_stay_unknown_offline() {
-        for (engine, model, reason, reference) in [
-            ("glm", "glm-5.3", "Z.AI documents no model-listing endpoint", "https://docs.z.ai/llms.txt"),
-            ("claude", "claude-opus-5", "no documented account listing for the Claude CLI",
-                "https://code.claude.com/docs/en/agent-sdk/typescript"),
-        ] {
-            let observation = check_availability(engine, model).unwrap();
-            assert_eq!((observation.status, observation.reason, observation.latency),
-                (CatalogStatus::Unknown, Some(reason), None));
-            assert!(observation.source.starts_with("none; ") && observation.source.contains(reference));
+    fn claude_catalog_reports_exact_alias_and_resolved_membership_only() {
+        let catalog = serde_json::json!({"models":["opus","claude-opus-5-5","sonnet[1m]"]});
+        for model in ["opus", "claude-opus-5-5", "sonnet[1m]"] {
+            let observation = claude_catalog(model, || Ok(catalog.clone()));
+            assert_eq!(observation.status, CatalogStatus::Listed);
+            assert!(observation.latency.is_some());
+            assert!(observation.catalog_default_tier.is_none());
             assert_observed_now(&observation);
         }
+        for model in ["Opus", "claude-opus-5", "sonnet"] {
+            let observation = claude_catalog(model, || Ok(catalog.clone()));
+            assert_eq!(observation.status, CatalogStatus::Unlisted);
+            let text = observation.render("claude", model);
+            assert!(text.contains("absence does not prove a model is unusable"));
+            assert!(text.contains("startup is included"));
+            assert!(text.contains("billed tier: unknown"));
+        }
+        for model in ["opus[1m]", "claude-opus-5-5", "default"] { assert!(claude_id(model)); }
+        for model in ["[1m]", "opus[2m]", "opus[1m][1m]", "opus\n", "opus/../other"] { assert!(!claude_id(model)); }
+    }
+
+    #[test]
+    fn claude_failed_and_malformed_catalogs_remain_unknown_without_provider_text() {
+        let error = claude_catalog("opus", || Err("private provider error"));
+        assert_eq!(error.status, CatalogStatus::Unknown);
+        assert!(error.latency.is_none());
+        assert!(!error.render("claude", "opus").contains("private provider error"));
+        for value in [serde_json::json!({}),serde_json::json!({"models":[]}),
+            serde_json::json!({"models":["opus",null]}),serde_json::json!({"models":["bad\nmodel"]}),
+            serde_json::json!({"models":vec!["opus";129]})] {
+            let observation = claude_catalog("opus", || Ok(value));
+            assert_eq!(observation.status, CatalogStatus::Unknown);
+            assert_eq!(observation.reason, Some("malformed Claude CLI catalog"));
+            assert!(observation.latency.is_none());
+        }
+    }
+
+    #[test]
+    fn engines_without_a_documented_account_listing_stay_unknown_offline() {
+        let observation = check_availability("glm", "glm-5.3").unwrap();
+        assert_eq!((observation.status, observation.reason, observation.latency),
+            (CatalogStatus::Unknown, Some("Z.AI documents no model-listing endpoint"), None));
+        assert!(observation.source.starts_with("none; ") && observation.source.contains("https://docs.z.ai/llms.txt"));
+        assert_observed_now(&observation);
         assert!(check_availability("router", "auto").is_err());
         assert!(check_availability("glm", "glm-5.3\n").is_err());
         assert!(check_availability("deepseek", "").is_err());

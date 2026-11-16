@@ -90,8 +90,6 @@ fn availability_flag_is_explicit_observational_and_writes_no_state() {
             "deepseek/deepseek-flash: unknown (no DeepSeek credential)\n"),
         (["model-facts", "glm", "glm-5.3", "--check-availability"],
             "glm/glm-5.3: unknown (Z.AI documents no model-listing endpoint)\n"),
-        (["model-facts", "claude", "claude-opus-5", "--check-availability"],
-            "claude/claude-opus-5: unknown (no documented account listing for the Claude CLI)\n"),
     ] {
         let output = run(&args);
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
