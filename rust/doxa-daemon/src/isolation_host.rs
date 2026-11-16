@@ -52,6 +52,7 @@ mod tests{
     }
 }
 impl Host for IsolationHost {
+    fn set_request_budget(&self, remaining: f64) -> Result<(), String> { self.inner.set_request_budget(remaining) }
     fn take_native_tool_audit(&self)->Option<Value>{self.inner.take_native_tool_audit()}
     fn supports_images(&self)->bool{self.inner.supports_images()}
     fn image_admission(&self)->Result<(),String>{self.inner.image_admission()}

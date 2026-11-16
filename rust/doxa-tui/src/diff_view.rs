@@ -210,7 +210,7 @@ pub fn reject(snapshot: &DiffSnapshot, index: usize) -> Result<String, String> {
     if cwd.canonicalize().ok().as_ref() != Some(cwd) { return Err("Worktree location changed; refresh the diff.".into()); }
     let (base, _) = base_for(cwd)?;
     if base != snapshot.base { return Err("Worktree base changed; refresh the diff.".into()); }
-    let (current, truncated) = git_output(cwd, &["--no-pager", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "--unified=3", &base, "--"], MAX_DIFF_BYTES)?;
+    let (current, truncated) = git_output(cwd, &["--no-pager", "diff", "--src-prefix=a/", "--dst-prefix=b/", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "--unified=3", &base, "--"], MAX_DIFF_BYTES)?;
     if truncated || !rejectable_hunks(&current).iter().any(|candidate| candidate.patch == hunk.patch) {
         return Err("This hunk changed; refresh the diff before rejecting it.".into());
     }
@@ -412,7 +412,7 @@ pub fn read(cwd: &Path) -> DiffSnapshot {
         Err(note) => return DiffSnapshot::message(format!("Cannot determine a safe diff base: {note}")),
     };
     let (bytes, truncated) = match git_output(&cwd,
-        &["--no-pager", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "--unified=3", &base, "--"], MAX_DIFF_BYTES) {
+        &["--no-pager", "diff", "--src-prefix=a/", "--dst-prefix=b/", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "--unified=3", &base, "--"], MAX_DIFF_BYTES) {
         Ok(result) => result,
         Err(note) => return DiffSnapshot::message(format!("Git could not compare this worktree with {base}: {note}")),
     };
@@ -545,6 +545,31 @@ mod tests {
         let (bytes, truncated) = git_output(dir.path(), &["ls-files", "--others", "--exclude-standard", "-z", "--"], 128).unwrap();
         assert!(truncated);
         assert_eq!(bytes.len(), 129);
+    }
+
+    #[test]
+    fn custom_git_prefixes_keep_complete_hunks_rejectable() {
+        let dir=tempfile::tempdir().unwrap();
+        let main=dir.path().join("main");let worktree=dir.path().join("session");
+        std::fs::create_dir(&main).unwrap();
+        let git=|cwd:&Path,args:&[&str]| {
+            let output=Command::new("git").args(args).current_dir(cwd).output().unwrap();
+            assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+        };
+        git(&main,&["init","-q","-b","main"]);
+        std::fs::write(main.join("tracked.txt"),"original\n").unwrap();
+        git(&main,&["add","tracked.txt"]);
+        git(&main,&["-c","user.name=Test","-c","user.email=test@example.com","commit","-qm","test: prefix fixture"]);
+        git(&main,&["worktree","add","-q","-b","doxa/session",worktree.to_str().unwrap()]);
+        for setting in ["diff.mnemonicPrefix","diff.noprefix"] {
+            git(&main,&["config",setting,"true"]);
+            std::fs::write(worktree.join("tracked.txt"),"edited\n").unwrap();
+            let snapshot=read(&worktree);
+            assert_eq!(snapshot.rejectable.len(),1,"{setting}");
+            reject(&snapshot,0).unwrap();
+            assert_eq!(std::fs::read_to_string(worktree.join("tracked.txt")).unwrap(),"original\n");
+            git(&main,&["config",setting,"false"]);
+        }
     }
 
     #[test]

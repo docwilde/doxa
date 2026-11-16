@@ -38,6 +38,71 @@ fn private_credentials(root:&Path){
     let home=root.join("doxa");fs::create_dir_all(&home).unwrap();
     fs::set_permissions(home,fs::Permissions::from_mode(0o700)).unwrap();
 }
+
+#[test]
+fn direct_api_budget_stops_a_tool_continuation_inside_one_turn() {
+    let dir=tempfile::tempdir().unwrap();let root=dir.path();private_credentials(root);
+    fs::write(root.join("input.txt"),"Local fixture text").unwrap();
+    let listener=TcpListener::bind("127.0.0.1:0").unwrap();listener.set_nonblocking(true).unwrap();
+    let endpoint=format!("http://{}/chat",listener.local_addr().unwrap());
+    let server=thread::spawn(move||{
+        let mut requests=Vec::new();
+        loop {
+            let deadline=Instant::now()+Duration::from_secs(if requests.is_empty(){10}else{2});
+            let mut socket=loop{match listener.accept(){
+                Ok((socket,_))=>break Some(socket),
+                Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{
+                    if Instant::now()>=deadline{break None;}thread::sleep(Duration::from_millis(5));
+                },Err(error)=>panic!("{error}")
+            }};
+            let Some(mut socket)=socket.take() else{break;};
+            socket.set_nonblocking(false).unwrap();socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut raw=Vec::new();
+            let request=loop {
+                let mut bytes=[0;4096];let count=socket.read(&mut bytes).unwrap();assert!(count>0);raw.extend_from_slice(&bytes[..count]);
+                if let Some(i)=raw.windows(4).position(|row|row==b"\r\n\r\n") {
+                    let header=String::from_utf8_lossy(&raw[..i]);
+                    let length=header.lines().find_map(|line|line.to_ascii_lowercase().strip_prefix("content-length: ").and_then(|value|value.parse::<usize>().ok())).unwrap();
+                    if raw.len()>=i+4+length {break serde_json::from_slice::<Value>(&raw[i+4..i+4+length]).unwrap();}
+                }
+            };
+            let first=requests.is_empty();
+            let cap=request["max_tokens"].as_u64().unwrap_or(10_000);
+            let input=serde_json::to_vec(&request).unwrap().len() as u64;
+            let response=json!({"model":"deepseek-flash","choices":[{"finish_reason":if first {"tool_calls"} else {"stop"},
+                "delta":if first {json!({"tool_calls":[{"index":0,"id":"read-fixture","type":"function","function":{"name":"workspace_read","arguments":"{\"path\":\"input.txt\"}"}}]})} else {json!({"content":"unexpected continuation"})}}],
+                "usage":{"prompt_tokens":input,"completion_tokens":cap}});
+            requests.push(request);
+            let body=format!("data: {response}\n\ndata: [DONE]\n\n");
+            write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            if !first {break;}
+        }
+        requests
+    });
+    let mut daemon=Daemon(Command::new(env!("CARGO_BIN_EXE_doxa-daemon")).env_clear()
+        .args(["--runtime-dir",root.to_str().unwrap(),"--cwd",root.to_str().unwrap(),"--session-id","request-budget",
+            "--engine","deepseek","--model","deepseek-flash","--effort","none","--vendor-endpoint",&endpoint,"--linger","20"])
+        .env("PATH","/usr/bin:/bin").env("HOME",root.join("home")).env("DOXA_HOME",root.join("doxa"))
+        .env("LORE_ROOT",root.join("lore")).env("LORE_PROJECTS_DIR",root.join("projects"))
+        .env("LORE_DISABLE_SYNC","1").env("LORE_DISABLE_REVIEW","1").env("DOXA_LORE","0")
+        .env("DEEPSEEK_API_KEY","local-fixture-key").env("DOXA_VENDOR_TOOLS","workspace-read")
+        .env("DOXA_SESSION_BUDGET_USD","0.01").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap());
+    let registry=root.join("registry/request-budget.json");
+    wait(||{assert!(daemon.0.try_wait().unwrap().is_none());registry.exists()});
+    let entry:Value=serde_json::from_slice(&fs::read(registry).unwrap()).unwrap();
+    let mut socket=UnixStream::connect(entry["daemon_socket"].as_str().unwrap()).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut reader=BufReader::new(socket.try_clone().unwrap());receive(&mut reader);
+    send(&mut socket,json!({"type":"attach","cursor":null}));
+    send(&mut socket,json!({"type":"prompt","id":1,"text":"Read input.txt and explain it"}));
+    let terminal=done(&mut reader);
+    assert_eq!(terminal["is_error"],true,"{terminal}");
+    assert_eq!(terminal["failure_category"],"spend_limit","{terminal}");
+    let requests=server.join().unwrap();assert_eq!(requests.len(),1,"a funded turn must not send an unfunded continuation");
+    let output=requests[0]["max_tokens"].as_u64().expect("provider output must be capped before sending");
+    let input=serde_json::to_vec(&requests[0]).unwrap().len() as f64;
+    assert!((input*0.3+output as f64*1.2)/1_000_000.0<=0.01);
+}
 fn transcript_dir(runtime:&Path)->PathBuf{let slug:String=runtime.to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();runtime.join("projects").join(slug)}
 
 #[test]

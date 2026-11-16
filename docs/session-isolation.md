@@ -1,5 +1,15 @@
 # Session isolation
 
+Docker open/offline sessions place host sockets below
+`DOXA_HOME/isolation/<session-id>/broker/`. With the 36-byte session IDs that
+DOXA generates, `DOXA_HOME` may contain at most **34 bytes on Linux** (30 on
+macOS). The longest socket name is `egress-claude.sock`; its complete path must
+fit the platform's Unix socket limit, including the trailing NUL. Admission
+and `doxa doctor --isolation docker-offline` report the actual length and byte
+budget before launching a container. Set a shorter absolute `DOXA_HOME` when
+the check fails. Native sessions and ROOT-provisioned hardened sockets use
+separate paths.
+
 Fleet-specific defaults, owner confirmations and runtime menus: [Fleet access and isolation](fleet-access.md).
 
 ## Contents

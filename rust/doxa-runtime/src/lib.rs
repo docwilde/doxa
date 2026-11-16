@@ -121,6 +121,11 @@ pub use doxa_input::Attachment;
 pub const NO_IMAGE_INPUT: &str = "This provider does not accept image attachments";
 
 pub trait Host: Send + Sync + 'static {
+    /// Install the remaining host allowance for the next API turn. Providers
+    /// must reserve each request before sending it and validate its usage.
+    fn set_request_budget(&self, _remaining_usd: f64) -> Result<(), String> {
+        Err("This provider cannot enforce a dollar ceiling within a turn".into())
+    }
     /// One-shot out-of-band native execution receipt. Raw provider/CLI event
     /// fields cannot grant this capability; only the native tool gate supplies it.
     fn take_native_tool_audit(&self)->Option<Value>{None}

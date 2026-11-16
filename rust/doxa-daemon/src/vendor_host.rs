@@ -82,6 +82,7 @@ pub struct VendorHost {
     routed: bool,
     route: Mutex<Option<Value>>,
     limits: Mutex<Option<doxa_vendors::TurnLimits>>,
+    request_budget: Mutex<Option<f64>>,
     model: Mutex<String>,
     effort: Mutex<String>,
     catalog: Mutex<Option<Vec<doxa_vendors::ModelCapability>>>,
@@ -253,7 +254,7 @@ impl VendorHost {
         let compact_context = store.read_vendor_context(storage_engine, &history).ok().flatten();
         let restored_turns = if routed { history.len() as u64 / 2 } else { 0 };
         let host = Self {
-            vendor: Mutex::new(vendor), routed, route: Mutex::new(None), limits: Mutex::new(None),
+            vendor: Mutex::new(vendor), routed, route: Mutex::new(None), limits: Mutex::new(None), request_budget:Mutex::new(None),
             model: Mutex::new(model),
             effort: Mutex::new(effort),
             catalog: Mutex::new(None),
@@ -716,6 +717,12 @@ impl VendorHost {
             if !source_matches().unwrap_or(false) { return Err("Reviewed compaction source changed; original context retained"); }
             let mut body = doxa_vendors::managed_compaction_body(self.vendor(),&model,&self.context_messages(&originals),&self.effort.lock().unwrap())
                 .map_err(|_| "Managed compaction input exceeds its bounded context")?;
+            let mut request_budget = self.request_budget.lock().unwrap().take()
+                .map(|remaining| crate::request_budget::RequestBudget::new(remaining,self.vendor().engine_id(),&model))
+                .transpose().map_err(|_| "Managed compaction spend bound unavailable")?;
+            if let Some(budget) = request_budget.as_mut() {
+                budget.admit(&mut body).map_err(|_| "Managed compaction exceeds the remaining spend allowance")?;
+            }
             if let Some(routed) = &routed {
                 body["max_tokens"] = json!(routed.limits.output_tokens);
                 if serde_json::to_vec(&body).map_err(|_| "Managed compaction body unavailable")?.len() > routed.limits.input_bytes {
@@ -752,6 +759,9 @@ impl VendorHost {
             };
             final_data["summary_attempted"] = json!(attempted.load(Ordering::Acquire));
             let outcome = response.map_err(|_| "Managed compaction request or admission failed; original context retained")?;
+            if let Some(budget) = request_budget.as_mut() {
+                budget.settle(&outcome).map_err(|_| "Managed compaction usage exceeds its reservation; accounting unknown")?;
+            }
             if routed.is_none() { final_data["model"] = json!(outcome.model); }
             final_data["model_consistent"] = json!(!outcome.model_conflict && outcome.model.as_deref() == Some(&model));
             if routed.is_some() && final_data["model_consistent"] != true { final_data["model"] = Value::Null; }
@@ -901,6 +911,13 @@ impl VendorHost {
         };
         let mut gate = NativeVendorGate::new(&self.workspace, self.workspace_read, peer,
             self.peer_desk.clone(), &scrub_tool, &emit_tool, tool_events.clone());
+        let request_budget = self.request_budget.lock().unwrap().take();
+        if let Some(remaining) = request_budget {
+            match crate::request_budget::RequestBudget::new(remaining, self.vendor().engine_id(), &selected_model) {
+                Ok(budget) => gate = gate.with_request_budget(budget),
+                Err(_) => { emit_tool(done_vendor_error(&Error::SpendLimit)); return; }
+            }
+        }
         if let Some(service) = &self.mcp {
             gate = gate.with_mcp(mcp_bindings, mcp_definitions, service.clone(), mcp_cancel);
         }
@@ -910,7 +927,7 @@ impl VendorHost {
         if !definitions.is_empty(){gate=gate.with_agent(definitions,Arc::new(move|name,args|if name=="spawn_session"{session.as_ref().ok_or("Session tools unavailable".to_owned())?(name,args)}else{agent.as_ref().ok_or("LORE tools unavailable".to_owned())?(name,args)}));}
 
         let native_tool_audit=gate.audit_handle();
-        let gate = if tools_enabled { Some(&mut gate as &mut dyn doxa_vendors::ToolGate) } else { None };
+        let gate = if tools_enabled || request_budget.is_some() { Some(&mut gate as &mut dyn doxa_vendors::ToolGate) } else { None };
         if self.resume_preflight.load(Ordering::Acquire) {
             let measured = (|| {
                 let user = json!({"role":"user","content":prompt});
@@ -1206,6 +1223,13 @@ impl VendorHost {
 }
 
 impl Host for VendorHost {
+    fn set_request_budget(&self, remaining: f64) -> Result<(), String> {
+        if self.routed || !remaining.is_finite() || remaining <= 0.0 || self.has_active_work() {
+            return Err("Direct API request budget requires an idle provider and a finite allowance".into());
+        }
+        *self.request_budget.lock().map_err(|_| "Request budget unavailable")? = Some(remaining);
+        Ok(())
+    }
     fn take_native_tool_audit(&self)->Option<Value>{self.native_tool_audit.lock().ok()?.take()}
     fn has_active_work(&self) -> bool { self.active.try_lock().map_or(true, |active| active.is_some()) }
     fn peer_tools_ready(&self) -> bool {
@@ -1359,7 +1383,7 @@ fn done_vendor_error(error:&Error)->Value {
         Error::InvalidToolArguments=>"tool_arguments_invalid",Error::TooManyToolCalls=>"tool_call_limit",
         Error::IncompleteStream=>"incomplete_stream",Error::InvalidUtf8=>"invalid_utf8",
         Error::InvalidToolCall|Error::UnexpectedToolCall=>"tool_unavailable",Error::ToolLimit=>"tool_step_limit",
-        Error::OutputLimit=>"output_token_limit",Error::RequestTooLarge=>"request_bytes_limit",
+        Error::OutputLimit=>"output_token_limit",Error::RequestTooLarge=>"request_bytes_limit",Error::SpendLimit=>"spend_limit",
         Error::ToolFailed=>"tool_failed",Error::InvalidToolDefinitions=>"tool_definitions_invalid",
         Error::HistoryTooLarge=>"history_limit",Error::MissingReasoningHistory=>"reasoning_history_missing",
         Error::ToolResultTooLarge=>"tool_result_limit",Error::UsageOverflow=>"usage_overflow",

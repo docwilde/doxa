@@ -6,6 +6,9 @@ FROM ${BASE_IMAGE}
 ARG BASE_FAMILY
 
 # Snapshot apt inputs are copied into the isolated build context by the helper.
+# The snapshots are HTTPS-only (Ubuntu redirects HTTP) and the base has no CA
+# store yet, so apt verifies TLS with the reviewed snapshot-ca.pem roots while
+# it installs the pinned ca-certificates package.
 COPY apt/ /opt/doxa-apt/
 RUN set -eu; \
     . /etc/os-release; \
@@ -18,7 +21,9 @@ RUN set -eu; \
     case "$arch" in amd64|arm64) ;; *) echo "unsupported base architecture" >&2; exit 1 ;; esac; \
     rm -f /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; \
     cp "/opt/doxa-apt/$family.sources" /etc/apt/sources.list; \
-    printf '%s\n' 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99doxa-snapshot; \
+    printf '%s\n' 'Acquire::Check-Valid-Until "false";' \
+      'Acquire::https::Verify-Peer "true";' 'Acquire::https::Verify-Host "true";' \
+      'Acquire::https::CAInfo "/opt/doxa-apt/snapshot-ca.pem";' > /etc/apt/apt.conf.d/99doxa-snapshot; \
     apt-get update; \
     xargs -r apt-get install -y --no-install-recommends < "/opt/doxa-apt/$family.packages"; \
     rm -f /etc/apt/apt.conf.d/99doxa-snapshot; \

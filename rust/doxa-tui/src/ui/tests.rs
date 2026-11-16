@@ -6859,6 +6859,10 @@ for line in sys.stdin:
         let (promoted,_) = super::transcript_tools::render(&queued.sessions[0].transcript,80,None,None);
         let visible = promoted.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
         assert!(visible.contains("Queued prompt started · q1 · 2026-10-11T13:25:00Z"));
+        assert!(visible.find("Continued assistant work").unwrap()
+            < visible.find("Queued prompt started · q1").unwrap(), "{visible}");
+        assert!(visible.find("Queued prompt started · q1").unwrap()
+            < visible.find("visible queued ending").unwrap(), "{visible}");
         assert_eq!(visible.matches("visible queued ending").count(),1);
     }
 

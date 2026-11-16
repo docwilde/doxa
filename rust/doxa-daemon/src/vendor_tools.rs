@@ -210,6 +210,7 @@ impl Drop for ResolvePeer {
 /// available only after the daemon supplies its same-scope scrubbed callback;
 /// every provider call still requires a per-call permission answer.
 pub struct NativeVendorGate<'a> {
+    request_budget: Option<crate::request_budget::RequestBudget>,
     audit: std::sync::Arc<std::sync::Mutex<Value>>,
     workspace: Option<WorkspaceReadGate<'a>>,
     peer: Option<doxa_runtime::PeerToolHandler>,
@@ -224,7 +225,10 @@ impl<'a> NativeVendorGate<'a> {
     pub fn new(root: &'a Path, workspace: bool, peer: Option<doxa_runtime::PeerToolHandler>,
         desk: std::sync::Arc<PeerDesk>, scrub: &'a (dyn Fn(&str) -> Result<String, ()> + Sync),
         emit: &'a dyn Fn(Value), events: std::sync::Arc<std::sync::Mutex<Vec<Value>>>) -> Self {
-        Self { audit:std::sync::Arc::new(std::sync::Mutex::new(json!({"version":1,"complete":true,"actions":[]}))), workspace:workspace.then(|| WorkspaceReadGate::new(root, scrub)), peer, agent:None, mcp:None, desk, scrub, emit, events }
+        Self { request_budget:None, audit:std::sync::Arc::new(std::sync::Mutex::new(json!({"version":1,"complete":true,"actions":[]}))), workspace:workspace.then(|| WorkspaceReadGate::new(root, scrub)), peer, agent:None, mcp:None, desk, scrub, emit, events }
+    }
+    pub fn with_request_budget(mut self, budget: crate::request_budget::RequestBudget) -> Self {
+        self.request_budget = Some(budget); self
     }
     pub fn with_agent(mut self, definitions: Vec<Value>, handler: doxa_runtime::PeerToolHandler) -> Self {
         self.agent = Some((definitions, handler)); self
@@ -410,6 +414,12 @@ impl Drop for McpReviewGuard {
     }
 }
 impl ToolGate for NativeVendorGate<'_> {
+    fn admit_request(&mut self, body: &mut Value, input_bound: u64) -> Result<(), doxa_vendors::Error> {
+        self.request_budget.as_mut().map_or(Ok(()), |budget| budget.admit_bound(body,input_bound))
+    }
+    fn settle_request(&mut self, completion: &doxa_vendors::Completion) -> Result<(), doxa_vendors::Error> {
+        self.request_budget.as_mut().map_or(Ok(()), |budget| budget.settle(completion))
+    }
     fn flush_events(&mut self) {
         // The async execution future queues events because the host emitter
         // is turn-local. Release the queue lock before invoking that emitter.

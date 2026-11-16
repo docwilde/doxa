@@ -2,6 +2,7 @@
 #[path = "../src/agent_tools.rs"] mod agent_tools;
 #[path = "../src/recovery_context.rs"] mod recovery_context;
 #[path = "../src/budget_host.rs"] mod budget_host;
+#[path = "../src/request_budget.rs"] mod request_budget;
 #[path = "../src/vendor_host.rs"] mod vendor_host;
 #[path = "../src/vendor_tools.rs"] mod vendor_tools;
 #[path = "../src/vendor_mcp.rs"] mod vendor_mcp;
@@ -665,7 +666,13 @@ mod tests {
     fn priced_budget_refuses_unknown_image_pricing_and_counts_reported_image_usage() {
         use doxa_vendors::Vendor;
         let env=Env::new();
-        let server=Server::new(|_,body|worker(body,false));
+        let server=Server::new(|_,body| {
+            // A tiny encoded PNG can consume more tokens than its wire bytes.
+            let input=serde_json::to_vec(body).unwrap().len()+500;
+            ("text/event-stream".into(),format!("data: {}\n\ndata: [DONE]\n\n",json!({
+                "model":body["model"],"choices":[{"finish_reason":"stop","delta":{"content":"Image answer"}}],
+                "usage":{"prompt_tokens":input,"completion_tokens":4}})),Duration::ZERO)
+        });
         // GLM-5.3-Flash has dated token prices, but no published per-image
         // token charge: a priced session refuses rather than under-count.
         let glm=vendor_host(&env,Vendor::Glm,"glm-5.3-flash","high","budget-glm",&server);
@@ -681,7 +688,8 @@ mod tests {
         assert_eq!(session.client.prompt_attachments("describe",&[fixture_png()]).unwrap()["ok"],true);
         let done=terminal(&mut session.client);assert_eq!(done["data"]["is_error"],false,"{done}");
         assert_eq!(done["data"]["cost_basis"],"priced_conservative");
-        assert!((done["data"]["session_cost_usd"].as_f64().unwrap()-(3.0*0.3+4.0*1.2)/1_000_000.0).abs()<1e-12);
+        let input=serde_json::to_vec(&server.bodies()[0]).unwrap().len() as f64+500.0;
+        assert!((done["data"]["session_cost_usd"].as_f64().unwrap()-(input*0.3+4.0*1.2)/1_000_000.0).abs()<1e-12);
         assert_eq!(image_parts(&server.bodies()[0]).len(),1);ds.shutdown();
     }
 

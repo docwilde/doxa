@@ -470,6 +470,7 @@ pub enum Error {
     ToolLimit,
     OutputLimit,
     RequestTooLarge,
+    SpendLimit,
     ToolFailed,
     InvalidToolDefinitions,
     HistoryTooLarge,
@@ -851,6 +852,9 @@ fn validate_local_endpoint(endpoint: &str) -> Result<(), Error> {
 /// The host owns permission decisions and tool implementations. Returning an error
 /// aborts the turn without putting the error text in a provider request or log.
 pub trait ToolGate {
+    /// Input bound includes text bytes and the exact sourced image allowance.
+    fn admit_request(&mut self, _body: &mut Value, _input_bound: u64) -> Result<(), Error> { Ok(()) }
+    fn settle_request(&mut self, _completion: &Completion) -> Result<(), Error> { Ok(()) }
     /// OpenAI-compatible function definitions this gate is prepared to execute.
     fn definitions(&self) -> Vec<Value>;
     fn execute<'a>(&'a mut self, call: &'a ToolCall) -> BoxFuture<'a, Result<Value, ()>>;
@@ -1139,14 +1143,15 @@ async fn run_turn_at(
             body["tools"] = Value::Array(definitions.clone());
             body["tool_choice"] = json!("auto");
         }
-        if let Some(limits) = limits {
-            let measured = serde_json::to_vec(&body).map_err(|_| Error::HistoryTooLarge)?.len()
+        let measured = serde_json::to_vec(&body).map_err(|_| Error::HistoryTooLarge)?.len()
                 .checked_sub(image_wire_bytes).and_then(|bytes| bytes.checked_add(image_tokens))
                 .ok_or(Error::RequestTooLarge)?;
+        if let Some(limits) = limits {
             if measured > limits.input_bytes {
                 return Err(Error::RequestTooLarge);
             }
         }
+        if let Some(gate) = gate.as_mut() { gate.admit_request(&mut body, measured as u64)?; }
         let mut completion = stream_at_with_key(
             vendor,
             endpoint,
@@ -1173,6 +1178,7 @@ async fn run_turn_at(
                 call.arguments = arguments.as_object().cloned().unwrap_or_default();
             }
         }
+        if let Some(gate) = gate.as_mut() { gate.settle_request(&completion)?; }
         outcome.requests += 1;
         outcome.model_consistent &= !completion.model_conflict && completion.model.as_deref() == Some(model);
         outcome.usage_complete &= completion.usage.as_ref().is_some_and(|usage| {

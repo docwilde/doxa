@@ -554,15 +554,7 @@ fn run(args: &[String]) -> io::Result<()> {
             let mut checks = vec![("daemon", daemon), ("runtime", runtime)];
             match options.engine {
                 launch::Engine::Codex => {
-                    checks.push((
-                        "codex",
-                        launch::executable(
-                            options
-                                .codex_bin
-                                .as_deref()
-                                .unwrap_or(std::path::Path::new("codex")),
-                        ),
-                    ));
+                    checks.push(("codex", launch::codex_executable(&options)));
                 }
                 launch::Engine::Claude => {checks.push(("claude",launch::claude_executable(&options)));}
                 launch::Engine::Fixture => {}
@@ -592,6 +584,15 @@ fn run(args: &[String]) -> io::Result<()> {
                     println!("router doctor is read-only; no decision or worker request was sent");
                 }
             }
+            let socket_check = doxa_isolation::home().and_then(|home| {
+                let profile = options.isolation.map(Ok)
+                    .unwrap_or_else(|| doxa_isolation::configured_profile(&home))?;
+                doxa_isolation::socket_budget::check_docker_socket_paths(
+                    &home, doxa_isolation::socket_budget::SESSION_ID_BYTES, profile,
+                )?;
+                Ok(home)
+            });
+            checks.push(("isolation socket paths", socket_check));
             for (name, result) in checks {
                 match result {
                     Ok(path) => println!("ok {name}: {}", path.display()),
