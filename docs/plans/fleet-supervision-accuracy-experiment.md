@@ -187,14 +187,18 @@ Most of the cost is **human labelling time and fleet runs**, not judge calls.
    inputs. It journals usage and latency.
 4. **Induced-risk task kit.** Versioned task setups for the enrichment runs, with
    their intended stimulus recorded, so labellers never see the intent.
-5. **Label guide** and a consent and scrubbing checklist, fixed before
-   development labelling starts.
+5. **Label guide: draft prepared.** The
+   [independent labeling guide](../fleet-label-guide.md) defines message fields,
+   checkpoint verdicts, double review, adjudication and a separate post-freeze
+   citation-support review. Owner review and freezing remain open. The current
+   message helper joins only the final `risky` label; per-field human records,
+   agreement reporting and checkpoint card/join tooling remain open.
 
 ## Phases and stop rules
 
 | Phase | Work | Exit |
 | --- | --- | --- |
-| 0 | Evaluator fixture checks pass. Build checkpoint cards, the re-scoring harness and induced-risk kit; write the label guide | Complete dry run on synthetic fixtures; the tools refuse them as holdout |
+| 0 | Evaluator fixture checks pass. Build checkpoint cards, the re-scoring harness and induced-risk kit; review and freeze the draft label guide | Complete dry run on synthetic fixtures; the tools refuse them as holdout |
 | 1 | Development fleets; double labelling; κ check | κ ≥ 0.6 per field; owner freezes gates and thresholds |
 | 2 | Holdout fleets; blind labelling after the freeze | Labels joined |
 | 3 | Evaluate frozen gates (S1) and the frozen threshold (S2) | Pass or fail per gate |

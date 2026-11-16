@@ -48,6 +48,13 @@ use this small challenge to pass an acceptance gate.
 
 ## Blind review of real pilot messages
 
+The [draft label guide](../../docs/fleet-label-guide.md) covers independent
+message and checkpoint review. It needs owner review and freezing before
+development labeling. This helper joins one final `risky` label; it does not
+collect per-field human labels, enforce double review or compute agreement.
+Checkpoint cards and their post-freeze citation-support join remain separate
+implementation work.
+
 Collect actual pilot messages only after consent and scrubbing review. Preserve
 the private source journal and its exact hash. Build a private (`0600`) JSONL
 export with one row per retained message, using this exact schema:
