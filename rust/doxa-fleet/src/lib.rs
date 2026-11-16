@@ -3,6 +3,7 @@
 pub mod judge;
 pub mod calibration;
 pub mod message_eval;
+pub mod evaluation_stats;
 pub mod message_gate;
 pub mod evidence;
 pub mod isolation_change;
