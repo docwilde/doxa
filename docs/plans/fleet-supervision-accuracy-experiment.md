@@ -191,8 +191,11 @@ Most of the cost is **human labelling time and fleet runs**, not judge calls.
    [independent labeling guide](../fleet-label-guide.md) defines message fields,
    checkpoint verdicts, double review, adjudication and a separate post-freeze
    citation-support review. Owner review and freezing remain open. The current
-   message helper joins only the final `risky` label; per-field human records,
-   agreement reporting and checkpoint card/join tooling remain open.
+   message helper joins only the final `risky` label. An
+   [aggregate agreement calculator](../../scripts/fleet-evaluation/README.md#aggregate-agreement-arithmetic)
+   computes point kappa from supplied counts; it cannot verify human pairing
+   or provenance. Per-field human records, paired-label collection and
+   checkpoint card/join tooling remain open.
 
 ## Phases and stop rules
 

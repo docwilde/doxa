@@ -128,6 +128,14 @@ For paired counts `n_ij`, let `N` be the number of complete pairs:
 undefined. It cannot satisfy an agreement threshold. Class imbalance and
 incomplete coverage must stay visible in the report.
 
+The [aggregate calculator](../scripts/fleet-evaluation/README.md#aggregate-agreement-arithmetic)
+computes that point statistic from supplied count matrices using exact
+fractions. The definition matches the
+[unweighted kappa reference](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.cohen_kappa_score.html).
+The calculator does not verify pairing, independent human authorship, blinding
+or collection provenance, and supplies no uncertainty interval or acceptance
+gate. The operator still needs the original paired review records.
+
 The experiment proposes development kappa of at least 0.6 per field. Below
 that value, the owner revises the guide and obtains new independent development
 labels before any holdout is opened. Agreement on a small development packet
