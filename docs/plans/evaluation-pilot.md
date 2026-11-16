@@ -1,7 +1,10 @@
 # Routing and supervision development pilot
 
 Status: **prepared; no paid trials run**. The owner authorized a pilot capped
-at **$25** on 2026-11-16. Full benchmark runs require a separate quote.
+at **$25** on 2026-11-16. Full benchmark runs require a separate quote. The frozen development settings
+are in [`pilot.json`](../../scripts/routing-benchmark/pilot.json). Run
+`python3 scripts/routing-benchmark/pilot_quote.py` from the repository root to
+check the allocations and obtain configuration/corpus hashes without dispatch.
 
 The pilot checks request forwarding, budget accounting, repair delivery,
 offline grading and collection formats. Its small development sample cannot
