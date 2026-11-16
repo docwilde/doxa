@@ -15,6 +15,11 @@
       "patch_sha256": "376dc69901a97e62d19c6bf32377c4d464e93192340aa582d6992f2613f8ca46",
       "source_commit": "360319d8dee62d87e2d59fc0c21805d79519cfed",
       "version": "0.165.0"
+    },
+    {
+      "patch_sha256": "c36c5b4841dc28468c45f850ab3b1ef1cebad03c6aeee29dba2f1fc1f31dd69e",
+      "source_commit": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+      "version": "0.166.0"
     }
   ],
   "schema": 1

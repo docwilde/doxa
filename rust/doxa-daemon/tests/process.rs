@@ -2143,13 +2143,18 @@ fn invalid_native_lore_capacity_rejects_session_before_socket_or_registry() {
 #[test]
 fn claude_daemon_uses_validated_absolute_cli_executable() {
     let dir=tempfile::tempdir().unwrap();let script=dir.path().join("claude-owned-cli");
-    claude_fixture(&script,"root.joinpath('argv').write_text(json.dumps(sys.argv))", "if frame['type']=='user': result()");
+    // The fixture publishes its complete argv report atomically.
+    claude_fixture(&script, "pending=root.joinpath('argv.pending'); pending.touch(); time.sleep(.05); pending.write_text(json.dumps(sys.argv)); pending.replace(root.joinpath('argv'))", "if frame['type']=='user': result()");
     let mut command=daemon_command();
     command.args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id",CLAUDE_SESSION,"--engine","claude","--claude-bin",script.to_str().unwrap(),"--linger","10"]).current_dir("/").stdout(Stdio::null()).stderr(Stdio::piped());
-    let mut child=command.spawn().unwrap();wait_until(||dir.path().join("argv").exists());
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    let mut child=OwnedChild(command.spawn().unwrap());wait_until(||dir.path().join("argv").exists());
     let argv:Value=serde_json::from_slice(&fs::read(dir.path().join("argv")).unwrap()).unwrap();assert_eq!(argv[0],script.to_str().unwrap());
     assert!(argv.as_array().unwrap().iter().any(|arg|arg=="--include-partial-messages"));assert!(!argv.as_array().unwrap().iter().any(|arg|arg=="--bare"));
-    unsafe{libc::kill(child.id() as libc::pid_t,libc::SIGTERM);}wait_until(||child.try_wait().unwrap().is_some());
+    unsafe{libc::kill(child.0.id() as libc::pid_t,libc::SIGTERM);}wait_until(||child.0.try_wait().unwrap().is_some());
     fs::set_permissions(&script,fs::Permissions::from_mode(0o600)).unwrap();
     let refused=command.output().unwrap();assert!(!refused.status.success());assert!(String::from_utf8_lossy(&refused.stderr).contains("executable"));
 }

@@ -38,6 +38,9 @@ MAX_FILE = 4 * 1024 * 1024
 MAX_TAG_BYTES = 8 * 1024 * 1024
 MAX_REMOTE_TAGS = 100000
 MAX_RELEASE_CANDIDATES = 64
+DIFF_OPTIONS = ["--binary", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv",
+                "--no-renames", "--diff-algorithm=myers", "--indent-heuristic", "--unified=3",
+                "--src-prefix=a/", "--dst-prefix=b/", "--submodule=short"]
 
 # Only these current executable pins and active contract fixtures may advance.
 # Comments, historical examples, unsupported-version probes and migration paths
@@ -115,6 +118,12 @@ def read(path):
 
 def run(*args, cwd=ROOT, **kw):
     return subprocess.check_output(args, cwd=cwd, text=True, **kw).strip()
+
+
+def git_diff(source, *revisions):
+    """Review bytes use one format across owner Git settings and object inventories."""
+    return subprocess.check_output(["git", "-c", "core.quotePath=true", "diff", *DIFF_OPTIONS,
+                                    *revisions], cwd=source)
 
 
 def api(url, data=None, method=None, *, token=None):
@@ -485,7 +494,7 @@ def prepare(root, directory, tag=None, release_date=None):
     if run("git", "rev-parse", old["tag"] + "^{commit}", cwd=source) != old["source_commit"]:
         raise ValueError("the reviewed upstream baseline tag moved")
     status = run("git", "diff", "--name-status", "--no-renames", old["source_commit"], commit, cwd=source).splitlines()
-    upstream_diff = subprocess.check_output(["git", "diff", "--binary", old["source_commit"], commit], cwd=source)
+    upstream_diff = git_diff(source, old["source_commit"], commit)
     sensitive = sensitive_changes(status)
     review = {"source_before": old["source_commit"], "source_after": commit,
               "diff_sha256": digest(upstream_diff), "changed_paths": [row.split("\t")[-1] for row in status],
@@ -501,7 +510,7 @@ def prepare(root, directory, tag=None, release_date=None):
     run("git", "apply", "--check", str(patch_path), cwd=source)
     run("git", "apply", str(patch_path), cwd=source)
     run("git", "add", "-N", ".", cwd=source)
-    patch = subprocess.check_output(["git", "diff", "HEAD", "--binary"], cwd=source)
+    patch = git_diff(source, "HEAD")
     new = dict(old, version=version, tag=tag, source_commit=commit, patch_sha256=digest(patch),
                provider=f"codex-{version}-precompact-v1")
     release_date = release_date or time.strftime('%Y-%m-%d', time.gmtime())

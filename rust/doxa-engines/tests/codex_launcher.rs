@@ -2,7 +2,7 @@
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
-const PATCH: &str = "c36c5b4841dc28468c45f850ab3b1ef1cebad03c6aeee29dba2f1fc1f31dd69e";
+const PATCH: &str = "4251ea9752f7ab11a20bcd6e453b18ef3f6812012661f7357b0a85d9821e8d59";
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -38,8 +38,8 @@ fn fixture() -> tempfile::TempDir {
     )
     .unwrap();
     fs::write(dir.path().join("receipt.json"),json!({"contract":"doxa-precompact-fail-closed-v1",
-        "source_commit":"6ff1e1ca3b30fc8b914720681fcf5fe62e95f856","patch_sha256":PATCH,
-        "code_mode_host_source_commit":"6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+        "source_commit":"086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a","patch_sha256":PATCH,
+        "code_mode_host_source_commit":"086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a",
         "code_mode_host_sha256":format!("{:x}",Sha256::digest(fs::read("/usr/bin/true").unwrap())),
         "code_mode_host_dispatcher_sha256":format!("{:x}",Sha256::digest(fs::read(env!("CARGO_BIN_EXE_doxa-codex-protected")).unwrap())),
         "binary_sha256":format!("{:x}",Sha256::digest(fs::read("/usr/bin/true").unwrap())),"official_cli":"/usr/bin/printf"}).to_string()).unwrap();

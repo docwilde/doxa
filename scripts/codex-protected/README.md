@@ -1,7 +1,7 @@
 # Protected Codex provider
 
-The reviewed patch targets official `rust-v0.166.0`, commit
-`6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`. Source, patch, launcher,
+The reviewed patch targets official `rust-v0.167.0`, commit
+`086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a`. Source, patch, launcher,
 app-server and code-mode helper identities are checked independently. The
 installer uses a separate `source-<commit>-<patch>` checkout and publishes
 immutable receipt-addressed artifacts; it never resets old build sources.
@@ -65,6 +65,27 @@ none of these commands require account credentials or external model calls.
 See each verifier's `--help` for its exact options. These checks do not establish
 real-account model availability or live sandbox acceptance.
 
+## Reviewed 0.167.0 port
+
+Network approvals enter the shared `request_approval_with_user_prompt` path.
+Its live-auto checks refuse escalation before review and after an answer,
+including a prompt captured before the switch. The structured result retains
+its reviewer and cancellation metadata. Ordinary mandatory sandbox review
+remains authoritative; the upstream managed human checkpoint checks run first.
+
+Command decisions claim a registered pending prompt before applying an
+execpolicy amendment. The durable write remains serialized with live-auto
+publication. The compiled regression registers its positive-control prompt
+and verifies both the durable allow rule and the stale-answer refusal.
+Upstream turn binding and human-only decision validation remain intact.
+Background compaction remains disabled, and direct background dispatch refuses
+before inference. The review record is `reviews/0.167.0.json`.
+
+The installer and updater compare a canonical diff with fixed algorithm,
+context, prefixes and full object IDs. They retain exact patch-byte checks and
+refuse unrelated source changes. Earlier reviewed installation receipts remain
+available for migration and rollback.
+
 ## Reviewed 0.166.0 port
 
 The port preserves the foreground compaction gate, disabled speculative
@@ -117,8 +138,8 @@ Existing Docker sessions keep the exact image recorded in their isolation
 manifest. Installing a new host provider or selecting a new-session image
 does not replace that saved image. A saved Docker thread can resume with the
 exact reviewed 0.163.0 contract (source `83086188`, patch `3a7b8c09`) or 0.164.0
-contract (source `6aaac694`, patch `f8759872`) as well as the current 0.165.0
-provider. The retained contract requires the protected
+contract (source `6aaac694`, patch `f8759872`), the reviewed 0.165.0 and
+0.166.0 contracts, and the current 0.167.0 provider. The retained contract requires the protected
 DOXA/live-auto initialize prefix and all normal hook, feature and launcher
 receipt checks. It is unavailable to fresh sessions or native providers.
 
