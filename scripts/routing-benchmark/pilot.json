@@ -1,0 +1,25 @@
+{
+  "schema": "doxa-evaluation-pilot-v1",
+  "authorized_usd": "25.00",
+  "allocations_usd": {
+    "repair": "15.00",
+    "decisions": "2.00",
+    "fleet_development": "5.00",
+    "undispatched": "3.00"
+  },
+  "tasks": ["easy-config", "easy-expiry", "intermediate-graph", "intermediate-delegation", "difficult-budget"],
+  "trials_per_task_per_arm": 1,
+  "arms": ["fixed_flash_none", "fixed_pro_high", "jev_per_call"],
+  "max_calls_per_trial": 6,
+  "max_input_tokens": 20000,
+  "max_output_tokens": 32768,
+  "router_model": "jev-1.13.0",
+  "candidates": [
+    {"provider": "deepseek", "model": "deepseek-flash", "effort": "none", "input_usd_per_million": "0.30", "output_usd_per_million": "1.20"},
+    {"provider": "deepseek", "model": "deepseek-v4-pro", "effort": "high", "input_usd_per_million": "1.32", "output_usd_per_million": "3.96"}
+  ],
+  "price_source": "https://api-docs.deepseek.com/quick_start/pricing/",
+  "price_checked_date": "2026-11-16",
+  "max_fleets": 2,
+  "usd_per_fleet": "2.50"
+}
