@@ -44,7 +44,7 @@ DOXA_RUST_BIN_DIR defaults to ~/.local/bin. install writes the Rust launcher
 and a desktop shortcut from committed HEAD. Provider CLIs must be on PATH.
 Pass --codex-bin or --claude-bin to select a provider CLI executable.
 codex-provider needs Python 3 for build tooling and bootstraps a private
-Rust 1.95 toolchain; installed provider dispatch is native Rust.
+Rust 1.99.1 toolchain; installed provider dispatch is native Rust.
 EOF
 }
 

@@ -1,0 +1,97 @@
+{
+  "after": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "4251ea9752f7ab11a20bcd6e453b18ef3f6812012661f7357b0a85d9821e8d59",
+    "provider": "codex-0.167.0-precompact-v1",
+    "schema": 1,
+    "source_commit": "086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a",
+    "tag": "rust-v0.167.0",
+    "version": "0.167.0"
+  },
+  "artifact_sha256": {
+    "app_server": "f4f0df49273dd3015e330ed7f091fe33e8568abbee22bef84b7ccf4196b0ba2d",
+    "code_mode_host": "6eb27f19847cfa80e8bd47a3cb0061765f47fb5255f492536f99a6440197f368"
+  },
+  "automatic_sensitive_path_gate_changed": false,
+  "before": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "c36c5b4841dc28468c45f850ab3b1ef1cebad03c6aeee29dba2f1fc1f31dd69e",
+    "provider": "codex-0.166.0-precompact-v1",
+    "schema": 1,
+    "source_commit": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+    "tag": "rust-v0.166.0",
+    "version": "0.166.0"
+  },
+  "compiled_source": {
+    "helper_inputs": {
+      "archive_sha256": "b3b490f2aa809eda7f6ac727f851fb00ce8355be72827577cfaac28c7137dbcd",
+      "binding_sha256": "3e4d5fecdbe0f98a6017e69d7ca82519a77fb032c5eb5e4cdbecdd3e2ec519d5",
+      "manifest_sha256": "1ec730635970ab1c0e8f4764ea113ad29d69d7f8d4c2ae69f3d766434a759350",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "152.2.0"
+    },
+    "lock_sha256": "55a002023bcad0b44fbed4a8cf7632d964ac08640c1ac6c7dbd5e905206f9392",
+    "manifest": "official 0.167.0 Cargo.toml; regenerated Cargo.lock changes only 171 workspace version stamps, with no dependency substitution",
+    "manifest_sha256": "7b603471d6b730d14a4e7da819cc7276bb1fc0e59bc8fe0438259cbe87814782",
+    "toolchain": "1.99.1",
+    "v8_source": "git+https://github.com/seanh-oai/rusty_v8.git?rev=350c5a859a9b3c84ab8701b3ad51e3b7699b30c0#350c5a859a9b3c84ab8701b3ad51e3b7699b30c0"
+  },
+  "guard_mapping": {
+    "compaction": "Foreground review remains required. Background scheduling remains disabled and direct background dispatch refuses before inference. The upstream token-estimation boundary rename does not grant compaction authority.",
+    "durable_execpolicy": "resolve_exec_approval requires a pending prompt before persistence. The positive control registers its prompt; persist_execpolicy_amendment retains the active_turn lock and refuses a durable allow rule after live-auto publication.",
+    "helper": "Upstream server/client output truncation and TerminateRequest changes retain the required same-source helper. The actual native-dispatcher fixture verifies a real tool read and the missing-helper refusal.",
+    "live_step_policy": "Captured and cloned StepContext values retain the same TurnContext. ApplyPatch, unified-exec preparation, runtime routing, orchestration and shell snapshots retain live approval_policy reads.",
+    "managed_human_checkpoints": "Upstream check_approval_requirement runs first. HumanCommand validation, pending-prompt claiming, originating-turn binding and post-review requirement checks remain intact.",
+    "model_metadata": "CatalogModel wraps ModelInfo and keeps ModelOrigin. The DOXA-only AskForApproval import remains alongside ModelOrigin; upstream model-safety restrictions remain intact.",
+    "native_review": "Upstream records native calls and captures per-tool NativeReview after hook rewrites. Those reviews do not replace the execution escalation guards.",
+    "shared_approval_entry": "Live-auto escalation checks run before and after request_approval_with_user_prompt, including the direct network approval caller. Structured source and cancellation metadata remain intact."
+  },
+  "review_kind": "manual protection-port boundary review; the automatic sensitive-path gate remains enforced",
+  "schema": 1,
+  "scope": "Focused compiled boundary checks and owned credential-free fixtures only. This is not an automatic-updater compiled-gates receipt, complete upstream-suite result or real-account/platform acceptance result.",
+  "upstream_review": {
+    "changed_paths": 988,
+    "diff_format": {
+      "core.quotePath": true,
+      "options": [
+        "--binary",
+        "--full-index",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--diff-algorithm=myers",
+        "--indent-heuristic",
+        "--unified=3",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--submodule=short"
+      ]
+    },
+    "diff_sha256": "ca1465c292cf7c5f474bd30c415f1cbcaf36d783fe123c7c69594f13546f7de5",
+    "sensitive_paths": 236
+  },
+  "verification": {
+    "actual_native_dispatcher_code_mode_and_missing_helper_control": "passed",
+    "app_server_build": "passed",
+    "automatic_compaction_cases": 20,
+    "canonical_diff_negative_controls": 4,
+    "code_mode_and_missing_helper_control": "passed",
+    "code_mode_host_build": "passed",
+    "core_guard_tests": 10,
+    "execpolicy_baselines": 83,
+    "hook_guard_tests": 1,
+    "installer_script_tests": 22,
+    "native_engine_tests": 114,
+    "native_existing_ignored": 3,
+    "native_test_toolchain": "1.100.0",
+    "network_cancellation_baselines": 3,
+    "originating_turn_and_environment_baselines": 2,
+    "paid_requests": 0,
+    "patch_stable_before_and_after_build": true,
+    "shared_network_guard_negative_control": "failed with shared-entry guards removed; passed after restoration",
+    "strict_guardian_baselines": 4,
+    "structured_approval_baselines": 8,
+    "update_script_tests": 35
+  }
+}
