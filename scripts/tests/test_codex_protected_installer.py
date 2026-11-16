@@ -423,7 +423,7 @@ sys.stdin.read()
         gate.write_text("new reviewed patch\n")
         reviewed = self.root / "fixture.patch"
         reviewed.write_bytes(subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary",
-                                                     "--src-prefix=a/", "--dst-prefix=b/"]))
+                                                     "--src-prefix=a/", "--dst-prefix=b/", "--full-index", "--diff-algorithm=myers", "--unified=3"]))
         gate.write_text("retained previous patch\n")
         (source / "untracked").write_text("retained user edit\n")
         before = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary"])
@@ -459,7 +459,7 @@ sys.stdin.read()
         first.write_text("reviewed change\n")
         patch_file = self.root / "fixture.patch"
         patch_file.write_bytes(subprocess.check_output(["git", "-C", str(source), "diff", "--binary",
-                                                       "--src-prefix=a/", "--dst-prefix=b/"]))
+                                                       "--src-prefix=a/", "--dst-prefix=b/", "--full-index", "--diff-algorithm=myers", "--unified=3"]))
         with patch.multiple(installer, SOURCE=head, PATCH=patch_file, PATCH_SHA256=installer.digest(patch_file)):
             versioned = self.root / ("source-" + head + "-" + installer.digest(patch_file))
             source.rename(versioned)
@@ -484,7 +484,7 @@ sys.stdin.read()
         first.write_text("reviewed change\n")
         patch_file = self.root / "fixture.patch"
         patch_file.write_bytes(subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary",
-                                                       "--src-prefix=a/", "--dst-prefix=b/"]))
+                                                       "--src-prefix=a/", "--dst-prefix=b/", "--full-index", "--diff-algorithm=myers", "--unified=3"]))
         versioned = self.root / ("source-" + head + "-" + installer.digest(patch_file))
         source.rename(versioned)
         with patch.multiple(installer, SOURCE=head, PATCH=patch_file, PATCH_SHA256=installer.digest(patch_file)):
@@ -494,6 +494,34 @@ sys.stdin.read()
                     self.assertEqual(versioned, installer.prepare_source(self.root))
                     self.assertEqual("reviewed change\n", (versioned / "first").read_text())
                     subprocess.run(["git", "-C", str(versioned), "config", name, "false"], check=True)
+
+    def test_source_verification_uses_reviewed_algorithm_context_and_full_object_ids(self):
+        source = self.root / "source"
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "Fixture"], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email", "fixture@example.invalid"], check=True)
+        first = source / "first"
+        first.write_text(''.join(f'prefix {i}\n' for i in range(12))+'c\nb\nd\na\na\nrare\na\nc\nrare\na\nrare\nb\na\na\nd\nd\n'+''.join(f'suffix {i}\n' for i in range(12)))
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm", "test: fixture source"], check=True)
+        head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        first.write_text(''.join(f'prefix {i}\n' for i in range(12))+'a\nb\na\nrare\nd\na\nrare\na\nb\nrare\na\nrare\nrare\nd\na\nb\n'+''.join(f'suffix {i}\n' for i in range(12)))
+        patch_file = self.root / "fixture.patch"
+        expected = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary",
+            "--full-index", "--diff-algorithm=myers", "--unified=3", "--indent-heuristic",
+            "--src-prefix=a/", "--dst-prefix=b/"])
+        patch_file.write_bytes(expected)
+        versioned = self.root / ("source-" + head + "-" + installer.digest(patch_file))
+        source.rename(versioned)
+        for key, value in [("diff.algorithm", "histogram"), ("diff.context", "9"),
+                           ("core.abbrev", "12"), ("diff.mnemonicPrefix", "true")]:
+            subprocess.run(["git", "-C", str(versioned), "config", key, value], check=True)
+        self.assertNotEqual(expected, subprocess.check_output(["git", "-C", str(versioned), "diff", "HEAD", "--binary"]))
+        with patch.multiple(installer, SOURCE=head, PATCH=patch_file, PATCH_SHA256=installer.digest(patch_file)):
+            self.assertEqual(versioned, installer.prepare_source(self.root))
+            (versioned / "first").write_text("unreviewed bytes\n")
+            with self.assertRaises(ValueError):
+                installer.prepare_source(self.root)
 
 
 if __name__ == "__main__":

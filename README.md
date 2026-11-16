@@ -44,14 +44,15 @@ Choose an installed engine in place of `codex`. Claude needs its CLI; protected 
 
 ## Recent development
 
-The latest tagged release is **2.0.0-beta.80**, with **LORE 0.62.30** and protected **Codex 0.166.0**. It includes these updates:
+Current source is **2.0.0-beta.81**, with **LORE 0.62.30** and protected **Codex 0.167.0**. It includes these updates:
 
+- **Reproducible provider installation.** The installer and updater use a fixed Git diff format, so local algorithm, context, prefix and abbreviation settings preserve the reviewed patch identity.
 - **Account model availability.** `doxa model-facts ENGINE MODEL --check-availability` checks the signed-in Codex account or DeepSeek API account and reports `listed`, `unlisted` or `unknown`, with the observation time and request latency. Claude and GLM remain `unknown`. These observations do not change the picker, price bounds or budget admission. [Model facts](docs/engine-capabilities.md).
 - **Images for API workers.** DeepSeek `deepseek-flash` and eligible Router API targets accept image attachments. DOXA requires documented vision support, an image token bound and a price bound. GLM images remain unavailable until all three facts are sourced. [Image input](docs/terminal-images.md#prompt-attachments).
 - **Native plugin panels.** `/native-plugin panel NAME` opens an owner-approved `render-local-panel-v1` WebAssembly panel under a signed operator permit. DOXA bounds execution, memory and text output, and stops the worker when the panel closes or its authority expires. [Plugin setup](docs/native-plugins.md).
 - **Measured code-graph response time.** The release TUI's prepared DOXA queries measured **62.8 ms p95** on the recorded laptop under its performance power profile. The terminal loop checks pending answers every 1 ms. The report also records slower quiet-profile results and the measurement's scope. [Benchmark and receipts](docs/codegraph-tui-release-latency-2026-11-14.md).
 
-Development builds on `main` also use **SubQ Snap 1.2** for routing and fleet review. Select `subq-snap-1.2` in candidate configs or Settings; the retired preview IDs are refused. Build from the development checkout with `./task run` to use changes beyond the tagged release.
+**SubQ Snap 1.2** serves routing and fleet review. Select the exact `subq-snap-1.2` model in candidate configs or Settings; retired preview IDs are refused.
 
 ## Workspace and sessions
 

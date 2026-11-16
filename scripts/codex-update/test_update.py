@@ -18,6 +18,33 @@ import verify
 
 
 class UpdateTests(unittest.TestCase):
+    def test_review_diff_ignores_owner_settings_and_object_abbreviations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            subprocess.run(['git','init','-q',str(root)],check=True)
+            for key,value in [('user.name','Fixture'),('user.email','fixture@example.invalid')]:
+                subprocess.run(['git','-C',str(root),'config',key,value],check=True)
+            file=root/'review.txt'
+            file.write_text(''.join(f'prefix {i}\n' for i in range(12))+'c\nb\nd\na\na\nrare\na\nc\nrare\na\nrare\nb\na\na\nd\nd\n'+''.join(f'suffix {i}\n' for i in range(12)))
+            subprocess.run(['git','-C',str(root),'add','.'],check=True)
+            subprocess.run(['git','-C',str(root),'commit','-qm','test: before'],check=True)
+            before=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()
+            file.write_text(''.join(f'prefix {i}\n' for i in range(12))+'a\nb\na\nrare\nd\na\nrare\na\nb\nrare\na\nrare\nrare\nd\na\nb\n'+''.join(f'suffix {i}\n' for i in range(12)))
+            subprocess.run(['git','-C',str(root),'add','.'],check=True)
+            subprocess.run(['git','-C',str(root),'commit','-qm','test: after'],check=True)
+            after=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()
+            expected=subprocess.check_output(['git','-C',str(root),'diff','--binary','--full-index',
+                '--diff-algorithm=myers','--unified=3','--indent-heuristic','--src-prefix=a/','--dst-prefix=b/',before,after])
+            for key,value in [('diff.algorithm','histogram'),('diff.context','9'),
+                              ('core.abbrev','12'),('diff.mnemonicPrefix','true')]:
+                subprocess.run(['git','-C',str(root),'config',key,value],check=True)
+            self.assertNotEqual(expected,subprocess.check_output(['git','-C',str(root),'diff','--binary',before,after]))
+            self.assertEqual(expected,update.git_diff(root,before,after))
+            file.write_text('a changed working tree\n')
+            expected_worktree=subprocess.check_output(['git','-C',str(root),'diff','--binary','--full-index',
+                '--diff-algorithm=myers','--unified=3','--indent-heuristic','--src-prefix=a/','--dst-prefix=b/','HEAD'])
+            self.assertEqual(expected_worktree,update.git_diff(root,'HEAD'))
+
     @staticmethod
     def tags(*names):
         return "".join("a"*40 + "\trefs/tags/" + name + "\n" for name in names).encode()

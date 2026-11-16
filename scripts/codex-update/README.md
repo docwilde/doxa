@@ -11,11 +11,9 @@ conflicts, a changed release-stamping shape or a missing guard test also stop
 the update and open/update a visible
 **Protected Codex update blocked** issue. The installed provider stays pinned.
 
-The workflow is disabled until the repository variable
-`CODEX_PROTECTED_UPDATES_ENABLED` is `true`. Activate it after the first
-0.163.0 protected port, compiled proofs and repository CI are validated.
-This source change does not enable it, install a provider, change repository
-settings, add a token, or assert that a hosted candidate has built successfully.
+The repository variable `CODEX_PROTECTED_UPDATES_ENABLED` controls the workflow.
+A value of `true` enables discovery and the guarded update path. A source port
+does not change that setting or establish hosted-run acceptance.
 
 The six-hour discovery reads the fixed official Git tag inventory (8 MiB,
 100,000 tags and 60 seconds maximum), considers only exact `rust-vX.Y.Z` tags
@@ -73,6 +71,13 @@ checks exclude only `scripts/codex-protected/precompact.patch`: its literal
 space-only context lines are required by unified-diff syntax and validated by
 exact patch application and canonical regeneration. Other whitespace errors
 still block publication. Publication refuses a changed base or an existing proposal.
+
+The upstream review and carried patch use one canonical Git diff format:
+Myers with the indent heuristic, three context lines, full object IDs, fixed
+`a/` and `b/` prefixes, quoted paths, no rename detection, no colour, no text
+conversion and no external diff driver. The installer regenerates those same
+bytes before accepting the source. Owner Git settings cannot change the
+reviewed algorithm, context, prefixes or abbreviated object names.
 
 The publisher uses only the ephemeral `GITHUB_TOKEN`, with scoped Actions,
 contents, PR and issue permissions. It never copies an owner PAT. It creates a
