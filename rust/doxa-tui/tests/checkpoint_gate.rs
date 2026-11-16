@@ -1,6 +1,13 @@
 #![cfg(unix)]
 use serde_json::{json, Value};
-use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
+
+fn command(root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-rs"));
+    command.current_dir(root).env("DOXA_HOME", root.join("uncreated-home"))
+        .env("DOXA_DAEMON_BIN", root.join("must-not-execute"));
+    command
+}
 
 fn row() -> Value {
     json!({"version":1,"id":"00000000-0000-4000-8000-000000000001",
@@ -16,7 +23,7 @@ fn row() -> Value {
 fn checkpoint_development_cli_is_offline_and_keeps_holdouts_private() {
     let dir = tempfile::tempdir().unwrap(); let input = dir.path().join("checkpoints.jsonl");
     fs::write(&input, row().to_string()).unwrap(); fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
-    let run = || Command::new(env!("CARGO_BIN_EXE_doxa-rs")).args(["fleet","evaluate-checkpoints-development"])
+    let run = || command(dir.path()).args(["fleet","evaluate-checkpoints-development"])
         .arg(&input).args(["--alignment-supervisor","jev:jev-1.13.0","--threshold","0.75"]).output().unwrap();
     let output = run(); assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -28,6 +35,8 @@ fn checkpoint_development_cli_is_offline_and_keeps_holdouts_private() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("refuses holdout"));
     fs::set_permissions(&input, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(!run().status.success());
+    assert!(!dir.path().join("uncreated-home").exists());
+    assert_eq!(fs::read_to_string(&input).unwrap(), holdout.to_string());
 }
 
 #[test]
@@ -47,7 +56,7 @@ fn checkpoint_holdout_cli_requires_prior_approval_and_real_labels() {
     }).collect();
     let encode = |rows: &[Value]| rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
     fs::write(&input, encode(&values[..2])).unwrap(); fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_doxa-rs")).args(["fleet","evaluate-checkpoints-development"]).arg(&input)
+    let output = command(dir.path()).args(["fleet","evaluate-checkpoints-development"]).arg(&input)
         .args(["--alignment-supervisor","jev:jev-1.13.0","--threshold","0.75"]).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let development: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -57,7 +66,7 @@ fn checkpoint_holdout_cli_requires_prior_approval_and_real_labels() {
         "min_drift_recall":0.9,"min_drift_recall_lower_95":0.8,"max_false_pause_rate":0.1,"max_abstention_rate":0.25,"max_p95_ms":12000});
     fs::write(&input, encode(&values)).unwrap(); fs::write(&gate_path, gate.to_string()).unwrap();
     fs::set_permissions(&gate_path, fs::Permissions::from_mode(0o600)).unwrap();
-    let run = || Command::new(env!("CARGO_BIN_EXE_doxa-rs")).args(["fleet","evaluate-checkpoints"]).arg(&input)
+    let run = || command(dir.path()).args(["fleet","evaluate-checkpoints"]).arg(&input)
         .args(["--alignment-supervisor","jev:jev-1.13.0","--gate"]).arg(&gate_path).output().unwrap();
     let output = run(); assert!(!output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -71,4 +80,7 @@ fn checkpoint_holdout_cli_requires_prior_approval_and_real_labels() {
     fs::write(&input, encode(&values)).unwrap();
     let output = run(); assert!(!output.status.success()); assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("holdouts require real"));
+    assert!(!dir.path().join("uncreated-home").exists());
+    assert_eq!(fs::read_to_string(&input).unwrap(), encode(&values));
+    assert_eq!(fs::read_to_string(&gate_path).unwrap(), gate.to_string());
 }

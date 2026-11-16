@@ -64,8 +64,9 @@ This schema example is artificial. It supplies no real observation or label.
 
 Verdicts are `aligned`, `uncertain`, `drifted` and `blocked`.
 `alignment_confidence` retains the raw alignment Choice confidence for
-calibration. `guard_confidence` contains the validated alignment, basis and
-evidence confidences; ties have a zero guard. Its alignment entry must equal
+calibration. Jev reports a normalized Choice concentration; its agreement with
+independent human labels remains unmeasured. `guard_confidence` contains the
+validated alignment, basis and evidence confidences; ties have a zero guard. Its alignment entry must equal
 the raw confidence or zero. A zero/low guard, unsupported basis or invalid
 citation produces effective `uncertain`, matching the closed host guard.
 The recording attests that projection; the evaluator cannot reconstruct the

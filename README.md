@@ -54,6 +54,8 @@ Current source is **2.0.0-beta.81**, with **LORE 0.62.30** and protected **Codex
 
 **SubQ Snap 1.2** serves routing and fleet review. Select the exact `subq-snap-1.2` model in candidate configs or Settings; retired preview IDs are refused.
 
+Development checkouts also include [offline checkpoint evaluation](docs/fleet-checkpoint-gate.md): score private recorded Choices, freeze a gate against development data, then check a separate holdout. The commands make no model calls and leave enforcement unchanged. Independent labels and representative collection remain necessary for quality claims.
+
 ## Workspace and sessions
 
 - **Work in parallel.** Open tabs with Ctrl+T, split with Alt+V or Alt+H, and keep a prompt in each pane. The project rail groups live and recoverable sessions. Saved layouts restore on launch.
