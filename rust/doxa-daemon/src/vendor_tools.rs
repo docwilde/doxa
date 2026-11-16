@@ -414,8 +414,8 @@ impl Drop for McpReviewGuard {
     }
 }
 impl ToolGate for NativeVendorGate<'_> {
-    fn admit_request(&mut self, body: &mut Value) -> Result<(), doxa_vendors::Error> {
-        self.request_budget.as_mut().map_or(Ok(()), |budget| budget.admit(body))
+    fn admit_request(&mut self, body: &mut Value, input_bound: u64) -> Result<(), doxa_vendors::Error> {
+        self.request_budget.as_mut().map_or(Ok(()), |budget| budget.admit_bound(body,input_bound))
     }
     fn settle_request(&mut self, completion: &doxa_vendors::Completion) -> Result<(), doxa_vendors::Error> {
         self.request_budget.as_mut().map_or(Ok(()), |budget| budget.settle(completion))

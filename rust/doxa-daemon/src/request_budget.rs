@@ -28,11 +28,15 @@ impl RequestBudget {
     }
 
     pub fn admit(&mut self, body: &mut Value) -> Result<(), Error> {
+        let input = serde_json::to_vec(body).map_err(|_| Error::SpendLimit)?.len() as u64;
+        self.admit_bound(body,input)
+    }
+
+    pub fn admit_bound(&mut self, body: &mut Value, input_bound: u64) -> Result<(), Error> {
         if self.pending.is_some() || body["model"].as_str() != Some(&self.model) { return Err(Error::SpendLimit); }
         // One serialized byte bounds at most one text token. The extra bytes
         // cover the max_tokens field inserted below, including its digits.
-        let input = serde_json::to_vec(body).map_err(|_| Error::SpendLimit)?.len()
-            .checked_add(64).ok_or(Error::SpendLimit)? as u64;
+        let input = input_bound.checked_add(64).ok_or(Error::SpendLimit)?;
         let input_cost = cost(input, self.input_rate)?;
         let available = self.remaining.checked_sub(input_cost).ok_or(Error::SpendLimit)?;
         let cap = body["max_tokens"].as_u64().unwrap_or(32768).min(32768);
