@@ -20,7 +20,7 @@ distribution; it is not a probability that the worker will complete the task.
 
 ## Decision service
 
-The router accepts pinned `jev-1.13.0` or `subq-snap-preview`. Use the
+The router accepts pinned `jev-1.13.0` or `subq-snap-1.2`. Use the
 `router_model` JSON field (legacy `jev_model` remains compatible), or select
 **routing decision model** in `/settings` → Session. `DOXA_ROUTER_MODEL` is an
 explicit environment override for new sessions. Changing the decision model
@@ -28,9 +28,12 @@ changes the frozen config digest; resuming requires the original selection.
 
 Snap uses [SubQ's typed Decisions API](https://docs.subq.ai/endpoints/decisions-api/)
 at `https://api.subq.ai/v1/systemone`, with a private saved SubQ key or
-`SUBQ_API_KEY`. The API pins `subq-snap-preview`; other SubQ models are refused.
-[Published pricing](https://subq.ai/#pricing) is $0.05/M input tokens and free
-output. DOXA validates exact model/usage, eligible choices, complete normalized
+`SUBQ_API_KEY`. The API pins `subq-snap-1.2`; other SubQ models are refused.
+[Published pricing](https://subq.ai/#pricing) is $0.04/M input tokens and free
+output. SubQ retired `subq-snap-preview` and `subq-snap-1.1` on 2026-11-11 and
+routes their requests to Snap 1.2 ([models](https://docs.subq.ai/using-the-api/models/)); the
+exact model check refuses those responses, so a config or setting that pinned the
+preview must select `subq-snap-1.2`. DOXA validates exact model/usage, eligible choices, complete normalized
 probabilities and finite confidence. Snap's reported confidence is checked
 against the frozen guard; Jev additionally uses its documented distribution
 formula. Ties fall back. Neither score certifies worker quality.

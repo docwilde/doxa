@@ -183,11 +183,11 @@ fn snap_routing_freezes_model_rates_and_accepts_documented_confidence() {
     let prepared = prepare(&cfg,&input()).unwrap();
     assert_eq!(prepared.body["model"],SUBQ_MODEL);
     assert_eq!(cfg.decision().endpoint(),"https://api.subq.ai/v1/systemone");
-    assert_eq!(prepared.reservation_usd_micros,token_cost(prepared.input_token_reservation,0,50_000,0).unwrap());
+    assert_eq!(prepared.reservation_usd_micros,token_cost(prepared.input_token_reservation,0,40_000,0).unwrap());
     let mut wire = response(); wire["model"]=json!(SUBQ_MODEL); wire["usage"]["output_tokens"]=json!(0);
     wire["answers"]["target"]["confidence"]=json!(0.9);
     let out = parse_response(&cfg,&prepared,&wire,1);
-    assert_eq!(out.reason,Reason::Selected); assert_eq!(out.router_cost_usd_micros,Some(5));
+    assert_eq!(out.reason,Reason::Selected); assert_eq!(out.router_cost_usd_micros,Some(4));
     let mut ledger=Ledger::default(); let hold=reserve(&cfg,&mut ledger,&prepared).unwrap();
     settle(&mut ledger,&hold,&out).unwrap(); assert!(!ledger.accounting_unknown);
     let mut changed=cfg.clone(); changed.jev_model=JEV_MODEL.into();
