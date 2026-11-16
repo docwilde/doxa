@@ -1,7 +1,7 @@
 # Protected Codex provider
 
-The reviewed patch targets official `rust-v0.165.0`, commit
-`360319d8dee62d87e2d59fc0c21805d79519cfed`. Source, patch, launcher,
+The reviewed patch targets official `rust-v0.166.0`, commit
+`6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`. Source, patch, launcher,
 app-server and code-mode helper identities are checked independently. The
 installer uses a separate `source-<commit>-<patch>` checkout and publishes
 immutable receipt-addressed artifacts; it never resets old build sources.
@@ -64,6 +64,28 @@ control. The helper proof must use the same source build and verified receipt;
 none of these commands require account credentials or external model calls.
 See each verifier's `--help` for its exact options. These checks do not establish
 real-account model availability or live sandbox acceptance.
+
+## Reviewed 0.166.0 port
+
+The port preserves the foreground compaction gate, disabled speculative
+compaction and live-auto permission boundary. Upstream moved unified-exec
+approval preparation into `handlers/unified_exec/preparation.rs`; both policy
+reads use the live `StepContext` policy. Patch approval assessment also reads
+that live policy. Permission requests retain their selected environment and
+final grants remain serialized with live-auto publication.
+
+The hook summary carries its source path as text, so the required hook checks
+the exact synthetic session-flags spelling. The async compaction regression
+awaits input capture and passes upstream's shutdown token. The review record
+is `reviews/0.166.0.json`.
+
+Compiled checks use the original 0.166.0 manifests and its pinned V8 git
+revision, including the source-pinned archive and binding manifests. Nine
+core guards, one hook guard, permission/Guardian baselines, app-server and
+helper builds, automatic-compaction controls and the code-mode missing-helper
+control pass without account credentials or paid model requests. These checks
+cover the protected boundary; they do not establish full upstream-suite or
+real-account acceptance.
 
 ## Reviewed 0.165.0 port
 

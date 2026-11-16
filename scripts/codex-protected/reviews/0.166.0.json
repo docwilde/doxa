@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "review_kind": "manual protection-port boundary review; the automatic sensitive-path gate remains enforced",
+  "before": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "376dc69901a97e62d19c6bf32377c4d464e93192340aa582d6992f2613f8ca46",
+    "provider": "codex-0.165.0-precompact-v1",
+    "schema": 1,
+    "source_commit": "360319d8dee62d87e2d59fc0c21805d79519cfed",
+    "tag": "rust-v0.165.0",
+    "version": "0.165.0"
+  },
+  "after": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "c36c5b4841dc28468c45f850ab3b1ef1cebad03c6aeee29dba2f1fc1f31dd69e",
+    "provider": "codex-0.166.0-precompact-v1",
+    "schema": 1,
+    "source_commit": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+    "tag": "rust-v0.166.0",
+    "version": "0.166.0"
+  },
+  "upstream_review": {
+    "diff_sha256": "a21fd598ade276e4e1b5cbc3716a74d81622bc7b08346398f508414a87802bf3",
+    "changed_paths": 1707,
+    "sensitive_paths": 429
+  },
+  "guard_mapping": {
+    "apply_patch": "Upstream split patch preparation from approval assessment. patch_approval_requirement reads the live StepContext policy.",
+    "unified_exec": "Upstream moved parsing and preparation out of exec_command and process_manager. Both policy reads in handlers/unified_exec/preparation.rs use StepContext.approval_policy; runtime and remote routing retain their live reads.",
+    "background_compaction": "capture_background_input is async and run_background_compaction accepts shutdown cancellation. The scheduler remains disabled and direct execution returns TurnAborted before inference. The regression uses the async capture and new argument.",
+    "session_permissions": "PreparedPermissionRequest carries the selected environment. The request gate, response sanitization and final grant publication retain the active-turn lock. The regression uses the prepared request and new timing-call argument.",
+    "hook_identity": "HookRunSummary.source_path is rendered text. The required SessionFlags hook matches the exact /<session-flags>/config.toml spelling through as_str; environment requirements hooks retain separate System provenance.",
+    "durable_execpolicy": "persist_execpolicy_amendment retains the same active_turn lock as doxaAuto publication and refuses a durable grant after the switch."
+  },
+  "compiled_source": {
+    "manifest": "official 0.166.0 Cargo.toml and regenerated upstream Cargo.lock; no dependency substitution",
+    "toolchain": "1.99.1",
+    "v8_git_revision": "350c5a859a9b3c84ab8701b3ad51e3b7699b30c0",
+    "helper_inputs": {
+      "version": "152.2.0",
+      "target": "x86_64-unknown-linux-gnu",
+      "manifest_sha256": "1ec730635970ab1c0e8f4764ea113ad29d69d7f8d4c2ae69f3d766434a759350",
+      "archive_sha256": "b3b490f2aa809eda7f6ac727f851fb00ce8355be72827577cfaac28c7137dbcd",
+      "binding_sha256": "3e4d5fecdbe0f98a6017e69d7ca82519a77fb032c5eb5e4cdbecdd3e2ec519d5"
+    }
+  },
+  "verification": {
+    "core_guard_tests": 9,
+    "hook_guard_tests": 1,
+    "originating_turn_and_environment_baselines": 2,
+    "strict_guardian_baselines": 4,
+    "app_server_build": "passed",
+    "code_mode_host_build": "passed",
+    "automatic_compaction_denial_and_allow_controls": "passed",
+    "automatic_default_window": "passed",
+    "code_mode_and_missing_helper_control": "passed",
+    "paid_requests": 0,
+    "patch_stable_before_and_after_build": true
+  },
+  "scope": "This record documents the reviewed guard mapping and focused compiled checks. It is not an installer artifact receipt, complete upstream-suite result or real-account acceptance result.",
+  "automatic_sensitive_path_gate_changed": false
+}
