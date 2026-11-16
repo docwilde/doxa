@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.80 — 2026-11-15
+
+**Protected Codex**
+
+- Update **`codex-current`** to protected Codex **0.166.0**, pinned to `6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`.
+- Retain compiled compaction refusal, permission checks and complete helper provenance; incompatible upstream releases stop the updater.
+
 ## 2.0.0-beta.79 — 2026-11-14
 
 **LORE 0.62.30**
