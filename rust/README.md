@@ -168,6 +168,12 @@ not call a judge or change enforcement. No real-message corpus ships. An opt-in
 rootless Docker fixture checks offline test receipt transport; a full live fleet
 run remains to be verified.
 
+`doxa fleet evaluate-checkpoints-development` scores private recorded checkpoint
+Choices. `doxa fleet evaluate-checkpoints` checks a frozen holdout gate with
+independent labels and separately grouped fleets. Both commands run offline;
+passing leaves enforcement unchanged. See the
+[checkpoint schema and bounds](../docs/fleet-checkpoint-gate.md).
+
 `/peers` or Ctrl+M opens the peer map; `/msg PEER TEXT` sends a scrubbed same-project message. The optional private mesh shows fleet relationships in a browser. Remote peer routes use authenticated private sockets and verified rosters. [Transport contract](../docs/native-peernet.md).
 
 ## Remote access

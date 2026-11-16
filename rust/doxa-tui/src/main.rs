@@ -729,6 +729,21 @@ fn worktrees(args: &[String]) -> io::Result<()> {
 
 fn fleet(args: &[String]) -> io::Result<()> {
     if args.iter().any(|arg|matches!(arg.as_str(),"--help"|"-h")) {print!("{}",fleet_control::HELP);return Ok(());}
+    if let [command, path, flag, model, option, value] = args {
+        if command == "evaluate-checkpoints-development" && flag == "--alignment-supervisor" && option == "--threshold" {
+            let model = doxa_fleet::judge::Model::parse(model)?;
+            let threshold = value.parse::<f64>().map_err(|_| invalid("invalid checkpoint threshold"))?;
+            let report = doxa_fleet::checkpoint_eval::evaluate_development_file(Path::new(path), &model, threshold)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        if command == "evaluate-checkpoints" && flag == "--alignment-supervisor" && option == "--gate" {
+            let model = doxa_fleet::judge::Model::parse(model)?;
+            let report = doxa_fleet::checkpoint_gate::evaluate_file(Path::new(path), &model, Path::new(value))?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return if report.passed { Ok(()) } else { Err(invalid("recorded checkpoint holdout did not meet the declared gate")) };
+        }
+    }
     if let [command, path, flag, model, gate_flag, gate_path] = args {
         if command == "evaluate-messages" && flag == "--message-judge" && gate_flag == "--gate" {
             let model = doxa_fleet::judge::Model::parse(model)?;
