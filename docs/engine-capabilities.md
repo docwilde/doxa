@@ -24,7 +24,11 @@ DOXA keeps one engine per session. The model picker shows choices reported by or
 
 Provider tool features depend on the installed CLI, model, and account. `/model`, `/effort`, and `/mode` expose only supported choices. Model and effort changes wait for the current turn and queue to finish; the supported active permission transitions are described below. The picker can show separately sourced context, thinking, and price facts for an exact model ID; unknown fields stay unknown and facts do not make a model selectable. [Model fact provenance](plans/model-registry.md).
 
-`doxa model-facts ENGINE MODEL --check-availability` reports whether the current account lists an exact model ID: `listed`, `unlisted` or `unknown`. The report includes the observation time, source and listing latency. Codex uses the provider's `account/read` and `model/list`; DeepSeek uses its documented `GET /models`. GLM and Claude report `unknown` because their providers document no account-scoped listing. The check runs only when requested and stores nothing. It does not change the picker, effort choices or budget admission. [Availability details](plans/model-registry.md#account-availability-observations).
+`doxa model-facts ENGINE MODEL --check-availability` reports catalog membership: `listed`, `unlisted` or `unknown`, with the observation time, source and listing latency. Codex uses the provider's `account/read` and `model/list`; DeepSeek uses its documented `GET /models`. Claude queries its CLI catalog for advertised aliases and resolved IDs, including `[1m]` variants; its timing includes CLI startup. This metadata check verifies neither authentication nor entitlement; absence from the catalog does not prove a model is unusable. GLM remains `unknown` without a documented listing. The explicit check saves no observation cache and changes no picker, effort or budget choice. Claude uses the same isolated account configuration as session launch. [Availability details](plans/model-registry.md#account-availability-observations).
+
+For mise's multicall `claude` wrapper, DOXA uses a bounded `mise which claude`
+lookup to pin the installed executable. The lookup installs no tool; a failed,
+ambiguous or timed-out resolution refuses the launch or catalog observation.
 
 The **Attach** chip, **Alt+A** and Linux PNG clipboard paste send bounded image
 content directly to Claude/Codex, including Docker sessions. Text files are
