@@ -44,7 +44,7 @@ Choose an installed engine in place of `codex`. Claude needs its CLI; protected 
 
 ## Recent development
 
-The latest tagged release is **2.0.0-beta.79**, with **LORE 0.62.30**. Account availability checks are a further development change; the other updates below ship in beta.79:
+The latest tagged release is **2.0.0-beta.80**, with **LORE 0.62.30** and protected **Codex 0.166.0**. It includes these updates:
 
 - **Account model availability.** `doxa model-facts ENGINE MODEL --check-availability` checks the signed-in Codex account or DeepSeek API account and reports `listed`, `unlisted` or `unknown`, with the observation time and request latency. Claude and GLM remain `unknown`. These observations do not change the picker, price bounds or budget admission. [Model facts](docs/engine-capabilities.md).
 - **Images for API workers.** DeepSeek `deepseek-flash` and eligible Router API targets accept image attachments. DOXA requires documented vision support, an image token bound and a price bound. GLM images remain unavailable until all three facts are sourced. [Image input](docs/terminal-images.md#prompt-attachments).
