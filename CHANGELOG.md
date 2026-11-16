@@ -7,6 +7,12 @@ the stable 2.0 release has not been cut.
 
 ## Unreleased
 
+- Observe advertised Claude CLI catalog membership for aliases, resolved
+  model IDs and `[1m]` variants with `model-facts --check-availability`.
+  Report startup-inclusive timing; account authentication, entitlement, billed
+  tier and charges remain unverified by this metadata check.
+- Resolve mise's `claude` command wrapper to the installed executable with a
+  bounded `mise which claude` lookup before catalog discovery or session launch.
 - Add offline development scoring and a frozen holdout gate for recorded fleet
   checkpoint Choices, with exact item-wise bounds, whole-fleet bootstrap
   quantiles, calibration, citations and latency. The commands require attested

@@ -4,12 +4,17 @@ use crate::launch::{self, Engine, LaunchOptions};
 use doxa_engines::codex_appserver::{AppServerDriver, AppServerOptions, CodexPermission};
 use doxa_engines::codex_driver::SandboxMode;
 use serde_json::{json, Value};
-use std::{path::Path, sync::atomic::AtomicBool, time::Duration};
+use std::{path::Path, sync::atomic::AtomicBool, time::{Duration, Instant}};
 
 const DEADLINE: Duration = Duration::from_secs(20);
 
 pub(crate) fn load_cancellable(engine: Engine, cwd: &Path, cancel: &AtomicBool) -> Result<Value, &'static str> {
     load_with_auth(engine, cwd, false, Some(cancel))
+}
+
+/// Advertised metadata only; this result provides no account admission evidence.
+pub(crate) fn load_catalog(engine: Engine, cwd: &Path) -> Result<Value, &'static str> {
+    load_with_auth(engine, cwd, false, None)
 }
 
 /// Router setup requires account evidence from the connected CLI protocol,
@@ -27,6 +32,7 @@ fn load_with_auth(engine: Engine, cwd: &Path, authenticated: bool,
             codex_catalog_at(&executable, cwd, authenticated, cancel)
         }
         Engine::Claude => {
+            let started = Instant::now();
             let options = LaunchOptions { claude_bin: std::env::var_os("DOXA_CLAUDE_BIN").map(Into::into), ..Default::default() };
             let executable = launch::claude_executable(&options).map_err(|_| "Claude executable unavailable")?;
             doxa_claude::isolation::sync_credentials(false).map_err(|_| "Claude account unavailable")?;
@@ -36,11 +42,13 @@ fn load_with_auth(engine: Engine, cwd: &Path, authenticated: bool,
                 executable: &executable, cwd, session_id: &session, resume: false,
                 model: None, effort: None, permission_mode: "manual", config_dir: &config_dir, plugins: &[],
             };
+            let remaining = DEADLINE.saturating_sub(started.elapsed());
+            if remaining.is_zero() { return Err("Claude account/catalog discovery timed out"); }
             let result = match (authenticated, cancel) {
-                (true, Some(cancel)) => doxa_claude::catalog::discover_authenticated_cancellable(options, DEADLINE, cancel),
-                (false, Some(cancel)) => doxa_claude::catalog::discover_cancellable(options, DEADLINE, cancel),
-                (true, None) => doxa_claude::catalog::discover_authenticated(options, DEADLINE),
-                (false, None) => doxa_claude::catalog::discover(options, DEADLINE),
+                (true, Some(cancel)) => doxa_claude::catalog::discover_authenticated_cancellable(options, remaining, cancel),
+                (false, Some(cancel)) => doxa_claude::catalog::discover_cancellable(options, remaining, cancel),
+                (true, None) => doxa_claude::catalog::discover_authenticated(options, remaining),
+                (false, None) => doxa_claude::catalog::discover(options, remaining),
             };
             result.map_err(|_| "Claude account/catalog unavailable or unverified")
         }

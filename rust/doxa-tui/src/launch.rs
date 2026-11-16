@@ -7,6 +7,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::os::unix::process::CommandExt;
+use std::os::fd::AsRawFd;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -127,7 +128,62 @@ pub fn executable(input: &Path) -> io::Result<PathBuf> {
 }
 
 pub fn claude_executable(options: &LaunchOptions) -> io::Result<PathBuf> {
-    executable(options.claude_bin.as_deref().unwrap_or(Path::new("claude")))
+    let input = options.claude_bin.as_deref().unwrap_or(Path::new("claude"));
+    let path = executable(input)?;
+    if input.file_name().is_some_and(|name| name == "claude")
+        && path.file_name().is_some_and(|name| name == "mise") {
+        return mise_claude(&path, Duration::from_secs(2));
+    }
+    Ok(path)
+}
+
+/// Resolve mise's multicall wrapper to an installed CLI before pinning its
+/// canonical path. `mise which` only resolves; it does not install Claude.
+fn mise_claude(mise: &Path, timeout: Duration) -> io::Result<PathBuf> {
+    struct Resolver(Child);
+    impl Drop for Resolver {
+        fn drop(&mut self) {
+            unsafe { libc::kill(-(self.0.id() as i32), libc::SIGKILL); }
+            let _ = self.0.wait();
+        }
+    }
+    let refused = || invalid("Claude mise wrapper did not resolve one installed executable");
+    let mut child = Resolver(Command::new(mise).args(["which", "claude"])
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .process_group(0).spawn()?);
+    let mut stdout = child.0.stdout.take().ok_or_else(refused)?;
+    let fd = stdout.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(refused());
+    }
+    let deadline = Instant::now() + timeout;
+    let mut bytes = Vec::new(); let mut eof = false;
+    loop {
+        let mut block = [0u8; 1024];
+        loop {
+            match stdout.read(&mut block) {
+                Ok(0) => { eof = true; break; },
+                Ok(count) => { bytes.extend_from_slice(&block[..count]); if bytes.len() > 4096 { return Err(refused()); } },
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+                Err(_) => return Err(refused()),
+            }
+            if Instant::now() >= deadline { return Err(refused()); }
+        }
+        if let Some(status) = child.0.try_wait()? {
+            if !status.success() { return Err(refused()); }
+            if eof { break; }
+        }
+        if Instant::now() >= deadline { return Err(refused()); }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| refused())?.trim_end_matches(['\r','\n']);
+    let path = Path::new(text);
+    if !path.is_absolute() || text.chars().any(char::is_control) { return Err(refused()); }
+    let resolved = executable(path)?;
+    if resolved == mise || resolved.file_name().is_some_and(|name| name == "mise") { return Err(refused()); }
+    Ok(resolved)
 }
 
 pub fn codex_executable(options: &LaunchOptions) -> io::Result<PathBuf> {
@@ -948,6 +1004,51 @@ mod tests {
             "daemon refused stop request"
         );
         server.join().unwrap();
+    }
+
+    #[test]
+    fn claude_mise_wrapper_pins_the_installed_binary_instead_of_the_multicall_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("installed cli");
+        fs::write(&actual, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&actual, fs::Permissions::from_mode(0o700)).unwrap();
+        let mise = dir.path().join("mise");
+        fs::write(&mise, "#!/usr/bin/env python3\nimport pathlib,sys\nassert sys.argv[1:]==['which','claude']\nprint(pathlib.Path(__file__).with_name('result').read_text(),end='')\n").unwrap();
+        fs::set_permissions(&mise, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(dir.path().join("result"), format!("{}\n", actual.display())).unwrap();
+        let wrapper = dir.path().join("claude"); symlink(&mise, &wrapper).unwrap();
+        let options = LaunchOptions { claude_bin: Some(wrapper), ..Default::default() };
+        assert_eq!(claude_executable(&options).unwrap(), actual);
+        assert_eq!(executable(&mise).unwrap(), mise, "ordinary executable resolution stays canonical");
+    }
+
+    #[test]
+    fn claude_mise_resolution_refuses_failed_ambiguous_and_non_executable_results() {
+        let dir = tempfile::tempdir().unwrap(); let mise = dir.path().join("mise");
+        fs::write(&mise, "#!/usr/bin/env python3\nimport pathlib,sys\np=pathlib.Path(__file__).with_name('result')\ns=p.read_text()\nif s=='FAIL':sys.exit(1)\nprint(s,end='')\n").unwrap();
+        fs::set_permissions(&mise, fs::Permissions::from_mode(0o700)).unwrap();
+        let data = dir.path().join("not-executable"); fs::write(&data, "data").unwrap();
+        for result in [String::new(), "relative/claude\n".into(), "one\ntwo\n".into(),
+            "x".repeat(4097), format!("{}\n",data.display()), format!("{}\n",dir.path().join("absent").display()),
+            format!("{}\n",mise.display()), "FAIL".into()] {
+            fs::write(dir.path().join("result"), result).unwrap();
+            assert!(mise_claude(&mise, Duration::from_secs(2)).is_err());
+        }
+    }
+
+    #[test]
+    fn claude_mise_timeout_kills_and_reaps_the_resolver() {
+        let dir = tempfile::tempdir().unwrap(); let mise = dir.path().join("mise");
+        fs::write(&mise, "#!/usr/bin/env python3\nimport os,pathlib,time\npathlib.Path(__file__).with_name('pid').write_text(str(os.getpid()))\ntime.sleep(60)\n").unwrap();
+        fs::set_permissions(&mise, fs::Permissions::from_mode(0o700)).unwrap();
+        let started = Instant::now();
+        assert!(mise_claude(&mise, Duration::from_millis(750)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        if let Ok(pid) = fs::read_to_string(dir.path().join("pid")) {
+            let pid: i32 = pid.parse().unwrap(); let alive = unsafe { libc::kill(pid,0) } == 0;
+            if alive { unsafe { libc::kill(pid,libc::SIGKILL); libc::waitpid(pid,std::ptr::null_mut(),0); } }
+            assert!(!alive, "timed out resolver must be killed and reaped");
+        }
     }
 
     #[test]

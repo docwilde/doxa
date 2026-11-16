@@ -44,7 +44,7 @@ Choose an installed engine in place of `codex`. Claude needs its CLI; protected 
 
 ## Recent development
 
-Current source is **2.0.0-beta.81**, with **LORE 0.62.30** and protected **Codex 0.167.0**. It includes these updates:
+The latest tagged release is **2.0.0-beta.81**, with **LORE 0.62.30** and protected **Codex 0.167.0**. It includes these updates:
 
 - **Reproducible provider installation.** The installer and updater use a fixed Git diff format, so local algorithm, context, prefix and abbreviation settings preserve the reviewed patch identity.
 - **Account model availability.** `doxa model-facts ENGINE MODEL --check-availability` checks the signed-in Codex account or DeepSeek API account and reports `listed`, `unlisted` or `unknown`, with the observation time and request latency. Claude and GLM remain `unknown`. These observations do not change the picker, price bounds or budget admission. [Model facts](docs/engine-capabilities.md).
@@ -55,6 +55,8 @@ Current source is **2.0.0-beta.81**, with **LORE 0.62.30** and protected **Codex
 **SubQ Snap 1.2** serves routing and fleet review. Select the exact `subq-snap-1.2` model in candidate configs or Settings; retired preview IDs are refused.
 
 Development checkouts also include [offline checkpoint evaluation](docs/fleet-checkpoint-gate.md): score private recorded Choices, freeze a gate against development data, then check a separate holdout. The commands make no model calls and leave enforcement unchanged. Independent labels and representative collection remain necessary for quality claims.
+
+Development builds query the advertised Claude CLI catalog with `doxa model-facts claude opus --check-availability`. Advertised aliases and resolved IDs, including `[1m]` variants, can be listed; absence from that catalog does not prove the model is unusable. Account authentication and entitlement remain unverified by this metadata check. The observation leaves model selection and budget admission unchanged.
 
 ## Workspace and sessions
 
