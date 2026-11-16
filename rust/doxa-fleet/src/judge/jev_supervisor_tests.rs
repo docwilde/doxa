@@ -194,13 +194,13 @@ fn decision_supervisor_rejects_aliases_nonhost_artifacts_and_context_overflow_be
 #[test]
 fn snap_supervision_uses_frozen_choice_evidence_and_budget_with_local_http() {
     let (_dir,mut context,snapshot)=fixture(Mode::Enforce);
-    context.review.supervisor=Some(Model::parse("subq:subq-snap-preview").unwrap());
+    context.review.supervisor=Some(Model::parse("subq:subq-snap-1.2").unwrap());
     context.validate().unwrap();
     let body=supervisor_request(&context,&snapshot);
-    assert_eq!(body["model"],"subq-snap-preview");
+    assert_eq!(body["model"],"subq-snap-1.2");
     assert!(body["questions"]["alignment"]["instructions"].is_string());
     let mut wire=response(&body,"drifted","task_scope","host-checkpoint");
-    wire["model"]=json!("subq-snap-preview");wire["usage"]["output_tokens"]=json!(0);
+    wire["model"]=json!("subq-snap-1.2");wire["usage"]["output_tokens"]=json!(0);
     for answer in wire["answers"].as_object_mut().unwrap().values_mut() { answer["confidence"]=json!(0.95); }
     let (endpoint,thread)=server(wire.to_string(),200);
     let result=evaluate_request_at(&context,context.review.supervisor.as_ref().unwrap(),&body,&endpoint,"fixture-key").unwrap();
@@ -208,10 +208,10 @@ fn snap_supervision_uses_frozen_choice_evidence_and_budget_with_local_http() {
     assert_eq!(result.result["verdict"],"drifted");assert_eq!(result.result["evidence_refs"],json!(["host-checkpoint"]));
     let state=crate::read_private::<State>(&context.state_path,crate::MAX_STATE).unwrap();
     assert_eq!(state.calls,1);assert!(!state.accounting_unknown);
-    assert!((state.actual_estimated_usd-0.000005).abs()<1e-10);
+    assert!((state.actual_estimated_usd-0.000004).abs()<1e-10);
     let model=context.review.supervisor.as_ref().unwrap();
     let mut unsupported=response(&body,"aligned","within_charter","no_support");
-    unsupported["model"]=json!("subq-snap-preview");unsupported["usage"]["output_tokens"]=json!(0);
+    unsupported["model"]=json!("subq-snap-1.2");unsupported["usage"]["output_tokens"]=json!(0);
     assert_eq!(parse_response_for_request(model,&unsupported,1,Some(&body)).unwrap().result["verdict"],"uncertain");
     let mut empty=snapshot;empty["artifacts"]=json!([]);
     let body=supervisor_request(&context,&empty);
@@ -223,7 +223,7 @@ fn snap_supervision_uses_frozen_choice_evidence_and_budget_with_local_http() {
 fn snap_outages_keep_reserved_spend_and_enforced_review_pause() {
     for status in [401,402,429,503] {
         let (_dir,mut context,snapshot)=fixture(Mode::Enforce);
-        context.review.supervisor=Some(Model::parse("subq:subq-snap-preview").unwrap());
+        context.review.supervisor=Some(Model::parse("subq:subq-snap-1.2").unwrap());
         let body=supervisor_request(&context,&snapshot);
         let (endpoint,thread)=server(json!({"detail":{"error_type":"fixture_error","message":"untrusted provider text"}}).to_string(),status);
         assert!(evaluate_request_at(&context,context.review.supervisor.as_ref().unwrap(),&body,&endpoint,"fixture-key").is_err());

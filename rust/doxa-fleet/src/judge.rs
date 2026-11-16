@@ -28,7 +28,7 @@ impl Model {
         let value=value.strip_prefix("llm:").unwrap_or(value);
         let (provider,model)=value.split_once(':').ok_or_else(||invalid("review model requires provider:model"))?;
         if !matches!(provider,"claude"|"codex"|"deepseek"|"glm"|"jev"|"subq")||model.is_empty()||model.len()>128||model.chars().any(char::is_control){return Err(invalid("unsupported independent review model"));}
-        if provider == "subq" && model != "subq-snap-preview" { return Err(invalid("SubQ decisions require subq:subq-snap-preview")); }
+        if provider == "subq" && model != "subq-snap-1.2" { return Err(invalid("SubQ decisions require subq:subq-snap-1.2")); }
         Ok(Self{provider:provider.into(),model:model.into()})
     }
     pub fn display(&self)->String{format!("{}:{}",self.provider,self.model)}

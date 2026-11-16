@@ -96,7 +96,7 @@ false-completion, false-alert, latency and cost validation remains open.
 
 ## SubQ Snap as an independent reviewer
 
-Select `subq:subq-snap-preview` for `--alignment-supervisor` or
+Select `subq:subq-snap-1.2` for `--alignment-supervisor` or
 `--message-judge`, independently, or use the corresponding dropdowns under
 `/settings` → **Fleet**. Set the masked **SubQ API key** under **Session**;
 `SUBQ_API_KEY` overrides a saved key. Keep an explicit review budget.
@@ -108,8 +108,8 @@ unsupported choices, ties or low confidence remain uncertain. Outages retain
 reserved spend and enforced holds; no automatic retry or provider switch runs.
 
 The [typed Decisions API](https://docs.subq.ai/endpoints/decisions-api/) requires
-`subq-snap-preview` and input-only usage. The [published rate](https://subq.ai/#pricing)
-is $0.05/M input tokens, with free output. Existing conservative snapshot limits
+`subq-snap-1.2` and input-only usage. The [published rate](https://subq.ai/#pricing)
+is $0.04/M input tokens, with free output. Existing conservative snapshot limits
 remain in force. Local HTTP fixtures cover successful citations, unsupported
 evidence, and 401/402/429/503 failures; live quality calibration remains open.
 

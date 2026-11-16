@@ -519,7 +519,7 @@ fn scene(name: &str) -> App {
                 "  slot 1 · worker · active · demo-claude-02",
                 "  slot 2 · worker · dependency_waiting",
                 "Dependency 2 after 1 · human review required · tests_verified: false",
-                "Independent supervisor: subq:subq-snap-preview · enforce",
+                "Independent supervisor: subq:subq-snap-1.2 · enforce",
                 "Fast message judge: jev:jev-1.13.0 · shadow",
                 "Native controller phase: monitoring",
                 "Total budget USD: 6.0",

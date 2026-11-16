@@ -29,7 +29,7 @@ An unavailable saved pin remains visible and requires explicit correction.
 **R** refreshes; reviews expire after 60 seconds. Missing, failed or empty
 catalogs remain unverified. Environment-owned settings remain read-only.
 
-Jev costs $0.042/M input tokens; Snap costs $0.05/M input tokens, with free
+Jev costs $0.042/M input tokens; Snap costs $0.04/M input tokens, with free
 output. Reservations include failed/unreported attempts. CLI worker account
 charges are unknown and excluded from the tracked routing/direct API allowance.
 Authentication does not establish subscription billing or a free worker.

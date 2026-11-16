@@ -7,7 +7,7 @@ const LABELS:[&str;15]=["Task","Directory","Worker engine","Worker model (blank 
 pub(super) struct Wizard{values:[String;15],selected:usize,editing:bool}
 impl Wizard{
     fn new(cwd:PathBuf)->Self{Self{values:[String::new(),cwd.to_string_lossy().into_owned(),"glm".into(),String::new(),"3".into(),"glm".into(),String::new(),"docker-offline".into(),"docker-offline".into(),"5".into(),"off".into(),"off".into(),"jev:jev-1.13.0".into(),"0.5".into(),String::new()],selected:0,editing:false}}
-    fn choices(&self)->Option<&'static [&'static str]>{match self.selected{2=>Some(&["glm","deepseek","claude","codex","router"]),5=>Some(&["off","glm","deepseek","claude","codex","router"]),7|8=>Some(&["docker-offline","docker-open","native"]),10=>Some(&["off","jev:jev-1.13.0","subq:subq-snap-preview"]),11=>Some(&["off","shadow","enforce"]),_=>None}}
+    fn choices(&self)->Option<&'static [&'static str]>{match self.selected{2=>Some(&["glm","deepseek","claude","codex","router"]),5=>Some(&["off","glm","deepseek","claude","codex","router"]),7|8=>Some(&["docker-offline","docker-open","native"]),10=>Some(&["off","jev:jev-1.13.0","subq:subq-snap-1.2"]),11=>Some(&["off","shadow","enforce"]),_=>None}}
     fn cycle(&mut self,back:bool){if let Some(options)=self.choices(){let i=options.iter().position(|row|*row==self.values[self.selected]).unwrap_or(0);self.values[self.selected]=options[(i+if back{options.len()-1}else{1})%options.len()].into();}}
     fn lines(&self)->Vec<String>{
         let mut lines=vec!["New fleet · ↑↓ field · ←→ preset · Enter edit · PgUp/PgDn scroll · F10 review · Esc".into(),
