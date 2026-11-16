@@ -73,7 +73,7 @@ trials per task, and no timeout or CPU, memory or storage overrides.
 | F-mid | Always the mid candidate, for example `deepseek-flash` with high thinking or a GLM model | Middle baseline |
 | F-strong | Always the strongest candidate, for example `deepseek-v4-pro` with high thinking | Quality ceiling among candidates |
 | **J** | Jev 1.13.0 choosing a candidate on **every call**, through the [routed endpoint](#the-routed-endpoint) | Routing under test |
-| S (optional) | SubQ Snap Preview through the same endpoint | Second router |
+| S (optional) | SubQ Snap 1.2 through the same endpoint | Second router |
 | H (optional) | DOXA's own API-worker harness as a Harbor custom agent, with Jev routing | Harness effect. **Not comparable** to leaderboard rows; reported separately |
 
 **Owner decision:** the exact candidate list, model IDs and thinking settings.
@@ -88,8 +88,11 @@ that Terminus-2 calls as if it were a single model.
 
 - Each request is one routing turn. The endpoint passes the conversation to the
   Router's existing decision path with the frozen candidate config. It then
-  forwards the request unchanged to the chosen candidate and returns that
-  candidate's response unchanged.
+  forwards the conversation, tools and sampling controls to the chosen candidate.
+  It substitutes only the selected model ID and the candidate's frozen,
+  provider-supported effort fields; the corresponding fixed arm uses those
+  same fields. It returns the candidate's response unchanged. The journal
+  records the exact permitted substitutions and rejects every other rewrite.
 - Pinning is off. Jev sees the conversation as the Router normally does, and
   nothing about the benchmark task: no task ID, category or difficulty.
 - Every call journals the decision, the candidate chosen, tokens, cost under the
@@ -98,8 +101,9 @@ that Terminus-2 calls as if it were a single model.
 - Budget admission works as it does today: a call with an unknown priced bound
   is refused, and that refusal is recorded as an infrastructure failure, not
   silently retried.
-- The endpoint only *chooses* a model. It never changes a request's content or
-  tools, so the harness stays the official one.
+- The endpoint chooses a frozen model/effort pair. It never changes the
+  conversation, tools, token allowances or harness resource limits. Candidate
+  configuration is not permission to enlarge the official harness allowance.
 
 ## Design
 
@@ -185,10 +189,16 @@ in-house tasks. Trials of one task are correlated, though, so the effective
 sample size is closer to the number of tasks than to the number of trials.
 **Compute the minimum detectable difference from stage 1**, using how often
 two arms disagree on the same task. The 5-point non-inferiority margin is only
-meaningful if stage 1 shows a test of that size is achievable. If not, the owner
-widens the margin *before* stage 2, or adds SWE-bench Pro tasks.
+meaningful if the experiment can resolve a difference of that size. Stage 1 is an
+interim look at the same public tasks: it cannot justify widening the success
+margin for the confirmatory comparison. If the frozen design lacks power,
+report that limit, or register a separate experiment with fresh tasks. Keep
+SWE-bench Pro results separate from the primary endpoint.
 
 ## Budget
+
+The separately authorized [pilot](evaluation-pilot.md) has a $25 ceiling and
+uses development tasks only. It does not authorize these full benchmark stages.
 
 Terminal-Bench tasks are long, multi-turn agent runs, so the cost per run is
 measured, not guessed.
@@ -214,7 +224,8 @@ call; their real share is measured in stage 1.
    and use a dedicated rootful runner rather than changing limits.
 2. **The routed endpoint** described above, with journals and budget admission.
    It is the only new production component, and needs its own tests: that it
-   forwards requests unchanged, that budget refusals are counted, and that
+   preserves conversation and tools, applies only frozen model/effort substitutions,
+   counts budget refusals, and ensures that
    decisions are journalled.
 3. **Analysis script**: reads Harbor results and endpoint journals, computes
    accuracy, cost and paired intervals, and prints the decision-rule table. It
@@ -228,7 +239,7 @@ call; their real share is measured in stage 1.
 
 | Phase | Work | Exit |
 | --- | --- | --- |
-| 0 | Build the endpoint and analysis; plumbing runs on the in-house corpus and Harbor examples | Endpoint forwards unchanged; journals and costs verified |
+| 0 | Build the endpoint and analysis; plumbing runs on the in-house corpus and Harbor examples | Endpoint preserves payloads except frozen model/effort fields; journals and costs verified |
 | 1 | Freeze candidates, config and rules; run the A0 anchor, 5 trials | Anchor within tolerance, or stop |
 | 2 | Stage 1, all arms, 1 trial | Pass rates, token use, cost per arm; compute power; owner confirms margins |
 | 3 | Stage 2, J vs F-strong (and S), 5 trials | Decision-rule table |

@@ -80,7 +80,7 @@ therefore comes from **real fleet work**, consented and scrubbed, labelled by
 
 ## Experiment S1: message judge
 
-- **Candidates.** Jev 1.13.0, SubQ Snap Preview and the DeepSeek fast judge.
+- **Candidates.** Jev 1.13.0, SubQ Snap 1.2 and the DeepSeek fast judge.
   Each gets its own gate file, and all gates are frozen **before** the holdout
   is opened. Evaluating several gates on one holdout is allowed, but the winner
   must be reported together with how many gates were tried.
@@ -150,6 +150,10 @@ checkpoints and 100 `aligned` ones across at least 10 fleets** in the holdout.
 At 54 of 60 caught (90%), the exact 95% lower bound on drift recall is about 81%.
 
 ## Budget
+
+The separately authorized [pilot](evaluation-pilot.md) reserves $5 for
+development collection. It does not authorize the full collection or human
+labelling workload described here.
 
 Most of the cost is **human labelling time and fleet runs**, not judge calls.
 
