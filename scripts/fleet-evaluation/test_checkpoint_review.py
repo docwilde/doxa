@@ -119,6 +119,20 @@ class CheckpointReviewTests(unittest.TestCase):
         review.join_packet(self.packet, None, self.result, False)
         self.assertTrue(self.read_result()[0]["outcome"]["citations_supported"])
 
+    def test_replay_manifest_binds_only_development_cards_and_export_receipt(self):
+        self.export(sample())
+        review.export_replay_source(self.packet, self.result)
+        manifest, = review.rows((self.result / "development-cards.json").read_bytes())
+        self.assertEqual(manifest, {"version": 1, "origin": "synthetic", "split": "development",
+                                   "export_receipt_sha256": review.digest((self.packet / "export-receipt.jsonl").read_bytes()),
+                                   "cards": review.rows((self.packet / "blind-cards.jsonl").read_bytes())})
+
+    def test_replay_manifest_refuses_real_holdout_cards(self):
+        self.export({**sample(origin="real"), "split": "holdout"})
+        with self.assertRaises(ValueError):
+            review.export_replay_source(self.packet, self.result)
+        self.assertFalse(self.result.exists())
+
     def test_freeze_requires_bound_complete_verdicts_and_unmodified_export(self):
         self.export(sample())
         labels = verdicts(self.packet)

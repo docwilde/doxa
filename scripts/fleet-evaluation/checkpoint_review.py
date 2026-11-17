@@ -194,6 +194,16 @@ def read_export(directory):
     return values, receipt, receipt_hash
 
 
+def export_replay_source(packet, directory):
+    values, _, receipt_hash = read_export(packet)
+    if values[0]["split"] != "development":
+        raise ValueError("offline replay export refuses holdout checkpoints")
+    manifest = {"version": 1, "origin": values[0]["origin"], "split": "development",
+                "export_receipt_sha256": receipt_hash, "cards": blind_cards(values)}
+    write_directory(directory, {"development-cards.json": jsonl([manifest])})
+    return len(values)
+
+
 def labels_by_id(values, expected, binding, field, predicate):
     labels = {}
     for row in values:
@@ -308,6 +318,9 @@ def main():
     export.add_argument("source", type=Path)
     export.add_argument("guide", type=Path)
     export.add_argument("new_packet", type=Path)
+    replay = commands.add_parser("export-replay")
+    replay.add_argument("packet", type=Path)
+    replay.add_argument("new_replay_source", type=Path)
     freeze = commands.add_parser("freeze")
     freeze.add_argument("packet", type=Path)
     freeze.add_argument("verdicts", type=Path)
@@ -322,6 +335,8 @@ def main():
     args = parser.parse_args()
     if args.command == "export":
         count = export_packet(read_private(args.source), read_private(args.guide), args.new_packet)
+    elif args.command == "export-replay":
+        count = export_replay_source(args.packet, args.new_replay_source)
     elif args.command == "freeze":
         count = freeze_verdicts(args.packet, read_private(args.verdicts), args.attestation)
     else:

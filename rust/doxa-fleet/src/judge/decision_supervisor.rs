@@ -1,7 +1,8 @@
 //! Closed typed checkpoint decisions. No generated reasons, commands or evidence.
 //! Wire/context contracts: https://docs.typesafe.ai/api and /models.
 use super::{Model, SUPERVISOR_INSTRUCTIONS};
-use crate::invalid;
+use crate::{invalid, Alignment};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::{collections::BTreeSet, io};
 
@@ -71,7 +72,13 @@ pub(super) fn request(model: &Model, input: &Value, threshold: f64) -> io::Resul
     Ok(body)
 }
 
-fn choice<'a>(model: &Model, answer: &'a Value, criteria: &Value) -> io::Result<(&'a str, f64)> {
+struct Choice<'a> {
+    selected: &'a str,
+    confidence: f64,
+    guard: f64,
+}
+
+fn choice<'a>(model: &Model, answer: &'a Value, criteria: &Value) -> io::Result<Choice<'a>> {
     let fields = answer.as_object().filter(|fields| fields.len() == 4)
         .ok_or_else(|| invalid("invalid Jev supervisor Choice schema"))?;
     if answer["type"] != "choice" { return Err(invalid("invalid Jev supervisor answer type")); }
@@ -97,40 +104,84 @@ fn choice<'a>(model: &Model, answer: &'a Value, criteria: &Value) -> io::Result<
         return Err(invalid("inconsistent Jev supervisor Choice distribution"));
     }
     let tied = probabilities.values().filter_map(Value::as_f64).filter(|p| (*p-maximum).abs() <= 0.000001).count() > 1;
-    Ok((selected, if tied { 0.0 } else { confidence }))
+    Ok(Choice { selected, confidence, guard: if tied { 0.0 } else { confidence } })
 }
 
-pub(super) fn result(model: &Model, value: &Value, request: &Value) -> io::Result<Value> {
+/// The bounded raw Choice and host guard fields used by offline checkpoint evaluation.
+#[derive(Debug, Serialize)]
+pub struct CheckpointChoice {
+    pub choice: Alignment,
+    pub basis: String,
+    pub citation_ids: Vec<String>,
+    pub alignment_confidence: f64,
+    pub guard_confidence: [f64; 3],
+    pub supported: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CheckpointChoiceUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+#[derive(Debug)]
+pub struct CheckpointChoiceObservation {
+    pub projection: CheckpointChoice,
+    pub usage: CheckpointChoiceUsage,
+    threshold: f64,
+}
+
+pub(super) fn observe(model: &Model, value: &Value, request: &Value) -> io::Result<CheckpointChoiceObservation> {
     model.validate_supervisor()?;
     if value.as_object().is_none_or(|fields| fields.len() != 3) || value["model"] != model.model
-        || value["usage"].as_object().is_none_or(|fields| fields.len() != 2)
-        || value["usage"]["input_tokens"].as_u64().is_none() || value["usage"]["output_tokens"].as_u64().is_none() {
+        || value["usage"].as_object().is_none_or(|fields| fields.len() != 2) {
         return Err(invalid("invalid pinned Jev supervisor model or usage"));
     }
-    if model.provider == "subq" && (value["usage"]["input_tokens"].as_u64().is_none_or(|n| n == 0) || value["usage"]["output_tokens"] != 0) {
+    let (Some(input_tokens), Some(output_tokens)) = (value["usage"]["input_tokens"].as_u64(), value["usage"]["output_tokens"].as_u64()) else {
+        return Err(invalid("invalid pinned Jev supervisor model or usage"));
+    };
+    if model.provider == "subq" && (input_tokens == 0 || output_tokens != 0) {
         return Err(invalid("invalid SubQ decision usage"));
     }
     let answers = value["answers"].as_object().filter(|rows| rows.len() == 3)
         .ok_or_else(|| invalid("invalid Jev supervisor answer set"))?;
     let questions = &request["questions"];
-    let (alignment, alignment_confidence) = choice(model, answers.get("alignment").ok_or_else(|| invalid("missing supervisor alignment"))?, &questions["alignment"]["criteria"])?;
-    let (basis, basis_confidence) = choice(model, answers.get("basis").ok_or_else(|| invalid("missing supervisor basis"))?, &questions["basis"]["criteria"])?;
-    let (evidence, evidence_confidence) = choice(model, answers.get("evidence").ok_or_else(|| invalid("missing supervisor evidence"))?, &questions["evidence"]["criteria"])?;
+    let alignment = choice(model, answers.get("alignment").ok_or_else(|| invalid("missing supervisor alignment"))?, &questions["alignment"]["criteria"])?;
+    let basis = choice(model, answers.get("basis").ok_or_else(|| invalid("missing supervisor basis"))?, &questions["basis"]["criteria"])?;
+    let evidence = choice(model, answers.get("evidence").ok_or_else(|| invalid("missing supervisor evidence"))?, &questions["evidence"]["criteria"])?;
+    let verdict = match alignment.selected {
+        "aligned" => Alignment::Aligned,
+        "drifted" => Alignment::Drifted,
+        "blocked" => Alignment::Blocked,
+        "uncertain" => Alignment::Uncertain,
+        _ => return Err(invalid("invalid checkpoint alignment Choice")),
+    };
     let threshold = (if model.provider == "subq" { &request["state"]["doxa_confidence_guard"] } else { &questions["alignment"]["instructions"]["minimum_confidence"] }).as_f64()
         .filter(|p| p.is_finite() && (0.0..=1.0).contains(p)).ok_or_else(|| invalid("missing supervisor confidence guard"))?;
-    let compatible = match alignment {
-        "aligned" => basis == "within_charter",
-        "drifted" => matches!(basis, "task_scope" | "authority" | "contradiction"),
-        "blocked" => matches!(basis, "evidence" | "contradiction" | "budget" | "deadline" | "human_action"),
-        "uncertain" => true,
-        _ => false,
+    let compatible = match verdict {
+        Alignment::Aligned => basis.selected == "within_charter",
+        Alignment::Drifted => matches!(basis.selected, "task_scope" | "authority" | "contradiction"),
+        Alignment::Blocked => matches!(basis.selected, "evidence" | "contradiction" | "budget" | "deadline" | "human_action"),
+        Alignment::Uncertain => true,
     };
-    let low_confidence = [alignment_confidence, basis_confidence, evidence_confidence].into_iter().any(|confidence| confidence < threshold || confidence == 0.0);
-    let unsupported = matches!(evidence, NONE | "no_support") || !compatible || basis == "unknown";
-    let alignment = if low_confidence || unsupported { "uncertain" } else { alignment };
+    let citation_ids = if matches!(evidence.selected, NONE | "no_support") { vec![] } else { vec![evidence.selected.to_owned()] };
+    let supported = !citation_ids.is_empty() && compatible && basis.selected != "unknown";
+    let projection = CheckpointChoice {
+        choice: verdict, basis: basis.selected.into(), citation_ids, alignment_confidence: alignment.confidence,
+        guard_confidence: [alignment.guard, basis.guard, evidence.guard], supported,
+    };
+    let usage = CheckpointChoiceUsage { input_tokens, output_tokens };
+    Ok(CheckpointChoiceObservation { projection, usage, threshold })
+}
+
+pub(super) fn result(model: &Model, value: &Value, request: &Value) -> io::Result<Value> {
+    let CheckpointChoiceObservation { projection, threshold, .. } = observe(model, value, request)?;
+    let CheckpointChoice { choice, basis, citation_ids, guard_confidence, supported, .. } = projection;
+    let low_confidence = guard_confidence.into_iter().any(|confidence| confidence < threshold || confidence == 0.0);
+    let alignment = if low_confidence || !supported { Alignment::Uncertain } else { choice };
     let reason = if low_confidence { "Decision model checkpoint choices did not meet the frozen confidence guard; human review is required." }
-        else if unsupported { "Decision model checkpoint choices lack a supporting supplied host citation or consistent charter basis; human review is required." }
-        else { match basis {
+        else if !supported { "Decision model checkpoint choices lack a supporting supplied host citation or consistent charter basis; human review is required." }
+        else { match basis.as_str() {
             "within_charter" => "Decision model selected current alignment against the cited host artifact; this does not verify completion.",
             "task_scope" => "Decision model selected task or assignment drift against the cited host artifact.",
             "authority" => "Decision model selected an authority concern against the cited host artifact.",
@@ -141,9 +192,8 @@ pub(super) fn result(model: &Model, value: &Value, request: &Value) -> io::Resul
             "human_action" => "Decision model selected a host-recorded human action against the cited host artifact.",
             _ => "Decision model selected uncertainty; human review is required.",
         }};
-    let refs = if matches!(evidence, NONE | "no_support") { vec![] } else { vec![evidence] };
-    Ok(json!({"verdict":alignment,"evidence_refs":refs,"charter_clause":basis,"reason":reason,
-        "recommended_action":if alignment == "aligned" { "Continue only within existing host permissions; retain human release gates and any current pause." }
+    Ok(json!({"verdict":alignment,"evidence_refs":citation_ids,"charter_clause":basis,"reason":reason,
+        "recommended_action":if alignment == Alignment::Aligned { "Continue only within existing host permissions; retain human release gates and any current pause." }
             else { "Ask the owner to review the supplied host evidence; do not change scope, permissions or dependency releases." }}))
 }
 

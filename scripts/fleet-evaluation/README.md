@@ -228,8 +228,59 @@ request builder that alter the plan require a new fixture.
 
 The example has no dispatch or credential interface. Request construction
 does not establish that a card originated from a live host, that its text was
-scrubbed or that a model would return a valid result. Provider replay, usage
-journaling and latency measurements remain separate work.
+scrubbed or that a model would return a valid result.
+
+### Project recorded development batches
+
+Export up to 128 distinct checkpoint cards from a verified development
+packet and freeze both candidate requests for each card at the same
+threshold. The Python export checks the original packet, refuses holdout
+data and copies the blinded snapshots without prior outcomes or human labels.
+
+```sh
+python3 scripts/fleet-evaluation/checkpoint_review.py export-replay \
+  /absolute/private/checkpoint-packet /absolute/private/new-replay
+cargo run --locked -p doxa-fleet --example checkpoint_requests -- freeze-batch \
+  /absolute/private/new-replay/development-cards.json 0.75 /absolute/private/new-replay/batch-plan.json
+```
+
+Keep the plan private since it contains the exact request bodies. Prepare an
+owner-private JSON file with one record for every card and candidate model
+in the plan. Below is one illustrative record. An actual batch supplies
+both models for each card and the exact request SHA-256 from the frozen
+plan. Match that hash against the original response's request record.
+
+```json
+{"version":1,"provenance":"synthetic_fixture","records":[{"id":"00000000-0000-4000-8000-000000000001","model":"jev:jev-1.13.0","request_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","latency_ms":null,"response_json":null}]}
+```
+
+Set `provenance` to `synthetic_fixture` for a synthetic packet or
+`retained_private` for a real development packet. Supply the exact retained
+provider JSON as a JSON string in `response_json`. This preserves duplicate
+fields so the production parser can refuse them. Use null for an unavailable
+body or unobserved timing. Keep any independently recorded timing for an
+unavailable response.
+
+```sh
+cargo run --locked -p doxa-fleet --example checkpoint_requests -- project-batch \
+  /absolute/private/new-replay/batch-plan.json EXACT_PRINTED_PLAN_SHA256 \
+  /absolute/private/retained-responses.json /absolute/private/new-replay/projections.json
+```
+
+The projector rebuilds the request batch, checks the frozen digest and
+requires exact response coverage by card ID, model and request digest. It uses
+the production Choice decoder for raw alignment confidence, guarded
+confidences, basis, citations, and reported token usage. Unavailable or
+rejected bodies yield an unavailable outcome with null usage. The new file
+contains only the bounded projections, observed timing, validated usage and
+binding metadata. Retained response provenance and timing depend on the
+operator's independent capture. Keep the projected outcomes separate from
+blind verdicts until the verdicts have been frozen.
+
+These projections supply model-side fields for the checkpoint review source
+schema. A record without observed timing cannot supply an evaluator row.
+Dispatcher integration, automatic retained-response capture, and a
+message replay path remain open.
 
 ## Verification
 

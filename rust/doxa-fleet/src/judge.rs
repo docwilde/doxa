@@ -84,6 +84,18 @@ pub fn checkpoint_choice_request(model: &Model, input: &Value, threshold: f64) -
     }
     decision_supervisor::request(model, input, threshold)
 }
+
+pub use decision_supervisor::{CheckpointChoice, CheckpointChoiceObservation, CheckpointChoiceUsage};
+
+/// Decode a retained Choice response against a verified production request.
+/// The caller supplies the request binding and any observed timing separately.
+pub fn checkpoint_choice_observation(model: &Model, request: &Value, raw: &[u8]) -> io::Result<CheckpointChoiceObservation> {
+    if !model.is_decision() || request["model"] != model.model || !decision_supervisor::is_request(request) {
+        return Err(invalid("checkpoint response requires the matching production Choice request"));
+    }
+    let value = parse_review_json(model, raw)?;
+    decision_supervisor::observe(model, &value, request)
+}
 fn request_with_threshold(model:&Model,instructions:&str,input:&Value,threshold:f64)->io::Result<Value>{
     if model.is_decision() && decision_supervisor::selected(instructions) {
         return checkpoint_choice_request(model,input,threshold);
@@ -239,11 +251,14 @@ fn call_at(model:&Model,endpoint:&str,key:&str,body:&Value)->io::Result<Response
         }
         if response.content_length().is_some_and(|n|n>MAX_OUTPUT as u64){return Err(invalid("review response exceeds bound"));}
         let mut raw=Vec::new();while let Some(chunk)=response.chunk().await.map_err(|_|invalid("invalid review response"))?{raw.extend_from_slice(&chunk);if raw.len()>MAX_OUTPUT{return Err(invalid("review response exceeds bound"));}}
-        if model.is_decision() {
-            strict::parse(&raw).map_err(|_|invalid("invalid or duplicate Jev supervisor JSON"))
-        } else { serde_json::from_slice(&raw).map_err(|_|invalid("invalid review response JSON")) }
+        parse_review_json(model, &raw)
     })?;
     parse_response_for_request(model,&value,started.elapsed().as_millis(),Some(body))
+}
+fn parse_review_json(model: &Model, raw: &[u8]) -> io::Result<Value> {
+    if raw.len() > MAX_OUTPUT { return Err(invalid("review response exceeds bound")); }
+    if model.is_decision() { strict::parse(raw).map_err(|_|invalid("invalid or duplicate Jev supervisor JSON")) }
+    else { serde_json::from_slice(raw).map_err(|_|invalid("invalid review response JSON")) }
 }
 pub fn parse_response(model:&Model,value:&Value,latency_ms:u128)->io::Result<Response>{
     parse_response_for_request(model,value,latency_ms,None)

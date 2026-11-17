@@ -10,6 +10,9 @@ use std::{
     path::Path,
 };
 
+#[path = "checkpoint_requests/batch.rs"]
+mod batch;
+
 const MODELS: [&str; 2] = ["jev:jev-1.13.0", "subq:subq-snap-1.2"];
 const KIND: &str = "offline_checkpoint_request_fixture";
 const MAX_PLAN_BYTES: u64 = 256 * 1024;
@@ -79,7 +82,7 @@ fn prepare(card: Card, threshold: f64) -> io::Result<Plan> {
     })
 }
 
-fn freeze(path: &Path, plan: &Plan) -> io::Result<()> {
+fn write_new(path: &Path, value: &impl Serialize, limit: u64) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("plan needs a parent directory"))?;
@@ -94,9 +97,9 @@ fn freeze(path: &Path, plan: &Plan) -> io::Result<()> {
             "use a canonical owner-private directory for the new plan",
         ));
     }
-    let raw = serde_json::to_vec(plan)?;
-    if raw.len() as u64 >= MAX_PLAN_BYTES {
-        return Err(invalid("checkpoint plan exceeds bounds"));
+    let raw = serde_json::to_vec(value)?;
+    if raw.len() as u64 >= limit {
+        return Err(invalid("checkpoint output exceeds bounds"));
     }
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(&raw)?;
@@ -129,14 +132,23 @@ fn run() -> io::Result<()> {
         [_, command, card, threshold, destination] if command == "freeze" => {
             let threshold = threshold.parse().map_err(|_| invalid("invalid checkpoint threshold"))?;
             let plan = prepare(read_private(Path::new(card), judge::MAX_INPUT as u64)?, threshold)?;
-            freeze(Path::new(destination), &plan)?;
+            write_new(Path::new(destination), &plan, MAX_PLAN_BYTES)?;
             plan
         }
         [_, command, plan, digest] if command == "verify" => {
             verify(read_private(Path::new(plan), MAX_PLAN_BYTES)?, digest)?
         }
+        [_, command, source, threshold, destination] if command == "freeze-batch" => {
+            let threshold = threshold.parse().map_err(|_| invalid("invalid checkpoint threshold"))?;
+            return batch::freeze(Path::new(source), threshold, Path::new(destination));
+        }
+        [_, command, plan, digest, responses, destination] if command == "project-batch" => {
+            return batch::project(
+                Path::new(plan), digest, Path::new(responses), Path::new(destination),
+            );
+        }
         _ => return Err(invalid(
-            "Usage: checkpoint_requests freeze PRIVATE_CARD_JSON THRESHOLD ABSOLUTE_NEW_PLAN | verify PRIVATE_PLAN_JSON EXACT_PLAN_SHA256"
+            "Usage: checkpoint_requests freeze PRIVATE_CARD_JSON THRESHOLD ABSOLUTE_NEW_PLAN | verify PRIVATE_PLAN_JSON EXACT_PLAN_SHA256 | freeze-batch PRIVATE_DEVELOPMENT_CARDS_JSON THRESHOLD ABSOLUTE_NEW_PLAN | project-batch PRIVATE_BATCH_PLAN EXACT_PLAN_SHA256 PRIVATE_RESPONSES_JSON ABSOLUTE_NEW_PROJECTIONS"
         )),
     };
     println!(
@@ -240,12 +252,12 @@ mod tests {
             .insert("review_reserved_usd".into(), json!(51.248178375505404));
         let plan = prepare(card_with_host_float, 0.75).unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(freeze(&output, &plan).is_err());
+        assert!(write_new(&output, &plan, MAX_PLAN_BYTES).is_err());
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        freeze(&output, &plan).unwrap();
+        write_new(&output, &plan, MAX_PLAN_BYTES).unwrap();
         assert_eq!(fs::metadata(&output).unwrap().mode() & 0o777, 0o600);
         assert_eq!(read_private::<Plan>(&output, MAX_PLAN_BYTES).unwrap(), plan);
-        assert!(freeze(&output, &prepare(card(), 0.5).unwrap()).is_err());
+        assert!(write_new(&output, &prepare(card(), 0.5).unwrap(), MAX_PLAN_BYTES).is_err());
         assert_eq!(read_private::<Plan>(&output, MAX_PLAN_BYTES).unwrap(), plan);
     }
 }

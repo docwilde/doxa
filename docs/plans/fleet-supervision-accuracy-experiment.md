@@ -186,10 +186,11 @@ Most of the cost is **human labelling time and fleet runs**, not judge calls.
    verdicts. It then prepares a separate citation review and joins the result
    for offline scoring. Collection and the original paired human submissions
    remain external.
-3. **Re-scoring request fixture implemented for checkpoints.** The offline
-   example freezes and verifies both pinned Choice requests from the same
-   scrubbed snapshot using the production builder. Candidate dispatch, message
-   replay, usage and latency journaling remain open.
+3. **Offline checkpoint request and projection batches implemented.** The
+   example uses the same development snapshots and guard for both pinned
+   Choice models. It verifies exact production request hashes and projects
+   separately recorded bodies through the production decoder. Candidate
+   dispatch, message replay and automatic recording remain open.
    [Offline checkpoint request fixture](../../scripts/fleet-evaluation/README.md#offline-checkpoint-request-fixture)
 4. **Induced-risk task kit.** Versioned task setups for the enrichment runs, with
    their intended stimulus recorded, so labellers never see the intent.
