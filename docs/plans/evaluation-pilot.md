@@ -55,6 +55,28 @@ identity and price bounds before execution; a changed rate or unsupported
 account stops admission. Credentials flow through the existing provider
 process, and never enter journals, cards or committed fixtures.
 
+The offline admission ledger uses SQLite transactions and rounds each hold
+upward to integer USD micros.
+A full-size Pro hold is $0.156162 after rounding. Jev holds use its pinned
+$0.042 per million input tokens and the production 24,576-byte limit plus
+1,024 framing tokens. The total for 30 maximum-size decisions is $0.032280.
+[Admission ledger](../../scripts/routing-benchmark/pilot_ledger.py)
+
+Initialize one owner-private database with `PilotLedger.create(path)` for the
+whole pilot. Use `PilotLedger.open(path)` for every worker or restart. The
+ledger binds the plan and corpus hashes and refuses a second reservation for
+the same slot. Make exactly one dispatch after a successful reservation.
+Bind verified response usage to its request digest with `settle_usage`. A
+missing response or unverified usage leaves the whole hold charged. An
+out-of-bound verified observation also freezes new reservations. Use `summary`
+for aggregate spend and usage without request identifiers or contents.
+
+`reserve_fleet` reserves the entire $2.50 for a fleet slot. Before use, the
+fleet launcher must enforce that cap across every API role and independently
+verify the deployment configuration. Fleet holds stay charged in full. The
+ledger has credential-free tests. Paid dispatch still requires integration of
+these admissions into the routed endpoint, repair bridge and fleet launcher.
+
 ## Prerequisites and deliverables
 
 The routed endpoint, analysis script and reviewed repair bridge must pass

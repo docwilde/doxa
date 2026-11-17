@@ -14,6 +14,9 @@
   "max_input_tokens": 20000,
   "max_output_tokens": 32768,
   "router_model": "jev-1.13.0",
+  "decision_input_usd_per_million": "0.042",
+  "max_decision_input_bytes": 24576,
+  "decision_input_framing_tokens": 1024,
   "candidates": [
     {"provider": "deepseek", "model": "deepseek-flash", "effort": "none", "input_usd_per_million": "0.30", "output_usd_per_million": "1.20"},
     {"provider": "deepseek", "model": "deepseek-v4-pro", "effort": "high", "input_usd_per_million": "1.32", "output_usd_per_million": "3.96"}
