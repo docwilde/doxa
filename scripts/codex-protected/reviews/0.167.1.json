@@ -88,7 +88,7 @@
     "canonical_git_settings_control": "passed",
     "code_mode_host_build": "passed",
     "independent_pinned_checkout_matches_reviewed_patch": true,
-    "installer_script_tests": 22,
+    "installer_script_tests": 23,
     "native_engine_tests": 114,
     "native_existing_ignored": 3,
     "paid_requests": 0,

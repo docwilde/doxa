@@ -645,7 +645,10 @@ def main():
     official = options.official_cli or (Path(found) if (found := shutil.which("codex")) else None)
     if official is None or not official.is_absolute() or not os.access(official, os.X_OK):
         parser.error("an installed official Codex CLI is required; pass --official-cli")
-    official = official.resolve()
+    resolved_official = official.resolve()
+    # mise's multicall entry point selects Codex by the invoked name.
+    if official.name != "codex" or resolved_official.name != "mise":
+        official = resolved_official
     if not options.launcher.is_absolute() or not os.access(options.launcher, os.X_OK):
         parser.error("--launcher must be an absolute native launcher executable")
     with locked_directory(options.cache):

@@ -10,7 +10,8 @@ the stable 2.0 release has not been cut.
 **Protected Codex**
 
 - Update **`codex-current`** to protected Codex **0.167.1**, pinned to `0a94398fa60c4fac0e7659e4213a0a36e613dd46`.
-- Retain compiled compaction refusal, permission checks and complete helper provenance; incompatible upstream releases stop the updater.
+- Retain compiled compaction refusal, permission checks and complete helper provenance. Incompatible upstream releases stop the updater.
+- Preserve the name of mise's Codex wrapper so the installed launcher delegates help and login to Codex.
 
 **Model discovery and fleet evaluation**
 

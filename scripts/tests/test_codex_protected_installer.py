@@ -52,6 +52,28 @@ sys.stdin.read()
         self.destination = result.parent
         return result
 
+    def test_cli_receipt_preserves_mise_multicall_name(self):
+        mise = self.root / "mise"
+        mise.write_text('#!/bin/sh\n[ "${0##*/}" = codex ] && printf "Codex CLI\\n"\n')
+        mise.chmod(0o700)
+        wrapper = self.root / "codex"
+        wrapper.symlink_to(mise)
+        providers = self.root / "providers"
+        args = ["install_codex_protected.py", "--cache", str(self.root / "cache"),
+                "--install-root", str(providers), "--launcher", str(self.launcher)]
+        with (
+            patch("sys.argv", args),
+            patch.object(installer.shutil, "which", return_value=str(wrapper)),
+            patch.object(installer, "build", return_value=self.binary),
+            patch.object(installer, "build_code_mode_host", return_value=(self.helper, None)),
+            patch.object(installer, "verified_artifacts", return_value=None),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            installer.main()
+        receipt = json.loads((providers / "codex-current" / "receipt.json").read_text())
+        self.assertEqual(receipt["official_cli"], str(wrapper))
+        self.assertEqual(subprocess.check_output([receipt["official_cli"], "--help"], text=True), "Codex CLI\n")
+
     def test_outer_receipt_restores_legacy_pointer_after_publication(self):
         self.install()
         legacy=self.root/"providers"/installer.PROVIDER
