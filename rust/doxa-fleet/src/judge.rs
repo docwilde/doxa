@@ -76,9 +76,17 @@ const NOUL_FIELDS:[(&str,&str);5]=[
 pub fn request(model:&Model,instructions:&str,input:&Value)->io::Result<Value>{
     request_with_threshold(model,instructions,input,0.5)
 }
+/// Build the production Choice request body without resolving credentials,
+/// reserving budget, dispatching a call or reading a fleet journal.
+pub fn checkpoint_choice_request(model: &Model, input: &Value, threshold: f64) -> io::Result<Value> {
+    if !model.is_decision() {
+        return Err(invalid("checkpoint request fixture requires a pinned Choice supervisor"));
+    }
+    decision_supervisor::request(model, input, threshold)
+}
 fn request_with_threshold(model:&Model,instructions:&str,input:&Value,threshold:f64)->io::Result<Value>{
     if model.is_decision() && decision_supervisor::selected(instructions) {
-        return decision_supervisor::request(model,input,threshold);
+        return checkpoint_choice_request(model,input,threshold);
     }
     let limit=if instructions==SEMANTIC_INSTRUCTIONS{MAX_SEMANTIC_INPUT}else{MAX_INPUT};
     if serde_json::to_vec(input)?.len()>limit{return Err(invalid("review input exceeds bound"));}

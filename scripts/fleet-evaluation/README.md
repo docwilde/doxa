@@ -199,12 +199,45 @@ maintaining the private records and opening the citation review after verdict
 freeze. Development and holdout use separate packets. Preserve the unchanged
 development row order when assembling the dataset for a frozen holdout gate.
 
+## Offline checkpoint request fixture
+
+The `checkpoint_requests` example freezes the two pinned Choice request bodies
+for one scrubbed checkpoint card and a selected confidence guard. It uses the
+production request builder for Jev 1.13.0 and SubQ Snap 1.2. Both arms share the
+same host snapshot. Each provider receives its production-specific encoding
+of the guard and evidence criteria. A plan contains private snapshot text.
+
+```sh
+install -d -m 0700 /absolute/private/checkpoint-fixture
+install -m 0600 scripts/fleet-evaluation/checkpoint-request-fixture.jsonl \
+  /absolute/private/checkpoint-fixture/card.json
+cargo run --locked -p doxa-fleet --example checkpoint_requests -- freeze \
+  /absolute/private/checkpoint-fixture/card.json 0.75 \
+  /absolute/private/checkpoint-fixture/plan.json
+cargo run --locked -p doxa-fleet --example checkpoint_requests -- verify \
+  /absolute/private/checkpoint-fixture/plan.json EXACT_PRINTED_PLAN_SHA256
+```
+
+The bundled card is synthetic. To check an existing review packet, provide a
+private JSON file containing one complete row from its `blind-cards.jsonl`.
+Keep its snapshot unchanged. Freeze writes a new plan and prints only the
+plan and snapshot digests, model IDs and call count. The hashes cover canonical
+JSON serialization. Verify rebuilds both requests and compares the resulting
+plan to the frozen digest. Changes to the host input, model pin, guard or
+request builder that alter the plan require a new fixture.
+
+The example has no dispatch or credential interface. Request construction
+does not establish that a card originated from a live host, that its text was
+scrubbed or that a model would return a valid result. Provider replay, usage
+journaling and latency measurements remain separate work.
+
 ## Verification
 
 Run the focused helpers with:
 
 ```sh
 cargo test --locked -p doxa-fleet --example review_evaluation
+cargo test --locked -p doxa-fleet --example checkpoint_requests
 python3 -m unittest discover -s scripts/fleet-evaluation -p 'test_*.py'
 ```
 
