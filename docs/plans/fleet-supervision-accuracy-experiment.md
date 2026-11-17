@@ -40,7 +40,7 @@ be frozen before any holdout result is opened.
 | Unit | One peer message, before delivery | One host checkpoint (charter, assignments, evidence, guard observations, budget, phase) |
 | Output | Risk score against the frozen threshold | `aligned`, `uncertain`, `drifted` or `blocked`, plus confidence and citations |
 | Evaluator today | `doxa fleet evaluate-messages` with a frozen [gate](../fleet-message-gate.md) | `doxa fleet evaluate-checkpoints` with a frozen [gate](../fleet-checkpoint-gate.md) |
-| Labelling tool | `scripts/fleet-evaluation/blind_review.py` | Needs a checkpoint card format |
+| Labelling tool | `scripts/fleet-evaluation/blind_review.py` | `scripts/fleet-evaluation/checkpoint_review.py` |
 
 The two are evaluated separately. A message judge that passes its gate says
 nothing about checkpoint supervision, and the reverse.
@@ -180,8 +180,12 @@ Most of the cost is **human labelling time and fleet runs**, not judge calls.
    operator attestations; the bounds state their independence and denominator
    assumptions. Fixture checks supply no supervisor quality evidence. The
    evaluator makes no reviewer calls and changes no policy.
-2. **Checkpoint cards** in `blind_review.py`: the host evidence a supervisor
-   receives, sealed and blinded, plus a join step for the four-way verdict.
+2. **Checkpoint cards implemented.** The
+   [offline helper](../../scripts/fleet-evaluation/README.md#blind-checkpoint-review)
+   exports supplied scrubbed host snapshots and binds guide, cards and final
+   verdicts. It then prepares a separate citation review and joins the result
+   for offline scoring. Collection and the original paired human submissions
+   remain external.
 3. **Re-scoring harness.** Replays the stored judge and supervisor inputs to each
    candidate model exactly as production would, so every model scores identical
    inputs. It journals usage and latency.
@@ -194,14 +198,14 @@ Most of the cost is **human labelling time and fleet runs**, not judge calls.
    message helper joins only the final `risky` label. An
    [aggregate agreement calculator](../../scripts/fleet-evaluation/README.md#aggregate-agreement-arithmetic)
    computes point kappa from supplied counts; it cannot verify human pairing
-   or provenance. Per-field human records, paired-label collection and
-   checkpoint card/join tooling remain open.
+   or provenance. Per-field human records and paired-label collection remain
+   open.
 
 ## Phases and stop rules
 
 | Phase | Work | Exit |
 | --- | --- | --- |
-| 0 | Evaluator fixture checks pass. Build checkpoint cards, the re-scoring harness and induced-risk kit; review and freeze the draft label guide | Complete dry run on synthetic fixtures; the tools refuse them as holdout |
+| 0 | Evaluator fixture checks pass. Build the re-scoring harness and induced-risk kit. Review and freeze the draft label guide | Complete dry run on synthetic fixtures. The tools refuse them as holdout |
 | 1 | Development fleets; double labelling; κ check | κ ≥ 0.6 per field; owner freezes gates and thresholds |
 | 2 | Holdout fleets; blind labelling after the freeze | Labels joined |
 | 3 | Evaluate frozen gates (S1) and the frozen threshold (S2) | Pass or fail per gate |

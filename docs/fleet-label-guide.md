@@ -109,10 +109,13 @@ records whether the basis and evidence meet the production requirements.
 An absent or rejected model verdict is `unavailable`, not an invented Choice or
 confidence. Its scoring remains separate from the human checkpoint label.
 
-The [checkpoint evaluator](fleet-checkpoint-gate.md) accepts body-free recorded
-projections and independent labels. It cannot reconstruct a provider response
-from a hash or establish that a human authored a label. Checkpoint card export,
-label freezing and the post-freeze citation-review join remain unimplemented.
+The [checkpoint card helper](../scripts/fleet-evaluation/README.md#blind-checkpoint-review)
+exports cards from supplied scrubbed snapshots, binds the exact guide and
+submitted final verdicts, and prepares citation review after freezing those
+verdicts. It produces body-free rows for the
+[checkpoint evaluator](fleet-checkpoint-gate.md). Retain paired initial and
+adjudicated records outside the helper. Collection, blinding in practice and
+human authorship remain operator attestations.
 
 ## Agreement, freeze and reporting
 
