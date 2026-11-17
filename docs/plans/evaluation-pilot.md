@@ -114,6 +114,19 @@ forwarded bytes and limits to a body-free receipt. Run
 The live endpoint still needs credential handling, ledger admission and
 provider transport connected to this core.
 
+Run the combined forwarding and ledger fixture from the repository root.
+
+```sh
+cargo build -p doxa-router --locked --offline --example pilot_wire_fixture
+python3 scripts/routing-benchmark/pilot_admission_fixture.py \
+  "${CARGO_TARGET_DIR:-target}/debug/examples/pilot_wire_fixture"
+```
+
+The fixture checks the committed request hash before each synthetic dispatch.
+It verifies matched fixed and routed requests, then reopens the ledger in an
+independent process to confirm ambiguous holds still count and prevent replay.
+The printed report contains no request or response text.
+
 The repair bridge can use text-only requests for all three arms. Tool-bearing
 requests must meet both candidates' requirements before Jev runs. DeepSeek's
 thinking mode requires prior assistant reasoning content when tools are
