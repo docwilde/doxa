@@ -106,6 +106,20 @@ fixed arms send the identical candidate settings. Preserve conversation,
 tools, token allowance and provider responses. Separate model failures,
 budget refusals, incomplete runs and actual grader failures in reports.
 
+The offline forwarding core in `doxa-router` checks both fixed profiles and
+the Jev selection path. It preserves the JSON values of all other accepted
+request fields, including raw message and tool payloads, and binds the exact
+forwarded bytes and limits to a body-free receipt. Run
+`cargo test -p doxa-router --test pilot_forward` for the fixture controls.
+The live endpoint still needs credential handling, ledger admission and
+provider transport connected to this core.
+
+The repair bridge can use text-only requests for all three arms. Tool-bearing
+requests must meet both candidates' requirements before Jev runs. DeepSeek's
+thinking mode requires prior assistant reasoning content when tools are
+supplied, so histories missing it are refused for Pro and the routed arm.
+[DeepSeek thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/)
+
 The [offline repair bridge](../representative-routing-benchmark.md#deliver-a-reviewed-pilot-repair)
 exports only candidate-visible files, previews a bounded source proposal and
 delivers an approved revision to the grader. Run its credential-free controls

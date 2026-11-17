@@ -1,6 +1,7 @@
 //! Bounded opt-in typed decision routing. The host owns durable admission and execution.
 mod strict;
 pub mod evaluation;
+pub mod pilot_forward;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
