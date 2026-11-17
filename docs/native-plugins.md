@@ -260,7 +260,7 @@ replay and expiry. It never contacts a provider or edits the owner's home:
 DOXA_PLUGIN_DISPOSABLE_HOST=1 DOXA_PLUGIN_TUI_ACCEPTANCE=1 \
   python3 scripts/plugin-installed-tui-proof.py \
     --frontend /absolute/private/install/doxa-rs \
-    --daemon /absolute/private/install/doxa-daemon \
+    --daemon /absolute/private/install/doxa-daemon-rs \
     --receipt installed-tui-proof.json
 ```
 
@@ -269,6 +269,27 @@ delegated supervisor layout as the installed-host command. Each receipt name
 must be new. The driver writes the host receipts, bounded TUI log and a final
 receipt only after every lifecycle case succeeds. Its temporary activation
 keys and owner home are removed at exit.
+
+Add `--panel` on the disposable delegated guest to exercise
+`/native-plugin panel` with the same signed activation workflow. The driver
+checks the DOXA header, exact module digest and guttered text. A second
+fixture returns a control sequence and must render no text or control bytes
+from the module. The lifecycle cases observe populated worker cgroups before
+permit revocation, panel close and window close, then require cleanup. They
+also check expiry, copied-permit refusal and refusal of a zero-grant package.
+The final receipt identifies the contract exercised. The panel guest run
+remains pending.
+
+To exercise the two installed TUI refusal paths on Linux, run the driver with
+an isolated fixture daemon and `--panel-refusals-only`. This mode creates a
+temporary owner home with no operator key and prints a summary with the
+frontend, daemon and terminal-output hashes.
+
+```sh
+python3 scripts/plugin-installed-tui-proof.py --panel-refusals-only \
+  --frontend /absolute/install/doxa-rs \
+  --daemon /absolute/install/doxa-daemon-rs
+```
 
 On 2026-10-13 this driver passed all eight cases against a private installed
 frontend on a disposable Ubuntu 26.04.1 guest with Bubblewrap 0.11.1 and cgroup

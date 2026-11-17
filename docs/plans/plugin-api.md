@@ -379,16 +379,18 @@ for new Claude sessions, not native TUI extensions.
   module, and every close, revocation and expiry path removes the worker's
   cgroup before a result is accepted. Local unit, worker-binary and
   Bubblewrap tests pass.
-- **Outstanding for panels** (needs a disposable delegated guest, not this
-  workstation):
+- The installed PTY driver has a refusal-only mode. Local beta.81 with a
+  fixture daemon refused an approved panel without a permit and refused an
+  approved zero-grant package under `/native-plugin panel`.
+  [Installed PTY driver](../native-plugins.md#installed-host-proof-and-operator-activation)
+- **Outstanding for panels on a disposable delegated guest**
   - a delegated-host fixture case sending an approved panel package through
     the production review, frame, worker and sandbox path, with stale
     approval refused before cgroup creation and cleanup after success, fuel,
     memory-limit and invalid-output outcomes;
   - an installed-host proof case for panels, with the permit's case list
     updated if a case is added;
-  - PTY TUI driver cases: refusal without a permit, a rendered panel through
-    the real slash command with no plugin control bytes in the terminal
-    stream, revocation of a running panel worker, panel and window close
-    cleanup, expiry refusal, and refusal of a zero-grant package;
+  - run the PTY driver's `--panel` mode with the existing guest activation
+    flow to verify actual rendering, control-output refusal, revocation,
+    panel and window close cleanup, expiry and both grant/permit refusals;
   - a decision on whether the operator permit should name allowed grants.
