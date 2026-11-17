@@ -256,22 +256,32 @@ class PilotLedger:
 
     def summary(self):
         """Return body-free usage and spend totals. Unresolved holds count in full."""
+        with self._transaction() as db:
+            return self._summary(db)
+
+    def reporting_snapshot(self):
+        """Read the private trial join and public usage in the same transaction."""
+        with self._transaction() as db:
+            rows = db.execute("""SELECT allocation, task_id, arm, slot, request_sha256 FROM reservations
+                WHERE allocation IN ('repair', 'decisions')""")
+            return self._run_id, self._summary(db), [dict(row) for row in rows]
+
+    def _summary(self, db):
         query = """SELECT COUNT(*) AS reservations, COUNT(settled_usd_micros) AS settled,
             COALESCE(SUM(settled_usd_micros), 0) AS settled_usd_micros,
             COALESCE(SUM(CASE WHEN settled_usd_micros IS NULL THEN held_usd_micros END), 0) AS unresolved_usd_micros,
             COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens,
             COUNT(latency_ms) AS timed_calls, COALESCE(SUM(latency_ms), 0) AS total_latency_ms,
             COALESCE(SUM(scope_breach), 0) AS scope_breaches FROM reservations WHERE allocation = ?"""
-        with self._transaction() as db:
-            scope_breach = db.execute("SELECT 1 FROM reservations WHERE scope_breach = 1 LIMIT 1").fetchone() is not None
-            allocations = {}
-            for allocation, cap in self._caps.items():
-                values = dict(db.execute(query, (allocation,)).fetchone())
-                charged = values["settled_usd_micros"] + values["unresolved_usd_micros"]
-                available = cap - charged if allocation != "undispatched" and not scope_breach else 0
-                allocations[allocation] = {**values, "ceiling_usd_micros": cap, "charged_usd_micros": charged,
-                                           "unresolved": values["reservations"] - values["settled"],
-                                           "available_usd_micros": available}
+        scope_breach = db.execute("SELECT 1 FROM reservations WHERE scope_breach = 1 LIMIT 1").fetchone() is not None
+        allocations = {}
+        for allocation, cap in self._caps.items():
+            values = dict(db.execute(query, (allocation,)).fetchone())
+            charged = values["settled_usd_micros"] + values["unresolved_usd_micros"]
+            available = cap - charged if allocation != "undispatched" and not scope_breach else 0
+            allocations[allocation] = {**values, "ceiling_usd_micros": cap, "charged_usd_micros": charged,
+                                       "unresolved": values["reservations"] - values["settled"],
+                                       "available_usd_micros": available}
         return {"schema": "doxa-pilot-usage-v1", "pilot_sha256": self._binding[0],
                 "corpus_sha256": self._binding[1], "scope_breach": scope_breach, "allocations": allocations,
                 "authorized_usd_micros": sum(self._caps.values()),

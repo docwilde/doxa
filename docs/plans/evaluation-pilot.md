@@ -154,3 +154,37 @@ functional outcomes and infrastructure failures. Stop at the ceilings even if
 some trials remain incomplete. Use those measurements to quote full routing
 stages and fleet collection separately; do not extrapolate confidence from
 this pilot's success rate.
+
+### Offline development summary
+
+Initialize a private observation manifest from the existing ledger. After the
+collector records its observations, generate the aggregate summary.
+
+```sh
+python3 scripts/routing-benchmark/pilot_summary.py template "$ledger" "$manifest"
+python3 scripts/routing-benchmark/pilot_summary.py summarize "$ledger" "$manifest"
+```
+
+Each manifest row has `task_id`, `arm`, and `status`. Use the frozen task
+and arm names in the pilot plan. For a final decision or repair event, add
+`allocation` (`decisions` or `repair`) and the one-based `call` number.
+
+- For `graded`, include the final repair's `request_sha256` and the private
+  JSON emitted by `pilot_bridge.py grade` under `grade`. The case results
+  determine the functional outcome. A case execution failure produces an
+  incomplete result.
+- For `provider_failure`, include the matching reserved request's
+  `request_sha256`. For `admission_refusal`, identify the refused event
+  with its allocation and call.
+- For `grader_infrastructure_failure`, include a `failure` category of
+  `engine_unavailable`, `image_unavailable`, `container_start`, or
+  `cleanup_unconfirmed`. For a failure after a repair call, identify the
+  final repair reservation with its allocation, call, and request digest.
+- Use `incomplete` for an unfinished trial. The summary also counts any
+  omitted trial as incomplete.
+
+The summary joins one observation per trial to a single ledger snapshot and
+reports aggregate trial outcomes, measured usage, grading time and held or
+settled amounts. The collector records terminal observations, including the
+link from the provider result to the reviewed grade. Ledger amounts describe
+admission and settlement under the frozen prices.
