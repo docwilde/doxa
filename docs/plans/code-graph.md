@@ -317,11 +317,14 @@ is read-only and creates no second memory authority.
   100 ms p95 target for prepared queries was met under the laptop's
   `performance` profile. It was not met under its `quiet` profile with
   concurrent builds, and the library alone missed it there too.
-- Still unmeasured: terminal emulator paint and display, and sessions
-  attached to a real daemon with concurrent agent output. Other hosts and
-  operating systems, battery and thermal states, and recorded user query
-  mixes on other repositories are also unmeasured. Two costs remain
-  unprofiled and unchanged: the per-answer fixed floor of four Git launches
-  plus per-file reader hand-offs, and a cold-start query that waits for
-  automatic preparation and then verifies again. No timing result is a
-  universal latency guarantee.
+- Installed beta.81 measured prepared DOXA queries through a real fixture
+  daemon. Answer p95 was 50.2 ms idle and 49.8 ms with short concurrent
+  responses, with 32 queries per condition and four daemon text deltas
+  observed inside every concurrent span.
+  [Installed fixture-daemon measurement](../codegraph-tui-release-latency-2026-11-14.md#installed-fixture-daemon-follow-up-17-november-2026)
+- Terminal emulator paint and display, sustained concurrent provider output,
+  other hosts and operating systems, battery and thermal states, and recorded
+  user query mixes on other repositories remain unmeasured. The per-answer
+  fixed floor of four Git launches plus per-file reader hand-offs remains
+  unprofiled, as does a cold-start query that waits for automatic preparation
+  and then verifies again. Latency varies with host and workload.
