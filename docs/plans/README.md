@@ -1,7 +1,6 @@
 # Plan status
 
-Audited against **main `854e355f`** on **2026-11-16** (beta.80 plus the
-SubQ Snap 1.2 pin). A Python-era plan's
+Updated for **2.0.0-beta.82** on **2026-11-17**. A Python-era plan's
 "shipped" label describes that historical release; it is not evidence that
 every proposed extension exists in Rust.
 

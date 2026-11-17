@@ -19,20 +19,21 @@ import tomllib
 import re
 from contextlib import contextmanager
 
-SOURCE = "086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a"
-SOURCE_TAG = "rust-v0.167.0"
+SOURCE = "0a94398fa60c4fac0e7659e4213a0a36e613dd46"
+SOURCE_TAG = "rust-v0.167.1"
 CONTRACT = "doxa-precompact-fail-closed-v1"
-PROVIDER = "codex-0.167.0-precompact-v1"
+PROVIDER = "codex-0.167.1-precompact-v1"
 PATCH = Path(__file__).resolve().parent / "codex-protected/precompact.patch"
-PATCH_SHA256 = "4251ea9752f7ab11a20bcd6e453b18ef3f6812012661f7357b0a85d9821e8d59"
+PATCH_SHA256 = "a18ebbb80c42cf7b424b86c373db2ee5d56fc5666f815b37bb5ba698fd2fea8e"
 LEGACY_PATCH_SHA256 = "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b"
-PREVIOUS_SOURCE = '6ff1e1ca3b30fc8b914720681fcf5fe62e95f856'
-PREVIOUS_PROVIDER = 'codex-0.166.0-precompact-v1'
-PREVIOUS_PATCHES = {'c36c5b4841dc28468c45f850ab3b1ef1cebad03c6aeee29dba2f1fc1f31dd69e'}
+PREVIOUS_SOURCE = '086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a'
+PREVIOUS_PROVIDER = 'codex-0.167.0-precompact-v1'
+PREVIOUS_PATCHES = {'4251ea9752f7ab11a20bcd6e453b18ef3f6812012661f7357b0a85d9821e8d59'}
 # Installer migration/rollback trust only. The native launcher stays current-only.
 # Never infer identities from an active receipt or discard older reviewed entries.
 MAX_REVIEWED_INSTALLATIONS = 256
 REVIEWED_INSTALLATIONS = (
+    ('086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a', '4251ea9752f7ab11a20bcd6e453b18ef3f6812012661f7357b0a85d9821e8d59', 'codex-0.167.0-precompact-v1'),
     ('360319d8dee62d87e2d59fc0c21805d79519cfed', '128293eb2e10aebdff916ab1d8fbce30fa10eba2dfac01cc501f9c1591034484', 'codex-0.165.0-precompact-v1'),
     ('360319d8dee62d87e2d59fc0c21805d79519cfed', '376dc69901a97e62d19c6bf32377c4d464e93192340aa582d6992f2613f8ca46', 'codex-0.165.0-precompact-v1'),
     ('6aaac694803004a63c6f393d153c96d22521a6b9', 'f8759872787029e5bf7064fe5be7166c5367b1db09b4b60362ea625117658924', 'codex-0.164.0-precompact-v1'),
@@ -41,7 +42,7 @@ REVIEWED_INSTALLATIONS = (
     ('b412ff32c417f855c2b2d1581b77058eed87c84b', '23bccbb08344fc70d1fd8a482b19814ca7f8edff07d478091b8c703e37a7ec6d', 'codex-0.156.1-precompact-v1'),
     ('b412ff32c417f855c2b2d1581b77058eed87c84b', 'd6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b', 'codex-0.156.1-precompact-v1'),
 )
-AGENT_PREFIX = "doxa_codex_rs/0.167.0 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; "
+AGENT_PREFIX = "doxa_codex_rs/0.167.1 (doxa-precompact-fail-closed-v1; doxa-midturn-auto-v1; "
 
 # Older reviewed payloads retain their original compiler provenance during
 # migration and rollback. Exact source/patch keys prevent a toolchain relabel.

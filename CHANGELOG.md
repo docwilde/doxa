@@ -5,7 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
-## Unreleased
+## 2.0.0-beta.82 — 2026-11-17
+
+**Protected Codex**
+
+- Update **`codex-current`** to protected Codex **0.167.1**, pinned to `0a94398fa60c4fac0e7659e4213a0a36e613dd46`.
+- Retain compiled compaction refusal, permission checks and complete helper provenance; incompatible upstream releases stop the updater.
+
+**Model discovery and fleet evaluation**
 
 - Observe advertised Claude CLI catalog membership for aliases, resolved
   model IDs and `[1m]` variants with `model-facts --check-availability`.
