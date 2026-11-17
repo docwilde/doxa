@@ -77,6 +77,26 @@ verify the deployment configuration. Fleet holds stay charged in full. The
 ledger has credential-free tests. Paid dispatch still requires integration of
 these admissions into the routed endpoint, repair bridge and fleet launcher.
 
+The fixture-only fleet check uses `fleet start --dry-run` with a pinned
+DeepSeek API target in the coordinator and both workers. It leaves the Docker
+roles offline and checks both outer ledger slots. Its $2.49 host plan assigns
+$0.75 to each of the three API roles and $0.24 to the shared review allowance.
+The native fleet launcher subtracts review before dividing the API allowance,
+and verifies the per-role ceiling and Router configuration before it
+submits a prompt. The review guard durably retains each review request's
+reservation. The test runs no daemon, contacts no provider and uses a
+disposable ledger. [Fleet fixture check](../../scripts/routing-benchmark/test_pilot_fleet.py)
+
+The October 20 `live_pilot.py` case uses its own $0.90 ceiling, manually
+accounts for prior holds and can migrate the coordinator to an online profile.
+It has no linkage to the evaluation ledger. Before this pilot's fleet
+collection, bind each actual launch to a successful outer hold and the same
+run identity on resume. Verify the exact account and rate bounds for all
+selected API roles and keep LORE provider calls, external MCP and other
+spending outside those allowances disabled for the pilot. Confirm the
+coordinator, workers and independent review use the intended durable
+journals before dispatching development tasks.
+
 ## Prerequisites and deliverables
 
 The routed endpoint, analysis script and reviewed repair bridge must pass
