@@ -60,7 +60,14 @@ def quote():
         "authorized_usd": pilot["authorized_usd"],
         "paid_requests": 0,
         "execution_ready": False,
-        "remaining_prerequisites": ["reviewed_routed_endpoint", "ledger_integration_across_dispatch_paths", "reviewed_repair_bridge", "pinned_rootless_grader_image", "checkpoint_cards_and_label_guide"],
+        "remaining_prerequisites": [
+            "provider_transport_with_exact_request_admission",
+            "fleet_launch_and_resume_bound_to_ledger",
+            "pinned_rootless_grader_image",
+            "provider_account_and_exact_price_verification",
+            "provider_observations_bound_to_approved_grades",
+            "guide_freeze_and_independent_label_collection",
+        ],
         "note": "Offline arithmetic against declared price bounds. This quote neither enforces spend nor establishes live prices, credentials, task success or quality.",
     }
 
