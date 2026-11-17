@@ -198,7 +198,7 @@ def equal(a,b):
     if isinstance(a,list):return len(a)==len(b) and all(equal(x,y) for x,y in zip(a,b))
     return a==b
 
-def grade(state,host,image):
+def grade(state,host,image,*,expected_plan_sha256=None,expected_source_sha256=None):
     state=Path(state).resolve(strict=True);private_directory(state)
     docker_args(host,image,'doxa-preflight',state,'pure')
     # CLI metadata only: no source execution, no credentials and no implicit pull.
@@ -208,9 +208,12 @@ def grade(state,host,image):
     require(inspected.returncode==0 and inspected.stdout.decode().strip()==image,'immutable local image unavailable')
     run=state/('grade-'+uuid.uuid4().hex);run.mkdir(mode=0o700)
     plan,inventory=snapshot(state,run/'source');row=task(plan['task_id'])
+    source_sha256=digest(encode(inventory))
+    require(expected_plan_sha256 is None or digest(encode(plan))==expected_plan_sha256,'scored plan differs from the approved plan')
+    require(expected_source_sha256 is None or source_sha256==expected_source_sha256,'scored source differs from approved source')
     driver=repo_read('driver.py');require(digest(driver)==plan['driver_sha256'],'driver changed during source capture')
     create(run/'driver.py',driver)
-    create(run/'claim.json',{'single_use':True,'source_sha256':digest(encode(inventory)),'plan_sha256':digest(read(state/'plan.json')),'image':image,'network':'none','provider_calls':0})
+    create(run/'claim.json',{'single_use':True,'source_sha256':source_sha256,'plan_sha256':digest(read(state/'plan.json')),'image':image,'network':'none','provider_calls':0})
     observations=[]
     for split in ('public_cases','evaluator_cases'):
         for i,case in enumerate(row[split]):
@@ -223,7 +226,7 @@ def grade(state,host,image):
     # later for a new, separately scored revision, but a grade always binds this copy.
     require({name:digest(read(run/'source'/name)) for name in inventory}==inventory and digest(read(run/'driver.py'))==plan['driver_sha256'],'scored snapshot or driver changed')
     report={'schema':'doxa-repair-grade-v1','task_id':row['id'],'difficulty':row['difficulty'],'family':row['family'],'split':row['split'],
-        'passed':all(r['passed'] for r in observations),'tests':observations,'source_sha256':digest(encode(inventory)),
+        'passed':all(r['passed'] for r in observations),'tests':observations,'source_sha256':source_sha256,
         'corpus_sha256':plan['corpus_sha256'],'driver_sha256':plan['driver_sha256'],
         'image':image,'docker_host':'local_rootless_unix_socket','network':'none','source_readonly':True,
         'evaluator_answers_mounted':False,'public_smoke_examples_mounted':True,'provider_credentials_passed':False,'host_candidate_execution':False,

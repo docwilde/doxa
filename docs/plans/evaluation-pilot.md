@@ -64,6 +64,11 @@ fixed arms send the identical candidate settings. Preserve conversation,
 tools, token allowance and provider responses. Separate model failures,
 budget refusals, incomplete runs and actual grader failures in reports.
 
+The [offline repair bridge](../representative-routing-benchmark.md#deliver-a-reviewed-pilot-repair)
+exports only candidate-visible files, previews a bounded source proposal and
+delivers an approved revision to the grader. Run its credential-free controls
+with the routing benchmark unit tests before connecting it to provider dispatch.
+
 Use an existing pinned local rootless Docker image for grading, with the
 corpus's network and resource limits. Do not pull an image or weaken limits
 silently. The provider sees only the candidate workspace; the host never

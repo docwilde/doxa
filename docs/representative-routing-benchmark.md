@@ -83,6 +83,29 @@ the test source and expected answers are withheld from the candidate workspace
 and score container; runtime inputs necessarily reach the program under test.
 Future contamination and deliberate test gaming remain limitations.
 
+## Deliver a reviewed pilot repair
+
+For the five [development pilot tasks](plans/evaluation-pilot.md), the offline
+bridge exports the prepared workspace's source, contract and public cases as
+JSON. It accepts a JSON proposal with schema `doxa-pilot-repair-proposal-v1`
+and a `files` object mapping each changed editable path to its complete UTF-8
+replacement text. The operator saves that proposal to a private file and
+reviews the diff before using the printed `approval_sha256` value.
+
+```sh
+python3 scripts/routing-benchmark/pilot_bridge.py context "$state"
+python3 scripts/routing-benchmark/pilot_bridge.py review "$state" "$proposal"
+python3 scripts/routing-benchmark/pilot_bridge.py apply "$state" "$proposal" \
+  --approval REVIEWED_APPROVAL_SHA256
+```
+
+Use the absolute, owner-private state path printed by `benchmark.py prepare`.
+All bridge commands run offline. Approval binds the original workspace, exact
+proposal and resulting files. Delivery publishes a fresh revision and leaves
+the original workspace intact. `pilot_bridge.py grade` takes the new `state`
+printed by `apply` and the same Docker flags as the standalone grader below.
+It checks that the scored plan and source still match the approved revision.
+
 ## Grade in offline Docker
 
 ```sh
