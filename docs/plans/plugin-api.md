@@ -384,13 +384,13 @@ for new Claude sessions, not native TUI extensions.
   approved zero-grant package under `/native-plugin panel`.
   [Installed PTY driver](../native-plugins.md#installed-host-proof-and-operator-activation)
 - **Outstanding for panels on a disposable delegated guest**
-  - a delegated-host fixture case sending an approved panel package through
-    the production review, frame, worker and sandbox path, with stale
-    approval refused before cgroup creation and cleanup after success, fuel,
-    memory-limit and invalid-output outcomes;
-  - an installed-host proof case for panels, with the permit's case list
-    updated if a case is added;
-  - run the PTY driver's `--panel` mode with the existing guest activation
+  - Send an approved panel package through the production review, frame,
+    worker and sandbox path. Verify stale approval refusal before cgroup
+    creation and cleanup after success, fuel exhaustion, memory limits and
+    invalid output.
+  - Run the installed-host panel proof and update the permit's case list if
+    the proof adds a case.
+  - Run the PTY driver's `--panel` mode with the existing guest activation
     flow to verify actual rendering, control-output refusal, revocation,
-    panel and window close cleanup, expiry and both grant/permit refusals;
-  - a decision on whether the operator permit should name allowed grants.
+    panel and window close cleanup, expiry and both grant and permit refusals.
+  - Decide whether the operator permit should name allowed grants.
