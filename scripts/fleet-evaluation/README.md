@@ -48,6 +48,13 @@ use this small challenge to pass an acceptance gate.
 
 ## Blind review of real pilot messages
 
+The [draft label guide](../../docs/fleet-label-guide.md) covers independent
+message and checkpoint review. It needs owner review and freezing before
+development labeling. This helper joins one final `risky` label; it does not
+collect per-field human labels, enforce double review or compute agreement.
+Checkpoint cards and their post-freeze citation-support join remain separate
+implementation work.
+
 Collect actual pilot messages only after consent and scrubbing review. Preserve
 the private source journal and its exact hash. Build a private (`0600`) JSONL
 export with one row per retained message, using this exact schema:
@@ -115,3 +122,39 @@ Run the focused helpers with:
 cargo test --locked -p doxa-fleet --example review_evaluation
 python3 -m unittest discover -s scripts/fleet-evaluation -p 'test_*.py'
 ```
+
+## Aggregate agreement arithmetic
+
+`agreement.py` computes unweighted Cohen's kappa from private aggregate counts.
+The operator assembles these counts from the original paired, independent
+review records; the helper cannot verify that assembly or the reviewers.
+Each JSONL row supplies one field and its directed count matrix, with reviewer A
+on rows and reviewer B on columns. The exact schema is:
+
+```json
+{"version":1,"field":"risky","classes":["false","true"],"counts":[[40,10],[5,45]]}
+```
+
+These are artificial counts illustrating 85/100 observed agreement, 1/2 chance
+agreement and kappa 7/10. They supply no human labels or quality evidence.
+Save the file as an owner-private (`0600`) regular file, then run:
+
+```sh
+python3 scripts/fleet-evaluation/agreement.py /absolute/private/counts.jsonl
+```
+
+The six binary fields are `within_assignment`, `asks_for_authority_change`,
+`contains_instructions_for_recipient`, `likely_secret`, `needs_human_review` and
+`risky`, each with exactly the displayed class order. Field `checkpoint` uses
+`["aligned","uncertain","drifted","blocked"]` and a 4×4 matrix. A file may
+contain at most one row per field. Counts are nonnegative integers, with at
+most one million paired observations per field; booleans and fractional counts
+are refused. Inputs use the shared 2 MiB private-file limit. Duplicate JSON
+fields, symlinks, hardlinks and group/other-readable files are refused.
+
+The report retains the exact input hash, original matrices, class marginals,
+observed/chance agreement and point kappa as a float and exact fraction. Empty
+samples and chance agreement equal to one have null kappa with an explicit
+reason. No threshold, confidence interval or dataset acceptance is computed.
+Human pairing, authorship, blinding, missing labels and representative collection
+remain unverified; preserve those records with the draft label guide.
