@@ -162,15 +162,21 @@ class Screen:
 
 
 class Tui:
-    def __init__(self, binary: Path, home: Path, socket_path: Path, cwd: Path, cpus: str | None) -> None:
+    def __init__(self, binary: Path, home: Path, socket_path: Path | None, cwd: Path, cpus: str | None,
+                 *, daemon: Path | None = None, runtime: Path | None = None) -> None:
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
-        # The session cwd, not inherited repository routing, selects the worktree.
-        env = {key: value for key, value in os.environ.items()
-               if not key.startswith("DOXA_") and key not in GIT_ROUTING}
+        if daemon is None:
+            # Fixture session cwd selects the worktree independently of Git routing.
+            env = {key: value for key, value in os.environ.items()
+                   if not key.startswith("DOXA_") and key not in GIT_ROUTING}
+            command = [str(binary), str(socket_path)]
+        else:
+            env = {"PATH": "/usr/bin:/bin", "DOXA_LORE": "0", "DOXA_WORKTREE": "0", "DOXA_MCP_ENABLED": "0",
+                   "DOXA_DAEMON_BIN": str(daemon), "DOXA_RUNTIME_DIR": str(runtime), "XDG_RUNTIME_DIR": str(runtime)}
+            command = [str(binary), "--engine", "fixture", "--linger", "0"]
         env.update({"TERM": "xterm-256color", "DOXA_HOME": str(home), "DOXA_SKIP_FIRST_RUN": "1",
                     "DOXA_SKIP_UPDATE_CHECK": "1"})
-        command = [str(binary), str(socket_path)]
         if cpus:
             command = ["taskset", "-c", cpus, *command]
         self.proc = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env,
@@ -238,7 +244,7 @@ class Tui:
         os.write(self.fd, command.encode())
         self.wait_screen(lambda text: f"> {command}" in text, what=f"prompt echo {command!r}")
 
-    def timed_enter(self, expect: str, timeout: float = 60.0, before_write=None) -> dict:
+    def timed_enter(self, expect: str, timeout: float = 60.0, before_write=None, after_answer=None) -> dict:
         """Write Enter; stamp every PTY chunk until a completion marker has
         arrived, collect the rest of that burst, then replay on the screen."""
         chunks: list[tuple[float, bytes]] = []
@@ -258,19 +264,25 @@ class Tui:
                 raise RuntimeError("no code graph answer before timeout")
         for _, chunk in early:
             self.screen.feed(chunk)
-        visible = None
+        visible = scanning = None
         for at, chunk in chunks:
             self.screen.feed(chunk)
-            if visible is None and answer_visible(self.screen.text(), expect):
+            screen = self.screen.text()
+            if scanning is None and "Scanning current Git worktree" in screen:
+                scanning = at
+            if visible is None and answer_visible(screen, expect):
                 visible = at
         if visible is None:
             raise RuntimeError(f"answer for {expect!r} not visible:\n{self.screen.text()}")
+        if after_answer is not None:
+            after_answer(started, visible)
         burst_end = visible
         for at, _ in chunks:
             if visible < at <= burst_end + 0.002:
                 burst_end = at
         row = {"query": expect, "first_output_ms": round((chunks[0][0] - started) * 1000, 3),
                "answer_visible_ms": round((visible - started) * 1000, 3),
+               "scanning_visible_ms": None if scanning is None else round((scanning - started) * 1000, 3),
                "answer_frame_last_byte_ms": round((burst_end - started) * 1000, 3),
                "output_bytes": sum(len(chunk) for _, chunk in chunks)}
         # Untimed: the production modal shows three rows; scroll one page to

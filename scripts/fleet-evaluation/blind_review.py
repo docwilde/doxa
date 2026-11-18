@@ -34,7 +34,12 @@ def rows(raw):
                 raise ValueError("duplicate JSON field")
             result[key] = value
         return result
-    values = [json.loads(line, object_pairs_hook=unique_object) for line in raw.decode("utf-8").splitlines() if line.strip()]
+
+    def invalid_constant(_):
+        raise ValueError("nonfinite JSON number")
+
+    values = [json.loads(line, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+              for line in raw.decode("utf-8").split("\n") if line.strip()]
     if not 1 <= len(values) <= 10000:
         raise ValueError("need 1–10000 rows")
     return values
@@ -101,8 +106,12 @@ def join(values, labels, independent_human_labels):
              "model": row["model"], "verdict": row["verdict"], "latency_ms": row["latency_ms"]} for row in values]
 
 
-def write_new(path, values):
-    raw = b"".join((json.dumps(value, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8") for value in values)
+def jsonl(values):
+    return b"".join((json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+                     + "\n").encode("utf-8") for value in values)
+
+
+def write_private_bytes(path, raw):
     if len(raw) > MAX_BYTES:
         raise ValueError("output exceeds 2 MiB")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -110,6 +119,11 @@ def write_new(path, values):
         file.write(raw)
         file.flush()
         os.fsync(file.fileno())
+
+
+def write_new(path, values):
+    raw = jsonl(values)
+    write_private_bytes(path, raw)
     return hashlib.sha256(raw).hexdigest()
 
 

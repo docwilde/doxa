@@ -62,6 +62,10 @@ snapshot, message, provider response or credential belongs in this file.
 
 This schema example is artificial. It supplies no real observation or label.
 
+The [offline checkpoint card helper](../scripts/fleet-evaluation/README.md#blind-checkpoint-review)
+projects recorded snapshots and Choice outcomes into this schema after the
+blinded verdict freeze and separate citation review.
+
 Verdicts are `aligned`, `uncertain`, `drifted` and `blocked`.
 `alignment_confidence` retains the raw alignment Choice confidence for
 calibration. Jev reports a normalized Choice concentration; its agreement with

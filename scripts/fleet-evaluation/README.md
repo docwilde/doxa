@@ -52,8 +52,6 @@ The [draft label guide](../../docs/fleet-label-guide.md) covers independent
 message and checkpoint review. It needs owner review and freezing before
 development labeling. This helper joins one final `risky` label; it does not
 collect per-field human labels, enforce double review or compute agreement.
-Checkpoint cards and their post-freeze citation-support join remain separate
-implementation work.
 
 Collect actual pilot messages only after consent and scrubbing review. Preserve
 the private source journal and its exact hash. Build a private (`0600`) JSONL
@@ -116,10 +114,181 @@ minimum **100 holdout messages, 50 risky, 50 safe and five originating fleets**.
 The helper neither lowers those floors nor claims consent, population accuracy,
 supervisor quality or a passing gate. A small real pilot remains exploratory.
 
+## Blind checkpoint review
+
+`checkpoint_review.py` prepares [checkpoint evaluator](../../docs/fleet-checkpoint-gate.md)
+rows in two stages. First, reviewers judge the scrubbed host snapshot without
+the evaluated Choice. After the operator freezes their final verdicts, a
+separate review checks whether the selected artifact supports the model's
+alignment and basis. The helper reads recorded data and makes no live calls.
+
+Prepare an owner-private (`0600`) source JSONL file from the private collection
+journal. Use the exact scrubbed host snapshot sent to the Choice adapter, before
+provider-specific request wrapping. Preserve all eight snapshot fields,
+including worker or earlier reviewer observations that appear in the input.
+Keep any disclosure or exclusion decision in the private journal. This example
+shows the source schema with artificial development data.
+
+```json
+{"version":1,"id":"00000000-0000-4000-8000-000000000001","group_id":"00000000-0000-4000-8000-000000000010","source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"synthetic","collection_context":"controlled_task_pilot","split":"development","consented":false,"scrubbed":true,"snapshot":{"charter":{},"assignments":[],"artifacts":[{"id":"host-example","evidence":{}}],"guard_observations":[],"recent_handoff_evidence":[],"budget":{},"elapsed_deadline":null,"phase":"running"},"model":"jev:jev-1.13.0","threshold":0.75,"latency_ms":500,"outcome":{"status":"decision","choice":"aligned","basis":"within_charter","citation_ids":["host-example"],"alignment_confidence":0.99,"guard_confidence":[0.99,0.99,0.99],"supported":true}}
+```
+
+Use an opaque checkpoint UUID, a stable opaque originating fleet UUID and the
+SHA-256 of the exact original journal record. The collector attests the mapping
+to that record, consent and scrubbing. One packet has one origin, split, model
+and threshold. Each originating fleet stays in one split and collection context
+across packets. Real rows require `origin: "real"` and `consented: true`.
+Controlled-task pilots and synthetic references stay in development.
+
+For a recorded decision, retain the raw alignment Choice and confidence, the
+basis Choice, the zero or one selected artifact IDs, and the three validated
+confidence guards in alignment, basis and evidence order. Translate the
+production no-evidence criteria to an empty array. In the source and the joined
+evaluation, `supported` records the production basis/evidence guard before the
+confidence check. Use `{"status":"unavailable"}` for an absent or rejected model
+verdict with a recorded snapshot and timing. Preserve missing records separately
+for coverage reporting. The helper does not capture those inputs, replay the
+reviewer or reconstruct raw Choices from an effective verdict.
+
+```sh
+python3 scripts/fleet-evaluation/checkpoint_review.py export \
+  /absolute/private/checkpoints.jsonl /absolute/private/label-guide.md /absolute/private/new-checkpoint-packet
+```
+
+After disclosure review, give the initial reviewers only `blind-cards.jsonl`,
+`label-guide.md` and `verdict-template.jsonl`. Copy the template into a private
+submission file. Retain both independent submissions and any adjudication in the
+private review record. Prepare one final verdict per card with its reviewer ID
+and nonempty rationale. Keep the two template hashes intact. The tool checks
+coverage and binds the submitted file. Pairing, adjudication and human
+authorship are operator responsibilities.
+
+```sh
+python3 scripts/fleet-evaluation/checkpoint_review.py freeze \
+  /absolute/private/new-checkpoint-packet /absolute/private/final-verdicts.jsonl --independent-human-labels
+```
+
+The packet's `frozen/` directory is created once. It binds the export receipt
+and the exact submitted verdicts before writing the citation cards. Give
+citation reviewers only `frozen/citation-cards.jsonl` and
+`frozen/citation-template.jsonl`. They read the same snapshot, the model's raw
+alignment, its basis and cited ID. Keep the frozen human verdicts private.
+For every cited decision, copy the citation template into a private submission
+and record `supports_claim` as a boolean with reviewer ID and rationale. The
+tool derives citation membership from the supplied artifacts and treats support
+for an absent ID as invalid. For a decision with no citations, both citation
+flags are true, and its separate production `supported` guard still applies.
+
+```sh
+python3 scripts/fleet-evaluation/checkpoint_review.py join \
+  /absolute/private/new-checkpoint-packet /absolute/private/new-checkpoint-result \
+  --citation-labels /absolute/private/citation-reviews.jsonl --independent-citation-review
+```
+
+Omit both citation options when the citation file is empty. For an offline
+synthetic fixture, freeze with `--synthetic-reference`, supply fixture citation
+reviews as needed, and omit `--independent-citation-review`. Its joined
+`label_source` remains `synthetic_reference`.
+
+`labeled-checkpoints.jsonl` contains the evaluator rows with the frozen verdicts,
+recorded model outcomes and citation flags. Snapshot bodies, reasons, reviewer
+IDs and citation IDs stay in the private review records. Keep the original
+review records and the export, freeze and join receipts together. File hashes
+guard against accidental changes and label mix-ups. They depend on the operator
+maintaining the private records and opening the citation review after verdict
+freeze. Development and holdout use separate packets. Preserve the unchanged
+development row order when assembling the dataset for a frozen holdout gate.
+
+## Offline checkpoint request fixture
+
+The `checkpoint_requests` example freezes the two pinned Choice request bodies
+for one scrubbed checkpoint card and a selected confidence guard. It uses the
+production request builder for Jev 1.13.0 and SubQ Snap 1.2. Both arms share the
+same host snapshot. Each provider receives its production-specific encoding
+of the guard and evidence criteria. A plan contains private snapshot text.
+
+```sh
+install -d -m 0700 /absolute/private/checkpoint-fixture
+install -m 0600 scripts/fleet-evaluation/checkpoint-request-fixture.jsonl \
+  /absolute/private/checkpoint-fixture/card.json
+cargo run --locked -p doxa-fleet --example checkpoint_requests -- freeze \
+  /absolute/private/checkpoint-fixture/card.json 0.75 \
+  /absolute/private/checkpoint-fixture/plan.json
+cargo run --locked -p doxa-fleet --example checkpoint_requests -- verify \
+  /absolute/private/checkpoint-fixture/plan.json EXACT_PRINTED_PLAN_SHA256
+```
+
+The bundled card is synthetic. To check an existing review packet, provide a
+private JSON file containing one complete row from its `blind-cards.jsonl`.
+Keep its snapshot unchanged. Freeze writes a new plan and prints only the
+plan and snapshot digests, model IDs and call count. The hashes cover canonical
+JSON serialization. Verify rebuilds both requests and compares the resulting
+plan to the frozen digest. Changes to the host input, model pin, guard or
+request builder that alter the plan require a new fixture.
+
+The example has no dispatch or credential interface. Request construction
+does not establish that a card originated from a live host, that its text was
+scrubbed or that a model would return a valid result.
+
+### Project recorded development batches
+
+Export up to 128 distinct checkpoint cards from a verified development
+packet and freeze both candidate requests for each card at the same
+threshold. The Python export checks the original packet, refuses holdout
+data and copies the blinded snapshots without prior outcomes or human labels.
+
+```sh
+python3 scripts/fleet-evaluation/checkpoint_review.py export-replay \
+  /absolute/private/checkpoint-packet /absolute/private/new-replay
+cargo run --locked -p doxa-fleet --example checkpoint_requests -- freeze-batch \
+  /absolute/private/new-replay/development-cards.json 0.75 /absolute/private/new-replay/batch-plan.json
+```
+
+Keep the plan private since it contains the exact request bodies. Prepare an
+owner-private JSON file with one record for every card and candidate model
+in the plan. Below is one illustrative record. An actual batch supplies
+both models for each card and the exact request SHA-256 from the frozen
+plan. Match that hash against the original response's request record.
+
+```json
+{"version":1,"provenance":"synthetic_fixture","records":[{"id":"00000000-0000-4000-8000-000000000001","model":"jev:jev-1.13.0","request_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","latency_ms":null,"response_json":null}]}
+```
+
+Set `provenance` to `synthetic_fixture` for a synthetic packet or
+`retained_private` for a real development packet. Supply the exact retained
+provider JSON as a JSON string in `response_json`. This preserves duplicate
+fields so the production parser can refuse them. Use null for an unavailable
+body or unobserved timing. Keep any independently recorded timing for an
+unavailable response.
+
+```sh
+cargo run --locked -p doxa-fleet --example checkpoint_requests -- project-batch \
+  /absolute/private/new-replay/batch-plan.json EXACT_PRINTED_PLAN_SHA256 \
+  /absolute/private/retained-responses.json /absolute/private/new-replay/projections.json
+```
+
+The projector rebuilds the request batch, checks the frozen digest and
+requires exact response coverage by card ID, model and request digest. It uses
+the production Choice decoder for raw alignment confidence, guarded
+confidences, basis, citations, and reported token usage. Unavailable or
+rejected bodies yield an unavailable outcome with null usage. The new file
+contains only the bounded projections, observed timing, validated usage and
+binding metadata. Retained response provenance and timing depend on the
+operator's independent capture. Keep the projected outcomes separate from
+blind verdicts until the verdicts have been frozen.
+
+These projections supply model-side fields for the checkpoint review source
+schema. A record without observed timing cannot supply an evaluator row.
+Dispatcher integration, automatic retained-response capture, and a
+message replay path remain open.
+
+## Verification
+
 Run the focused helpers with:
 
 ```sh
 cargo test --locked -p doxa-fleet --example review_evaluation
+cargo test --locked -p doxa-fleet --example checkpoint_requests
 python3 -m unittest discover -s scripts/fleet-evaluation -p 'test_*.py'
 ```
 

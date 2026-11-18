@@ -5,6 +5,8 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from pilot_ledger import micros, token_cost
+
 ROOT = Path(__file__).resolve().parent
 
 
@@ -29,10 +31,18 @@ def quote():
         if min(rate_in, rate_out) < 0:
             raise ValueError("prices must be nonnegative")
         cost = (pilot["max_input_tokens"] * rate_in + pilot["max_output_tokens"] * rate_out) / 1_000_000
-        bounds.append({"model": candidate["model"], "effort": candidate["effort"], "request_bound_usd": str(cost)})
+        held_micros = token_cost(pilot["max_input_tokens"], pilot["max_output_tokens"], micros(rate_in), micros(rate_out))
+        bounds.append({"model": candidate["model"], "effort": candidate["effort"],
+                       "request_bound_usd": str(cost), "request_hold_usd_micros": held_micros})
     worst = max(Decimal(row["request_bound_usd"]) for row in bounds) * calls
-    if worst > allocations["repair"]:
+    worst_hold_micros = max(row["request_hold_usd_micros"] for row in bounds) * calls
+    if worst_hold_micros > micros(allocations["repair"]):
         raise ValueError("repair allocation cannot cover the declared worst case")
+    decisions = len(tasks) * pilot["trials_per_task_per_arm"] * pilot["max_calls_per_trial"]
+    decision_input_bound = pilot["max_decision_input_bytes"] + pilot["decision_input_framing_tokens"]
+    decision_hold_micros = token_cost(decision_input_bound, 0, micros(pilot["decision_input_usd_per_million"]), 0)
+    if decision_hold_micros * decisions > micros(allocations["decisions"]):
+        raise ValueError("decision allocation cannot cover the declared worst case")
     if pilot["max_fleets"] * Decimal(pilot["usd_per_fleet"]) > allocations["fleet_development"]:
         raise ValueError("fleet allocations exceed their ceiling")
     return {
@@ -42,12 +52,22 @@ def quote():
         "trials": trials,
         "maximum_repair_calls": calls,
         "maximum_all_pro_repair_usd": str(worst),
+        "maximum_all_pro_admission_usd_micros": worst_hold_micros,
+        "maximum_decisions": decisions,
+        "maximum_decision_admission_usd_micros": decision_hold_micros * decisions,
         "candidate_request_bounds": bounds,
         "allocations_usd": pilot["allocations_usd"],
         "authorized_usd": pilot["authorized_usd"],
         "paid_requests": 0,
         "execution_ready": False,
-        "remaining_prerequisites": ["reviewed_routed_endpoint", "durable_shared_admission_ledger", "reviewed_repair_bridge", "pinned_rootless_grader_image", "checkpoint_cards_and_label_guide"],
+        "remaining_prerequisites": [
+            "provider_transport_with_exact_request_admission",
+            "fleet_launch_and_resume_bound_to_ledger",
+            "pinned_rootless_grader_image",
+            "provider_account_and_exact_price_verification",
+            "provider_observations_bound_to_approved_grades",
+            "guide_freeze_and_independent_label_collection",
+        ],
         "note": "Offline arithmetic against declared price bounds. This quote neither enforces spend nor establishes live prices, credentials, task success or quality.",
     }
 

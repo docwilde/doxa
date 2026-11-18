@@ -20,6 +20,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1", features = ["rt", "time", "net"] }
 
 [dev-dependencies]
+# Preserve exact host floats when the offline request fixture reads its plan.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 tempfile = "3"
 
 [features]
@@ -27,4 +29,8 @@ test-transport = []
 
 [[example]]
 name = "review_evaluation"
+test = true
+
+[[example]]
+name = "checkpoint_requests"
 test = true

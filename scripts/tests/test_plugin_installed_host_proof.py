@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import importlib.util
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import tomllib
 import subprocess
 from types import SimpleNamespace
 import unittest
@@ -225,6 +227,38 @@ class InstalledProofTests(unittest.TestCase):
         self.assertIn("─",screen.text())
         screen.feed(b"\x1b[1;1H\x1b[2K")
         self.assertNotIn(expected,screen.text())
+
+    def test_panel_fixture_stages_only_exact_approved_packages_without_operator(self) -> None:
+        digest = driver.stage_packages(self.root, panel=True)
+        config = tomllib.loads((self.root / "config.toml").read_text())
+        self.assertNotIn("native_plugin_host", config)
+        self.assertFalse((self.root / "native-plugin-authority").exists())
+        packages = {row["name"]: row for row in config["native_plugin_packages"]}
+        self.assertEqual(set(packages), {"demo", "paneldemo", "panelreject", "panelspin"})
+        for name, row in packages.items():
+            package = self.root / "native-plugin-packages" / name
+            manifest = (package / "manifest.toml").read_bytes()
+            module = (package / "module.wasm").read_bytes()
+            self.assertEqual(hashlib.sha256(manifest).hexdigest(), row["manifest_sha256"])
+            self.assertEqual(hashlib.sha256(module).hexdigest(), row["module_sha256"])
+            self.assertEqual(tomllib.loads(manifest.decode())["requested_grants"], row["grants"])
+            self.assertEqual(row["grants"], [] if name == "demo" else [driver.PANEL_GRANT])
+            self.assertEqual((package / "module.wasm").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(digest, packages["paneldemo"]["module_sha256"])
+
+    def test_only_signed_panel_mode_reaches_existing_guest_opt_in(self) -> None:
+        script = SCRIPT.with_name("plugin-installed-tui-proof.py")
+        args = [str(script), "--frontend", str(self.root / "doxa-rs"),
+                "--daemon", str(self.root / "doxa-daemon")]
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(driver.common, "preflight", side_effect=AssertionError("host probe ran")), \
+                mock.patch.object(driver, "panel_refusals_only", return_value=0) as refusals:
+            with mock.patch("sys.argv", [*args, "--panel-refusals-only"]):
+                self.assertEqual(driver.main(), 0)
+            refusals.assert_called_once_with(self.root / "doxa-rs", self.root / "doxa-daemon")
+            with mock.patch("sys.argv", [*args, "--panel", "--receipt", "guest.json"]):
+                with self.assertRaisesRegex(driver.common.ProofError, "disposable-host and TUI acceptance"):
+                    driver.main()
 
     def test_operator_reads_allow_atime_updates_but_reject_content_metadata_changes(self) -> None:
         path = self.root / "private"

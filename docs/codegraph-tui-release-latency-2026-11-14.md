@@ -248,3 +248,53 @@ per-process load, power state, residency and the attach-to-Enter time. Run
 the harness checks with `python3 -m unittest
 scripts.tests.test_bench_codegraph_tui`. The harness starts no model, network
 request or LORE write.
+
+## Installed fixture-daemon follow-up, 17 November 2026
+
+Installed DOXA beta.81 (`4b3381bc`) used its production typed session bridge
+and a real `doxa-daemon-rs` process running the built-in fixture engine. Each
+process attached in a clean archive of `4b3381bc` and displayed one real fixture
+response before measurement. The benchmark waited for background preparation,
+then submitted eight novel prepared queries using the same command mix as the
+14 November DOXA series. All answers reported indexed origin. The source
+inventory covered 1,387 listed files, 244 parsed Rust files, 98 parsed Python
+files and 104 unparseable Rust files.
+
+Eight fresh process pairs of frontend and daemon alternated between idle and
+concurrent conditions. In the concurrent condition a second Unix socket client
+submitted one short fixture turn at a time, with a 12 ms wait between turns.
+The client timestamped the exact fixture text delta it read from the daemon.
+Every concurrent sample had four observed deltas between the Enter write and
+the answer read. Scanning and answer timestamps came from separate markers
+on the replayed PTY screen. The comparison uses those markers because first
+output and last-byte burst measurements can include daemon redraws. The client
+and TUI used private state with LORE disabled. All fixture daemons removed
+their private registry entry at teardown. The run contacted no provider.
+
+The host was the 16-logical-CPU 285H above, on Linux `7.2.15-1-omarchy`. The
+observed power profile and energy preference stayed `performance/performance`
+and one-minute load was 2.06–2.21. The same 160×48 PTY and nearest-rank p95
+apply. All timings are milliseconds.
+
+| Condition | Queries | Scanning p50 / p95 | Answer p50 / p95 | Answer max |
+| --- | ---: | ---: | ---: | ---: |
+| Idle fixture daemon | 32 | 1.4 / 1.9 | 45.4 / 50.2 | 63.5 |
+| Concurrent fixture output | 32 | 1.5 / 2.1 | 46.3 / 49.8 | 50.1 |
+
+At this fixture load the two answer p95 values were within one millisecond.
+The concurrent measurements establish overlap with short daemon turns. The
+observer did not timestamp each delta's arrival in the TUI or rendering in
+the terminal. Sustained provider streams, large output, networked daemons,
+and graphical terminal and compositor paint remain unmeasured.
+[Raw receipt](codegraph-daemon-pty-2026-11-17.json)
+
+To reproduce, prepare a private clean Git worktree from `git archive 4b3381bc`
+as above and commit its staged files. Run the installed binaries from the
+same installation.
+
+```sh
+python3 scripts/bench_codegraph_daemon_pty.py \
+  --binary "$HOME/.local/bin/doxa-rs" --daemon "$HOME/.local/bin/doxa-daemon-rs" \
+  --root PRIVATE/doxa --file rust/doxa-codegraph/src/main.rs \
+  --python-file scripts/bench_codegraph_cold.py --symbol query --runs 8
+```

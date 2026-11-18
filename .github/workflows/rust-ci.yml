@@ -95,6 +95,11 @@ jobs:
           python3 scripts/check_workflow_action_pins.py
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/routing-benchmark -p 'test_*.py' -v
+          cargo +stable build --locked -p doxa-router --example pilot_wire_fixture
+          python3 scripts/routing-benchmark/pilot_admission_fixture.py \
+            "$GITHUB_WORKSPACE/target/debug/examples/pilot_wire_fixture"
+          python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p 'test_bench_codegraph_*.py' -v
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/codex-update -p 'test_*.py' -v
           python3 -W error::ResourceWarning -m unittest discover \
