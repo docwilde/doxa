@@ -44,19 +44,17 @@ Choose an installed engine in place of `codex`. Claude needs its CLI; protected 
 
 ## Recent development
 
-The latest tagged release is **2.0.0-beta.81**, with **LORE 0.62.30** and protected **Codex 0.167.0**. It includes these updates:
+DOXA **2.0.0-beta.82** includes **LORE 0.62.30** and protected **Codex 0.167.1**.
 
 - **Reproducible provider installation.** The installer and updater use a fixed Git diff format, so local algorithm, context, prefix and abbreviation settings preserve the reviewed patch identity.
-- **Account model availability.** `doxa model-facts ENGINE MODEL --check-availability` checks the signed-in Codex account or DeepSeek API account and reports `listed`, `unlisted` or `unknown`, with the observation time and request latency. Claude and GLM remain `unknown`. These observations do not change the picker, price bounds or budget admission. [Model facts](docs/engine-capabilities.md).
+- **Model availability.** `doxa model-facts ENGINE MODEL --check-availability` checks the Codex account or DeepSeek API catalog. Try `doxa model-facts claude opus --check-availability` to inspect advertised Claude aliases and resolved IDs, including `[1m]` variants. DOXA resolves mise wrappers to the installed Claude CLI. Claude account authentication and entitlement remain unverified, and GLM availability remains `unknown`. [Model facts](docs/engine-capabilities.md).
 - **Images for API workers.** DeepSeek `deepseek-flash` and eligible Router API targets accept image attachments. DOXA requires documented vision support, an image token bound and a price bound. GLM images remain unavailable until all three facts are sourced. [Image input](docs/terminal-images.md#prompt-attachments).
 - **Native plugin panels.** `/native-plugin panel NAME` opens an owner-approved `render-local-panel-v1` WebAssembly panel under a signed operator permit. DOXA bounds execution, memory and text output, and stops the worker when the panel closes or its authority expires. [Plugin setup](docs/native-plugins.md).
 - **Measured code-graph response time.** The release TUI's prepared DOXA queries measured **62.8 ms p95** on the recorded laptop under its performance power profile. The terminal loop checks pending answers every 1 ms. The report also records slower quiet-profile results and the measurement's scope. [Benchmark and receipts](docs/codegraph-tui-release-latency-2026-11-14.md).
 
 **SubQ Snap 1.2** serves routing and fleet review. Select the exact `subq-snap-1.2` model in candidate configs or Settings; retired preview IDs are refused.
 
-Development checkouts also include [offline checkpoint evaluation](docs/fleet-checkpoint-gate.md): score private recorded Choices, freeze a gate against development data, then check a separate holdout. The commands make no model calls and leave enforcement unchanged. Independent labels and representative collection remain necessary for quality claims.
-
-Development builds query the advertised Claude CLI catalog with `doxa model-facts claude opus --check-availability`. Advertised aliases and resolved IDs, including `[1m]` variants, can be listed; absence from that catalog does not prove the model is unusable. Account authentication and entitlement remain unverified by this metadata check. The observation leaves model selection and budget admission unchanged.
+Use [offline checkpoint evaluation](docs/fleet-checkpoint-gate.md) to score recorded Choices on private development data and check a frozen gate on a separate holdout. The commands run offline. Independent labels and representative collection remain necessary for quality claims.
 
 ## Workspace and sessions
 
