@@ -1,7 +1,7 @@
 # Protected Codex provider
 
-The reviewed patch targets official `rust-v0.167.0`, commit
-`086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a`. Source, patch, launcher,
+The reviewed patch targets official `rust-v0.167.1`, commit
+`0a94398fa60c4fac0e7659e4213a0a36e613dd46`. Source, patch, launcher,
 app-server and code-mode helper identities are checked independently. The
 installer uses a separate `source-<commit>-<patch>` checkout and publishes
 immutable receipt-addressed artifacts; it never resets old build sources.
@@ -51,7 +51,7 @@ python3 scripts/codex-protected/verify_code_mode.py --server PRIVATE_SERVER --sc
 ```
 
 List each Rust filter first and require a nonzero inventory: the current source
-has nine core guard tests and one hook guard test. The originating-turn,
+has ten core guard tests and one hook guard test. The originating-turn,
 environment-keyed permission-grant and strict Guardian review baselines must
 also remain passing. These focused checks do not replace the complete upstream
 test suite.
@@ -64,6 +64,15 @@ control. The helper proof must use the same source build and verified receipt;
 none of these commands require account credentials or external model calls.
 See each verifier's `--help` for its exact options. These checks do not establish
 real-account model availability or live sandbox acceptance.
+
+## Reviewed 0.167.1 port
+
+Codex 0.167.1 changes incremental tool declarations for Bedrock Responses and
+keeps hosted web search in the top-level tool list. The manual port preserves
+both upstream tool handling and DOXA's live approval policy on captured steps.
+Foreground compaction retains its required review and the protected payload
+refuses background dispatch. The [review record](reviews/0.167.1.json) binds
+the source, patch, toolchain and verification results.
 
 ## Reviewed 0.167.0 port
 
@@ -139,7 +148,7 @@ manifest. Installing a new host provider or selecting a new-session image
 does not replace that saved image. A saved Docker thread can resume with the
 exact reviewed 0.163.0 contract (source `83086188`, patch `3a7b8c09`) or 0.164.0
 contract (source `6aaac694`, patch `f8759872`), the reviewed 0.165.0 and
-0.166.0 contracts, and the current 0.167.0 provider. The retained contract requires the protected
+0.166.0 and 0.167.0 contracts, and the current 0.167.1 provider. The retained contract requires the protected
 DOXA/live-auto initialize prefix and all normal hook, feature and launcher
 receipt checks. It is unavailable to fresh sessions or native providers.
 
