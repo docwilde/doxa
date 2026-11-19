@@ -44,7 +44,7 @@ Choose an installed engine in place of `codex`. Claude needs its CLI; protected 
 
 ## Recent development
 
-DOXA **2.0.0-beta.82** includes **LORE 0.62.30** and protected **Codex 0.167.1**.
+DOXA **2.0.0-beta.83** includes **LORE 0.62.30** and protected **Codex 0.170.0**.
 
 - **Reproducible provider installation.** The installer and updater use a fixed Git diff format, so local algorithm, context, prefix and abbreviation settings preserve the reviewed patch identity.
 - **Model availability.** `doxa model-facts ENGINE MODEL --check-availability` checks the Codex account or DeepSeek API catalog. Try `doxa model-facts claude opus --check-availability` to inspect advertised Claude aliases and resolved IDs, including `[1m]` variants. DOXA resolves mise wrappers to the installed Claude CLI. Claude account authentication and entitlement remain unverified, and GLM availability remains `unknown`. [Model facts](docs/engine-capabilities.md).
@@ -54,7 +54,7 @@ DOXA **2.0.0-beta.82** includes **LORE 0.62.30** and protected **Codex 0.167.1**
 
 **SubQ Snap 1.2** serves routing and fleet review. Select the exact `subq-snap-1.2` model in candidate configs or Settings; retired preview IDs are refused.
 
-Use [offline checkpoint evaluation](docs/fleet-checkpoint-gate.md) to score recorded Choices on private development data and check a frozen gate on a separate holdout. The commands run offline. Independent labels and representative collection remain necessary for quality claims.
+Use [offline checkpoint evaluation](docs/fleet-checkpoint-gate.md) to replay recorded development Choices, score private development data and check a frozen gate on a separate holdout. The [development pilot tooling](docs/plans/evaluation-pilot.md) verifies recorded spending holds and reports aggregate results. Live transport and independent labels remain open.
 
 ## Workspace and sessions
 

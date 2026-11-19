@@ -1,0 +1,81 @@
+{
+  "after": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "738667bb902423c35e7352d057ca8153c3c3ea9235b1caaa3946aefb77d6c3c0",
+    "provider": "codex-0.170.0-precompact-v1",
+    "schema": 1,
+    "source_commit": "29eb79e9866b3262a777fdf8195c1b9e63684c91",
+    "tag": "rust-v0.170.0",
+    "version": "0.170.0"
+  },
+  "annotated_upstream_tag_object": "72f97c309fb0f78b6f35cce455adf416e6a51571",
+  "artifact_sha256": {
+    "app_server": "04795b49fe98ebf82d1485ef6494c36e03ec9c40e09ee0811a8157dbf437231e",
+    "code_mode_host": "35986a26221ad8147ecbb9ddf61df771a9168d174c8dca32a49d58fefea76b1b"
+  },
+  "automatic_sensitive_path_gate_changed": false,
+  "before": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "a18ebbb80c42cf7b424b86c373db2ee5d56fc5666f815b37bb5ba698fd2fea8e",
+    "provider": "codex-0.167.1-precompact-v1",
+    "schema": 1,
+    "source_commit": "0a94398fa60c4fac0e7659e4213a0a36e613dd46",
+    "tag": "rust-v0.167.1",
+    "version": "0.167.1"
+  },
+  "compiled_source": {
+    "helper_inputs": {
+      "archive_sha256": "b3b490f2aa809eda7f6ac727f851fb00ce8355be72827577cfaac28c7137dbcd",
+      "binding_sha256": "3e4d5fecdbe0f98a6017e69d7ca82519a77fb032c5eb5e4cdbecdd3e2ec519d5",
+      "manifest_sha256": "1ec730635970ab1c0e8f4764ea113ad29d69d7f8d4c2ae69f3d766434a759350",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "152.2.0"
+    },
+    "lock_sha256": "11ed3c419dcb08d7d3921f20eb4980c7a0620234c1f7ed79a2d3ca3b98f39a3e",
+    "manifest_sha256": "a6d233c4dd5c1cdf44008559a33ec275732172791d2fde93e9382baa0c9ca02c",
+    "toolchain": "1.99.1"
+  },
+  "guard_mapping": {
+    "background_compaction": "Scheduling refuses every role, including with the upstream root-only option set. Direct background dispatch returns TurnAborted before transport. The gate test uses the current auth-owner type.",
+    "foreground_compaction": "Local, foreground Remote V2 and token-budget compaction call the exact session-flags hook gate. The foreground remote attempt retains upstream rejected-audio projection, history handling and fallback under that gate.",
+    "helper_identity": "The reviewed source pins both products and the helper V8 manifest. The native dispatcher checks those identities for protected startup.",
+    "permission_policy": "The previous live override and managed-policy guard edits carry forward intact. The private update rejects mixed settings, and guards at the shared approval entry and publish point handle captured steps and stale answers."
+  },
+  "lock_workspace_version_stamps": 174,
+  "patch_files_with_identical_edit_inventories_after_version_stamp": 23,
+  "review_kind": "manual protection-port boundary review",
+  "scope": "Focused source boundary review and credential-free compiled guard, provider and dispatcher checks.",
+  "upstream_review": {
+    "automatic_review_filter_paths_count": 655,
+    "changed_paths_count": 2745,
+    "diff_sha256": "6363effc90c495015efc222a5af17e3d84cf5616e46449d610a9dc2be17ed3d2",
+    "protected_patch_overlapping_paths": 22
+  },
+  "verification": {
+    "actual_native_dispatcher_code_mode_and_missing_helper_control": "passed",
+    "app_server_build": "passed",
+    "automatic_compaction_cases": 20,
+    "canonical_git_settings_control": "passed",
+    "code_mode_host_build": "passed",
+    "guard_mutation_cases": 3,
+    "independent_pinned_checkout_matches_reviewed_patch": true,
+    "installer_script_tests": 23,
+    "native_daemon_code_mode": "passed",
+    "native_engine_tests": 114,
+    "native_existing_ignored": 3,
+    "paid_requests": 0,
+    "patch_stable_before_and_after_build": true,
+    "provider_test_inventory": {
+      "codex-core-doxa_": 12,
+      "codex-core-exec_policy-tests": 86,
+      "codex-core-execution_cancellation_respects_network_approval_boundary": 3,
+      "codex-core-record_granted_request_permissions_for_turn_uses_originating_turn": 1,
+      "codex-core-request_permission_grants_are_environment_keyed": 1,
+      "codex-core-strict_auto_review": 5,
+      "codex-core-tools-approvals-tests": 8,
+      "codex-hooks-doxa_required_hook_rejects_infrastructure_and_invalid_output": 1
+    },
+    "scheduled_discovery_after_repin": "no newer eligible release at review time",
+    "updater_script_tests": 35
+  }
+}
