@@ -372,6 +372,7 @@ impl App {
             let name = match form.engine {
                 launch::Engine::Codex => "codex",
                 launch::Engine::Claude => "claude",
+                launch::Engine::Antigravity => "Antigravity",
                 launch::Engine::DeepSeek => "deepseek",
                 launch::Engine::Glm => "glm",
                 launch::Engine::Router => "Model Router",

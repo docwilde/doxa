@@ -480,6 +480,7 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
             None | Some(Value::Null) => Engine::Codex,
             Some(Value::String(engine)) if engine == "codex" => Engine::Codex,
             Some(Value::String(engine)) if engine == "claude" => Engine::Claude,
+            Some(Value::String(engine)) if engine == "antigravity" => Engine::Antigravity,
             _ => return Err("unsupported saved thread engine"),
         };
         let vendor_name = format!("{}.messages.json", entry.id);

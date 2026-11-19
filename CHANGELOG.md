@@ -5,6 +5,12 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.84 — 2026-11-19
+
+- Add native Linux text sessions through Google Antigravity CLI over ACP, with live model and effort selection, one-time tool approvals, cancellation, and session resume.
+- Verify Gemini 4 Neon on a signed-in account. Exact model selections require an advertised ID or a unique display name.
+- Inject LORE memory on the first turn and index scrubbed transcripts on shutdown.
+
 ## 2.0.0-beta.83 — 2026-11-19
 
 **Protected Codex**

@@ -5,6 +5,7 @@ DOXA keeps one engine per session. The model picker shows choices reported by or
 ## Contents
 
 - [At a glance](#at-a-glance)
+- [Antigravity preview](#antigravity-preview)
 - [Review and accounting](#review-and-accounting)
 - [Platform limits](#platform-limits)
 - [Where to go next](#where-to-go-next)
@@ -42,6 +43,10 @@ history keeps the label, not the pixels. Router image turns narrow eligibility
 to image-capable API targets and require an image-capable pin or fallback.
 Legacy Codex exec refuses images; PDF and remote-hub attachment submission
 remain unsupported. See [attachment formats and limits](terminal-images.md#prompt-attachments).
+
+## Antigravity preview
+
+Antigravity provides standalone text sessions on native Linux. DOXA obtains models and reasoning levels from the active CLI session, forwards ACP tool permission prompts for one-time review, and resumes the saved Antigravity conversation with its scrubbed DOXA transcript. Google manages the CLI's account, tools, and billing. [Antigravity setup and LORE](antigravity.md).
 
 ## Review and accounting
 

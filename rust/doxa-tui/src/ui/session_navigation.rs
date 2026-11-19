@@ -619,6 +619,7 @@ impl App {
         let engine = match engine {
             "codex" => launch::Engine::Codex,
             "claude" => launch::Engine::Claude,
+            "antigravity" => launch::Engine::Antigravity,
             "deepseek" => launch::Engine::DeepSeek,
             "glm" => launch::Engine::Glm,
             "router" => {self.notice="clear: start a new router session with an explicit --router-config path".into();return;},
@@ -711,6 +712,7 @@ impl App {
         }
         let engine = match engine {
             "claude" => launch::Engine::Claude,
+            "antigravity" => launch::Engine::Antigravity,
             "codex" => launch::Engine::Codex,
             "deepseek" => launch::Engine::DeepSeek,
             "glm" => launch::Engine::Glm,

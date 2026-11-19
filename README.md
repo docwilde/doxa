@@ -6,7 +6,7 @@
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Ratatui terminal interface">
 </p>
 
-**DOXA** is a Rust terminal workspace for coding agents. Run Claude, Codex, DeepSeek, or GLM in tabs and split panes, then close the terminal and reattach to running sessions later. [Jev](docs/jev-router.md) routes each turn among configured models and can independently supervise fleet alignment at host checkpoints. Integrated [LORE](https://github.com/docwilde/LORE) shares reviewed memory across DOXA, Claude Code, and Codex.
+**DOXA** is a Rust terminal workspace for coding agents. Run Claude, Codex, Antigravity, DeepSeek, or GLM in tabs and split panes, then close the terminal and reattach to running sessions later. [Jev](docs/jev-router.md) routes each turn among configured models and can independently supervise fleet alignment at host checkpoints. Integrated [LORE](https://github.com/docwilde/LORE) shares reviewed memory across DOXA, Claude Code, and Codex.
 
 > [!WARNING]
 > Rust 2.0 is in beta. Agents can edit files and run commands with your privileges. Choose a [session isolation profile](docs/session-isolation.md) and review the [platform limits](#platform-and-scope) before using DOXA on important work.
@@ -44,7 +44,7 @@ Choose an installed engine in place of `codex`. Claude needs its CLI; protected 
 
 ## Recent development
 
-DOXA **2.0.0-beta.83** includes **LORE 0.62.30** and protected **Codex 0.170.0**.
+DOXA **2.0.0-beta.84** includes **LORE 0.62.30** and protected **Codex 0.170.0**.
 
 - **Reproducible provider installation.** The installer and updater use a fixed Git diff format, so local algorithm, context, prefix and abbreviation settings preserve the reviewed patch identity.
 - **Model availability.** `doxa model-facts ENGINE MODEL --check-availability` checks the Codex account or DeepSeek API catalog. Try `doxa model-facts claude opus --check-availability` to inspect advertised Claude aliases and resolved IDs, including `[1m]` variants. DOXA resolves mise wrappers to the installed Claude CLI. Claude account authentication and entitlement remain unverified, and GLM availability remains `unknown`. [Model facts](docs/engine-capabilities.md).
@@ -72,9 +72,12 @@ The [Rust guide](rust/README.md) covers keys, session recovery, worktrees, setti
 | --- | --- | --- |
 | Claude | Claude Code CLI | Sign in with the CLI. |
 | Codex | Protected private app server | Linux build and Codex sign-in. |
+| Antigravity (Linux preview) | Google Antigravity CLI over ACP | Install `agy` and sign in with Google. [Setup and LORE](docs/antigravity.md). |
 | DeepSeek | Rust API client | Supply an API key. |
 | GLM | Rust API client | Supply a z.ai API key. |
 | Model Router (opt-in) | Jev or SubQ Snap selects configured DeepSeek/GLM API or authenticated Claude/Codex CLI targets | Private candidate config, worker credentials and a private Jev/SubQ key. |
+
+On native Linux, sign in with `agy acp --login`, then run `doxa new --engine antigravity --model "Gemini 4 Neon"` if Neon appears in your account catalog. DOXA supplies LORE memory on the first turn and indexes the scrubbed transcript on shutdown.
 
 [Engine capability matrix](docs/engine-capabilities.md) lists model, permission, cost, compaction, and platform support. The picker distinguishes sourced model facts from unknown context or thinking support. API budget admission uses a conservative documented price bound and refuses an unknown priced bound.
 The [Model Router](docs/jev-router.md) keeps one canonical conversation while selecting an eligible configured worker at each turn. `/model auto` enables routing; a target ID pins it. Native Claude and protected Codex workers retain their tool and permission reviews. Their account charges remain unknown and are excluded from the tracked routing/API allowance.

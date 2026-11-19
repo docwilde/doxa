@@ -20,6 +20,7 @@ pub enum Engine {
     #[default]
     Codex,
     Claude,
+    Antigravity,
     Fixture,
     DeepSeek,
     Glm,
@@ -49,6 +50,7 @@ impl Engine {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Antigravity => "antigravity",
             Self::DeepSeek => "deepseek",
             Self::Glm => "glm",
             Self::Router => "router",
@@ -70,6 +72,7 @@ pub struct LaunchOptions {
     pub sandbox: Option<String>,
     pub codex_bin: Option<PathBuf>,
     pub claude_bin: Option<PathBuf>,
+    pub antigravity_bin: Option<PathBuf>,
     pub resume: Option<String>,
     pub router_config: Option<PathBuf>,
     pub account_turn_limit:Option<u64>,
@@ -132,14 +135,36 @@ pub fn claude_executable(options: &LaunchOptions) -> io::Result<PathBuf> {
     let path = executable(input)?;
     if input.file_name().is_some_and(|name| name == "claude")
         && path.file_name().is_some_and(|name| name == "mise") {
-        return mise_claude(&path, Duration::from_secs(2));
+        return mise_which(&path, "claude", Duration::from_secs(2));
     }
     Ok(path)
 }
 
+pub fn antigravity_executable(options: &LaunchOptions) -> io::Result<PathBuf> {
+    let configured = env::var_os("DOXA_ANTIGRAVITY_BIN").filter(|value| !value.is_empty()).map(PathBuf::from);
+    let explicit = options.antigravity_bin.as_deref().or(configured.as_deref());
+    let input = explicit.unwrap_or(Path::new("agy"));
+    let resolve = |path: &Path| {
+        let resolved = executable(path)?;
+        if path.file_name().is_some_and(|name| name == "agy")
+            && resolved.file_name().is_some_and(|name| name == "mise")
+        {
+            mise_which(&resolved, "agy", Duration::from_secs(2))
+        } else {
+            Ok(resolved)
+        }
+    };
+    let first = resolve(input);
+    if first.is_ok() || explicit.is_some() {
+        return first;
+    }
+    // A stale mise shim can shadow the official installer in some PATHs.
+    env::var_os("HOME").map(|home| resolve(&PathBuf::from(home).join(".local/bin/agy"))).unwrap_or(first)
+}
+
 /// Resolve mise's multicall wrapper to an installed CLI before pinning its
-/// canonical path. `mise which` only resolves; it does not install Claude.
-fn mise_claude(mise: &Path, timeout: Duration) -> io::Result<PathBuf> {
+/// canonical path. `mise which` only resolves; it does not install the provider.
+fn mise_which(mise: &Path, provider: &str, timeout: Duration) -> io::Result<PathBuf> {
     struct Resolver(Child);
     impl Drop for Resolver {
         fn drop(&mut self) {
@@ -147,8 +172,8 @@ fn mise_claude(mise: &Path, timeout: Duration) -> io::Result<PathBuf> {
             let _ = self.0.wait();
         }
     }
-    let refused = || invalid("Claude mise wrapper did not resolve one installed executable");
-    let mut child = Resolver(Command::new(mise).args(["which", "claude"])
+    let refused = || invalid(format!("{provider} mise wrapper did not resolve one installed executable"));
+    let mut child = Resolver(Command::new(mise).args(["which", provider])
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
         .process_group(0).spawn()?);
     let mut stdout = child.0.stdout.take().ok_or_else(refused)?;
@@ -263,6 +288,7 @@ fn configured_engine_id(value:Option<&str>) -> Engine {
     match value.map(str::to_ascii_lowercase).as_deref() {
         Some("codex") => Engine::Codex, Some("deepseek") => Engine::DeepSeek, Some("glm") => Engine::Glm,
         Some("router") => Engine::Router,
+        Some("antigravity") => Engine::Antigravity,
         _ => Engine::Claude,
     }
 }
@@ -427,11 +453,21 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
     let startup_seconds = if options.engine == Engine::Claude {
         doxa_state::claude_startup_seconds(env::var("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT").ok().as_deref())
             .map_err(invalid)?.1
-    } else { 10 };
+    } else if options.engine == Engine::Antigravity { 45 } else { 10 };
     let cfg = config();
     let mut effective = options.clone();
     if effective.resume.is_none() && !matches!(effective.engine,Engine::Fixture|Engine::Router) && effective.effort.is_none() {
         effective.effort = configured_string("effort", "DOXA_EFFORT", cfg.as_ref());
+    }
+    if effective.engine == Engine::Antigravity {
+        if !cfg!(target_os = "linux") || fleet_runtime.is_some()
+            || effective.isolation.is_some_and(doxa_isolation::Profile::docker)
+        {
+            return Err(invalid("Antigravity requires a standalone native Linux session"));
+        }
+        effective.isolation = Some(doxa_isolation::Profile::Native);
+    } else if effective.antigravity_bin.is_some() {
+        return Err(invalid("--antigravity-bin requires --engine antigravity"));
     }
     let options = &effective;
     if options.router_config.is_some() && options.engine!=Engine::Router {return Err(invalid("--router-config requires --engine router"));}
@@ -512,7 +548,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
     let id = if let Some(id) = &options.resume {
         if !matches!(
             options.engine,
-            Engine::Codex | Engine::Claude | Engine::DeepSeek | Engine::Glm | Engine::Router
+            Engine::Codex | Engine::Claude | Engine::Antigravity | Engine::DeepSeek | Engine::Glm | Engine::Router
         ) || !discovery::valid_id(id)
         {
             return Err(invalid(
@@ -629,6 +665,16 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             if let Some(model) = &model {
                 command.arg("--model").arg(model);
             }
+            if let Some(effort) = &options.effort { command.arg("--effort").arg(effort); }
+        }
+        Engine::Antigravity => {
+            if options.codex_bin.is_some() || options.claude_bin.is_some() || options.sandbox.is_some() {
+                return Err(invalid("Antigravity uses its own terminal sandbox"));
+            }
+            command.args(["--engine", "antigravity", "--antigravity-bin"])
+                .arg(antigravity_executable(options)?);
+            if options.resume.is_some() { command.args(["--resume", "true"]); }
+            if let Some(model) = &model { command.arg("--model").arg(model); }
             if let Some(effort) = &options.effort { command.arg("--effort").arg(effort); }
         }
         Engine::DeepSeek | Engine::Glm => {
@@ -767,6 +813,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
                 "native daemon exited before startup ({status}); check {} dependencies",
                 match options.engine {
                     Engine::Claude => "Claude CLI and authentication",
+                    Engine::Antigravity => "Antigravity ACP, sign-in and model selection",
                     Engine::Codex => "Codex authentication and LORE",
                     Engine::Fixture => "fixture",
                     Engine::DeepSeek | Engine::Glm => "vendor API key and LORE",
@@ -1032,7 +1079,7 @@ mod tests {
             "x".repeat(4097), format!("{}\n",data.display()), format!("{}\n",dir.path().join("absent").display()),
             format!("{}\n",mise.display()), "FAIL".into()] {
             fs::write(dir.path().join("result"), result).unwrap();
-            assert!(mise_claude(&mise, Duration::from_secs(2)).is_err());
+            assert!(mise_which(&mise, "claude", Duration::from_secs(2)).is_err());
         }
     }
 
@@ -1042,7 +1089,7 @@ mod tests {
         fs::write(&mise, "#!/usr/bin/env python3\nimport os,pathlib,time\npathlib.Path(__file__).with_name('pid').write_text(str(os.getpid()))\ntime.sleep(60)\n").unwrap();
         fs::set_permissions(&mise, fs::Permissions::from_mode(0o700)).unwrap();
         let started = Instant::now();
-        assert!(mise_claude(&mise, Duration::from_millis(750)).is_err());
+        assert!(mise_which(&mise, "claude", Duration::from_millis(750)).is_err());
         assert!(started.elapsed() < Duration::from_secs(3));
         if let Ok(pid) = fs::read_to_string(dir.path().join("pid")) {
             let pid: i32 = pid.parse().unwrap(); let alive = unsafe { libc::kill(pid,0) } == 0;
