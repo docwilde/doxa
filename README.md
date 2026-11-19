@@ -77,6 +77,8 @@ The [Rust guide](rust/README.md) covers keys, session recovery, worktrees, setti
 | GLM | Rust API client | Supply a z.ai API key. |
 | Model Router (opt-in) | Jev or SubQ Snap selects configured DeepSeek/GLM API or authenticated Claude/Codex CLI targets | Private candidate config, worker credentials and a private Jev/SubQ key. |
 
+On native Linux, sign in with `agy acp --login`, then run `doxa new --engine antigravity --model "Gemini 4 Neon"` if Neon appears in your account catalog. DOXA supplies LORE memory on the first turn and indexes the scrubbed transcript on shutdown.
+
 [Engine capability matrix](docs/engine-capabilities.md) lists model, permission, cost, compaction, and platform support. The picker distinguishes sourced model facts from unknown context or thinking support. API budget admission uses a conservative documented price bound and refuses an unknown priced bound.
 The [Model Router](docs/jev-router.md) keeps one canonical conversation while selecting an eligible configured worker at each turn. `/model auto` enables routing; a target ID pins it. Native Claude and protected Codex workers retain their tool and permission reviews. Their account charges remain unknown and are excluded from the tracked routing/API allowance.
 
