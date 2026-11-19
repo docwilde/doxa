@@ -14,6 +14,7 @@ pub const CATEGORIES: &[&str] = &["Session", "Fleet", "Memory", "Appearance", "K
 pub fn engine_label(value: &str) -> &str {
     match value {
         "router"=>"Model Router (on for new sessions)",
+        "antigravity"=>"Antigravity",
         ""=>"(default)",
         _=>value,
     }
@@ -27,7 +28,7 @@ macro_rules! key_setting {
     };
 }
 pub const SETTINGS: &[Setting] = &[
-    Setting { key: "engine", env: "DOXA_ENGINE", label: "default engine", category: "Session", kind: Kind::Choice, choices: &["", "claude", "codex", "deepseek", "glm", "router"], default: "claude", read_only: false, help: "Select Model Router to route NEW sessions. Select a fixed engine to turn routing off.", note: "Applies to new sessions. Fixed engines disable routing without deleting the Router configuration." },
+    Setting { key: "engine", env: "DOXA_ENGINE", label: "default engine", category: "Session", kind: Kind::Choice, choices: &["", "claude", "codex", "deepseek", "glm", "antigravity", "router"], default: "claude", read_only: false, help: "Select Model Router to route NEW sessions. Select a fixed engine to turn routing off.", note: "Applies to new sessions. Fixed engines disable routing without deleting the Router configuration." },
     Setting { key: "router_config", env: "DOXA_ROUTER_CONFIG", label: "Model Router config", category: "Session", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Absolute path to a reviewed owner-private router JSON file; Ctrl+P checks config, auth and exact target catalogs without inference.", note: "Start requires a current review of the configuration, account and exact target catalog." },
     Setting { key: "router_model", env: "DOXA_ROUTER_MODEL", label: "routing decision model", category: "Session", kind: Kind::Choice, choices: &["", "jev-1.13.0", "subq-snap-1.2"], default: "", read_only: false, help: "Use the config's decision model, Jev, or SubQ Snap for new Router sessions.", note: "Ctrl+P reviews the selected service key and worker catalogs. Existing sessions retain their frozen routing model. Jev: $0.042/M input; Snap: $0.04/M input; output free." },
     Setting { key: "jev_api_key", env: "TYPESAFE_API_KEY", label: "Jev API key", category: "Session", kind: Kind::Credential, choices: &[], default: "", read_only: false, help: "Masked private key for Jev routing and independent fleet review.", note: "Enter saves to the private credential store. An environment key takes precedence; Delete removes the saved key." },
@@ -435,7 +436,7 @@ mod tests {
     fn catalog_covers_python119_categories_and_conservative_defaults() {
         for key in ["engine","effort","allow_bypass","spawn_sessions","agent_peer_send","peer_inbound_turns","session_budget_usd","permission_mode","restore_tabs","resume_restored","lore","derive_secs","consult_floor","graph_context","graph_view","ctx_absolute","context_grid","boot_banner","show_reasoning","background","sidebar","rail_entries","collection_sort","sidebar_width","clock_show","clock_date","clock_hour","clock_seconds","clock_tz","clock_format","notify","notify_update","notify_lore","notify_staged","notify_needs_input"] {assert!(find(key).is_ok(),"missing {key}");}
         assert_eq!(find("lore").unwrap().default,"1");assert_eq!(find("sidebar").unwrap().default,"");assert_eq!(find("collection_sort").unwrap().default,"manual");assert_eq!(find("rail_entries").unwrap().default,"sessions");assert_eq!(find("notify").unwrap().default,"auto");assert_eq!(find("notify_needs_input").unwrap().default,"");
-        assert_eq!(find("engine").unwrap().choices,&["","claude","codex","deepseek","glm","router"]);
+        assert_eq!(find("engine").unwrap().choices,&["","claude","codex","deepseek","glm","antigravity","router"]);
         assert!(!find("image_mode").unwrap().read_only);assert!(find("lore_root").unwrap().read_only);
     }
     #[test]

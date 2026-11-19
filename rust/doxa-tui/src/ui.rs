@@ -159,7 +159,7 @@ const REVIEW_BODY_RESERVE: u16 = 10;
 
 use commands::COMMANDS;
 
-const ENGINE_CHOICES: [&str; 5] = ["codex", "claude", "deepseek", "glm", "router"];
+const ENGINE_CHOICES: [&str; 6] = ["codex", "claude", "deepseek", "glm", "router", "antigravity"];
 // Fallback model IDs measured from the vendors' catalogues in Python 1.19.
 // Unknown models get no effort choices until a verified capability arrives.
 const DEEPSEEK_MODELS: [&str; 2] = ["deepseek-flash", "deepseek-v4-pro"];
@@ -201,6 +201,7 @@ fn engine_name(engine: launch::Engine) -> &'static str {
     match engine {
         launch::Engine::Codex => "codex",
         launch::Engine::Claude => "claude",
+        launch::Engine::Antigravity => "antigravity",
         launch::Engine::DeepSeek => "deepseek",
         launch::Engine::Glm => "glm",
         launch::Engine::Router => "router",

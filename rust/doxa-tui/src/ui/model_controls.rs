@@ -127,7 +127,7 @@ impl App {
             self.notice = "Effort capability is unknown for this session".into();
             return;
         };
-        if matches!(engine.as_str(), "codex" | "claude")
+        if matches!(engine.as_str(), "codex" | "claude" | "antigravity")
             && !self
                 .session_catalogs
                 .get(&id)
@@ -459,7 +459,8 @@ impl App {
             1 => launch::Engine::Claude,
             2 => launch::Engine::DeepSeek,
             3 => launch::Engine::Glm,
-            _ => launch::Engine::Router,
+            4 => launch::Engine::Router,
+            _ => launch::Engine::Antigravity,
         };
         self.engine_picker = false;
         self.new_session=None;
@@ -527,12 +528,16 @@ impl App {
             })
             .or_else(|| (!models.is_empty()).then(|| "high".to_owned()));
         self.vendor_catalog_pending = None;
-        let catalog_pending = if matches!(engine, launch::Engine::Codex | launch::Engine::Claude) {
+        let catalog_pending = if matches!(engine, launch::Engine::Codex | launch::Engine::Claude | launch::Engine::Antigravity) {
             self.request_new_session_catalog(engine)
         } else { self.request_vendor_catalog(engine) };
         self.new_session = Some(NewSession {
             router_config:None,
-            isolation: doxa_isolation::home().and_then(|home|doxa_isolation::configured_profile(&home)).unwrap_or_default(),
+            isolation: if engine == launch::Engine::Antigravity {
+                doxa_isolation::Profile::Native
+            } else {
+                doxa_isolation::home().and_then(|home|doxa_isolation::configured_profile(&home)).unwrap_or_default()
+            },
             engine,
             model,
             models: models.iter().map(|name| (*name).to_owned()).collect(),
@@ -599,7 +604,7 @@ impl App {
         self.invalidate_host_auth();
         let Some(engine) = self.new_session.as_ref().filter(|form| !form.catalog_pending).map(|form| form.engine) else { return; };
         self.cancel_new_session_catalog();
-        let pending = if matches!(engine, launch::Engine::Codex | launch::Engine::Claude) {
+        let pending = if matches!(engine, launch::Engine::Codex | launch::Engine::Claude | launch::Engine::Antigravity) {
             self.request_new_session_catalog(engine)
         } else if engine == launch::Engine::Router {
             let Some(path)=self.new_session.as_ref().and_then(|form|form.router_config.clone()) else {return;};
@@ -616,7 +621,7 @@ impl App {
         if let Some(form) = self.new_session.as_mut() {
             form.catalog_pending = pending;
             form.catalog_note = if pending { "Refreshing live model catalog…" } else { "Live model catalog unavailable · R retries" }.into();
-            if matches!(engine, launch::Engine::Codex | launch::Engine::Claude) { form.models.clear(); }
+            if matches!(engine, launch::Engine::Codex | launch::Engine::Claude | launch::Engine::Antigravity) { form.models.clear(); }
         }
         self.refresh_choice_dropdown();
     }
@@ -662,7 +667,14 @@ impl App {
                     .take(100).map(str::to_owned).collect();
                 let mut seen = HashSet::new();
                 form.models.retain(|model| seen.insert(model.clone()));
-                if !form.models.is_empty() && !form.models.contains(&form.model) {
+                if engine == launch::Engine::Antigravity && !form.model.is_empty() && !form.models.contains(&form.model) {
+                    let mut matches = reply["capabilities"].as_array().into_iter().flatten()
+                        .filter(|row| row["name"] == form.model)
+                        .filter_map(|row| row["model"].as_str().filter(|model| form.models.iter().any(|id| id == model)));
+                    if let Some(model) = matches.next().filter(|_| matches.next().is_none()) {
+                        form.model = model.to_owned();
+                    }
+                } else if !form.models.is_empty() && !form.models.contains(&form.model) {
                     form.model = reply["capabilities"].as_array().into_iter().flatten()
                         .find(|row| row["is_default"] == true && row["model"].as_str().is_some_and(|model| form.models.iter().any(|id| id == model)))
                         .and_then(|row| row["model"].as_str()).map(str::to_owned).unwrap_or_else(|| form.models[0].clone());
@@ -891,6 +903,8 @@ impl App {
                             "Model or effort capability changed; session was not started".into();
                         return true;
                     }
+                }
+                if vendor || form.engine == launch::Engine::Antigravity {
                     options.effort = form.effort;
                 }
                 if matches!(form.engine,launch::Engine::Claude | launch::Engine::Router) {

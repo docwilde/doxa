@@ -1,6 +1,7 @@
 //! Native DOXA protocol host. The fixture remains an explicit test mode.
 mod agent_tools;
 mod mcp;
+mod antigravity_host;
 mod claude_host;
 mod recovery_context;
 mod budget_host;
@@ -68,6 +69,7 @@ enum Engine {
     Fixture,
     Codex,
     Claude,
+    Antigravity,
     DeepSeek,
     Glm,
     Router,
@@ -78,6 +80,7 @@ impl Engine {
             Self::Fixture => "fixture",
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Antigravity => "antigravity",
             Self::DeepSeek => "deepseek",
             Self::Glm => "glm",
             Self::Router => "router",
@@ -104,6 +107,7 @@ struct Options {
     engine: Engine,
     codex_bin: Option<PathBuf>,
     claude_bin: Option<PathBuf>,
+    antigravity_bin: Option<PathBuf>,
     resume: bool,
     model: Option<String>,
     effort: Option<String>,
@@ -151,6 +155,7 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
     let mut engine = Engine::Fixture;
     let mut codex_bin = None;
     let mut claude_bin = None;
+    let mut antigravity_bin = None;
     let mut resume = false;
     let mut model = None;
     let mut effort = None;
@@ -192,13 +197,15 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
             Some("--engine") => engine = match value.to_str() {
                 Some("fixture") => Engine::Fixture, Some("codex") => Engine::Codex,
                 Some("claude") => Engine::Claude,
+                Some("antigravity") => Engine::Antigravity,
                 Some("deepseek") => Engine::DeepSeek, Some("glm") => Engine::Glm,
                 Some("router") => Engine::Router,
-                _ => return Err(invalid("engine must be fixture, codex, claude, deepseek, glm, or router")),
+                _ => return Err(invalid("engine must be fixture, codex, claude, antigravity, deepseek, glm, or router")),
             },
             Some("--router-config") => {router_config=Some(PathBuf::from(value));explicit_router_config=true;},
             Some("--codex-bin") => codex_bin = Some(PathBuf::from(value)),
             Some("--claude-bin") => claude_bin = Some(PathBuf::from(value)),
+            Some("--antigravity-bin") => antigravity_bin = Some(PathBuf::from(value)),
             Some("--resume") => resume = match value.to_str() {
                 Some("true") => true, Some("false") => false,
                 _ => return Err(invalid("resume must be true or false")),
@@ -230,7 +237,7 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
             Some("--linger") => {
                 linger = linger_duration(value.to_str().ok_or_else(|| invalid("invalid linger"))?)?;
             }
-            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--base-branch REF] [--linger SECONDS] [--engine fixture|codex|claude|deepseek|glm|router] [--router-config PATH] [--codex-bin PATH --claude-bin PATH --model MODEL --effort EFFORT --sandbox MODE --resume true|false]")),
+            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--base-branch REF] [--linger SECONDS] [--engine fixture|codex|claude|antigravity|deepseek|glm|router] [--router-config PATH] [--codex-bin PATH --claude-bin PATH --antigravity-bin PATH --model MODEL --effort EFFORT --sandbox MODE --resume true|false]")),
         }
     }
     // Do not let registry entries claim an unvalidated path or identity.
@@ -269,6 +276,9 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
     if engine != Engine::Router {
         if explicit_router_config {return Err(invalid("--router-config requires --engine router"));}
         router_config=None;
+    }
+    if engine != Engine::Antigravity && antigravity_bin.is_some() {
+        return Err(invalid("--antigravity-bin requires --engine antigravity"));
     }
     if engine == Engine::Router {
         if effort.is_some() || explicit_sandbox {
@@ -311,6 +321,17 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
         if codex_bin.is_some() || sandbox != SandboxMode::WorkspaceWrite {
             return Err(invalid("Codex options require --engine codex"));
         }
+    } else if engine == Engine::Antigravity {
+        if !cfg!(target_os = "linux") || isolation.is_some_and(doxa_isolation::Profile::docker)
+            || parent_session_id.is_some() || spawn_depth != 0 || task.is_some()
+            || explicit_sandbox || codex_bin.is_some() || claude_bin.is_some()
+        {
+            return Err(invalid("Antigravity requires a standalone native Linux session and its own terminal sandbox"));
+        }
+        if resume && !explicit_session_id {
+            return Err(invalid("Antigravity resume needs --session-id"));
+        }
+        antigravity_bin = Some(executable(antigravity_bin.ok_or_else(|| invalid("Antigravity needs --antigravity-bin"))?)?);
     } else if let Some(vendor) = engine.vendor() {
         if codex_bin.is_some()
             || claude_bin.is_some()
@@ -347,6 +368,7 @@ fn options_from(arguments:impl IntoIterator<Item=std::ffi::OsString>) -> io::Res
         engine,
         codex_bin,
         claude_bin,
+        antigravity_bin,
         resume,
         model,
         effort,
@@ -578,6 +600,9 @@ fn run() -> io::Result<()> {
         }
         _ => None,
     };
+    if options.engine == Engine::Antigravity && ceiling.is_some() {
+        return Err(invalid("Antigravity uses provider-managed billing and cannot enforce a DOXA dollar ceiling"));
+    }
     let account_turn_limit=env::var("DOXA_ACCOUNT_TURN_LIMIT").ok().filter(|value|!value.trim().is_empty())
         .map(|value|value.parse::<u64>().map_err(|_|invalid("invalid account turn limit"))).transpose()?;
     if account_turn_limit.is_some_and(|limit|!(1..=32).contains(&limit)||options.engine!=Engine::Codex||ceiling.is_some()
@@ -613,6 +638,9 @@ fn run() -> io::Result<()> {
     } else { None };
     let profile = options.isolation.or(recorded_isolation).unwrap_or(doxa_isolation::configured_profile(&isolation_home)?);
     if recorded_isolation.is_some_and(|saved| saved != profile) { return Err(invalid("resume isolation differs from saved manifest")); }
+    if options.engine == Engine::Antigravity && profile.docker() {
+        return Err(invalid("Antigravity requires native Linux isolation"));
+    }
     let mut isolation = if profile.docker() {
         let runtime = doxa_isolation::Runtime::prepare(&isolation_home, &options.session_id, &options.cwd,
             Some(profile), options.resume, options.base_branch.as_deref())?;
@@ -673,6 +701,7 @@ fn run() -> io::Result<()> {
     env::set_var("DOXA_MCP_RUNTIME", &options.runtime);
     let mut codex_host = None;
     let mut claude_host = None;
+    let mut antigravity_host = None;
     let mut vendor_host = None;
     let mut router_host = None;
     let host: Arc<dyn Host> = match options.engine {
@@ -714,6 +743,16 @@ fn run() -> io::Result<()> {
                 .map_err(io::Error::other)?,
             );
             claude_host = Some(host.clone());
+            host
+        }
+        Engine::Antigravity => {
+            let host = Arc::new(antigravity_host::AntigravityHost::new(
+                options.antigravity_bin.as_ref().expect("validated Antigravity executable"),
+                &options.cwd, &options.session_id, options.resume,
+                options.model.as_deref(), options.effort.as_deref(),
+            )?);
+            options.model = host.initial_model();
+            antigravity_host = Some(host.clone());
             host
         }
         Engine::DeepSeek | Engine::Glm => {
@@ -810,12 +849,14 @@ fn run() -> io::Result<()> {
         provider_args.extend(["--router-config".into(),options.router_config.as_ref().expect("validated Router config").to_str().ok_or_else(||invalid("Router config path must be UTF-8 for child launch"))?.into()]);
         if let Some(path)=&options.codex_bin {provider_args.extend(["--codex-bin".into(),path.to_str().ok_or_else(||invalid("Codex executable must be UTF-8 for child launch"))?.into()]);}
     }
-    peer_host.configure_spawner(session_spawn::SpawnConfig {
-        executable:env::current_exe()?,engine:options.engine.name().into(),
-        runtime:options.runtime.clone(),cwd:options.cwd.clone(),
-        session_id:options.session_id.clone(),depth:options.spawn_depth,provider_args,
-    })?;
-    peer_host.connect_provider_tools();
+    if options.engine != Engine::Antigravity {
+        peer_host.configure_spawner(session_spawn::SpawnConfig {
+            executable:env::current_exe()?,engine:options.engine.name().into(),
+            runtime:options.runtime.clone(),cwd:options.cwd.clone(),
+            session_id:options.session_id.clone(),depth:options.spawn_depth,provider_args,
+        })?;
+        peer_host.connect_provider_tools();
+    }
     let host: Arc<dyn Host> = peer_host.clone();
     let session = Session {
         session_id: options.session_id.clone(),
@@ -871,7 +912,7 @@ fn run() -> io::Result<()> {
         }
         if let Ok(Some(received)) = inbox.poll_receive_with_receipt(&|s: &str| s.to_owned()) {
             let receipt=if let Ok(mut event) = peer_host.inbound_event(received.frame.clone(),received.message_id.as_deref()) {
-                let wake_enabled = options.engine != Engine::Fixture && inbound_policy.enabled();
+                let wake_enabled = !matches!(options.engine, Engine::Fixture | Engine::Antigravity) && inbound_policy.enabled();
                 event["data"]["wake_policy"] = json!(if wake_enabled { "enabled" } else { "disabled" });
                 handle.publish(event.clone());
                 let (state,reason) = if wake_enabled {
@@ -945,6 +986,9 @@ fn run() -> io::Result<()> {
         if !host.shutdown() {
             eprintln!("doxa-daemon: Claude CLI host did not finalize cleanly");
         }
+    }
+    if let Some(host) = &antigravity_host {
+        host.shutdown();
     }
     if let Some(host) = &vendor_host {
         host.shutdown();

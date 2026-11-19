@@ -3,6 +3,8 @@
 
 pub mod codex;
 pub mod codex_interaction;
+#[cfg(unix)]
+pub mod antigravity;
 pub mod peer_tools;
 pub mod session_tools;
 #[cfg(unix)]

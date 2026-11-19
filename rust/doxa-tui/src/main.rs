@@ -117,12 +117,13 @@ window is open; /remote-disconnect stops sharing. /remote-control URL adds
 remote tabs beside local tabs; /local selects an open local tab. Ctrl+R opens
 remote history, and PageUp at its top fetches older turns.
 
-New-session options: --engine codex|claude|deepseek|glm|router, --model NAME,
+New-session options: --engine codex|claude|antigravity|deepseek|glm|router, --model NAME,
   --router-config ABSOLUTE_PATH (reviewed router targets and compaction policy),
   --isolation native|docker-open|docker-offline,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.
 Codex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH.
 Claude: --claude-bin PATH, --effort low|medium|high|xhigh|max.
+Antigravity: --antigravity-bin PATH, --model and --effort use the live ACP catalog.
 Codex: --effort uses account model capabilities.
 DeepSeek/GLM: --effort low|high|max (DeepSeek also none).
 LORE memory, provider review and peer services run in Rust.
@@ -396,7 +397,7 @@ fn run(args: &[String]) -> io::Result<()> {
                 command = Some(if arg == "-V" { "--version" } else { arg })
             }
             "--session" | "--socket" | "--engine" | "--model" | "--effort" | "--linger"
-            | "--sandbox" | "--codex-bin" | "--claude-bin" | "--router-config"
+            | "--sandbox" | "--codex-bin" | "--claude-bin" | "--antigravity-bin" | "--router-config"
              | "--resume" | "--branch" | "--isolation" => {
                 index += 1;
                 let value = args
@@ -419,12 +420,13 @@ fn run(args: &[String]) -> io::Result<()> {
                         match value.as_str() {
                             "codex" => options.engine = launch::Engine::Codex,
                             "claude" => options.engine = launch::Engine::Claude,
+                            "antigravity" => options.engine = launch::Engine::Antigravity,
                             "fixture" => options.engine = launch::Engine::Fixture,
                             "deepseek" => options.engine = launch::Engine::DeepSeek,
                             "glm" => options.engine = launch::Engine::Glm,
                             "router" => options.engine = launch::Engine::Router,
                             _ => return Err(invalid(
-                                "native engine must be codex, claude, deepseek, glm, router, or fixture",
+                                "native engine must be codex, claude, antigravity, deepseek, glm, router, or fixture",
                             )),
                         }
                     }
@@ -439,6 +441,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     "--sandbox" => options.sandbox = Some(value.clone()),
                     "--codex-bin" => options.codex_bin = Some(PathBuf::from(value)),
                     "--claude-bin" => options.claude_bin = Some(PathBuf::from(value)),
+                    "--antigravity-bin" => options.antigravity_bin = Some(PathBuf::from(value)),
                     "--router-config" => {explicit_launch=true;options.router_config=Some(PathBuf::from(value));},
                     "--resume" => options.resume = Some(value.clone()),
                     "--branch" => options.branch = Some(value.clone()),
@@ -469,7 +472,7 @@ fn run(args: &[String]) -> io::Result<()> {
     }
     if options.resume.is_some() && command != Some("new") {
         return Err(invalid(
-            "--resume requires new --engine codex|claude|deepseek|glm|router",
+            "--resume requires new --engine codex|claude|antigravity|deepseek|glm|router",
         ));
     }
     if options.branch.is_some() && command != Some("new") {
@@ -557,6 +560,26 @@ fn run(args: &[String]) -> io::Result<()> {
                     checks.push(("codex", launch::codex_executable(&options)));
                 }
                 launch::Engine::Claude => {checks.push(("claude",launch::claude_executable(&options)));}
+                launch::Engine::Antigravity => {
+                    let executable = launch::antigravity_executable(&options);
+                    if let Ok(path) = &executable {
+                        let cancel = std::sync::atomic::AtomicBool::new(false);
+                        match doxa_engines::antigravity::discover(path, &std::env::current_dir()?, &cancel) {
+                            Ok(config) => {
+                                let catalog = config.catalog();
+                                println!("ok Antigravity ACP · {} advertised models", catalog["models"].as_array().map_or(0, Vec::len));
+                                if let Some(model) = &options.model {
+                                    match config.selection(false, model) {
+                                        Ok(_) => println!("ok Antigravity model · listed by the active CLI"),
+                                        Err(error) => { println!("missing Antigravity model · {error}"); missing = true; }
+                                    }
+                                }
+                            }
+                            Err(error) => { println!("missing Antigravity ACP session · {error}"); missing = true; }
+                        }
+                    }
+                    checks.push(("agy", executable));
+                }
                 launch::Engine::Fixture => {}
                 launch::Engine::DeepSeek | launch::Engine::Glm => {
                     if let Err(error) = launch::vendor_effort(&options) {

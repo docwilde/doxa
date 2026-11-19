@@ -75,7 +75,7 @@ fn choice(value: &str) -> io::Result<Choice> {
     }
     Ok(Choice { engine, model, weight, lore: None })
 }
-fn engine_name(engine: launch::Engine) -> &'static str { match engine { launch::Engine::Claude => "claude", launch::Engine::Codex => "codex", launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture",launch::Engine::Router=>"router" } }
+fn engine_name(engine: launch::Engine) -> &'static str { match engine { launch::Engine::Claude => "claude", launch::Engine::Codex => "codex", launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture",launch::Engine::Router=>"router", launch::Engine::Antigravity=>"antigravity" } }
 
 pub struct Spec {
     preflight: fleet_plan::Preflight, access:crate::fleet_policy::Policy, pool: Vec<Choice>, prompt: String, cwd: PathBuf,

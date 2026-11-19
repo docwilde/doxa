@@ -1,5 +1,5 @@
 //! Prospective session catalogs use the same provider CLI and account as launch.
-//! Discovery starts no DOXA daemon, thread, user turn or inference request.
+//! Discovery starts no DOXA daemon, user turn or inference request.
 use crate::launch::{self, Engine, LaunchOptions};
 use doxa_engines::codex_appserver::{AppServerDriver, AppServerOptions, CodexPermission};
 use doxa_engines::codex_driver::SandboxMode;
@@ -51,6 +51,26 @@ fn load_with_auth(engine: Engine, cwd: &Path, authenticated: bool,
                 (false, None) => doxa_claude::catalog::discover(options, remaining),
             };
             result.map_err(|_| "Claude account/catalog unavailable or unverified")
+        }
+        Engine::Antigravity if !authenticated => {
+            let executable = launch::antigravity_executable(&LaunchOptions::default())
+                .map_err(|_| "Antigravity executable unavailable")?;
+            let never = AtomicBool::new(false);
+            let catalog = doxa_engines::antigravity::discover(&executable, cwd, cancel.unwrap_or(&never))
+                .map_err(|error| {
+                    if error.to_string().contains("sign-in required") {
+                        "Antigravity sign-in required · run agy acp --login"
+                    } else {
+                        "Antigravity ACP model catalog unavailable"
+                    }
+                })?.catalog();
+            let encoded = catalog.to_string();
+            let mut lore = doxa_lore::LoreClient::open(Duration::from_secs(5))
+                .map_err(|_| "LORE catalog scrub unavailable")?;
+            if lore.scrub(&encoded).ok().as_deref() != Some(encoded.as_str()) {
+                return Err("Antigravity catalog unavailable after scrubbing");
+            }
+            Ok(catalog)
         }
         _ => Err("This engine uses its own model catalog"),
     }
