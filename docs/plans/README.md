@@ -1,6 +1,6 @@
 # Plan status
 
-Updated for **2.0.0-beta.82** on **2026-11-17**. A Python-era plan's
+Updated for **2.0.0-beta.83** on **2026-11-19**. A Python-era plan's
 "shipped" label describes that historical release; it is not evidence that
 every proposed extension exists in Rust.
 

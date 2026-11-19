@@ -18,9 +18,9 @@ use std::{
     process::Command,
 };
 
-const SOURCE: &str = "0a94398fa60c4fac0e7659e4213a0a36e613dd46";
+const SOURCE: &str = "29eb79e9866b3262a777fdf8195c1b9e63684c91";
 const CONTRACT: &str = "doxa-precompact-fail-closed-v1";
-const PATCH: &str = "a18ebbb80c42cf7b424b86c373db2ee5d56fc5666f815b37bb5ba698fd2fea8e";
+const PATCH: &str = "738667bb902423c35e7352d057ca8153c3c3ea9235b1caaa3946aefb77d6c3c0";
 const MAX_BINARY: u64 = 1024 * 1024 * 1024;
 
 #[derive(Deserialize)]

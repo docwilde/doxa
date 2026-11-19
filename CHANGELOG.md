@@ -5,6 +5,24 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.83 — 2026-11-19
+
+**Protected Codex**
+
+- Update **`codex-current`** to protected Codex **0.170.0**, pinned to `29eb79e9866b3262a777fdf8195c1b9e63684c91`.
+- Retain required foreground compaction review, background compaction refusal,
+  live permission checks and verified code-mode helper provenance.
+
+**Offline evaluation and acceptance**
+
+- Add a draft guide for blind fleet labeling and an aggregate Cohen's kappa
+  calculator.
+- Replay recorded development checkpoint Choices against frozen requests and
+  verify durable spending holds for the $25 development pilot with synthetic
+  dispatch.
+- Add installed PTY checks for plugin refusals and prepared code-graph queries
+  during local fixture daemon output.
+
 ## 2.0.0-beta.82 — 2026-11-17
 
 **Protected Codex**
