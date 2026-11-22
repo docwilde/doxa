@@ -159,6 +159,29 @@ class PilotLedger:
                 and bounded_int(call, 1, self._plan["max_calls_per_trial"]),
                 "request is outside the frozen pilot trial or call scope")
 
+    def bind_coordinator(self, configuration_sha256):
+        check_digest(configuration_sha256)
+        with self._transaction(write=True) as db:
+            db.execute("""CREATE TABLE coordinator (
+                id INTEGER PRIMARY KEY CHECK (id = 1), configuration_sha256 TEXT NOT NULL
+            )""")
+            db.execute("INSERT INTO coordinator (id, configuration_sha256) VALUES (1, ?)",
+                       (configuration_sha256,))
+
+    def verify_coordinator(self, configuration_sha256):
+        with self._transaction() as db:
+            row = db.execute("SELECT configuration_sha256 FROM coordinator WHERE id = 1").fetchone()
+            require(row is not None and row["configuration_sha256"] == configuration_sha256,
+                    "coordinator configuration differs from the frozen ledger binding")
+
+    @staticmethod
+    def _create_repair_receipts(db):
+        db.execute("""CREATE TABLE IF NOT EXISTS repair_receipts (
+            reservation_id TEXT PRIMARY KEY REFERENCES reservations(id),
+            response_sha256 TEXT NOT NULL, proposal_sha256 TEXT NOT NULL,
+            grade_sha256 TEXT
+        )""")
+
     def reserve_repair(self, task_id, arm, call, *, model, effort, input_bound, output_limit,
                        input_rate, output_rate, request_sha256):
         """Hold before one API dispatch, using the bound of the final serialized request."""
@@ -200,6 +223,19 @@ class PilotLedger:
                 "fleet slot or all-in ceiling differs from the frozen scope")
         return self._reserve("fleet_development", "", "", slot, configuration_sha256, cap)
 
+    def verify_fleet_hold(self, slot, configuration_sha256):
+        """Verify the retained outer hold before resuming the same native run."""
+        check_digest(configuration_sha256)
+        with self._transaction() as db:
+            hold = db.execute("""SELECT request_sha256, held_usd_micros FROM reservations
+                WHERE allocation = 'fleet_development' AND task_id = '' AND arm = '' AND slot = ?""",
+                (slot,)).fetchone()
+            require(hold is not None and hold["request_sha256"] == configuration_sha256
+                    and hold["held_usd_micros"] == micros(self._plan["usd_per_fleet"]),
+                    "fleet configuration does not match its retained hold")
+            require(db.execute("SELECT 1 FROM reservations WHERE scope_breach = 1 LIMIT 1").fetchone() is None,
+                    "a verified provider observation exceeded the frozen scope")
+
     def _reserve(self, allocation, task_id, arm, slot, digest, hold,
                  model="", effort="", input_bound=0, output_limit=0, input_rate=0, output_rate=0):
         check_digest(digest)
@@ -231,9 +267,14 @@ class PilotLedger:
                         input_rate, output_rate, time.time_ns()))
         return reservation
 
-    def settle_usage(self, reservation_id, *, request_sha256, model, input_tokens, output_tokens, latency_ms=None):
+    def settle_usage(self, reservation_id, *, request_sha256, model, input_tokens, output_tokens,
+                     latency_ms=None, repair_receipt=None):
         """Settle independently verified, complete usage; omit settlement for ambiguous dispatches."""
         check_digest(request_sha256)
+        if repair_receipt is not None:
+            response_sha256, proposal_sha256 = repair_receipt
+            check_digest(response_sha256)
+            check_digest(proposal_sha256)
         require(bounded_int(input_tokens, 1, MAX_MEASUREMENT) and bounded_int(output_tokens, 0, MAX_MEASUREMENT)
                 and (latency_ms is None or bounded_int(latency_ms, 0, MAX_MEASUREMENT)),
                 "provider usage or latency is incomplete or malformed")
@@ -244,6 +285,8 @@ class PilotLedger:
                     "usage does not bind to a pilot model reservation")
             require(row["settled_at_ns"] is None and not row["scope_breach"],
                     "pilot reservation already received a verified observation")
+            require(repair_receipt is None or row["allocation"] == "repair",
+                    "only a repair response can supply a proposal")
             breach = (row["model"] != model or input_tokens > row["input_bound"]
                       or (row["allocation"] == "repair" and output_tokens > row["output_limit"]))
             # An out-of-scope provider observation freezes further admissions and leaves the hold charged.
@@ -251,8 +294,30 @@ class PilotLedger:
             db.execute("""UPDATE reservations SET input_tokens = ?, output_tokens = ?, latency_ms = ?,
                           settled_usd_micros = ?, settled_at_ns = ?, scope_breach = ? WHERE id = ?""",
                        (input_tokens, output_tokens, latency_ms, charge, time.time_ns(), breach, reservation_id))
+            if not breach and repair_receipt is not None:
+                self._create_repair_receipts(db)
+                db.execute("""INSERT INTO repair_receipts (reservation_id, response_sha256, proposal_sha256)
+                              VALUES (?, ?, ?)""", (reservation_id, response_sha256, proposal_sha256))
         require(not breach, "verified provider model or usage exceeded the frozen scope")
         return charge
+
+    def record_repair_grade(self, task, arm, call, *, request_sha256, proposal_sha256, grade_sha256):
+        """Bind a reviewed grade to the specific settled response and extracted proposal."""
+        self._trial(task, arm, call)
+        for digest in (request_sha256, proposal_sha256, grade_sha256):
+            check_digest(digest)
+        with self._transaction(write=True) as db:
+            self._create_repair_receipts(db)
+            row = db.execute("""SELECT r.id, c.grade_sha256 FROM reservations AS r
+                JOIN repair_receipts AS c ON c.reservation_id = r.id
+                WHERE r.allocation = 'repair' AND r.task_id = ? AND r.arm = ? AND r.slot = ?
+                  AND r.request_sha256 = ? AND r.settled_usd_micros IS NOT NULL
+                  AND r.scope_breach = 0 AND c.proposal_sha256 = ?""",
+                (task, arm, call, request_sha256, proposal_sha256)).fetchone()
+            require(row is not None and row["grade_sha256"] in (None, grade_sha256),
+                    "grade does not match a settled repair proposal")
+            db.execute("UPDATE repair_receipts SET grade_sha256 = ? WHERE reservation_id = ?",
+                       (grade_sha256, row["id"]))
 
     def summary(self):
         """Return body-free usage and spend totals. Unresolved holds count in full."""
@@ -262,8 +327,14 @@ class PilotLedger:
     def reporting_snapshot(self):
         """Read the private trial join and public usage in the same transaction."""
         with self._transaction() as db:
-            rows = db.execute("""SELECT allocation, task_id, arm, slot, request_sha256 FROM reservations
-                WHERE allocation IN ('repair', 'decisions')""")
+            receipts_exist = db.execute("SELECT 1 FROM sqlite_master WHERE name = 'repair_receipts'").fetchone()
+            fields = ("r.allocation, r.task_id, r.arm, r.slot, r.request_sha256, "
+                      "r.settled_usd_micros IS NOT NULL AS settled")
+            source = "reservations AS r"
+            if receipts_exist:
+                fields += ", c.proposal_sha256, c.grade_sha256"
+                source += " LEFT JOIN repair_receipts AS c ON c.reservation_id = r.id"
+            rows = db.execute(f"SELECT {fields} FROM {source} WHERE r.allocation IN ('repair', 'decisions')")
             return self._run_id, self._summary(db), [dict(row) for row in rows]
 
     def _summary(self, db):

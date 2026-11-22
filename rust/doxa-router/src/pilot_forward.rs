@@ -119,25 +119,33 @@ impl Route<'_> {
     /// Consume a decision response already obtained for this prepared request.
     /// Low confidence, ambiguous accounting and invalid answers stop this call.
     pub fn finish(self, response: &[u8], latency_ms: u64) -> io::Result<(Forward, Outcome)> {
+        let (forward, outcome) = self.observe(response, latency_ms)?;
+        forward.map(|forward| (forward, outcome)).ok_or_else(|| {
+            invalid("pilot decision did not establish a selected candidate and bounded usage")
+        })
+    }
+
+    /// Report verified usage even when the result cannot authorize a repair.
+    pub fn observe(self, response: &[u8], latency_ms: u64) -> io::Result<(Option<Forward>, Outcome)> {
         if response.len() > DECISION_RESPONSE_LIMIT {
             return Err(invalid("pilot decision response exceeds the byte limit"));
         }
         let response =
             strict::parse(response).map_err(|_| invalid("invalid pilot decision JSON"))?;
         let result = parse_response(self.config, &self.decision, &response, latency_ms);
-        if result.reason != Reason::Selected
-            || result
-                .usage
-                .as_ref()
-                .is_none_or(|usage| usage.input_tokens > self.decision.input_token_reservation)
-        {
-            return Err(invalid(
-                "pilot decision did not establish a selected candidate and bounded usage",
-            ));
+        if result.verified_response.is_none() {
+            return Err(invalid("pilot decision response could not be verified"));
+        }
+        let bounded_usage = result
+            .usage
+            .as_ref()
+            .is_some_and(|usage| usage.input_tokens <= self.decision.input_token_reservation);
+        if result.reason != Reason::Selected || !bounded_usage {
+            return Ok((None, result));
         }
         match result.candidate_id.as_str() {
-            "flash-direct" => Ok((self.flash, result)),
-            "pro-thinking" => Ok((self.pro, result)),
+            "flash-direct" => Ok((Some(self.flash), result)),
+            "pro-thinking" => Ok((Some(self.pro), result)),
             _ => Err(invalid("pilot decision selected an unknown candidate")),
         }
     }

@@ -113,7 +113,10 @@ def classify_trial(row, calls, plan, accounting, driver_sha256, task):
         return status
 
     b.require(status == "graded" and row.keys() == shape | {"grade"}, "unknown or invalid trial outcome")
-    return classify_grade(row["grade"], row["task_id"], accounting["corpus_sha256"], driver_sha256, task)
+    outcome = classify_grade(row["grade"], row["task_id"], accounting["corpus_sha256"], driver_sha256, task)
+    b.require(registered["settled"] and registered.get("grade_sha256") == b.digest(b.encode(row["grade"])),
+              "grade does not bind to the settled repair reservation")
+    return outcome
 
 
 def summarize(ledger, manifest):

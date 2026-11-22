@@ -137,9 +137,33 @@ def snapshot(state,target):
         create(target/name,raw);inventory[name]=digest(raw)
     return plan,inventory
 
-def docker_args(host,image,name,source,kind,driver=None):
+def check_grader_target(host, image):
     require(re.fullmatch(r'sha256:[0-9a-f]{64}',image) is not None,'an immutable Docker image ID is required')
     require(host.startswith('unix:///') and not any(c in host for c in '\n\r'),'a local rootless Docker Unix socket is required')
+
+
+def grader_preflight(host, image):
+    check_grader_target(host, image)
+    # Read local engine metadata before running any candidate.
+    environment = {"PATH": "/usr/bin:/bin"}
+    docker = ["/usr/bin/docker", "--host", host]
+    info = subprocess.run(
+        [*docker, "info", "--format", "{{json .SecurityOptions}}"],
+        env=environment, capture_output=True, timeout=10,
+    )
+    require(info.returncode == 0 and "name=rootless" in json.loads(info.stdout),
+            "Docker Engine must report rootless mode")
+    inspected = subprocess.run(
+        [*docker, "image", "inspect", image, "--format", "{{.Id}}"],
+        env=environment, capture_output=True, timeout=10,
+    )
+    require(inspected.returncode == 0 and inspected.stdout.decode().strip() == image,
+            "immutable local image unavailable")
+    return {"schema": "doxa-repair-grader-preflight-v1", "rootless": True, "image": image}
+
+
+def docker_args(host,image,name,source,kind,driver=None):
+    check_grader_target(host, image)
     return ['/usr/bin/docker','--host',host,'run','--rm','--pull=never','-i','--name',name,
         '--network=none','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges:true',
         '--user=0:0','--ipc=private','--cgroupns=private','--memory=268435456','--memory-swap=268435456',
@@ -200,12 +224,7 @@ def equal(a,b):
 
 def grade(state,host,image,*,expected_plan_sha256=None,expected_source_sha256=None):
     state=Path(state).resolve(strict=True);private_directory(state)
-    docker_args(host,image,'doxa-preflight',state,'pure')
-    # CLI metadata only: no source execution, no credentials and no implicit pull.
-    info=subprocess.run(['/usr/bin/docker','--host',host,'info','--format','{{json .SecurityOptions}}'],env={'PATH':'/usr/bin:/bin'},capture_output=True,timeout=10)
-    require(info.returncode==0 and 'name=rootless' in json.loads(info.stdout),'Docker Engine must report rootless mode')
-    inspected=subprocess.run(['/usr/bin/docker','--host',host,'image','inspect',image,'--format','{{.Id}}'],env={'PATH':'/usr/bin:/bin'},capture_output=True,timeout=10)
-    require(inspected.returncode==0 and inspected.stdout.decode().strip()==image,'immutable local image unavailable')
+    grader_preflight(host, image)
     run=state/('grade-'+uuid.uuid4().hex);run.mkdir(mode=0o700)
     plan,inventory=snapshot(state,run/'source');row=task(plan['task_id'])
     source_sha256=digest(encode(inventory))
@@ -240,11 +259,17 @@ def main():
     sub.add_parser('list')
     p=sub.add_parser('router-config');p.add_argument('--fallback',required=True,choices=('flash-direct','flash-thinking','pro-thinking'))
     p=sub.add_parser('prepare');p.add_argument('task');p.add_argument('state',type=Path);p.add_argument('--trusted-reference',action='store_true')
-    p=sub.add_parser('grade');p.add_argument('state',type=Path);p.add_argument('--docker-host',required=True);p.add_argument('--image',required=True)
+    for action in ('grader-preflight', 'grade'):
+        p = sub.add_parser(action)
+        if action == 'grade':
+            p.add_argument('state', type=Path)
+        p.add_argument('--docker-host', required=True)
+        p.add_argument('--image', required=True)
     args=parser.parse_args()
     if args.action=='list':result=[{k:t[k] for k in ('id','title','difficulty','family','split','editable_paths')} for t in corpus()['tasks']]
     elif args.action=='router-config':result=router_config(args.fallback)
     elif args.action=='prepare':result=prepare(args.task,args.state,args.trusted_reference)
+    elif args.action=='grader-preflight':result=grader_preflight(args.docker_host,args.image)
     else:result=grade(args.state,args.docker_host,args.image)
     print(json.dumps(result,indent=2))
 

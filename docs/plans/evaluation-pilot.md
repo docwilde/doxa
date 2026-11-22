@@ -55,6 +55,12 @@ identity and price bounds before execution; a changed rate or unsupported
 account stops admission. Credentials flow through the existing provider
 process, and never enter journals, cards or committed fixtures.
 
+The ledger controls admission before a request and freezes new admissions
+after a verified overage. A provider can report an overage only after the call,
+and an ambiguous response cannot confirm final billing. The paid coordinator
+must verify the providers' enforceable token and billing bounds before it
+dispatches and account for already admitted work when it stops.
+
 The offline admission ledger uses SQLite transactions and rounds each hold
 upward to integer USD micros.
 A full-size Pro hold is $0.156162 after rounding. Jev holds use its pinned
@@ -111,8 +117,15 @@ the Jev selection path. It preserves the JSON values of all other accepted
 request fields, including raw message and tool payloads, and binds the exact
 forwarded bytes and limits to a body-free receipt. Run
 `cargo test -p doxa-router --test pilot_forward` for the fixture controls.
-The live endpoint still needs credential handling, ledger admission and
-provider transport connected to this core.
+The [dispatch module](../../scripts/routing-benchmark/pilot_dispatch.py) joins
+that core to exact-byte HTTPS transport and ledger admission. The
+[coordinator](../../scripts/routing-benchmark/pilot_coordinator.py) rehearses
+one proposal request per task and arm. It binds the settled response and exact
+proposal to an explicitly approved revision and its offline grade. An empty
+or incomplete provider answer stays a provider failure, even if usage settles.
+The summary checks the grade against its own reservation and cannot use a
+grade from another arm. A restart can recover an approved grade without
+dispatching another request.
 
 Run the combined forwarding and ledger fixture from the repository root.
 
@@ -122,10 +135,34 @@ python3 scripts/routing-benchmark/pilot_admission_fixture.py \
   "${CARGO_TARGET_DIR:-target}/debug/examples/pilot_wire_fixture"
 ```
 
-The fixture checks the committed request hash before each synthetic dispatch.
-It verifies matched fixed and routed requests, then reopens the ledger in an
-independent process to confirm ambiguous holds still count and prevent replay.
-The printed report contains no request or response text.
+The fixture checks the committed request hash at a loopback HTTP receiver.
+It verifies matched fixed and routed requests and reopens the ledger in an
+independent process. Ambiguous holds still count and prevent replay. A verified
+Jev usage overage freezes all new admissions even when the decision yields no
+forwarding request. The printed report contains no request or response text.
+
+Run the credential-free coordinator rehearsal against the same workstation
+wire adapter and an existing rootless grader image:
+
+```sh
+python3 scripts/routing-benchmark/pilot_coordinator_fixture.py \
+  "${CARGO_TARGET_DIR:-target}/debug/examples/pilot_wire_fixture" \
+  --docker-host unix:///PATH --image sha256:DIGEST
+```
+
+It exercises all three arms with synthetic responses and grades two explicit
+reference controls. An interrupted response keeps its hold and cannot replay.
+The [fleet wrapper](../../scripts/routing-benchmark/pilot_fleet.py) generates
+a fixed native dry run, reserves its complete outer hold before start and
+requires the same executable, configuration and native run for resume.
+
+The workstation account metadata probe observed both DeepSeek model IDs, an
+available balance and a successful Jev catalog response on 2026-11-22. TypeSafe
+documents that its catalog may omit versioned IDs. The published prices match
+the frozen scope. Account-side spend limits remain unverified, so the pilot
+coordinator has only a credential-free transport entry point.
+[DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing/) ·
+[TypeSafe models](https://docs.typesafe.ai/models)
 
 The repair bridge can use text-only requests for all three arms. Tool-bearing
 requests must meet both candidates' requirements before Jev runs. DeepSeek's
@@ -142,6 +179,10 @@ Use an existing pinned local rootless Docker image for grading, with the
 corpus's network and resource limits. Do not pull an image or weaken limits
 silently. The provider sees only the candidate workspace; the host never
 executes candidate code.
+
+Run `benchmark.py grader-preflight --docker-host unix:///PATH --image sha256:DIGEST`
+to verify the engine and image metadata before preparing any repair trials.
+The grader repeats this check when it starts an approved grading run.
 
 Prepare blinded checkpoint cards and the label guide before fleet collection.
 Keep development collections and independent human labels separate. Do not

@@ -7,13 +7,69 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
+import benchmark as b
+import pilot_coordinator
+import pilot_fleet
 from pilot_ledger import LedgerRefused, PilotLedger, micros, policy, token_cost
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 class FleetPilotFixture(unittest.TestCase):
+    def test_launch_and_resume_share_one_retained_budget(self):
+        override = os.environ.get("DOXA_PILOT_FIXTURE_BINARY")
+        binary = Path(override or ROOT / "target/debug/doxa-rs").absolute()
+        if override is None and not binary.is_file():
+            self.skipTest("Build doxa-rs or set DOXA_PILOT_FIXTURE_BINARY")
+        base = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="pf-"))).resolve()
+        state = base / "p"
+        image = "sha256:" + "a" * 64
+        with patch.object(b, "grader_preflight", return_value={"image": image}):
+            pilot_coordinator.initialize(state, "unix:///fixture/socket", image)
+            intent_digest = pilot_fleet.plan_fleet(state, 1, binary, binary, base)
+        intent = b.parse(b.read(state / "slot-1/intent.json"))
+        run = Path(intent["runtime"]) / intent["run_id"]
+        operations = []
+
+        def fixture_execute(argv, environment, workspace):
+            ledger = PilotLedger.open(state / "pilot.sqlite")
+            ledger.verify_fleet_hold(1, intent_digest)
+            self.assertEqual(workspace, base)
+            self.assertEqual(environment["DOXA_MCP_ENABLED"], "0")
+            self.assertFalse(any(name.endswith("API_KEY") for name in environment))
+            operations.append(argv[2])
+
+        self.assertIsNone(pilot_fleet.drive_fleet(state, 1, intent_digest, fixture_execute))
+        with self.assertRaisesRegex(LedgerRefused, "already reserved"):
+            pilot_fleet.drive_fleet(state, 1, intent_digest, fixture_execute)
+        with self.assertRaisesRegex(ValueError, "canonical directory required"):
+            pilot_fleet.drive_fleet(state, 1, intent_digest, fixture_execute, resume=True)
+        run.mkdir(mode=0o700)
+        (run / "router-configs").mkdir(mode=0o700)
+        rows = []
+        for index in range(3):
+            path = run / f"router-configs/slot-{index}.json"
+            digest = b.create(path, b.encode({"fixture": index}))
+            rows.append({"index": index, "engine": "router", "model": "flash", "isolation": "docker-offline",
+                         "router_config": str(path), "router_config_sha256": digest})
+        manifest = {
+            "native_version": 1, "run_id": intent["run_id"], "mode": "supervisor", "phase": "monitoring",
+            "live": True, "ledger_path": str(run / "home/peers/messages.jsonl"), "slots": rows,
+            "spec": {"cwd": str(base), "isolation": "docker-offline", "run_budget_usd": 2.49,
+                     "lore_enabled": False},
+            "supervision": {"context": {"review": {"budget_usd": 0.24}}},
+        }
+        b.create(run / "manifest.json", manifest)
+        self.assertIsNone(pilot_fleet.drive_fleet(state, 1, intent_digest, fixture_execute, resume=True))
+        Path(rows[0]["router_config"]).write_text("{}")
+        with self.assertRaisesRegex(ValueError, "Router journal identity changed"):
+            pilot_fleet.drive_fleet(state, 1, intent_digest, fixture_execute, resume=True)
+        self.assertEqual(operations, ["start", "resume"])
+        self.assertEqual(PilotLedger.open(state / "pilot.sqlite").summary()["allocations"]
+                         ["fleet_development"]["charged_usd_micros"], 2_500_000)
+
     def test_dry_run_profiles_fit_two_retained_fleet_envelopes(self):
         override = os.environ.get("DOXA_PILOT_FIXTURE_BINARY")
         binary = Path(override or ROOT / "target/debug/doxa-rs").absolute()
