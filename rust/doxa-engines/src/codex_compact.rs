@@ -9,10 +9,10 @@ use std::io::Write;
 #[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
 
-pub const SUPPORTED_VERSION: &str = "0.170.0";
-pub const PROTECTED_AGENT_PREFIX: &str = "doxa_codex_rs/0.170.0 (doxa-precompact-fail-closed-v1; ";
-pub const SUPPORTED_SOURCE: &str = "29eb79e9866b3262a777fdf8195c1b9e63684c91";
-pub const SUPPORTED_PATCH: &str = "738667bb902423c35e7352d057ca8153c3c3ea9235b1caaa3946aefb77d6c3c0";
+pub const SUPPORTED_VERSION: &str = "0.171.0";
+pub const PROTECTED_AGENT_PREFIX: &str = "doxa_codex_rs/0.171.0 (doxa-precompact-fail-closed-v1; ";
+pub const SUPPORTED_SOURCE: &str = "ccf9be8cc458bd6b8336fe84d68d8893f2691a5e";
+pub const SUPPORTED_PATCH: &str = "2908cbc754d542111a6767b6f28e7f66b45464007c5eb5d3eb3bdad4650e1386";
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]

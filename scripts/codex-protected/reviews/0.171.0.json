@@ -1,0 +1,78 @@
+{
+  "after": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "2908cbc754d542111a6767b6f28e7f66b45464007c5eb5d3eb3bdad4650e1386",
+    "provider": "codex-0.171.0-precompact-v1",
+    "schema": 1,
+    "source_commit": "ccf9be8cc458bd6b8336fe84d68d8893f2691a5e",
+    "tag": "rust-v0.171.0",
+    "version": "0.171.0"
+  },
+  "annotated_upstream_tag_object": "295eca93394bb83a6ec8e0841033f3997f97fcbd",
+  "artifact_sha256": {
+    "app_server": "f688380f97663e01d393b957a7a9e7eb0c580af892f91361229608bbcec9768e",
+    "code_mode_host": "d4b6904fe4adaecf0453f7800c64a54aed00bc4a9d09a0a6ca37bd2954e4f521"
+  },
+  "automatic_sensitive_path_gate_changed": false,
+  "before": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "738667bb902423c35e7352d057ca8153c3c3ea9235b1caaa3946aefb77d6c3c0",
+    "provider": "codex-0.170.0-precompact-v1",
+    "schema": 1,
+    "source_commit": "29eb79e9866b3262a777fdf8195c1b9e63684c91",
+    "tag": "rust-v0.170.0",
+    "version": "0.170.0"
+  },
+  "compiled_source": {
+    "helper_inputs": {
+      "archive_sha256": "b3b490f2aa809eda7f6ac727f851fb00ce8355be72827577cfaac28c7137dbcd",
+      "binding_sha256": "3e4d5fecdbe0f98a6017e69d7ca82519a77fb032c5eb5e4cdbecdd3e2ec519d5",
+      "manifest_sha256": "1ec730635970ab1c0e8f4764ea113ad29d69d7f8d4c2ae69f3d766434a759350",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "152.2.0"
+    },
+    "lock_sha256": "05c5b672b121ec8aac65a2a5d642a6a3cb37bfe08d491f62a1808a7c08ad1f",
+    "manifest_sha256": "8afe63c7ddbee1946f4747eb1e4ef32dd218cffdfac63c10e685904b2febe866",
+    "profile": "dev-small",
+    "toolchain": "1.99.1"
+  },
+  "guard_mapping": {
+    "background_compaction": "The scheduler refuses background compaction and its execution entry returns TurnAborted before transport.",
+    "foreground_compaction": "Foreground compaction retains the required session-flags hook and upstream audio handling.",
+    "helper_identity": "The private native dispatcher requires the source-bound server and code-mode helper. The compiled helper uses the source-pinned V8 archive and bindings.",
+    "permission_policy": "The permission-only update rejects mixed request-country, reviewer, environment and model settings. The captured-step regression checks that the permission profile and thread defaults stay fixed."
+  },
+  "review_kind": "manual protection-port boundary review",
+  "upstream_review": {
+    "automatic_review_filter_paths_count": 471,
+    "changed_paths_count": 2078,
+    "protected_patch_overlapping_paths": 19
+  },
+  "verification": {
+    "actual_native_dispatcher_code_mode_and_missing_helper_control": "passed",
+    "app_server_build": "passed",
+    "automatic_compaction_cases": 20,
+    "code_mode_host_build": "passed",
+    "debug_guard_test_stack_bytes": 16777216,
+    "independent_pinned_checkout_matches_reviewed_patch": true,
+    "installer_script_tests": 23,
+    "native_engine_tests": 115,
+    "native_existing_ignored": 3,
+    "paid_requests": 0,
+    "patch_stable_before_and_after_build": true,
+    "provider_test_inventory": {
+      "codex-core-doxa_async_compaction_cannot_start_unreviewed_work": 1,
+      "codex-core-doxa_auto_": 8,
+      "codex-core-doxa_root_only_flag_cannot_enable_speculation": 2,
+      "codex-core-exec_policy-tests": 86,
+      "codex-core-execution_cancellation_respects_network_approval_boundary": 3,
+      "codex-core-infrastructure_failures_never_authorize_compaction": 1,
+      "codex-core-record_granted_request_permissions_for_turn_uses_originating_turn": 1,
+      "codex-core-request_permission_grants_are_environment_keyed": 1,
+      "codex-core-strict_auto_review": 5,
+      "codex-core-tools-approvals-tests": 8,
+      "codex-hooks-doxa_required_hook_rejects_infrastructure_and_invalid_output": 1
+    },
+    "updater_script_tests": 35
+  }
+}

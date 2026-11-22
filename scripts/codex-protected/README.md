@@ -1,7 +1,7 @@
 # Protected Codex provider
 
-The reviewed patch targets official `rust-v0.170.0`, commit
-`29eb79e9866b3262a777fdf8195c1b9e63684c91`. Source, patch, launcher,
+The protected patch targets official `rust-v0.171.0`, commit
+`ccf9be8cc458bd6b8336fe84d68d8893f2691a5e`. Source, patch, launcher,
 app-server and code-mode helper identities are checked independently. The
 installer uses a separate `source-<commit>-<patch>` checkout and publishes
 immutable receipt-addressed artifacts; it never resets old build sources.
@@ -64,6 +64,15 @@ control. The helper proof must use the same source build and verified receipt;
 none of these commands require account credentials or external model calls.
 See each verifier's `--help` for its exact options. These checks do not establish
 real-account model availability or live sandbox acceptance.
+
+## Reviewed 0.171.0 port
+
+The port preserves upstream's request-country setting for ordinary live
+updates. A private `doxaAuto` update must leave request country and the other
+ordinary settings unset. Foreground compaction still requires the trusted
+synchronous review, and the protected background entry refuses before
+inference. The [review record](reviews/0.171.0.json) binds the workstation
+build and credential-free checks to the pinned source and patch.
 
 ## Reviewed 0.170.0 port
 
@@ -156,7 +165,7 @@ manifest. Installing a new host provider or selecting a new-session image
 does not replace that saved image. A saved Docker thread can resume with the
 exact reviewed 0.163.0 contract (source `83086188`, patch `3a7b8c09`) or 0.164.0
 contract (source `6aaac694`, patch `f8759872`), the reviewed 0.165.0 and
-0.166.0, 0.167.0 and 0.167.1 contracts, and the current 0.170.0 provider. The retained contract requires the protected
+0.166.0, 0.167.0, 0.167.1 and 0.170.0 contracts. The retained contract requires the protected
 DOXA/live-auto initialize prefix and all normal hook, feature and launcher
 receipt checks. It is unavailable to fresh sessions or native providers.
 
