@@ -5,6 +5,11 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.86 — 2026-11-22
+
+- Update `codex-current` to protected Codex **0.171.0**.
+- Keep trusted foreground compaction review, background compaction refusal, live permission guards and source-pinned code-mode helper inputs.
+
 ## 2.0.0-beta.85 — 2026-11-21
 
 - Record structured tool successes and failures by default for Claude, Codex, Gemini via Antigravity, DeepSeek and GLM.
