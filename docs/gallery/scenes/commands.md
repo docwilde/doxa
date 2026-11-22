@@ -7,6 +7,6 @@
 
 Slash-command completion appears in the prompt.
 
-[![Slash-command completion](../../../assets/shots/rust-2.0.0-beta.78-commands.png)](../../../assets/shots/rust-2.0.0-beta.78-commands.png)
+[![Slash-command completion](../../../assets/shots/rust-2.0.0-beta.85-commands.png)](../../../assets/shots/rust-2.0.0-beta.85-commands.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#commands) · [Back to the README gallery](../../../README.md#gallery)

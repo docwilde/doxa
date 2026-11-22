@@ -7,6 +7,6 @@
 
 Expanded tool input and output use a synthetic event in the production renderer.
 
-[![Expanded tool input and output](../../../assets/shots/rust-2.0.0-beta.78-tool-entries.png)](../../../assets/shots/rust-2.0.0-beta.78-tool-entries.png)
+[![Expanded tool input and output](../../../assets/shots/rust-2.0.0-beta.85-tool-entries.png)](../../../assets/shots/rust-2.0.0-beta.85-tool-entries.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#tool-entries) · [Back to the README gallery](../../../README.md#gallery)

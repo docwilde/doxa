@@ -1,48 +1,48 @@
 # Rust gallery
 
-The beta.78 gallery contains **28 actual terminal screenshots**, captured from the production Ratatui `App` running in a GTK/VTE terminal on a private Xvfb display. `ffmpeg x11grab` captures the display framebuffer at **3068 × 1734**. The gallery example feeds illustrative turns, tool calls, memory, fleets and telemetry into the native UI; it never starts a provider or contacts owner sessions or memory. Every scene has isolated state. DejaVu Sans Mono and a private Symbols Nerd Font provide the terminal glyphs. The capture metadata records the terminal grid and SHA-256 of each original PNG.
+The beta.85 gallery contains **28 actual terminal screenshots**, captured from the production Ratatui `App` running in a GTK/VTE terminal on a private Xvfb display. `ffmpeg x11grab` captures the display framebuffer at **3068 × 1734**. The gallery example feeds illustrative turns, tool calls, memory, fleets and telemetry into the native UI; it never starts a provider or contacts owner sessions or memory. Every scene has isolated state. DejaVu Sans Mono and a private Symbols Nerd Font provide the terminal glyphs. The capture metadata records the terminal grid and SHA-256 of each original PNG.
 
-Earlier sets remain in `assets/shots` as history: the beta.48 images were rasterized from styled `TestBackend` cells, and the beta.49 and beta.50 sets are older terminal captures of the same scenes. The current README and interactive gallery use the beta.78 captures.
+Earlier sets remain in `assets/shots` as history: the beta.48 images were rasterized from styled `TestBackend` cells, and beta.49, beta.50 and beta.78 are earlier terminal captures. The current README and interactive gallery use the beta.85 captures.
 
 ## Contents
 
-- [Beta.78 terminal captures](#beta78-terminal-captures)
+- [Beta.85 terminal captures](#beta85-terminal-captures)
 - [Reproduce the captures](#reproduce-the-captures)
 - [Earlier live terminal captures](#earlier-live-terminal-captures)
 - [Browser and Android gallery](remote-gallery.md)
 
-## Beta.78 terminal captures
+## Beta.85 terminal captures
 
 | Scene | Image | What the fixture exercises |
 | --- | --- | --- |
-| Workspace | [hero](../assets/shots/rust-2.0.0-beta.78-hero.png) | Tabs, project rail, Markdown answer, and version line |
-| Project triage | [triage](../assets/shots/rust-2.0.0-beta.78-triage.png) | Verified-root hue and a pane badge pointing to a hidden tab that needs input |
-| Pane rail | [pane-triage](../assets/shots/rust-2.0.0-beta.78-pane-triage.png) | One navigable row for the pane with three tabs; hidden-tab urgency remains visible |
-| Project label | [project-label](../assets/shots/rust-2.0.0-beta.78-project-label.png) | An explicit label on a verified project heading, kept in fixture memory without writing owner config |
-| Image preview | [image-preview](../assets/shots/rust-2.0.0-beta.78-image-preview.png) | An inline checked-in local Markdown image rendered inside a transcript paragraph using the halfblock fallback |
-| Isolation | [isolation](../assets/shots/rust-2.0.0-beta.78-isolation.png) | The Docker policy chip and details from a synthetic rootless worker status |
-| Fleet review | [fleet-review](../assets/shots/rust-2.0.0-beta.78-fleet-review.png) | A supervised plan with spending limits, independent reviewer, and message judge; launch is disabled |
-| Dependency plan | [fleet-dependency](../assets/shots/rust-2.0.0-beta.78-fleet-dependency.png) | Frozen tasks, predecessor edge, and explicit human-release warning in a disabled plan |
-| Dependency release | [fleet-release-review](../assets/shots/rust-2.0.0-beta.78-fleet-release-review.png) | Synthetic host checkpoint, receiver read-back and sender agreement in the real review modal; release is disabled |
-| Code graph | [codegraph](../assets/shots/rust-2.0.0-beta.78-codegraph.png) | A synthetic, read-only module query in the production modal, with source hashes and an explicitly unknown conditional edge |
-| Fleet status | [fleet-view](../assets/shots/rust-2.0.0-beta.78-fleet-view.png) | A synthetic worker waiting for its predecessor; no controller starts |
-| Beliefs | [beliefs](../assets/shots/rust-2.0.0-beta.78-beliefs.png) | Belief selection and review actions; writes are disabled |
-| Tool details | [tool-entries](../assets/shots/rust-2.0.0-beta.78-tool-entries.png) | Expanded normalized tool event with synthetic input and output |
-| Memory | [memory-management](../assets/shots/rust-2.0.0-beta.78-memory-management.png) | Curated project memory controls; writes are disabled |
-| Commands | [commands](../assets/shots/rust-2.0.0-beta.78-commands.png) | Slash-command completion |
-| Help | [help](../assets/shots/rust-2.0.0-beta.78-help.png) | Built-in command help |
-| Settings | [settings](../assets/shots/rust-2.0.0-beta.78-settings.png) | Actual click on Appearance and hover on Memory in the submenu title bar; changes remain unsaved |
-| Jev Router settings | [settings-router](../assets/shots/rust-2.0.0-beta.78-settings-router.png) | Actual dropdown and text-editor staging of the Router default and private config path; readiness stays Not checked |
-| Routing status | [routing-status](../assets/shots/rust-2.0.0-beta.78-routing-status.png) | Synthetic Auto decision with separate effective API worker, latency and Jev-only routing estimate |
-| Context | [context](../assets/shots/rust-2.0.0-beta.78-context.png) | Reported 42,000 of 200,000 tokens, with exact synthetic system, tool and conversation components |
-| Subscription quota | [usage-quota](../assets/shots/rust-2.0.0-beta.78-usage-quota.png) | Synthetic Claude session and weekly quotas with reset times and preserved extra provider windows; no billing request |
-| Queued prompts | [queued-prompts](../assets/shots/rust-2.0.0-beta.78-queued-prompts.png) | Markdown and user stripe on a queued prompt while a turn is running |
-| Peer messages | [peer-messages](../assets/shots/rust-2.0.0-beta.78-peer-messages.png) | Default-collapsed received, sent and queued sections with robot direction icons and full session addresses |
-| Peer details | [peer-expanded](../assets/shots/rust-2.0.0-beta.78-peer-expanded.png) | Actual clicks expand the received and sent message bodies with their peer stripe |
-| Thinking | [reasoning](../assets/shots/rust-2.0.0-beta.78-reasoning.png) | Collapsed progress section with brain marker and a synthetic token count |
-| MCP settings | [settings-mcp](../assets/shots/rust-2.0.0-beta.78-settings-mcp.png) | API worker MCP controls and all four masked search-key fields; no connection or tool call |
-| GLM reporting | [glm-account](../assets/shots/rust-2.0.0-beta.78-glm-account.png) | Owner-declared API resource bundle; cash balance and bundle remainder stay unknown |
-| Docker setup | [setup-docker](../assets/shots/rust-2.0.0-beta.78-setup-docker.png) | Direct /setup docker opens the production prerequisites and image/socket editor controls without provider probes |
+| Workspace | [hero](../assets/shots/rust-2.0.0-beta.85-hero.png) | Tabs, project rail, Markdown answer, and version line |
+| Project triage | [triage](../assets/shots/rust-2.0.0-beta.85-triage.png) | Verified-root hue and a pane badge pointing to a hidden tab that needs input |
+| Pane rail | [pane-triage](../assets/shots/rust-2.0.0-beta.85-pane-triage.png) | One navigable row for the pane with three tabs; hidden-tab urgency remains visible |
+| Project label | [project-label](../assets/shots/rust-2.0.0-beta.85-project-label.png) | An explicit label on a verified project heading, kept in fixture memory without writing owner config |
+| Image preview | [image-preview](../assets/shots/rust-2.0.0-beta.85-image-preview.png) | An inline checked-in local Markdown image rendered inside a transcript paragraph using the halfblock fallback |
+| Isolation | [isolation](../assets/shots/rust-2.0.0-beta.85-isolation.png) | The Docker policy chip and details from a synthetic rootless worker status |
+| Fleet review | [fleet-review](../assets/shots/rust-2.0.0-beta.85-fleet-review.png) | A supervised plan with spending limits, independent reviewer, and message judge; launch is disabled |
+| Dependency plan | [fleet-dependency](../assets/shots/rust-2.0.0-beta.85-fleet-dependency.png) | Frozen tasks, predecessor edge, and explicit human-release warning in a disabled plan |
+| Dependency release | [fleet-release-review](../assets/shots/rust-2.0.0-beta.85-fleet-release-review.png) | Synthetic host checkpoint, receiver read-back and sender agreement in the real review modal; release is disabled |
+| Code graph | [codegraph](../assets/shots/rust-2.0.0-beta.85-codegraph.png) | A synthetic, read-only module query in the production modal, with source hashes and an explicitly unknown conditional edge |
+| Fleet status | [fleet-view](../assets/shots/rust-2.0.0-beta.85-fleet-view.png) | A synthetic worker waiting for its predecessor; no controller starts |
+| Beliefs | [beliefs](../assets/shots/rust-2.0.0-beta.85-beliefs.png) | Belief selection and review actions; writes are disabled |
+| Tool details | [tool-entries](../assets/shots/rust-2.0.0-beta.85-tool-entries.png) | Expanded normalized tool event with synthetic input and output |
+| Memory | [memory-management](../assets/shots/rust-2.0.0-beta.85-memory-management.png) | Curated project memory controls; writes are disabled |
+| Commands | [commands](../assets/shots/rust-2.0.0-beta.85-commands.png) | Slash-command completion |
+| Help | [help](../assets/shots/rust-2.0.0-beta.85-help.png) | Built-in command help |
+| Settings | [settings](../assets/shots/rust-2.0.0-beta.85-settings.png) | Actual click on Appearance and hover on Memory in the submenu title bar; changes remain unsaved |
+| Jev Router settings | [settings-router](../assets/shots/rust-2.0.0-beta.85-settings-router.png) | Actual dropdown and text-editor staging of the Router default and private config path; readiness stays Not checked |
+| Routing status | [routing-status](../assets/shots/rust-2.0.0-beta.85-routing-status.png) | Synthetic Auto decision with separate effective API worker, latency and Jev-only routing estimate |
+| Context | [context](../assets/shots/rust-2.0.0-beta.85-context.png) | Reported 42,000 of 200,000 tokens, with exact synthetic system, tool and conversation components |
+| Subscription quota | [usage-quota](../assets/shots/rust-2.0.0-beta.85-usage-quota.png) | Synthetic Claude session and weekly quotas with reset times and preserved extra provider windows; no billing request |
+| Queued prompts | [queued-prompts](../assets/shots/rust-2.0.0-beta.85-queued-prompts.png) | Markdown and user stripe on a queued prompt while a turn is running |
+| Peer messages | [peer-messages](../assets/shots/rust-2.0.0-beta.85-peer-messages.png) | Default-collapsed received, sent and queued sections with robot direction icons and full session addresses |
+| Peer details | [peer-expanded](../assets/shots/rust-2.0.0-beta.85-peer-expanded.png) | Actual clicks expand the received and sent message bodies with their peer stripe |
+| Thinking | [reasoning](../assets/shots/rust-2.0.0-beta.85-reasoning.png) | Collapsed progress section with brain marker and a synthetic token count |
+| MCP settings | [settings-mcp](../assets/shots/rust-2.0.0-beta.85-settings-mcp.png) | API worker MCP controls and all four masked search-key fields; no connection or tool call |
+| GLM reporting | [glm-account](../assets/shots/rust-2.0.0-beta.85-glm-account.png) | Owner-declared API resource bundle; cash balance and bundle remainder stay unknown |
+| Docker setup | [setup-docker](../assets/shots/rust-2.0.0-beta.85-setup-docker.png) | Direct /setup docker opens the production prerequisites and image/socket editor controls without provider probes |
 
 The `image-preview` scene exercises the portable halfblock path. A terminal with Kitty or Sixel graphics may use another backend; this capture is not evidence of either terminal protocol. Fleet and isolation values are synthetic and labeled as fixtures in the UI. The dependency-release fixture cannot release a worker. Project-label state is held in memory; the live command writes owner config only after verifying the root. Paths under `/demo` are example data.
 
@@ -60,7 +60,7 @@ mkdir -m 700 /path/on/real/disk/capture-state
   --icon-font /path/to/SymbolsNerdFontMono-Regular.ttf
 ```
 
-The script forces GTK onto the private X display (`GDK_BACKEND=x11`, no `WAYLAND_DISPLAY`), so a Wayland desktop session neither receives the window nor yields an empty capture. The script checks the binary version, waits for native terminal content to stabilize, captures all manifest scenes and verifies PNG dimensions. Pass scene IDs after the options for a subset. `assets/shots/rust-2.0.0-beta.78-capture.json` records original hashes and provenance. The JSON cell-buffer mode and `scripts/render_rust_gallery.py` remain developer debugging tools; they are not the current terminal-capture pipeline.
+The script forces GTK onto the private X display (`GDK_BACKEND=x11`, no `WAYLAND_DISPLAY`), so a Wayland desktop session neither receives the window nor yields an empty capture. The script checks the binary version, waits for native terminal content to stabilize, captures all manifest scenes and verifies PNG dimensions. Pass scene IDs after the options for a subset. `assets/shots/rust-2.0.0-beta.85-capture.json` records original hashes and provenance. The JSON cell-buffer mode and `scripts/render_rust_gallery.py` remain developer debugging tools; they are not the current terminal-capture pipeline.
 
 ## Earlier live terminal captures
 
