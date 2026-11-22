@@ -2,6 +2,8 @@
 """Exercise the Rust forwarding and SQLite admission boundary with synthetic responses."""
 
 import argparse
+import http.client
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from contextlib import closing
 import json
 from pathlib import Path
@@ -9,117 +11,14 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-import time
+import threading
 
 import benchmark as b
-from pilot_ledger import FIXED_ARMS, JEV_ARM, LedgerRefused, PilotLedger, micros, policy
+from pilot_dispatch import MAX_ADAPTER_PAYLOAD, post_exact, run_call
+from pilot_ledger import JEV_ARM, LedgerRefused, PilotLedger
 
-MAX_ADAPTER_PAYLOAD = 256 * 1024
 ENVIRONMENT = {"PATH": "/usr/bin:/bin"}
 SOURCE = "private synthetic candidate body"
-
-
-def wire(adapter, state, **input_fields):
-    payload = b.encode(input_fields)
-    b.require(len(payload) <= MAX_ADAPTER_PAYLOAD, "pilot fixture request exceeds the adapter bound")
-    result = subprocess.run(
-        [str(adapter)], input=payload, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        env={**ENVIRONMENT, "DOXA_HOME": str(state)}, timeout=10,
-    )
-    b.require(result.returncode == 0 and len(result.stdout) <= MAX_ADAPTER_PAYLOAD,
-              "pilot wire fixture refused")
-    return b.parse(result.stdout)
-
-
-def bound_wire(prepared, framing=0):
-    wire_bytes = prepared["wire"].encode("utf-8")
-    receipt = prepared["receipt"]
-    b.require(receipt["request_sha256"] == b.digest(wire_bytes)
-              and receipt["input_bound"] == len(wire_bytes) + framing,
-              "forwarding receipt does not bind the exact wire request")
-    return wire_bytes, receipt
-
-
-def complete_usage(status, body):
-    if status != 200 or len(body) > MAX_ADAPTER_PAYLOAD:
-        return None
-    try:
-        response = b.parse(body)
-        choices = response["choices"]
-        usage = response["usage"]
-        model = response["model"]
-        prompt, completion, total = (usage[key] for key in
-                                     ("prompt_tokens", "completion_tokens", "total_tokens"))
-        if (response["object"] == "chat.completion" and isinstance(model, str) and model
-                and isinstance(choices, list) and len(choices) == 1
-                and choices[0]["finish_reason"] in {"stop", "length", "tool_calls", "content_filter"}
-                and type(prompt) is int and type(completion) is int and type(total) is int
-                and prompt > 0 and completion >= 0 and total == prompt + completion):
-            return model, prompt, completion
-    except (KeyError, IndexError, TypeError, ValueError, RecursionError):
-        pass
-    return None
-
-
-def run_call(adapter, state, ledger, scope, request, decision_transport, repair_transport):
-    task, arm, slot = scope
-    plan, _, _ = policy()
-    if arm == JEV_ARM:
-        config = b.router_config("flash-direct")
-        config["candidates"] = [row for row in config["candidates"]
-                                if (row["model"], row["effort"]) in FIXED_ARMS.values()]
-        common = {"config": config, "request": request}
-        decision_prepared = wire(adapter, state, operation="prepare", **common)
-        decision_bytes, receipt = bound_wire(decision_prepared, plan["decision_input_framing_tokens"])
-        decision = ledger.reserve_decision(
-            task, slot, model=receipt["model"], input_bound=receipt["input_bound"],
-            input_rate=micros(plan["decision_input_usd_per_million"]),
-            request_sha256=receipt["request_sha256"],
-        )
-        b.require(decision.held_usd_micros == receipt["held_usd_micros"], "Jev hold differs from the wire bound")
-        started = time.monotonic_ns()
-        try:
-            status, response = decision_transport(decision_bytes)
-            if status != 200 or len(response) > 64 * 1024:
-                return "ambiguous_decision", None
-            selected = wire(adapter, state, operation="finish", **common,
-                            decision_sha256=receipt["request_sha256"], response=response.decode("utf-8"))
-        except (OSError, ValueError, subprocess.SubprocessError):
-            return "ambiguous_decision", None
-        observed = selected["decision"]
-        ledger.settle_usage(
-            decision.id, request_sha256=observed["request_sha256"], model=observed["model"],
-            input_tokens=observed["usage"]["input_tokens"], output_tokens=observed["usage"]["output_tokens"],
-            latency_ms=(time.monotonic_ns() - started) // 1_000_000,
-        )
-        prepared = selected["repair"]
-    else:
-        prepared = wire(adapter, state, operation="fixed", arm=arm, request=request)
-    repair_bytes, receipt = bound_wire(prepared)
-    candidate = next(row for row in plan["candidates"]
-                     if (row["model"], row["effort"]) == (receipt["model"], receipt["effort"]))
-    repair = ledger.reserve_repair(
-        task, arm, slot, model=receipt["model"], effort=receipt["effort"],
-        input_bound=receipt["input_bound"], output_limit=receipt["output_limit"],
-        input_rate=micros(candidate["input_usd_per_million"]),
-        output_rate=micros(candidate["output_usd_per_million"]),
-        request_sha256=receipt["request_sha256"],
-    )
-    started = time.monotonic_ns()
-    try:
-        status, response = repair_transport(repair_bytes)
-    except OSError:
-        return "ambiguous_repair", None
-    usage = complete_usage(status, response)
-    if usage is None:
-        return "ambiguous_repair", response
-    model, prompt, completion = usage
-    ledger.settle_usage(
-        repair.id, request_sha256=receipt["request_sha256"], model=model,
-        input_tokens=prompt, output_tokens=completion,
-        latency_ms=(time.monotonic_ns() - started) // 1_000_000,
-    )
-    return "settled", response
 
 
 def fixture_reply(allocation, kind, model):
@@ -127,12 +26,14 @@ def fixture_reply(allocation, kind, model):
         raise TimeoutError("synthetic timeout after dispatch")
     if allocation == "decisions":
         target = {"deepseek-flash": "flash-direct", "deepseek-v4-pro": "pro-thinking"}[model]
-        probabilities = {candidate: 0.94 if candidate == target else 0.06
+        score, other, confidence = (0.62, 0.38, 0.24) if kind == "low_confidence" else (0.94, 0.06, 0.88)
+        probabilities = {candidate: score if candidate == target else other
                          for candidate in ("flash-direct", "pro-thinking")}
         response = {
-            "model": "jev-1.13.0", "usage": {"input_tokens": 41, "output_tokens": 1},
+            "model": "jev-1.13.0",
+            "usage": {"input_tokens": 100_000 if kind == "oversized_usage" else 41, "output_tokens": 1},
             "answers": {"target": {"type": "choice", "choice": target,
-                                   "probabilities": probabilities, "confidence": 0.88}},
+                                   "probabilities": probabilities, "confidence": confidence}},
         }
     else:
         response = {
@@ -167,6 +68,45 @@ def independent_summary(path):
     return b.parse(result.stdout)
 
 
+def through_http(callback, body):
+    """Drive the production byte transport against one local fixture response."""
+    errors = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            try:
+                b.require(self.path == "/test" and self.headers["Authorization"] == "Bearer fixture",
+                          "unexpected fixture request")
+                length = int(self.headers["Content-Length"])
+                b.require(0 < length <= MAX_ADAPTER_PAYLOAD, "unexpected fixture body size")
+                status, payload = callback(self.rfile.read(length))
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except TimeoutError:
+                self.close_connection = True
+            except Exception as error:
+                errors.append(error)
+                self.close_connection = True
+
+    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+        server.timeout = 2
+        worker = threading.Thread(target=server.handle_request)
+        worker.start()
+        try:
+            return post_exact(http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2),
+                              "/test", body, key="fixture", response_limit=MAX_ADAPTER_PAYLOAD)
+        finally:
+            worker.join(timeout=3)
+            b.require(not worker.is_alive(), "fixture HTTP request did not stop")
+            if errors:
+                raise errors[0]
+
+
 def run_fixture(adapter, state):
     ledger_path = state / "fixture.sqlite3"
     ledger = PilotLedger.create(ledger_path)
@@ -179,12 +119,12 @@ def run_fixture(adapter, state):
 
     def submit(scope, model, *, decision_kind="success", repair_kind="success", expected):
         def response_sender(allocation, kind):
-            def send(outgoing):
+            def respond(outgoing):
                 verify_hold(ledger_path, scope, allocation, outgoing)
                 dispatches[allocation] += 1
                 wire_hashes[(scope, allocation)] = b.digest(outgoing)
                 return fixture_reply(allocation, kind, model)
-            return send
+            return lambda outgoing: through_http(respond, outgoing)
 
         result, response = run_call(
             adapter, state, ledger, scope, request,
@@ -232,14 +172,36 @@ def run_fixture(adapter, state):
         pass
     else:
         raise ValueError("the ledger admitted a request without the frozen output allowance")
-    after = ledger.summary()
-    b.require(dispatches == {"decisions": 3, "repair": 4} and before == after,
+    b.require(dispatches == {"decisions": 3, "repair": 4} and before == ledger.summary(),
               "replay changed dispatch counts or accounting")
-    allocations = after["allocations"]
+    allocations = before["allocations"]
     b.require(allocations["decisions"]["unresolved"] == 1
               and allocations["repair"]["unresolved"] == 2
               and all(allocations[name]["unresolved_usd_micros"] > 0 for name in dispatches),
               "ambiguous reservations were released")
+    no_selection = ("intermediate-delegation", JEV_ARM, 1)
+    submit(no_selection, "deepseek-flash", decision_kind="low_confidence", expected="unselected_decision")
+    b.require(ledger.summary()["allocations"]["decisions"]["settled"] == 3
+              and dispatches == {"decisions": 4, "repair": 4},
+              "verified unselected decision was not settled independently of forwarding")
+    overage = ("difficult-budget", JEV_ARM, 1)
+    try:
+        submit(overage, "deepseek-flash", decision_kind="oversized_usage", expected="no_repair")
+    except LedgerRefused as error:
+        b.require("exceeded the frozen scope" in str(error), "unexpected overage refusal")
+    else:
+        raise ValueError("verified Jev usage overage did not freeze admissions")
+    ledger = PilotLedger.open(ledger_path)
+    try:
+        run_call(adapter, state, ledger, pending, request, unexpected_dispatch, unexpected_dispatch)
+    except LedgerRefused as error:
+        b.require("exceeded the frozen scope" in str(error), "unrelated repair refusal did not bind the overage")
+    else:
+        raise ValueError("verified Jev usage overage permitted another dispatch")
+    after = ledger.summary()
+    b.require(after["scope_breach"] and after == independent_summary(ledger_path)
+              and dispatches == {"decisions": 5, "repair": 4},
+              "overage did not persist or changed repair dispatches")
     result = {
         "schema": "doxa-pilot-admission-fixture-v1",
         "synthetic_dispatches": dispatches, "paid_requests": 0,
@@ -247,6 +209,7 @@ def run_fixture(adapter, state):
         "frozen_allowance_refused_before_dispatch": True,
         "replays_and_unsettled_continuations_refused": True,
         "reopened_in_independent_process": True,
+        "verified_jev_overage_freezes_admission": True,
         "ledger": after,
     }
     b.require(SOURCE.encode() not in b.read(ledger_path) and SOURCE.encode() not in b.encode(result),

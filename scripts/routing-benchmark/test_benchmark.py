@@ -69,6 +69,29 @@ class Tests(unittest.TestCase):
             with self.assertRaises(ValueError):b.grade(Path(root),'tcp://host:2375','sha256:'+'a'*64)
             run.assert_not_called()
 
+    def test_grader_preflight_requires_rootless_engine_and_exact_local_image(self):
+        host = "unix:///owned/docker.sock"
+        image = "sha256:" + "a" * 64
+        complete = b.subprocess.CompletedProcess
+        for security, actual, expected in [
+            (b'["name=rootful"]', image, "rootless"),
+            (b'["name=rootless"]', "sha256:" + "b" * 64, "image unavailable"),
+            (b'["name=rootless"]', image, None),
+        ]:
+            with self.subTest(expected=expected), patch.object(b.subprocess, "run", side_effect=[
+                complete([], 0, security), complete([], 0, actual.encode() + b"\n"),
+            ]) as run:
+                if expected:
+                    with self.assertRaisesRegex(ValueError, expected):
+                        b.grader_preflight(host, image)
+                else:
+                    self.assertEqual(b.grader_preflight(host, image)["image"], image)
+                commands = [args[0][3:] for args, _ in run.call_args_list]
+                self.assertEqual(commands, [
+                    ["info", "--format", "{{json .SecurityOptions}}"],
+                    *([] if expected == "rootless" else [["image", "inspect", image, "--format", "{{.Id}}"]]),
+                ])
+
     def test_source_snapshot_binds_exact_bytes_and_is_independent_of_later_edits(self):
         with tempfile.TemporaryDirectory() as root:
             state=Path(root)/'task';b.prepare('easy-config',state)

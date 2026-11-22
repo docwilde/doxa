@@ -22,7 +22,7 @@ class SummaryTests(unittest.TestCase):
         run_id, accounting, _ = self.ledger.reporting_snapshot()
         self.manifest = {**s.header(run_id, accounting), "trials": []}
 
-    def reserve(self, task, arm=FLASH, *, settle=True):
+    def reserve(self, task, arm=FLASH, *, settle=True, grade=None):
         digest = b.digest(f"private request for {task}/{arm}".encode())
         model, effort, input_rate, output_rate = {
             FLASH: ("deepseek-flash", "none", 300000, 1200000),
@@ -33,8 +33,14 @@ class SummaryTests(unittest.TestCase):
             input_rate=input_rate, output_rate=output_rate, request_sha256=digest,
         )
         if settle:
+            proposal = b.digest(f"proposal {task}/{arm}".encode())
             self.ledger.settle_usage(hold.id, request_sha256=digest, model=model,
-                                     input_tokens=37, output_tokens=19, latency_ms=4)
+                                     input_tokens=37, output_tokens=19, latency_ms=4,
+                                     repair_receipt=("e" * 64, proposal))
+            if grade is not None:
+                self.ledger.record_repair_grade(task, arm, 1, request_sha256=digest,
+                                                proposal_sha256=proposal,
+                                                grade_sha256=b.digest(b.encode(grade)))
         return {"task_id": task, "arm": arm, "allocation": "repair", "call": 1,
                 "request_sha256": digest}
 
@@ -58,17 +64,17 @@ class SummaryTests(unittest.TestCase):
     def test_aggregates_closed_outcomes_and_ledger_without_disclosing_private_fields(self):
         graded = [self.grade("easy-config"), self.grade("easy-expiry", passed=False),
                   self.grade("difficult-budget", passed=False, failure="timeout")]
-        passed = self.reserve("easy-config", settle=False)
+        passed = self.reserve("easy-config", grade=graded[0])
         provider = self.reserve("intermediate-graph", settle=False)
         self.manifest["trials"] = [
             {**passed, "status": "graded", "grade": graded[0]},
-            {**self.reserve("easy-expiry", PRO), "status": "graded", "grade": graded[1]},
+            {**self.reserve("easy-expiry", PRO, grade=graded[1]), "status": "graded", "grade": graded[1]},
             {**provider, "status": "provider_failure"},
             {"task_id": "easy-config", "arm": s.JEV_ARM, "allocation": "decisions", "call": 1,
              "status": "admission_refusal"},
             {"task_id": "intermediate-delegation", "arm": FLASH,
              "status": "grader_infrastructure_failure", "failure": "image_unavailable"},
-            {**self.reserve("difficult-budget"), "status": "graded", "grade": graded[2]},
+            {**self.reserve("difficult-budget", grade=graded[2]), "status": "graded", "grade": graded[2]},
         ]
         result = s.summarize(self.ledger, self.manifest)
         self.assertEqual(result["planned_trials"], 15)
@@ -80,7 +86,7 @@ class SummaryTests(unittest.TestCase):
         cases = sum(len(report["tests"]) for report in graded)
         self.assertEqual(result["grader_observations"], {"cases": cases, "total_duration_ms": 2 * cases})
         self.assertEqual(result["accounting"], self.ledger.summary())
-        self.assertEqual(result["accounting"]["allocations"]["repair"]["unresolved"], 2)
+        self.assertEqual(result["accounting"]["allocations"]["repair"]["unresolved"], 1)
         public = json.dumps(result)
         for value in (str(self.root), "private-grade-body", self.manifest["ledger_run_id"],
                       "a" * 64, "b" * 64, "c" * 64, passed["request_sha256"],
@@ -100,8 +106,8 @@ class SummaryTests(unittest.TestCase):
                 s.summarize(self.ledger, self.manifest)
 
     def test_requires_a_terminal_reserved_request_and_a_complete_frozen_grade(self):
-        reserved = self.reserve("easy-config")
         grade = self.grade("easy-config")
+        reserved = self.reserve("easy-config", grade=grade)
         report = {**reserved, "status": "graded", "grade": grade}
         self.manifest["trials"] = [report]
         for key, bad in (
@@ -116,6 +122,12 @@ class SummaryTests(unittest.TestCase):
         self.manifest["trials"] = [{**report, "request_sha256": "d" * 64}]
         with self.assertRaisesRegex(ValueError, "does not match a reserved request"):
             s.summarize(self.ledger, self.manifest)
+        for arm, settle in ((PRO, True), (FLASH, False)):
+            other_task = "easy-expiry" if arm == FLASH else "easy-config"
+            wrong_arm = self.reserve(other_task, arm, settle=settle)
+            self.manifest["trials"] = [{**wrong_arm, "status": "graded", "grade": self.grade(other_task)}]
+            with self.assertRaisesRegex(ValueError, "grade does not bind to the settled repair reservation"):
+                s.summarize(self.ledger, self.manifest)
         refusal = {key: value for key, value in reserved.items() if key != "request_sha256"}
         self.manifest["trials"] = [{**refusal, "status": "admission_refusal"}]
         with self.assertRaisesRegex(ValueError, "conflicts with a committed reservation"):

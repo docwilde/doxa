@@ -74,9 +74,9 @@ fn run() -> io::Result<Value> {
             if route.decision().request_sha256 != decision_sha256 {
                 return Err(io::Error::other("pilot fixture decision binding changed"));
             }
-            let (forward, decision) = route.finish(response.as_bytes(), 0)?;
+            let (forward, decision) = route.observe(response.as_bytes(), 0)?;
             Ok(json!({
-                "repair": wire_value(&forward)?,
+                "repair": forward.as_ref().map(wire_value).transpose()?,
                 "decision": {
                     "request_sha256": decision.request_sha256,
                     "model": decision.model,
