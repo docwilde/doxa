@@ -7,6 +7,6 @@
 
 A synthetic Auto decision shows the selected worker separately from decision/API routing cost. No provider call is made.
 
-[![Synthetic Auto routing decision with separate effective worker and routing cost](../../../assets/shots/rust-2.0.0-beta.78-routing-status.png)](../../../assets/shots/rust-2.0.0-beta.78-routing-status.png)
+[![Synthetic Auto routing decision with separate effective worker and routing cost](../../../assets/shots/rust-2.0.0-beta.85-routing-status.png)](../../../assets/shots/rust-2.0.0-beta.85-routing-status.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#routing-status) · [Back to the README gallery](../../../README.md#gallery)

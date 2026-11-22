@@ -7,6 +7,6 @@
 
 Configure Jev or SubQ Snap routing in the native Settings menu
 
-[![Staged SubQ Snap routing model and private candidate config awaiting review](../../../assets/shots/rust-2.0.0-beta.78-settings-router.png)](../../../assets/shots/rust-2.0.0-beta.78-settings-router.png)
+[![Staged SubQ Snap routing model and private candidate config awaiting review](../../../assets/shots/rust-2.0.0-beta.85-settings-router.png)](../../../assets/shots/rust-2.0.0-beta.85-settings-router.png)
 
 [Open the interactive gallery](https://docwilde.github.io/doxa/gallery/#settings-router) · [Back to the README gallery](../../../README.md#gallery)
