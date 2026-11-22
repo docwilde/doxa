@@ -83,6 +83,7 @@ impl PeerEventJournal {
 
 pub struct PeerHost {
     inner: Arc<dyn Host>,
+    pub(crate) tool_evidence: Option<crate::tool_evidence::Recorder>,
     agent_tools_enabled: bool,
     lore: Mutex<Option<LoreClient>>,
     runtime: PathBuf,
@@ -183,6 +184,7 @@ impl PeerHost {
         Ok(Self {
             fleet: Mutex::new(fleet), fleet_path,
             inner,
+            tool_evidence: None,
             agent_tools_enabled,
             lore: Mutex::new(None),
             runtime,
@@ -703,11 +705,15 @@ impl PeerHost {
         let current=if self.fleet_owner().ok().flatten().is_some(){
             format!("Host runtime internet policy: {}. Offline workers request research via peer_send question from an owner-approved online coordinator; offline coordinators escalate to the owner. This policy does not change the frozen task or grant approval.\n\n{text}",if doxa_isolation::task_internet_allowed().unwrap_or(false){"direct internet is enabled by the owner"}else{"direct internet and web searches are disabled"})
         }else{text.into()};
+        let mut evidence = self.tool_evidence.as_ref()
+            .map(|recorder| recorder.turn(&self.cwd, &self.session_id));
         self.inner.prompt_with_images(&current, images, origin, &mut |event| {
+            if let Some(evidence) = evidence.as_mut() { evidence.observe(&event); }
             let terminal=matches!(event["type"].as_str(),Some("turn_done"|"turn_refused"));
             emit(event);
             if terminal{self.cancel_spawns(false);}
         });
+        if let Some(evidence) = evidence { evidence.finish(); }
     }
 }
 

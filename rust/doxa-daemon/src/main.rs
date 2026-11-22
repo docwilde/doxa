@@ -2,6 +2,7 @@
 mod agent_tools;
 mod mcp;
 mod antigravity_host;
+mod tool_evidence;
 mod claude_host;
 mod recovery_context;
 mod budget_host;
@@ -825,14 +826,18 @@ fn run() -> io::Result<()> {
     let title_lock = session_title::TitleLock::acquire(&options.runtime)?;
     let title = session_title::from_registry(&options.runtime, &options.session_id, &base_title)?;
     let (event_tx, event_rx) = mpsc::sync_channel(256);
-    let peer_host = Arc::new(PeerHost::new(
+    let evidence = tool_evidence::Recorder::configured(options.engine.name(),
+        host.lore_enabled().unwrap_or_else(doxa_state::lore_enabled_default));
+    let mut peer_host = PeerHost::new(
         host,
         options.runtime.clone(),
         &options.cwd,
         options.session_id.clone(),
         title.clone(),
         event_tx,
-    )?);
+    )?;
+    peer_host.tool_evidence = evidence;
+    let peer_host = Arc::new(peer_host);
     let mut provider_args=Vec::new();
     provider_args.extend(["--isolation".into(), profile.key().into()]);
     #[cfg(feature="local-test-server")]

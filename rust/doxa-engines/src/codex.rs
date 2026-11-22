@@ -201,6 +201,34 @@ impl CodexJsonlNormalizer {
             self.started_bytes = self.started_bytes.saturating_sub(id.len());
         }
         let mut events = vec![EngineEvent::new("tool_result", json!({"id":display_id,"name":display_name,"result_summary":summary,"is_error":is_error,"duration_ms":duration_ms}))];
+        if event_kind == "item.completed" {
+            let status = item.get("status").and_then(Value::as_str);
+            let outcome = match (item_kind.as_str(), status) {
+                (_, Some("declined" | "interrupted" | "cancelled" | "canceled")) => None,
+                (_, Some("failed" | "error")) => Some("failure"),
+                ("command_execution", _) => item
+                    .get("exit_code")
+                    .and_then(Value::as_i64)
+                    .map(|code| if code == 0 { "success" } else { "failure" }),
+                ("mcp_tool_call", Some("completed")) => {
+                    let error = item.get("result").and_then(|result| result.get("isError"));
+                    match error {
+                        Some(Value::Bool(true)) => Some("failure"),
+                        None | Some(Value::Bool(false)) => {
+                            Some(if is_error { "failure" } else { "success" })
+                        }
+                        _ => None,
+                    }
+                }
+                ("file_change" | "patch_apply" | "web_search", Some("completed")) => {
+                    Some(if is_error { "failure" } else { "success" })
+                }
+                _ => None,
+            };
+            if let Some(outcome) = outcome {
+                events[0].data["evidence_outcome"] = json!(outcome);
+            }
+        }
         // App-server search details often arrive only with item/completed.
         // Update the existing card, rather than fabricating an empty initial
         // query or recording a second tool invocation with the same identity.
@@ -353,6 +381,31 @@ pub fn duration_ms(duration: Duration) -> u64 { duration.as_millis().min(u128::f
 #[cfg(test)]
 mod tracking_bounds_tests {
     use super::*;
+
+    #[test]
+    fn evidence_requires_an_explicit_terminal_outcome() {
+        let mut normalizer = CodexJsonlNormalizer::new(str::to_owned);
+        for (event, status, code, outcome) in [
+            ("item.completed", "completed", Some(0), Some("success")),
+            ("item.completed", "completed", Some(2), Some("failure")),
+            ("item.completed", "completed", None, None),
+            ("item.completed", "declined", Some(2), None),
+            ("item.updated", "in_progress", Some(0), None),
+        ] {
+            let item = json!({
+                "id": "command", "type": "command_execution", "status": status,
+                "exit_code": code, "aggregated_output": "Command returned exit code 0"
+            });
+            let events = normalizer.map_item(event, Some(&item));
+            assert_eq!(events[0].data["evidence_outcome"].as_str(), outcome);
+        }
+        let mcp = json!({
+            "id": "mcp", "type": "mcp_tool_call", "status": "completed",
+            "result": {"isError": true, "content": []}
+        });
+        let events = normalizer.map_item("item.completed", Some(&mcp));
+        assert_eq!(events[0].data["evidence_outcome"], "failure");
+    }
 
     #[test]
     fn uncompleted_tools_cannot_grow_duration_tracking_without_bound() {

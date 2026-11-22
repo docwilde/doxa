@@ -97,7 +97,7 @@ launch() {
   plugin_worker=$target_dir/$profile/doxa-plugin-worker
   lore=$target_dir/$profile/lore-rs
   [ -x "$binary" ] && [ -x "$plugin_worker" ] && [ -x "$daemon" ] && [ -x "$lore" ] || fail 'Cargo produced no runnable frontend, plugin worker, daemon or native LORE'
-  export DOXA_LORE_RS=$lore
+  export DOXA_LORE_RS=${DOXA_LORE_RS:-$lore}
   export DOXA_DAEMON_BIN=$daemon
   export DOXA_REMOTE_BIN=$target_dir/$profile/doxa-remote
   export DOXA_ISOLATION_WORKER=$target_dir/$profile/doxa-isolation-worker

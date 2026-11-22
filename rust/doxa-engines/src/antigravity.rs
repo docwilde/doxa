@@ -42,6 +42,7 @@ impl Acp {
         ])
         .current_dir(cwd)
         .env_clear()
+        .env("LORE_TOOL_EVIDENCE", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

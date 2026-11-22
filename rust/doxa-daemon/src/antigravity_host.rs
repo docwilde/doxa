@@ -492,17 +492,22 @@ impl AntigravityHost {
         };
         let id = self.scrub(id)?;
         let status = update["status"].as_str();
+        let tool = update["kind"].as_str().filter(|kind| matches!(*kind,
+            "read" | "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" | "switch_mode"))
+            .unwrap_or("tool");
         if matches!(status, Some("completed" | "failed")) {
             emit(json!({"type": "tool_result", "data": {"id": id,
                 "result_summary": if status == Some("failed") { "Failed" } else { "Completed" },
-                "is_error": status == Some("failed")}}));
+                "is_error": status == Some("failed"),
+                "evidence_tool": tool,
+                "evidence_outcome": if status == Some("failed") { "failure" } else { "success" }}}));
         } else if update["sessionUpdate"] == "tool_call" {
             let name = update["title"]
                 .as_str()
                 .filter(|s| s.len() <= 256 && !s.chars().any(char::is_control))
                 .unwrap_or("Antigravity tool");
             emit(
-                json!({"type": "tool_call", "data": {"id": id, "name": self.scrub(name)?, "input": {}}}),
+                json!({"type": "tool_call", "data": {"id": id, "name": self.scrub(name)?, "evidence_tool": tool, "input": {}}}),
             );
         }
         Ok(())

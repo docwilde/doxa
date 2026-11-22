@@ -337,6 +337,7 @@ impl AppServerDriver {
         let owner_fd = owner_peer.as_ref().map(AsRawFd::as_raw_fd);
         let mut provider_command = std::process::Command::new(&options.executable);
         provider_command.arg("app-server").arg("--stdio").current_dir(&options.cwd);
+        provider_command.env("LORE_TOOL_EVIDENCE", "0");
         // DOXA owns visible sessions, peer coordination and fleet/account caps.
         // Provider-internal children would bypass those identities and budgets.
         provider_command.arg("-c").arg("agents.enabled=false");
@@ -838,7 +839,14 @@ impl AppServerDriver {
                         }
                         let answer = answer?;
                         if is_peer {
-                            emit(EngineEvent::new("tool_result", json!({"id":frame["params"]["callId"],"is_error":answer["success"] != true})));
+                            let outcome = answer["success"]
+                                .as_bool()
+                                .map(|success| if success { "success" } else { "failure" });
+                            emit(EngineEvent::new("tool_result", json!({
+                                "id": frame["params"]["callId"],
+                                "is_error": answer["success"] != true,
+                                "evidence_outcome": outcome,
+                            })));
                             for content in answer["contentItems"].as_array().into_iter().flatten() {
                                 if let Some(text) = content["text"].as_str() {
                                     let clean = (self.scrub)(text);

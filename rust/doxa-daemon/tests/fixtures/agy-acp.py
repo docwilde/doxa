@@ -10,6 +10,7 @@ assert sys.argv[1:] == [
 ]
 for name in ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS", "AGY_ADC_AUTH"]:
     assert name not in os.environ
+assert os.environ.get("LORE_TOOL_EVIDENCE") == "0"
 cwd = str(Path.cwd())
 session = "fixture_native_acp_conversation"
 model = "fixture-default"
@@ -67,7 +68,9 @@ for line in sys.stdin:
     elif method == "session/prompt":
         assert params["sessionId"] == session and model == "fixture-neon"
         prompt_id = message["id"]
-        cancel = params["prompt"][-1]["text"] == "please cancel"
+        prompt = params["prompt"][-1]["text"]
+        cancel = prompt == "please cancel"
+        fail_tool = prompt == "show tool failure"
         text("Fixture answer sk-abcdefghijk")
         text("lmnopqrstuvwxyz123456 done ")
         tool = {"toolCallId": "tool-1", "title": "Inspect fixture", "rawInput": {"command": "printf test"}}
@@ -95,7 +98,7 @@ for line in sys.stdin:
             assert outcome == {"outcome": "cancelled"}
         else:
             assert outcome["optionId"] in ["allow-this", "deny-this"]
-            update(sessionUpdate="tool_call_update", toolCallId="tool-1", status="completed")
+            update(sessionUpdate="tool_call_update", toolCallId="tool-1", status="failed" if fail_tool else "completed")
             send(id=prompt_id, result={"stopReason": "end_turn"})
         continue
     else:

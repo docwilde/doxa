@@ -4286,7 +4286,9 @@ fn codex_full_access_builtin_peers_deliver_exact_ids_without_second_approval() {
         frames.push(frame);
     }
     assert_eq!(frames.iter().filter(|row|row["event"]["type"]=="tool_call").count(),5);
-    assert_eq!(frames.iter().filter(|row|row["event"]["type"]=="tool_result").count(),5);
+    let outcomes: Vec<_> = frames.iter().filter(|row| row["event"]["type"] == "tool_result")
+        .map(|row| row["event"]["data"]["evidence_outcome"].as_str()).collect();
+    assert_eq!(outcomes, [Some("success"), Some("failure"), Some("failure"), Some("success"), Some("success")]);
     assert!(!frames.iter().any(|row|row["event"]["type"]=="needs_input_resolved"));
     let delivered = delivery.join().unwrap();
     assert_eq!(delivered["body"],"full-access exact delivery");
