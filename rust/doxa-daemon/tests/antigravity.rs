@@ -371,3 +371,69 @@ fn missing_neon_and_dollar_ceiling_refuse_before_inference() {
         ["initialize", "session/new"]
     );
 }
+
+fn antigravity_evidence(recording: Option<&str>) -> Vec<Value> {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    setup(root);
+    let mut child = command(root);
+    child
+        .args(["--model", "Gemini 4 Neon"])
+        .env("DOXA_LORE", "1");
+    if let Some(recording) = recording {
+        child.env("LORE_TOOL_EVIDENCE", recording);
+    }
+    let mut daemon = Process(child.spawn().unwrap());
+    let mut client = Client::attach(root, &mut daemon);
+    for text in ["show tool success", "show tool failure"] {
+        client.prompt(text);
+        let request = client.event("needs_input");
+        assert_eq!(
+            client.call(
+                "answer_needs_input",
+                json!({
+                    "id":request["id"],"answer":{"decision":"allow"},"reviewed_request": request
+                })
+            )["ok"],
+            true
+        );
+        assert_eq!(client.event("turn_done")["stop_reason"], "end_turn");
+    }
+    client.stop(&mut daemon);
+
+    let carrier = std::env::var_os("DOXA_LORE_RS").unwrap_or_else(|| "lore-rs".into());
+    let listing = Command::new(carrier)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", root.join("home"))
+        .env("LORE_ROOT", root.join("lore"))
+        .env("LORE_DISABLE_SYNC", "1")
+        .current_dir(root.join("workspace"))
+        .args(["tool-evidence", "list"])
+        .output()
+        .unwrap();
+    assert!(listing.status.success(), "{}", String::from_utf8_lossy(&listing.stderr));
+    let log = String::from_utf8(listing.stdout).unwrap();
+    assert!(!log.contains("printf test") && !log.contains("Fixture answer"));
+    serde_json::from_str(&log).unwrap()
+}
+
+#[test]
+fn antigravity_tool_evidence_carries_only_host_decoded_outcomes() {
+    let rows = antigravity_evidence(None);
+    assert_eq!(rows.len(), 2);
+    for (row, expected) in rows.iter().zip(["failure", "success"]) {
+        assert_eq!(row["engine"], "antigravity");
+        assert_eq!(row["session_id"], SID);
+        assert_eq!(row["source"], "doxa");
+        assert!(row["call_id"].as_str().unwrap().ends_with(":tool-1"));
+        assert_eq!(row["tool"], "tool");
+        assert_eq!(row["outcome"], expected);
+    }
+    assert_ne!(rows[0]["call_id"], rows[1]["call_id"]);
+}
+
+#[test]
+fn antigravity_tool_evidence_can_be_disabled() {
+    assert!(antigravity_evidence(Some("0")).is_empty());
+}

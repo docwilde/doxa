@@ -5,6 +5,11 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.85 — 2026-11-21
+
+- Record structured tool successes and failures by default for Claude, Codex, Gemini via Antigravity, DeepSeek and GLM.
+- Store tool observations in the local LORE 0.62.32 evidence store. Set `LORE_TOOL_EVIDENCE=0` to turn recording off.
+
 ## 2.0.0-beta.84 — 2026-11-19
 
 - Add native Linux text sessions through Google Antigravity CLI over ACP, with live model and effort selection, one-time tool approvals, cancellation, and session resume.

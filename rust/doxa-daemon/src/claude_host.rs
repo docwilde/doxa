@@ -1914,9 +1914,15 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>, launch
                             Some("tool_use") => Some(
                                 json!({"type":"tool_call","data":{"id":block["id"],"name":block["name"],"input":block["input"],"parent_id":frame["parent_tool_use_id"]}}),
                             ),
-                            Some("tool_result") => Some(
-                                json!({"type":"tool_result","data":{"id":block["tool_use_id"],"result_summary":block["content"],"is_error":block["is_error"]}}),
-                            ),
+                            Some("tool_result") => {
+                                let outcome = match block.get("is_error") {
+                                    None | Some(Value::Bool(false)) => Some("success"),
+                                    Some(Value::Bool(true)) => Some("failure"),
+                                    _ => None,
+                                };
+                                Some(json!({"type":"tool_result","data":{"id":block["tool_use_id"],
+                                    "result_summary":block["content"],"is_error":block["is_error"],"evidence_outcome":outcome}}))
+                            },
                             _ => None,
                         };
                         if let Some(event) = event {

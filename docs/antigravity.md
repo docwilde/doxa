@@ -17,3 +17,5 @@ Detach and reattach as with other DOXA sessions. After a clean turn and shutdown
 ## LORE
 
 DOXA sends a bounded LORE snapshot for the working directory with the first turn of each attached Antigravity process. It keeps that snapshot out of the DOXA conversation transcript. DOXA scrubs prompts and streamed replies and stores completed turns in the same owner-private transcript format as other engines. LORE indexes the transcript when the session stops. `DOXA_LORE=0` skips memory injection and indexing. Secret scrubbing remains required. Antigravity itself owns any session data or logs it writes.
+
+DOXA records ACP tool completions as local observations by default with a LORE carrier that supports tool evidence. It stores the provider’s reported outcome, call identity and tool kind. Set **LORE_TOOL_EVIDENCE=0** to disable recording. [Tool evidence and linking](https://github.com/docwilde/LORE/blob/main/docs/tool-evidence.md).

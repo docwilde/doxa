@@ -13,6 +13,8 @@ use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -765,11 +767,45 @@ impl LoreClient {
     pub fn spawn_agent(carrier: &Path, timeout: Duration) -> Result<Self, LoreError> {
         Self::spawn_module(carrier, timeout, "doxa.native_agent_tools", &["agent_catalog_v1", "agent_tool_v1"])
     }
+    pub fn open_tool_evidence(timeout: Duration) -> Result<Self, LoreError> {
+        if lore_core::Core::capabilities().contains(&"tool_evidence_record_v1") {
+            return Self::open(timeout);
+        }
+        let carrier = match std::env::var_os("DOXA_LORE_RS").filter(|value| !value.is_empty()) {
+            Some(path) => Some(PathBuf::from(path)).filter(|path| path.is_absolute()),
+            None => std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .filter(|dir| dir.is_absolute())
+                .map(|dir| dir.join("lore-rs"))
+                .find(|path| {
+                    std::fs::metadata(path).is_ok_and(|meta| {
+                        #[cfg(unix)]
+                        if meta.permissions().mode() & 0o111 == 0 {
+                            return false;
+                        }
+                        meta.is_file()
+                    })
+                }),
+        }.ok_or(LoreError::Unavailable)?;
+        Self::spawn_bridge(&carrier, timeout, &["bridge"], &["tool_evidence_record_v1"])
+    }
+
+    pub fn record_tool_evidence(&mut self, cwd: &str, engine: &str, session_id: &str,
+        observations: &[Value]) -> Result<u64, LoreError> {
+        let reply = self.request_value("tool_evidence_record_v1",
+            json!({"cwd":cwd,"engine":engine,"session_id":session_id,"observations":observations}))?;
+        reply["inserted"].as_u64().filter(|count| *count <= observations.len() as u64)
+            .ok_or(LoreError::InvalidFrame)
+    }
+
     fn spawn_module(carrier: &Path, timeout: Duration, module: &str, required: &[&str]) -> Result<Self, LoreError> {
+        Self::spawn_bridge(carrier, timeout, &["-m", module], required)
+    }
+
+    fn spawn_bridge(carrier: &Path, timeout: Duration, args: &[&str], required: &[&str]) -> Result<Self, LoreError> {
         let mut command = Command::new(carrier);
         if let Some(root) = carrier_root()? { command.env("LORE_ROOT", root); }
         command
-            .args(["-m", module])
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());

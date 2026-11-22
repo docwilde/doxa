@@ -44,8 +44,9 @@ Choose an installed engine in place of `codex`. Claude needs its CLI; protected 
 
 ## Recent development
 
-DOXA **2.0.0-beta.84** includes **LORE 0.62.30** and protected **Codex 0.170.0**.
+DOXA **2.0.0-beta.85** includes **LORE 0.62.32** and protected **Codex 0.170.0**.
 
+- **Tool evidence.** DOXA records provider-reported tool outcomes in LORE by default. Link relevant observations to beliefs or an exact learned recipe revision. Set `LORE_TOOL_EVIDENCE=0` to turn recording off. [Tool evidence](https://github.com/docwilde/LORE/blob/main/docs/tool-evidence.md).
 - **Reproducible provider installation.** The installer and updater use a fixed Git diff format, so local algorithm, context, prefix and abbreviation settings preserve the reviewed patch identity.
 - **Model availability.** `doxa model-facts ENGINE MODEL --check-availability` checks the Codex account or DeepSeek API catalog. Try `doxa model-facts claude opus --check-availability` to inspect advertised Claude aliases and resolved IDs, including `[1m]` variants. DOXA resolves mise wrappers to the installed Claude CLI. Claude account authentication and entitlement remain unverified, and GLM availability remains `unknown`. [Model facts](docs/engine-capabilities.md).
 - **Images for API workers.** DeepSeek `deepseek-flash` and eligible Router API targets accept image attachments. DOXA requires documented vision support, an image token bound and a price bound. GLM images remain unavailable until all three facts are sourced. [Image input](docs/terminal-images.md#prompt-attachments).
