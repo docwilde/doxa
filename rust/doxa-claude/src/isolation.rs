@@ -238,6 +238,12 @@ fn snapshot_with_roots(source: &Path, dest: &Path, plugin: bool, roots: &[PathBu
             write(&path, &serde_json::to_vec(&manifest)?)?;
         }
     }
+    // Native sessions can share this directory across daemon processes.
+    // Stage first, then serialize replacing the snapshot with other publishers.
+    let lock = OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(parent)?;
+    doxa_state::lock_exclusive_bounded(&lock)?;
     if let Ok(m) = fs::symlink_metadata(dest) {
         if m.file_type().is_symlink() {
             fs::remove_file(dest)?;
@@ -251,13 +257,19 @@ fn snapshot_with_roots(source: &Path, dest: &Path, plugin: bool, roots: &[PathBu
     Ok(())
 }
 pub fn prepare() -> io::Result<PathBuf> {
+    fn failed(step: &str, error: io::Error) -> io::Error {
+        io::Error::new(error.kind(), format!("{step} ({:?})", error.kind()))
+    }
+
     let base = config_dir();
-    directory(&base)?;
-    write(&base.join("settings.json"), b"{}\n")?;
-    sync_credentials(false)?;
+    directory(&base).map_err(|e| failed("open private directory", e))?;
+    write(&base.join("settings.json"), b"{}\n")
+        .map_err(|e| failed("write private settings", e))?;
+    sync_credentials(false).map_err(|e| failed("sync credentials", e))?;
     let source = user_config_base().join("skills");
     if source.is_dir() {
-        snapshot(&source, &base.join("skills"), false)?;
+        snapshot(&source, &base.join("skills"), false)
+            .map_err(|e| failed("snapshot personal skills", e))?;
     }
     Ok(base)
 }
@@ -466,6 +478,29 @@ fn front_matter(text: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn concurrent_sessions_publish_one_complete_skills_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("skills");
+        let target = dir.path().join("private/skills");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("SKILL.md"), "local skill").unwrap();
+        for _ in 0..8 {
+            let barrier = std::sync::Barrier::new(12);
+            std::thread::scope(|scope| {
+                let workers: Vec<_> = (0..12).map(|_| scope.spawn(|| {
+                    barrier.wait();
+                    snapshot(&source, &target, false)
+                })).collect();
+                for worker in workers {
+                    worker.join().unwrap().unwrap();
+                }
+            });
+            assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "local skill");
+            assert!(target.join(".doxa-skills-snapshot").is_file());
+        }
+    }
+
     #[test]
     fn plugin_snapshot_strips_executing_channels_and_copies_links_one_direction() {
         let dir = tempfile::tempdir().unwrap();
