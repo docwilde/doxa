@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.89 — 2026-11-24
+
+**Setup and Settings**
+
+- Give **`/setup`** named steps and keep Docker prerequisites and installation guidance in a scrollable details view.
+- Give **`/settings`** a category sidebar in wide panes and a category picker in narrow panes, with aligned values and visible staged edits.
+- Fix slash command text disappearing from the prompt before a session opens.
+
+**Claude startup**
+
+- Fix concurrent Claude starts racing to replace the private skills snapshot. Startup errors identify the configuration step that failed.
+
 ## 2.0.0-beta.88 — 2026-11-24
 
 **Evaluation**
