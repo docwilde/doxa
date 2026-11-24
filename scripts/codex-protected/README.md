@@ -1,7 +1,7 @@
 # Protected Codex provider
 
-The protected patch targets official `rust-v0.171.0`, commit
-`ccf9be8cc458bd6b8336fe84d68d8893f2691a5e`. Source, patch, launcher,
+The protected patch targets official `rust-v0.172.0`, commit
+`3d86e43b075adeba2193ec5c22ac92f55afd82e6`. Source, patch, launcher,
 app-server and code-mode helper identities are checked independently. The
 installer uses a separate `source-<commit>-<patch>` checkout and publishes
 immutable receipt-addressed artifacts; it never resets old build sources.
@@ -64,6 +64,14 @@ control. The helper proof must use the same source build and verified receipt;
 none of these commands require account credentials or external model calls.
 See each verifier's `--help` for its exact options. These checks do not establish
 real-account model availability or live sandbox acceptance.
+
+## Reviewed 0.172.0 port
+
+Upstream now validates legacy writable roots when it converts sandbox policies
+for execution. The port retains that validation and carries forward DOXA's
+foreground compaction hook, background refusal and permission-only
+`doxaAuto` update. The [review record](reviews/0.172.0.json) binds the
+source, patch and compiled checks.
 
 ## Reviewed 0.171.0 port
 

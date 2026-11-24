@@ -1,0 +1,87 @@
+{
+  "after": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "fc02e572916d9e9b5c5293e1afa9d0e9f16cd42201c4f06c4e1ed715e7b168ae",
+    "provider": "codex-0.172.0-precompact-v1",
+    "schema": 1,
+    "source_commit": "3d86e43b075adeba2193ec5c22ac92f55afd82e6",
+    "tag": "rust-v0.172.0",
+    "version": "0.172.0"
+  },
+  "annotated_upstream_tag_object": "fc3036dba44468096953f0e832f3fecd3adc0228",
+  "artifact_sha256": {
+    "app_server": "59e8b2c91249fe3773ae4adbb9143ce72aa701245bffb4e2cc8e96895c63db16",
+    "code_mode_host": "ede75d5cdb9d2a317f39e40778094a529a58e1ae45ba64afeda0e10d8000c7bb"
+  },
+  "automatic_sensitive_path_gate_changed": false,
+  "before": {
+    "contract": "doxa-precompact-fail-closed-v1",
+    "patch_sha256": "2908cbc754d542111a6767b6f28e7f66b45464007c5eb5d3eb3bdad4650e1386",
+    "provider": "codex-0.171.0-precompact-v1",
+    "schema": 1,
+    "source_commit": "ccf9be8cc458bd6b8336fe84d68d8893f2691a5e",
+    "tag": "rust-v0.171.0",
+    "version": "0.171.0"
+  },
+  "compiled_source": {
+    "helper_inputs": {
+      "archive_sha256": "b3b490f2aa809eda7f6ac727f851fb00ce8355be72827577cfaac28c7137dbcd",
+      "binding_sha256": "3e4d5fecdbe0f98a6017e69d7ca82519a77fb032c5eb5e4cdbecdd3e2ec519d5",
+      "manifest_sha256": "1ec730635970ab1c0e8f4764ea113ad29d69d7f8d4c2ae69f3d766434a759350",
+      "target": "x86_64-unknown-linux-gnu",
+      "version": "152.2.0"
+    },
+    "lock_sha256": "0c017d96dae581ea09834ddbda7c572dd48e771cf86e9f87f8b3bcb4ab16f686",
+    "manifest_sha256": "b983195c341f8103290af6a044c1161f528b8fb503cb7e33301b37362c455868",
+    "profile": "dev-small",
+    "toolchain": "1.99.1"
+  },
+  "guard_mapping": {
+    "background_compaction": "Scheduling remains disabled and the background execution entry refuses before a request.",
+    "foreground_compaction": "Local, remote V2 and token-budget callers still stop on a refused trusted hook before inference or history replacement.",
+    "helper_identity": "The private dispatcher binds the app server and helper to the reviewed source and verifies both artifact hashes. The build uses pinned V8 inputs.",
+    "permission_policy": "Upstream validates legacy sandbox roots at conversion and retains the turn MCP reviewer constraints. DOXA's live update rejects mixed settings and keeps active-turn policy validation at publication and grant handling."
+  },
+  "review_kind": "manual protection-port boundary review",
+  "upstream_review": {
+    "automatic_review_filter_paths_count": 242,
+    "canonical_diff_sha256": "40d3d0069212140df4c9ee2db501aed5520f213f78a5fd9687e18874843f54e8",
+    "changed_paths_count": 822,
+    "protected_patch_overlapping_paths": [
+      "codex-rs/Cargo.lock",
+      "codex-rs/app-server/src/request_processors/turn_processor.rs",
+      "codex-rs/core/src/hook_runtime.rs",
+      "codex-rs/core/src/lib.rs",
+      "codex-rs/core/src/session/mod.rs",
+      "codex-rs/core/src/session/step_activation.rs",
+      "codex-rs/core/src/session/tests.rs",
+      "codex-rs/core/src/session/turn_context.rs",
+      "codex-rs/protocol/src/protocol.rs"
+    ],
+    "protection_edit_lines_unchanged_except_version_stamps": true
+  },
+  "verification": {
+    "actual_native_dispatcher_code_mode_and_missing_helper_control": "passed",
+    "app_server_build": "passed",
+    "automatic_compaction_cases": 20,
+    "code_mode_host_build": "passed",
+    "independent_pinned_checkout_matches_reviewed_patch": true,
+    "installer_script_tests": 23,
+    "native_engine_tests": 115,
+    "native_existing_ignored": 3,
+    "paid_requests": 0,
+    "patch_stable_before_and_after_build": true,
+    "provider_test_inventory": {
+      "codex-core/doxa_": 12,
+      "codex-core/exec_policy::tests": 86,
+      "codex-core/execution_cancellation_respects_network_approval_boundary": 3,
+      "codex-core/infrastructure_failures_never_authorize_compaction": 1,
+      "codex-core/record_granted_request_permissions_for_turn_uses_originating_turn": 1,
+      "codex-core/request_permission_grants_are_environment_keyed": 1,
+      "codex-core/strict_auto_review": 5,
+      "codex-core/tools::approvals::tests": 8,
+      "codex-hooks/doxa_required_hook_rejects_infrastructure_and_invalid_output": 1
+    },
+    "updater_script_tests": 35
+  }
+}

@@ -44,7 +44,7 @@ Choose an installed engine in place of `codex`. Claude needs its CLI; protected 
 
 ## Recent development
 
-DOXA **2.0.0-beta.86** includes **LORE 0.62.32** and protected **Codex 0.171.0**.
+DOXA **2.0.0-beta.87** includes **LORE 0.62.32** and protected **Codex 0.172.0**.
 
 - **Tool evidence.** DOXA records provider-reported tool outcomes in LORE by default. Link relevant observations to beliefs or an exact learned recipe revision. Set `LORE_TOOL_EVIDENCE=0` to turn recording off. [Tool evidence](https://github.com/docwilde/LORE/blob/main/docs/tool-evidence.md).
 - **Reproducible provider installation.** The installer and updater use a fixed Git diff format, so local algorithm, context, prefix and abbreviation settings preserve the reviewed patch identity.
