@@ -243,7 +243,8 @@ fn snapshot_with_roots(source: &Path, dest: &Path, plugin: bool, roots: &[PathBu
     let lock = OpenOptions::new().read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
         .open(parent)?;
-    doxa_state::lock_exclusive_bounded(&lock)?;
+    // Removing the previous tree can outlast the interactive state-lock budget.
+    doxa_state::lock_exclusive_with_timeout(&lock, std::time::Duration::from_secs(5))?;
     if let Ok(m) = fs::symlink_metadata(dest) {
         if m.file_type().is_symlink() {
             fs::remove_file(dest)?;

@@ -37,9 +37,14 @@ pub const MAX_MACHINE_ID_BYTES: u64 = 256;
 /// The file remains locked until its owner drops it; there is no forced unlock
 /// or stale-lock deletion. Callers may explicitly retry after a busy refusal.
 pub fn lock_exclusive_bounded(file: &fs::File) -> io::Result<()> {
+    lock_exclusive_with_timeout(file, std::time::Duration::from_millis(100))
+}
+
+/// Acquire an advisory lock within a caller's operation deadline.
+pub fn lock_exclusive_with_timeout(file: &fs::File, timeout: std::time::Duration) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     use std::time::{Duration, Instant};
-    let deadline = Instant::now() + Duration::from_millis(100);
+    let deadline = Instant::now() + timeout;
     loop {
         if Instant::now() >= deadline {
             return Err(io::Error::new(io::ErrorKind::WouldBlock,
