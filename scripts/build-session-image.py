@@ -27,8 +27,8 @@ CODEX_FILES = {
     "codex": "code_mode_host_dispatcher_sha256",
 }
 CONTRACT = "doxa-precompact-fail-closed-v1"
-SOURCE = "ccf9be8cc458bd6b8336fe84d68d8893f2691a5e"
-PATCH = "2908cbc754d542111a6767b6f28e7f66b45464007c5eb5d3eb3bdad4650e1386"
+SOURCE = "3d86e43b075adeba2193ec5c22ac92f55afd82e6"
+PATCH = "fc02e572916d9e9b5c5293e1afa9d0e9f16cd42201c4f06c4e1ed715e7b168ae"
 MAX_BINARY = 1024 * 1024 * 1024
 APT_SNAPSHOT = "20260901T000000Z"
 APT_PACKAGES = {"bash", "ca-certificates", "git", "python3", "ripgrep"}

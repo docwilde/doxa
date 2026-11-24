@@ -1438,9 +1438,9 @@ for line in sys.stdin:
 
     #[test]
     fn provider_version_uses_only_the_authoritative_product_prefix() {
-        let desktop = "Codex Desktop/0.171.0 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)";
+        let desktop = "Codex Desktop/0.172.0 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)";
         assert_eq!(provider_version(desktop), Some(crate::codex_compact::SUPPORTED_VERSION));
-        assert_eq!(provider_version("codex_cli_rs/0.171.0"), Some(crate::codex_compact::SUPPORTED_VERSION));
+        assert_eq!(provider_version("codex_cli_rs/0.172.0"), Some(crate::codex_compact::SUPPORTED_VERSION));
         let current = crate::codex_compact::SUPPORTED_VERSION;
         for agent in [
             format!("Codex Desktop/0.1.0 (doxa; {current})"),

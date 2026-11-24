@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.87 — 2026-11-24
+
+**Protected Codex**
+
+- Update **`codex-current`** to protected Codex **0.172.0**, pinned to `3d86e43b075adeba2193ec5c22ac92f55afd82e6`.
+- Keep required foreground compaction review, background compaction refusal, live permission checks and verified Code Mode helper provenance.
+
+**Evaluation**
+
+- Rehearse routing repair delivery, offline grading and fleet admission accounting with credential-free fixtures.
+
 ## 2.0.0-beta.86 — 2026-11-22
 
 - Update `codex-current` to protected Codex **0.171.0**.
