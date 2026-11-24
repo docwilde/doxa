@@ -3632,8 +3632,9 @@ for line in sys.stdin:
         app.settings_menu = Some(SettingsMenu { rows: settings_test_rows("120",false),
             selected: 0, draft: None, category: 0, edits: HashMap::new(), engine: "claude".into() });
         let menu = app.active_chooser_rect().unwrap();
+        let field = app.settings_fields(menu)[1].1;
         assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
-            column: menu.x + 2, row: menu.y + 4, modifiers: KeyModifiers::NONE }));
+            column: field.x + 2, row: field.y, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.settings_menu.as_ref().unwrap().selected, 1);
     }
 
@@ -4141,6 +4142,27 @@ for line in sys.stdin:
         assert_eq!(app.pending_prompts, [("s".into(), "first\n\nlast".into())]);
         assert!(app.input.is_empty());
         assert_eq!(app.input_cursor, 0);
+    }
+
+    #[test]
+    fn slash_input_stays_visible_in_the_prompt_before_opening_a_session() {
+        for width in [40, 100] {
+            let mut app = App::default();
+            app.rail_visible = false;
+            app.handle(Event::Resize(width, 28));
+            assert!(app.groups[0].active_id().is_none());
+            for (ch, expected) in [('/', "/"), ('m', "/m"), ('o', "/mo")] {
+                app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+                assert!(!app.slash_suggestions().is_empty());
+                let prompt = app.pane_regions(0, app.layout(app.size).body)[4];
+                let mut terminal = Terminal::new(TestBackend::new(width, 28)).unwrap();
+                terminal.draw(|frame| app.draw(frame)).unwrap();
+                let buffer = terminal.backend().buffer();
+                let painted = (prompt.x + 1..prompt.right() - 1)
+                    .map(|x| buffer[(x, prompt.y + 1)].symbol()).collect::<String>();
+                assert!(painted.contains(&format!("> {expected}▏")), "{width}: {painted}");
+            }
+        }
     }
 
     #[test]

@@ -613,7 +613,9 @@ impl App {
         } else if self.memory_manager.is_some() {
             19
         } else if let Some(menu) = &self.operations_menu {
-            (menu.lines(usize::from(pane.width)).len() + 2).clamp(7, 19) as u16
+            if menu.is_setup() { 16 } else {
+                (menu.lines(usize::from(pane.width)).len() + 2).clamp(7, 19) as u16
+            }
         } else if self
             .chip_info
             .as_ref()
@@ -674,9 +676,7 @@ impl App {
         } else {
             return None;
         };
-        let group = &self.groups[self.active_group];
-        let draft = group.active_id().map_or("", |_| self.input.as_str());
-        let prompt = prompt_height(draft, pane.height);
+        let prompt = prompt_height(&self.input, pane.height);
         let available = pane.height.saturating_sub(3 + prompt + 1 + 1 + 1);
         let height = self
             .chooser_height_override
@@ -1112,20 +1112,13 @@ impl App {
     }
 
     pub(super) fn pane_regions(&self, index: usize, area: Rect) -> [Rect; 6] {
-        let group = &self.groups[index];
-        let draft = group
-            .active_id()
-            .map(|id| {
-                if self.active_group == index {
-                    self.input.as_str()
-                } else {
-                    self.input_drafts
-                        .get(&(index, id.to_owned()))
-                        .map(|(text, _)| text.as_str())
-                        .unwrap_or("")
-                }
-            })
-            .unwrap_or("");
+        let draft = if self.active_group == index {
+            self.input.as_str()
+        } else {
+            self.groups[index].active_id()
+                .and_then(|id| self.input_drafts.get(&(index, id.to_owned())))
+                .map_or("", |(text, _)| text.as_str())
+        };
         let chooser_height = if self.active_group == index {
             self.chooser_rect(area).map_or(0, |rect| rect.height)
         } else {

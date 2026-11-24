@@ -559,118 +559,172 @@ impl App {
         }
     }
 
-    pub(super) fn draw_settings_menu(&self, frame: &mut Frame, area: Rect) {
-        let Some(menu) = &self.settings_menu else {
-            return;
-        };
-        let mut lines = vec![
-            Line::from(format!(" {} unsaved", menu.edits.len() + usize::from(menu.draft.is_some()))),
-            Line::from(""),
-        ];
-        let (indices, start, visible) = menu.visible_window(area.height);
-        for &index in indices.iter().skip(start).take(visible) {
-            let row = &menu.rows[index];
-            let draft = menu
-                .draft
-                .as_ref()
-                .filter(|(k, _)| k == row.setting.key)
-                .map(|(_, v)| v.as_str());
-            let edited = menu.edits.get(row.setting.key);
-            let secret_mask=self.mcp_secret_mask(row.setting.key);
-            let shown = secret_mask.as_deref().or(draft)
-                .or_else(|| edited.and_then(|v| v.as_deref()))
-                .unwrap_or(if edited == Some(&None) {
-                    "(default after save)"
-                } else if row.value.is_empty() {
-                    "(unset)"
-                } else {
-                    &row.value
-                });
-            lines.push(Line::styled(
-                format!(
-                    " {} {}: {} ({}){}",
-                    if menu.selected == index { '›' } else { ' ' },
-                    row.setting.label,
-                    if row.setting.kind == crate::settings::Kind::Choice && !row.shadowed && !row.setting.read_only {
-                        format!("[{} ▾]", if row.setting.key=="engine" {safe_label(crate::settings::engine_label(shown))}
-                            else if shown.is_empty() { "(default)".into() } else { safe_label(shown) })
-                    } else { safe_label(shown) },
-                    row.source,
-                    if row.shadowed {
-                        " · set by env"
-                    } else if row.setting.read_only {
-                        " · read-only"
-                    } else if edited.is_some() {
-                        " *"
-                    } else {
-                        ""
-                    }
-                ),
-                Style::default()
-                    .fg(if row.shadowed {
-                        theme::MUTED
-                    } else if menu.selected == index {
-                        theme::TEXT
-                    } else {
-                        theme::SECONDARY
-                    })
-                    .bg(if menu.selected == index {
-                        theme::HIGHLIGHT
-                    } else {
-                        theme::RAISED
-                    }),
-            ));
+    fn settings_value(&self, menu: &super::SettingsMenu, index: usize) -> String {
+        let row = &menu.rows[index];
+        let draft = menu.draft.as_ref().filter(|(key, _)| key == row.setting.key)
+            .map(|(_, value)| value.as_str());
+        let edited = menu.edits.get(row.setting.key);
+        let mask = self.mcp_secret_mask(row.setting.key);
+        let value = mask.as_deref().or(draft).or_else(|| edited.and_then(|value| value.as_deref()))
+            .unwrap_or(if edited == Some(&None) { "(default after save)" }
+                else if row.value.is_empty() { "(unset)" } else { &row.value });
+        if row.setting.key == "engine" {
+            safe_label(crate::settings::engine_label(value))
+        } else {
+            crate::markdown::sanitize(value).replace('\n', " ").chars().take(4096).collect()
         }
-        if let Some(row) = menu
-            .rows
-            .get(menu.selected)
-            .filter(|r| r.setting.category == crate::settings::CATEGORIES[menu.category])
-        {
-            lines.push(Line::from(""));
-            lines.push(Line::from(format!(" {}", row.setting.help)));
-            if ["derive_secs", "consult_floor", "graph_context"].contains(&row.setting.key) {
-                lines.push(Line::from(" Claude session memory control; Codex/vendor use their engine's snapshot policy."));
-            }
-            if row.setting.key == "session_budget_usd" && !matches!(menu.engine.as_str(),"claude"|"codex"|"router"|"deepseek"|"glm") {
-                lines.push(Line::from(
-                    " This engine reports no session dollar cost; ceiling cannot be enforced.",
-                ));
-            }
-            if !row.setting.note.is_empty() {
-                lines.push(Line::from(format!(" {}", row.setting.note)));
-            }
+    }
+
+    fn settings_details(&self, menu: &super::SettingsMenu) -> Vec<String> {
+        let Some(row) = menu.rows.get(menu.selected) else { return Vec::new(); };
+        let mut details = vec![
+            format!(" {}", row.setting.label),
+            format!(" Value  {}", self.settings_value(menu, menu.selected)),
+            format!(" Source  {}", safe_label(&row.source)),
+            String::new(),
+            format!(" {}", row.setting.help),
+        ];
+        if row.shadowed {
+            details.push(format!(" Environment override  {}", row.setting.env));
+        }
+        if ["derive_secs", "consult_floor", "graph_context"].contains(&row.setting.key) {
+            details.push(" Claude session memory control. Codex and vendor sessions use their engine's snapshot policy.".into());
+        }
+        if row.setting.key == "session_budget_usd" && !matches!(menu.engine.as_str(), "claude" | "codex" | "router" | "deepseek" | "glm") {
+            details.push(" This engine reports no session dollar cost. The ceiling cannot be enforced.".into());
+        }
+        if !row.setting.note.is_empty() {
+            details.push(format!(" {}", row.setting.note));
         }
         if crate::settings::CATEGORIES[menu.category] == "Paths" {
             if let Ok(path) = crate::settings::config_path() {
-                lines.push(Line::from(format!(
-                    " config file: {} (resolved; 0600)",
-                    path.display()
-                )));
+                details.push(format!(" Config file  {} (0600)", safe_label(&path.display().to_string())));
             }
         }
         if crate::settings::CATEGORIES[menu.category] == "About" {
-            lines.push(Line::from(format!(
-                " DOXA Rust {} · /about build · /update refresh",
-                env!("CARGO_PKG_VERSION")
-            )));
-            if let Some(telemetry) = self.groups[self.active_group]
-                .active_id()
+            details.push(format!(" DOXA Rust {} · /about build · /update refresh", env!("CARGO_PKG_VERSION")));
+            if let Some(tier) = self.groups[self.active_group].active_id()
                 .and_then(|id| self.session_telemetry.get(id))
+                .and_then(|telemetry| telemetry.subscription_type.as_ref())
             {
-                if let Some(tier) = &telemetry.subscription_type {
-                    lines.push(Line::from(format!(
-                        " plan: {} (reported by session)",
-                        safe_label(tier)
-                    )));
-                }
+                details.push(format!(" Plan  {} (reported by session)", safe_label(tier)));
             }
         }
+        details
+    }
+
+    pub(super) fn draw_settings_menu(&self, frame: &mut Frame, area: Rect) {
+        use super::menu_sheet as sheet;
+        use ratatui::layout::{Constraint, Layout};
+
+        let Some(menu) = &self.settings_menu else { return; };
+        let layout = self.settings_layout(area);
+        let view = layout.sheet;
+        let navigation = &self.settings_navigation;
+        let category = crate::settings::CATEGORIES[menu.category];
+        let unsaved = menu.edits.len()
+            + usize::from(menu.draft.as_ref().is_some_and(|(key, _)| !menu.edits.contains_key(key)));
+        let title = if unsaved > 0 { format!("Settings · {unsaved} unsaved") } else { "Settings".into() };
+        let heading_style = Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD);
+        view.draw(frame, &title);
+
+        let category_open = navigation.category_cursor.is_some();
+        let heading = if layout.wide || category_open { " C Categories".into() }
+            else { format!(" C Categories  /  {category}") };
+        sheet::line(frame, layout.category_button, &heading, heading_style);
+        if layout.wide {
+            sheet::line(frame, Rect::new(layout.fields.x, view.heading.y, layout.fields.width, view.heading.height),
+                &format!(" {category}"), heading_style);
+        }
+
+        let footer = if self.mcp_secret.is_some() { " Enter save key   Esc cancel" }
+            else if menu.draft.is_some() { " Enter stage   Ctrl+S save   Esc cancel" }
+            else if category_open { " ↑↓ choose   Enter open   Esc back" }
+            else if navigation.details { " ↑↓ / PgUp/PgDn scroll   Esc back" }
+            else if area.width < 56 { " Enter  ^S save  ? help  Esc" }
+            else { " Enter edit   Ctrl+S save   ? details   Esc close" };
+        sheet::line(frame, view.footer, footer, Style::default().fg(theme::MUTED));
+
+        for (index, rect, label) in self.settings_categories(area) {
+            let selected = index == navigation.category_cursor.unwrap_or(menu.category);
+            let hovered = self.title_tab_hover.is_some_and(|hit| hit.owner == super::choice_dropdown::TitleTabOwner::Settings
+                && hit.index == index && hit.rect == rect);
+            let style = if hovered { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::UNDERLINED) }
+                else { sheet::selected_style(selected) };
+            sheet::line(frame, rect, &label, style);
+        }
+        let body = layout.fields;
+        if body.is_empty() { return; }
+        let preflight = self.settings_preflight(menu, body);
+        if navigation.details {
+            let (details, probe) = reserve_settings_preflight(body, preflight.len().min(menu.preflight_rows(area.height)));
+            sheet::scroll_text(frame, details, &self.settings_details(menu), &navigation.detail_scroll);
+            frame.render_widget(Paragraph::new(preflight).style(Style::default().fg(theme::SECONDARY)), probe);
+            return;
+        }
+        let rows = self.settings_fields(area);
+        let label_width = menu.indices().iter().map(|index| menu.rows[*index].setting.label.width() as u16 + 5)
+            .max().unwrap_or(0).min(body.width.saturating_mul(3) / 5);
+        let header = Rect::new(body.x, body.y, body.width.saturating_sub(1), layout.field_header);
+        let [name, value] = Layout::horizontal([Constraint::Length(label_width), Constraint::Fill(1)]).areas(header);
+        sheet::line(frame, name, " Setting", heading_style);
+        sheet::line(frame, value, "Value", heading_style);
+
+        for &(index, rect) in &rows {
+            let row = &menu.rows[index];
+            let selected = menu.selected == index && !category_open;
+            let style = sheet::selected_style(selected);
+            let editing = menu.draft.as_ref().is_some_and(|(key, _)| key == row.setting.key);
+            let marker = if row.shadowed { "Env" }
+                else if row.setting.read_only { "Read only" }
+                else if editing { "Editing" }
+                else if menu.edits.contains_key(row.setting.key) { "Staged" }
+                else { "" };
+            let marker_width = if rect.width >= 51 && !marker.is_empty() { 10 } else { 0 };
+            let [name, value, badge] = Layout::horizontal([
+                Constraint::Length(label_width), Constraint::Fill(1), Constraint::Length(marker_width),
+            ]).areas(rect);
+            let indicator = if selected { '›' } else { ' ' };
+            sheet::line(frame, name, &format!(" {indicator} {}:", row.setting.label), style);
+            let shown = self.settings_value(menu, index);
+            if editing {
+                sheet::edit_line(frame, value, &shown);
+            } else {
+                let shown = if marker_width == 0 && !marker.is_empty() { format!("[{marker}] {shown}") }
+                    else if row.setting.kind == crate::settings::Kind::Choice && !row.shadowed && !row.setting.read_only {
+                        format!("{shown} ▾")
+                    } else { shown };
+                sheet::line(frame, value, &shown, style);
+            }
+            sheet::line(frame, badge, marker, style);
+        }
+        let after_fields = body.y + layout.field_header + rows.len() as u16;
+        let rest = Rect::new(body.x, after_fields.min(body.bottom()), body.width, body.bottom().saturating_sub(after_fields));
+        let (help, probe) = reserve_settings_preflight(rest, preflight.len().min(menu.preflight_rows(area.height)));
+        if let Some(row) = menu.rows.get(menu.selected) {
+            let text = match crate::settings::CATEGORIES[menu.category] {
+                "About" => format!(" DOXA Rust {} · /about build", env!("CARGO_PKG_VERSION")),
+                "Paths" => crate::settings::config_path().map_or_else(|_| format!(" {}", row.setting.help),
+                    |path| format!(" Config file  {}", safe_label(&path.display().to_string()))),
+                _ => format!(" {}", row.setting.help),
+            };
+            sheet::line(frame, Rect::new(help.x, help.y, help.width, help.height.min(1)),
+                &text, Style::default().fg(theme::MUTED));
+        }
+        frame.render_widget(Paragraph::new(preflight).style(Style::default().fg(theme::SECONDARY)), probe);
+        let indices = menu.indices();
+        let start = rows.first().and_then(|(index, _)| indices.iter().position(|other| index == other)).unwrap_or(0);
+        let scroll_area = Rect::new(body.right().saturating_sub(1), body.y + layout.field_header, 1, rows.len() as u16);
+        sheet::scrollbar(frame, scroll_area, indices.len(), rows.len(), start);
+    }
+
+    fn settings_preflight(&self, menu: &super::SettingsMenu, area: Rect) -> Vec<Line<'static>> {
         let mermaid_selected = menu.rows.get(menu.selected).is_some_and(|row|
             matches!(row.setting.key, "mermaid_renderer" | "mermaid_renderer_root"));
         let router_selected=menu.rows.get(menu.selected).is_some_and(|row|matches!(row.setting.key,"engine"|"router_config"));
-        let mut preflight_lines = if crate::settings::CATEGORIES[menu.category]=="MCP" {
+        if crate::settings::CATEGORIES[menu.category]=="MCP" {
             let path=std::path::PathBuf::from(menu.effective_value("mcp_config"));
-            let width=usize::from(area.width.saturating_sub(3)).max(1);
+            let width=usize::from(area.width.saturating_sub(1)).max(1);
             let mut footer=vec![Line::styled(if self.mcp_secret.is_some() {
                 " Key editor · Enter save · Esc cancel"
             } else {" Ctrl+P check · Ctrl+R reload · PgUp/PgDn"},Style::default().fg(theme::ACCENT))];
@@ -681,7 +735,7 @@ impl App {
             let path=std::path::PathBuf::from(menu.effective_value("router_config"));
             let mut footer=vec![Line::styled(" Ctrl+P review Router",
                 Style::default().fg(theme::ACCENT))];
-            let width=usize::from(area.width.saturating_sub(3)).max(1);
+            let width=usize::from(area.width.saturating_sub(1)).max(1);
             footer.extend(self.router_review_lines(&path).into_iter().flat_map(|line|
                 crate::memory_menu::wrap_review(&format!(" {line}"),width)).take(4).map(Line::from));
             footer
@@ -689,34 +743,13 @@ impl App {
             let status = self.mermaid_preflight.as_ref()
                 .map(|preflight| preflight.message(&menu.mermaid_paths()))
                 .unwrap_or_else(|| "Not checked".into());
-            let width = usize::from(area.width.saturating_sub(3)).max(1);
+            let width = usize::from(area.width.saturating_sub(1)).max(1);
             let mut footer = vec![Line::styled(" Ctrl+P check renderer",
                 Style::default().fg(theme::ACCENT))];
             footer.extend(crate::memory_menu::wrap_review(&format!(" Preflight: {status}"), width)
                 .into_iter().take(3).map(Line::from));
             footer
-        } else { Vec::new() };
-        preflight_lines.truncate(menu.preflight_rows(area.height));
-        // Keep the action hint and preflight result visible even when a note is long.
-        lines.truncate(usize::from(area.height.saturating_sub(3)).saturating_sub(preflight_lines.len()));
-        lines.extend(preflight_lines);
-        lines.push(Line::from(if menu.draft.is_some() {
-            " Enter accept edit · Ctrl+S save · Esc cancel edit"
-        } else {
-            " 1–9 / 0 MCP category · Enter/click choose/edit · Ctrl+S save · Esc discard/close"
-        }));
-        frame.render_widget(
-            Paragraph::new(chooser_list_lines(lines, usize::from(area.width.saturating_sub(3))))
-                .block(
-                    Block::default()
-                        .title(self.settings_tab_line(area, menu.category))
-                        .borders(Borders::ALL)
-                        .border_style(theme::modal_border_style()),
-                )
-                .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
-            area,
-        );
-        draw_menu_scrollbar(frame, area, indices.len(), visible, start);
+        } else { Vec::new() }
     }
 
     pub(super) fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
@@ -733,6 +766,10 @@ impl App {
             return;
         }
         if let Some(menu) = &self.operations_menu {
+            if menu.is_setup() {
+                menu.draw_setup(frame, area);
+                return;
+            }
             let width = usize::from(area.width.saturating_sub(3));
             let (menu_lines, scrollbar) = menu.lines_with_scroll(width, usize::from(area.height));
             let lines = menu_lines
@@ -2227,31 +2264,21 @@ impl App {
             .active_id()
             .and_then(|id| self.sessions.iter().find(|s| s.id == id));
         let active = self.active_group == index;
-        let (draft, cursor) = group
-            .active_id()
-            .map(|id| {
-                if active
-                    && self
-                        .active_request_index()
-                        .is_some_and(|index| self.input_requests[index].freeform())
-                {
-                    let request = &self.input_requests[self.active_request_index().unwrap()];
-                    (request.free_text.as_str(), request.free_cursor)
-                } else if active && self.history_modal {
-                    (
-                        self.history_query.as_str(),
-                        self.history_query_cursor.min(self.history_query.len()),
-                    )
-                } else if active {
-                    (self.input.as_str(), self.input_cursor)
-                } else {
-                    self.input_drafts
-                        .get(&(index, id.to_owned()))
-                        .map(|(text, cursor)| (text.as_str(), *cursor))
-                        .unwrap_or(("", 0))
-                }
-            })
-            .unwrap_or(("", 0));
+        let (draft, cursor) = if active {
+            if let Some(request) = self.active_request_index().map(|index| &self.input_requests[index])
+                .filter(|request| request.freeform())
+            {
+                (request.free_text.as_str(), request.free_cursor)
+            } else if self.history_modal {
+                (self.history_query.as_str(), self.history_query_cursor.min(self.history_query.len()))
+            } else {
+                (self.input.as_str(), self.input_cursor)
+            }
+        } else {
+            group.active_id()
+                .and_then(|id| self.input_drafts.get(&(index, id.to_owned())))
+                .map_or(("", 0), |(text, cursor)| (text.as_str(), *cursor))
+        };
         let (draft, cursor) = if active {
             self.lore_picker
                 .as_ref()
@@ -2734,6 +2761,8 @@ impl App {
             Paragraph::new(Line::from(chip_spans)).style(Style::default().bg(theme::RAISED)),
             inner[3],
         );
+        let prompt_focused = active && self.focus == Focus::Prompt
+            && self.settings_menu.is_none() && self.operations_menu.is_none();
         let cursor = cursor.min(draft.len());
         let cursor_line = draft[..cursor].bytes().filter(|b| *b == b'\n').count();
         let cursor_column =
@@ -2743,7 +2772,7 @@ impl App {
             .enumerate()
             .map(|(line, text)| format!("{}{}", if line == 0 { "> " } else { "  " }, text))
             .collect();
-        if active && self.focus == Focus::Prompt {
+        if prompt_focused {
             let offset = draft[..cursor].rsplit('\n').next().unwrap_or("").len() + 2;
             rows[cursor_line].insert(offset, '▏');
         }
@@ -2784,7 +2813,7 @@ impl App {
                                 if self.lore_picker.as_ref().is_some_and(|picker| picker.proposal_mode) { " Filter pending ● " }
                                 else if self.lore_picker.as_ref().is_some_and(|picker| picker.filter_focused) { " Filter beliefs ● " }
                                 else { " Filter beliefs (click or /) " }
-                            } else if active && self.focus == Focus::Prompt {
+                            } else if prompt_focused {
                                 " Prompt ● · Alt+A files "
                             } else {
                                 " Prompt "
@@ -2792,7 +2821,7 @@ impl App {
                         )
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(
-                            if active && self.focus == Focus::Prompt {
+                            if prompt_focused {
                                 theme::ACCENT
                             } else {
                                 theme::BORDER
@@ -2950,4 +2979,13 @@ pub(super) fn draw_menu_scrollbar(frame: &mut Frame, area: Rect, total: usize, v
             .thumb_style(Style::default().fg(theme::ACCENT)),
         rect, &mut state,
     );
+}
+
+fn reserve_settings_preflight(area: Rect, rows: usize) -> (Rect, Rect) {
+    let height = area.height.min(rows as u16);
+    let top = area.height - height;
+    (
+        Rect::new(area.x, area.y, area.width, top),
+        Rect::new(area.x, area.y + top, area.width, height),
+    )
 }

@@ -34,7 +34,7 @@ impl CliOptions {
         match provider {
             Provider::Claude => {
                 let path = self.claude.as_deref().ok_or("Router Claude executable unavailable")?;
-                let home = doxa_claude::isolation::prepare().map_err(|_|"Router Claude private account unavailable")?;
+                let home = doxa_claude::isolation::prepare().map_err(|error| format!("Router Claude private account unavailable: {error}"))?;
                 let plugins = doxa_claude::isolation::adopted_plugins().map_err(|_|"Router Claude plugin snapshot unavailable")?;
                 let id = worker_id().map_err(|_|"Router discovery identity unavailable")?;
                 let catalog = doxa_claude::catalog::discover_authenticated_cancellable(doxa_claude::CliOptions {

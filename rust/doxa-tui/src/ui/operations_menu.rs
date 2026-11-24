@@ -1,7 +1,11 @@
 //! Selectable operations popup. Authentication runs on a worker and only
 //! filtered public progress is retained in this menu, never in transcripts.
-use crossterm::event::{KeyCode, KeyEvent};
-use super::credential_editor::{self, Editor};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{Frame, layout::{Constraint, Layout, Position, Rect}, style::Style};
+use super::menu_sheet::{self as sheet, Sheet};
+use crate::theme;
+use std::cell::Cell;
+use super::{credential_editor::{self, Editor}, unsafe_input_char};
 use doxa_vendors::Vendor;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -19,6 +23,11 @@ pub struct Menu {
     worker_thread: Option<std::thread::JoinHandle<()>>,
     closed: bool,
     step: usize,
+    setup_direct: bool,
+    setup_details: bool,
+    setup_scroll: Cell<usize>,
+    setup_row_start: Cell<usize>,
+    docker_status: String,
     editing: Option<&'static str>,
     input: String,
     scroll: usize,
@@ -35,13 +44,18 @@ pub struct Menu {
 }
 impl Menu {
     pub fn new(kind: &str) -> Self {
-        let mut menu = Self { kind: kind.into(), rows: Vec::new(), selected: 0, messages: Vec::new(), worker: None, closed: false, step: 0, editing: None, input: String::new(), scroll: 0, cancel: None, requested: false,
+        let mut menu = Self { kind: kind.into(), rows: Vec::new(), selected: 0, messages: Vec::new(), worker: None, closed: false, step: 0,
+            setup_direct: false, setup_details: false, setup_scroll: Cell::new(0),
+            setup_row_start: Cell::new(0), docker_status: String::new(), editing: None, input: String::new(), scroll: 0, cancel: None, requested: false,
             engine: None, restart_ready: false, restart_complete: None, mesh: None, mesh_revision: 0, worker_thread: None, plugins_changed: false, secret: None, credentials_changed: Vec::new() };
         menu.prepare(); menu
     }
     pub fn docker_setup() -> Self {
-        let mut menu=Self::new("setup");menu.step=3;menu.prepare();
-        menu.messages=vec![crate::operations::setup_docker_guide()];menu
+        let mut menu = Self::new("setup");
+        menu.step = 3;
+        menu.setup_direct = true;
+        menu.prepare();
+        menu
     }
     /// Parsing/selection is pure. The UI calls start_requested only after the
     /// popup fits above the prompt, so a hidden popup cannot start authentication.
@@ -85,6 +99,7 @@ impl Menu {
     }
     fn prepare(&mut self) {
         self.selected = 0;
+        self.setup_row_start.set(0);
         self.rows = match self.kind.as_str() {
             "doctor" => vec![("Refresh health checks".into(), Action::Maintenance("doctor", false))],
             "update" => vec![("Build and install latest main".into(), Action::Maintenance("update", false))],
@@ -97,18 +112,21 @@ impl Menu {
                 rows
             },
             "setup" => match self.step {
-                0 => vec![("Check authentication and continue".into(), Action::Report)],
+                0 => vec![("Check provider authentication".into(), Action::Report), ("Continue to Memory".into(), Action::Skip)],
                 1 => vec![("Create separate DOXA LORE store".into(), Action::Store(false)), ("Share existing Claude LORE store".into(), Action::Store(true)), ("Skip store selection".into(), Action::Skip)],
                 2 => vec![("Edit model default".into(), Action::Preference("model")), ("Edit effort default".into(), Action::Preference("effort")), ("Continue to Docker setup".into(), Action::Skip)],
                 _ => vec![("Check Docker prerequisites".into(), Action::DockerReport),
                     ("Edit Docker worker image digest".into(), Action::Preference("docker_image")),
                     ("Edit rootless Docker socket".into(), Action::Preference("docker_host")),
                     ("Show rootless Engine and image build steps".into(), Action::DockerGuide),
-                    ("Finish setup".into(), Action::Skip)],
+                    (if self.setup_direct { "Close" } else { "Finish setup" }.into(), Action::Skip)],
             },
             _ => vec![("Refresh discovered Claude plugins".into(), Action::Reload), ("Enable adoption for new sessions".into(), Action::Plugins(true)), ("Disable adoption for new sessions".into(), Action::Plugins(false))],
         };
-        if self.kind == "setup" {
+        if self.is_setup() && self.step == 3 {
+            self.docker_status = crate::docker_setup::Prerequisites::inspect().label();
+        }
+        if self.is_setup() && self.step == 0 {
             for vendor in [Vendor::DeepSeek, Vendor::Glm] {
                 self.rows.push((format!("{} API key · {} · edit", credential_editor::label(vendor), credential_editor::status(vendor)), Action::CredentialEdit(vendor)));
                 self.rows.push((format!("Remove saved {} API key", credential_editor::label(vendor)), Action::CredentialRemove(vendor)));
@@ -131,7 +149,13 @@ impl Menu {
                 if done {
                     self.plugins_changed |= matches!(self.kind.as_str(), "plugins" | "reload-plugins");
                     self.restart_ready = self.restart_complete.take().is_some_and(|flag| flag.load(Ordering::Acquire));
-                    self.worker = None; self.cancel = None; break;
+                    self.worker = None;
+                    self.cancel = None;
+                    if self.is_setup() && self.step == 0 {
+                        self.setup_details = true;
+                        self.setup_scroll.set(0);
+                    }
+                    break;
                 }
             }
         }
@@ -174,9 +198,109 @@ impl Menu {
         let scrollbar = (room > 0 && report.len() > room).then_some((report.len(), room, start));
         (lines, scrollbar)
     }
+    pub(super) fn is_setup(&self) -> bool { self.kind == "setup" }
+
+    fn setup_rows(&self, area: Rect) -> Rect {
+        let body = Sheet::new(area).body;
+        if self.secret.is_some() {
+            return Rect::new(body.x, body.y + 1, body.width, body.height.saturating_sub(1).min(2));
+        }
+        Rect::new(body.x, body.y, body.width, body.height.saturating_sub(1).max(u16::from(body.height > 0)))
+    }
+
+    fn setup_start(&self, rows: Rect) -> usize {
+        sheet::window(&self.setup_row_start, self.selected, self.rows.len(), usize::from(rows.height))
+    }
+
+    pub(super) fn draw_setup(&self, frame: &mut Frame<'_>, area: Rect) {
+        let view = Sheet::new(area);
+        let step = ["Accounts", "Memory", "Defaults", "Docker"][self.step];
+        view.draw(frame, if self.setup_direct { "Docker Setup" } else { "Setup" });
+        let heading = if self.setup_direct { "Prerequisites and configuration".into() }
+            else { format!("{} of 4  ·  {step}", self.step + 1) };
+        sheet::line(frame, view.heading, &format!(" {heading}"), Style::default().fg(theme::ACCENT));
+        let editing = self.editing.is_some() || self.secret.is_some();
+        let footer = if editing { " Enter save   Esc cancel edit" }
+            else if self.setup_details { " ↑↓ / PgUp/PgDn scroll   Esc back" }
+            else if self.busy() { " Checking…   Esc close" }
+            else if !self.setup_direct && self.step > 0 { " Enter   D details   ← back   Esc close" }
+            else { " Enter   D details   Esc close" };
+        sheet::line(frame, view.footer, footer, Style::default().fg(theme::MUTED));
+
+        if self.setup_details {
+            let lines = self.messages.iter().flat_map(|text| text.lines().map(str::to_owned)).collect::<Vec<_>>();
+            sheet::scroll_text(frame, view.body, &lines, &self.setup_scroll);
+            return;
+        }
+
+        let rows = self.setup_rows(area);
+        let style = Style::default().fg(theme::SECONDARY);
+        if let Some(editor) = &self.secret {
+            sheet::line(frame, Rect::new(view.body.x, view.body.y, view.body.width, 1),
+                &format!(" {} API key: {}", credential_editor::label(editor.vendor), editor.mask()), style);
+            for (index, label) in ["Save API key", "Cancel editing"].iter().enumerate().take(usize::from(rows.height)) {
+                let selected = self.selected == index;
+                sheet::line(frame, Rect::new(rows.x, rows.y + index as u16, rows.width, 1),
+                    &format!(" {} {label}", if selected { '›' } else { ' ' }), sheet::selected_style(selected));
+            }
+            return;
+        }
+        if let Some(key) = self.editing {
+            let label = match key {
+                "docker_image" => "Docker worker image digest",
+                "docker_host" => "Rootless Docker socket",
+                "model" => "Default model",
+                _ => "Default effort",
+            };
+            let [title, value, result] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Fill(1)]).areas(view.body);
+            sheet::line(frame, title, &format!(" {label}"), style);
+            sheet::edit_line(frame, value, &self.input);
+            if let Some(message) = self.messages.last() {
+                sheet::scroll_text(frame, result, &[message.clone()], &self.setup_scroll);
+            }
+            return;
+        }
+
+        let start = self.setup_start(rows);
+        for (offset, (index, (label, _))) in self.rows.iter().enumerate().skip(start).take(usize::from(rows.height)).enumerate() {
+            let selected = self.selected == index;
+            sheet::line(frame, Rect::new(rows.x, rows.y + offset as u16, rows.width.saturating_sub(1), 1),
+                &format!(" {} {label}", if selected { '›' } else { ' ' }), sheet::selected_style(selected));
+        }
+        sheet::scrollbar(frame, rows, self.rows.len(), usize::from(rows.height), start);
+        let status_y = (rows.y + (self.rows.len() as u16).min(rows.height)).min(view.body.bottom());
+        let status = Rect::new(rows.x, status_y, rows.width, view.body.bottom().saturating_sub(status_y));
+        let lines = if self.step == 3 { vec![self.docker_status.clone()] }
+            else if self.busy() { vec!["Checking provider authentication…".into()] }
+            else { self.messages.last().map(|message| message.lines().take(2).map(str::to_owned).collect()).unwrap_or_default() };
+        sheet::scroll_text(frame, status, &lines, &Cell::new(0));
+    }
+
+    pub(super) fn setup_pointer(&mut self, area: Rect, point: Position, click: bool) {
+        if self.busy() || self.editing.is_some() || self.setup_details { return; }
+        let rows = self.setup_rows(area);
+        if !rows.contains(point) { return; }
+        let offset = usize::from(point.y - rows.y);
+        let index = if self.secret.is_some() { offset } else { self.setup_start(rows) + offset };
+        if index < if self.secret.is_some() { 2 } else { self.rows.len() } {
+            self.selected = index;
+            if click { self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); }
+        }
+    }
+
     pub fn choice_at(&self, row: usize) -> bool { !self.busy() && !self.requested && self.editing.is_none() && if self.secret.is_some() { matches!(row, 2|3) } else { row > 0 && row <= self.rows.len() } }
     pub fn hover(&mut self, row: usize) { if self.choice_at(row) { self.selected = row - if self.secret.is_some() { 2 } else { 1 }; } }
     pub fn paste(&mut self, text: &str) -> bool {
+        if self.editing.is_some() {
+            let value = text.trim();
+            if value.chars().any(unsafe_input_char) || self.input.len() + value.len() > 4096 {
+                self.messages = vec!["Paste a single value of at most 4096 bytes".into()];
+                self.setup_scroll.set(0);
+            } else {
+                self.input.push_str(value);
+            }
+            return true;
+        }
         let Some(editor) = &mut self.secret else { return false; };
         if !editor.append(text) { self.messages.push("API key must be a single line of at most 4096 printable ASCII characters".into()); }
         true
@@ -207,6 +331,44 @@ impl Menu {
             }
             return;
         }
+        if self.is_setup() {
+            if self.setup_details {
+                let scroll = self.setup_scroll.get();
+                match key.code {
+                    KeyCode::Esc | KeyCode::Left | KeyCode::Char('d' | 'D') => self.setup_details = false,
+                    KeyCode::Up => self.setup_scroll.set(scroll.saturating_sub(1)),
+                    KeyCode::Down => self.setup_scroll.set(scroll.saturating_add(1)),
+                    KeyCode::PageUp => self.setup_scroll.set(scroll.saturating_sub(8)),
+                    KeyCode::PageDown => self.setup_scroll.set(scroll.saturating_add(8)),
+                    _ => {}
+                }
+                return;
+            }
+            if key.code == KeyCode::Esc && self.editing.take().is_some() {
+                self.input.clear();
+                return;
+            }
+            if !self.busy() && self.editing.is_none() {
+                match key.code {
+                    KeyCode::Left if self.step > 0 && !self.setup_direct => {
+                        self.step -= 1;
+                        self.messages.clear();
+                        self.prepare();
+                        return;
+                    }
+                    KeyCode::Char('d' | 'D') if self.step == 3 || !self.messages.is_empty() => {
+                        if self.step == 3 {
+                            self.docker_status = crate::docker_setup::Prerequisites::inspect().label();
+                            self.messages = vec![crate::operations::setup_docker_report()];
+                        }
+                        self.setup_details = true;
+                        self.setup_scroll.set(0);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
         if key.code == KeyCode::Esc {
             self.cancel();
             self.closed = true; return;
@@ -216,14 +378,23 @@ impl Menu {
         if self.busy() || self.requested { return; }
         if let Some(field) = self.editing {
             match key.code {
-                KeyCode::Char(c) if !c.is_control() => self.input.push(c),
+                KeyCode::Char(c) if !unsafe_input_char(c)
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && self.input.len() + c.len_utf8() <= 4096 => self.input.push(c),
                 KeyCode::Backspace => { self.input.pop(); }
                 KeyCode::Enter => {
                     let result = if field.starts_with("docker_") { crate::operations::setup_docker_setting(field, &self.input) }
                         else { crate::operations::setup_default(field, Some(&self.input)) };
                     let saved = result.is_ok();
-                    self.messages.push(result.unwrap_or_else(|e| e.to_string()));
-                    if saved { self.editing = None; self.input.clear(); }
+                    self.messages = vec![result.unwrap_or_else(|e| e.to_string())];
+                    self.setup_scroll.set(0);
+                    if saved {
+                        self.editing = None;
+                        self.input.clear();
+                        if self.step == 3 {
+                            self.docker_status = crate::docker_setup::Prerequisites::inspect().label();
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -240,13 +411,20 @@ impl Menu {
         self.scroll = 0;
         let action = self.rows[self.selected].1.clone();
         match action {
-            Action::Preference(field) => { self.editing = Some(field); self.input.clear(); return; }
-            Action::DockerGuide => { self.messages = vec![crate::operations::setup_docker_guide()]; return; }
-            Action::DockerReport => {
-                let (sender, receiver) = mpsc::channel(); self.worker = Some(receiver);
-                self.worker_thread = Some(std::thread::spawn(move || {
-                    let _ = sender.send((true, crate::operations::setup_docker_report()));
-                })); return;
+            Action::Preference(field) => {
+                self.editing = Some(field);
+                self.input.clear();
+                self.messages.clear();
+                return;
+            }
+            Action::DockerGuide | Action::DockerReport => {
+                self.docker_status = crate::docker_setup::Prerequisites::inspect().label();
+                self.messages = vec![if matches!(action, Action::DockerReport) {
+                    crate::operations::setup_docker_report()
+                } else { crate::operations::setup_docker_guide() }];
+                self.setup_details = true;
+                self.setup_scroll.set(0);
+                return;
             }
             Action::CredentialEdit(vendor) => { self.secret = Some(Editor::new(vendor)); self.selected = 0; return; }
             Action::CredentialRemove(vendor) => {
@@ -287,10 +465,16 @@ impl Menu {
             let reload = matches!(action, Action::Reload);
             let (sender, receiver) = mpsc::channel(); self.worker = Some(receiver);
             self.worker_thread = Some(std::thread::spawn(move || {
-                let result = if setup { crate::operations::setup_report() } else { crate::operations::plugins_bridge(reload) };
+                let result = if setup {
+                    crate::operations::auth_status(None).map(|status| format!(
+                        "{status}\n\nUse /login to sign in to Claude or Codex. Return to Accounts to edit DeepSeek or GLM API keys."
+                    ))
+                } else {
+                    crate::operations::plugins_bridge(reload)
+                };
                 let _ = sender.send((true, result.unwrap_or_else(|e| e.to_string())));
             }));
-            if setup { self.step += 1; self.prepare(); }
+            if setup { self.messages.clear(); }
             return;
         }
         let result = match action {
@@ -304,8 +488,13 @@ impl Menu {
         };
         let success = result.is_ok(); self.plugins_changed |= success && matches!(self.kind.as_str(), "plugins" | "reload-plugins"); self.messages.push(result.unwrap_or_else(|e| e.to_string()));
         if self.kind == "setup" && success {
-            if self.step >= 3 { self.closed = true; } else { self.step += 1; self.prepare();
-                if self.step == 3 { self.messages = vec![crate::operations::setup_docker_guide()]; } }
+            if self.step >= 3 {
+                self.closed = true;
+            } else {
+                self.messages.clear();
+                self.step += 1;
+                self.prepare();
+            }
         }
     }
 }
@@ -317,6 +506,52 @@ impl Drop for Menu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn setup_keeps_docker_details_and_field_edits_local() {
+        let mut menu = Menu::docker_setup();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 10)).unwrap();
+        let paint = |menu: &Menu, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+            terminal.draw(|frame| menu.draw_setup(frame, frame.area())).unwrap();
+            terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect::<String>()
+        };
+        assert!(paint(&menu, &mut terminal).contains("Check Docker prerequisites"));
+        menu.key(key(KeyCode::Enter));
+        assert!(paint(&menu, &mut terminal).contains("Docker prerequisites"));
+        assert!(menu.setup_details);
+        menu.key(key(KeyCode::PageDown));
+        assert!(!paint(&menu, &mut terminal).contains("Docker prerequisites"));
+        menu.key(key(KeyCode::Esc));
+        assert!(!menu.closed() && !menu.setup_details);
+        menu.key(key(KeyCode::Down));
+        menu.key(key(KeyCode::Enter));
+        assert!(menu.paste("sha256:example\n"));
+        assert!(paint(&menu, &mut terminal).contains("sha256:example▏"));
+        menu.key(key(KeyCode::Esc));
+        assert_eq!(menu.editing, None);
+        assert!(menu.input.is_empty() && !menu.closed());
+        menu.key(key(KeyCode::Esc));
+        assert!(menu.closed());
+    }
+
+    #[test]
+    fn setup_checks_authentication_on_the_accounts_step() {
+        let mut menu = Menu::new("setup");
+        let (sender, worker) = mpsc::channel();
+        menu.worker = Some(worker);
+        sender.send((true, "Claude authenticated".into())).unwrap();
+        menu.poll();
+        assert_eq!(menu.step, 0);
+        assert!(menu.setup_details);
+        menu.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        menu.selected = 1;
+        menu.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(menu.step, 1);
+        assert!(!menu.rows.iter().any(|(_, action)| matches!(action, Action::CredentialEdit(_))));
+        menu.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(menu.step, 0);
+    }
+
     #[test]
     fn setup_docker_stage_has_reviewable_actions_and_does_not_finish_with_defaults() {
         let mut menu=Menu::new("setup");

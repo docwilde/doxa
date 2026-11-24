@@ -339,16 +339,14 @@ fn canonical_allow_missing(path:&Path)->Option<PathBuf>{
     Some(ancestor.canonicalize().ok()?.join(relative))
 }
 
-fn repository_root(workspace:&Path)->Option<PathBuf>{
-    let workspace=workspace.canonicalize().ok()?;
-    Some(workspace.ancestors().find(|path|fs::symlink_metadata(path.join(".git")).is_ok())
-        .unwrap_or(&workspace).to_path_buf())
+fn repository_root(directory: &Path) -> Option<&Path> {
+    directory.ancestors().find(|path| fs::symlink_metadata(path.join(".git")).is_ok())
 }
 
-fn private_overlap(root:&Path,home:&Path,doxa_home:&Path,workspace:&Path,fleet:&Path)->bool{
+fn private_overlap(root: &Path, home: &Path, doxa_home: &Path, workspace: Option<&Path>, fleet: &Path) -> bool {
     home.starts_with(root)
-        || [doxa_home,workspace,fleet].iter().any(|private|
-            private.starts_with(root)||root.starts_with(private))
+        || [Some(doxa_home), workspace, Some(fleet)].into_iter().flatten().any(|private|
+            private.starts_with(root) || root.starts_with(private))
 }
 
 fn root_exposes_private_paths(root:&Path,workspaces:&[PathBuf])->Option<bool>{
@@ -362,12 +360,17 @@ fn root_exposes_private_paths(root:&Path,workspaces:&[PathBuf])->Option<bool>{
     // A dedicated package may live below HOME, but mounting HOME itself or
     // any ancestor would expose every private file. DOXA state, the current
     // repository and fleet state are refused in either direction.
-    let current=std::env::current_dir().ok()?;
-    let current_repo=repository_root(&current)?;
-    if private_overlap(root,&home,&doxa_home,&current_repo,&fleet){return Some(true);}
+    let current = std::env::current_dir().ok()?.canonicalize().ok()?;
+    if private_overlap(root, &home, &doxa_home, repository_root(&current), &fleet) {
+        return Some(true);
+    }
     for workspace in workspaces {
-        let repo=repository_root(workspace)?;
-        if private_overlap(root,&home,&doxa_home,&repo,&fleet){return Some(true);}
+        // An explicit session workspace also needs protection without Git.
+        let workspace = workspace.canonicalize().ok()?;
+        let protected = repository_root(&workspace).unwrap_or(&workspace);
+        if private_overlap(root, &home, &doxa_home, Some(protected), &fleet) {
+            return Some(true);
+        }
     }
     Some(false)
 }
@@ -641,15 +644,31 @@ mod tests {
         let fleet=state.join("fleet");
         for root in [Path::new("/"),home,state.as_path(),&state.join("settings"),
             repo.as_path(),&repo.join("tools/mermaid"),fleet.as_path(),&fleet.join("run-1")] {
-            assert!(private_overlap(root,home,&state,&repo,&fleet),"{} was not refused",root.display());
+            assert!(private_overlap(root,home,&state,Some(&repo),&fleet),"{} was not refused",root.display());
         }
-        assert!(!private_overlap(&home.join("tools/mermaid"),home,&state,&repo,&fleet));
+        assert!(!private_overlap(&home.join("tools/mermaid"),home,&state,Some(&repo),&fleet));
         let (package,renderer)=fixture("exit 99");
         let home=std::env::var_os("HOME").map(PathBuf::from).unwrap().canonicalize().unwrap();
         assert!(reviewed_paths(&renderer,home.to_str().unwrap(),&[]).is_none());
         assert!(render_source("graph TD; A-->B",24,&renderer,home.to_str().unwrap(),&[],
             &picker(),&AtomicBool::new(false)).is_none());
         assert!(package.path().exists());
+    }
+
+    #[test]
+    fn home_launch_directory_allows_a_dedicated_renderer_package() {
+        let home = tempfile::tempdir().unwrap();
+        let package = home.path().join(".local/share/renderer");
+        fs::create_dir_all(&package).unwrap();
+        let state = home.path().join(".doxa");
+        let fleet = state.join("fleet");
+
+        assert!(!private_overlap(&package, home.path(), &state, repository_root(home.path()), &fleet));
+        assert!(private_overlap(home.path(), home.path(), &state, None, &fleet));
+        assert!(private_overlap(&package, home.path(), &state, Some(home.path()), &fleet));
+
+        fs::create_dir(home.path().join(".git")).unwrap();
+        assert!(private_overlap(&package, home.path(), &state, repository_root(home.path()), &fleet));
     }
 
     #[test]

@@ -398,7 +398,7 @@ impl ClaudeHost {
         // Preserve the verified CLI conversation; decide whether the first
         // continued request needs a bounded replay after measuring its input.
         let home = doxa_claude::isolation::prepare()
-            .map_err(|_| "Claude private configuration unavailable")?;
+            .map_err(|error| format!("Claude private configuration unavailable: {error}"))?;
         let plugins = doxa_claude::isolation::adopted_plugins()
             .map_err(|_| "Claude plugin adoption unavailable")?;
         // The provider's private home contains credentials/artifacts, never

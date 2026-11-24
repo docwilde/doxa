@@ -569,6 +569,7 @@ impl App {
     }
     pub(super) fn open_settings_menu(&mut self) {
         self.title_tab_hover = None;
+        self.settings_navigation = Default::default();
         self.mcp_secret=None;
         self.choice_dropdown = None;
         let identity = self.groups[self.active_group]
@@ -718,7 +719,7 @@ impl App {
     }
     pub(super) fn settings_menu_key(&mut self, key: KeyEvent) -> bool {
         if self.choice_dropdown.is_some() { return self.choice_dropdown_key(key); }
-        if self.mcp_page_key(key) {return true;}
+        if !self.settings_navigation.details && self.mcp_page_key(key) { return true; }
         if self.settings_menu.as_ref().is_some_and(|menu| menu.draft.is_none())
             && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             if let KeyCode::Char(number @ '0'..='9') = key.code {
@@ -755,14 +756,35 @@ impl App {
         if key.modifiers.contains(KeyModifiers::SHIFT)
             && matches!(key.code, KeyCode::Left | KeyCode::Right)
         {
-            menu.finish_draft();
-            menu.category = if key.code == KeyCode::Right {
-                (menu.category + 1) % crate::settings::CATEGORIES.len()
-            } else {
-                (menu.category + crate::settings::CATEGORIES.len() - 1)
-                    % crate::settings::CATEGORIES.len()
-            };
-            menu.selected = menu.indices().first().copied().unwrap_or(0);
+            let count = crate::settings::CATEGORIES.len();
+            let index = (menu.category + if key.code == KeyCode::Right { 1 } else { count - 1 }) % count;
+            self.select_settings_category(index);
+            return true;
+        }
+        if let Some(cursor) = self.settings_navigation.category_cursor.as_mut() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Left | KeyCode::Char('c' | 'C') => self.toggle_settings_categories(),
+                KeyCode::Up | KeyCode::BackTab => *cursor = cursor.saturating_sub(1),
+                KeyCode::Down | KeyCode::Tab => *cursor = (*cursor + 1).min(crate::settings::CATEGORIES.len() - 1),
+                KeyCode::Enter | KeyCode::Right => {
+                    let index = *cursor;
+                    self.select_settings_category(index);
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if self.settings_navigation.details {
+            let scroll = &self.settings_navigation.detail_scroll;
+            match key.code {
+                KeyCode::Esc | KeyCode::Left | KeyCode::Char('?') => self.settings_navigation.details = false,
+                KeyCode::Char('c' | 'C') => self.toggle_settings_categories(),
+                KeyCode::Up => scroll.set(scroll.get().saturating_sub(1)),
+                KeyCode::Down => scroll.set(scroll.get().saturating_add(1)),
+                KeyCode::PageUp => scroll.set(scroll.get().saturating_sub(8)),
+                KeyCode::PageDown => scroll.set(scroll.get().saturating_add(8)),
+                _ => {}
+            }
             return true;
         }
         if let Some((_, draft)) = &mut menu.draft {
@@ -790,6 +812,13 @@ impl App {
         }
         match key.code {
             KeyCode::Esc => self.close_settings_menu(),
+            KeyCode::Char('c' | 'C') if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                self.toggle_settings_categories();
+            }
+            KeyCode::Char('?') => {
+                self.settings_navigation.details = true;
+                self.settings_navigation.detail_scroll.set(0);
+            }
             KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
                 let indices = menu.indices();
                 if let Some(position) = indices.iter().position(|i| *i == menu.selected) {
