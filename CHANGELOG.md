@@ -17,6 +17,10 @@ the stable 2.0 release has not been cut.
 
 - Fix concurrent Claude starts racing to replace the private skills snapshot. Startup errors identify the configuration step that failed.
 
+**Mermaid**
+
+- Fix **`doxa doctor`** refusing a dedicated Mermaid package when DOXA is launched from a home directory without a Git repository.
+
 ## 2.0.0-beta.88 — 2026-11-24
 
 **Evaluation**
