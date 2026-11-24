@@ -5,6 +5,12 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.88 — 2026-11-24
+
+**Evaluation**
+
+- Publish the SubQ Snap development pilot with five subscription-backed model baselines, 29 repair trials and 128 offline grading checks.
+
 ## 2.0.0-beta.87 — 2026-11-24
 
 **Protected Codex**
