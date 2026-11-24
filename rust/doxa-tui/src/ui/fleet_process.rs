@@ -93,11 +93,12 @@ fn public_plan_error(error:io::Error)->io::Error{
     io::Error::new(error.kind(),message)
 }
 fn review_lines(title:&str,value:&Value)->Vec<String>{
-    let mut lines=vec![format!("{title} · read all rows, Shift+A arm, Shift+Y launch · Esc cancel")];
+    let mut lines = vec![title.into(), "## Run and budget".into()];
     for (label,key)in [("Run","run_id"),("Root","root"),("Directory","cwd"),("Mode","mode"),("Isolation","isolation"),("Workers","workers"),("Sessions","sessions"),("Seed","seed"),("Workers with memory off","memory_off"),("Memory default enabled","lore_enabled"),("Total budget USD","run_budget_usd"),("Allow unbudgeted","allow_unbudgeted"),("Approval policy","approval_policy"),("Approval grace seconds","approval_grace_s"),("Dry run","dry_run"),("Preflight","preflight"),("Task digest","prompt_sha256"),("Assignment plan digest","assignments_sha256"),("Quiescence deadline seconds","quiescence_timeout_s"),("Quiescence grace seconds","quiescence_grace_s")]{
         if !value[key].is_null(){lines.push(format!("{label}: {}",value[key].as_str().map(str::to_owned).unwrap_or_else(||value[key].to_string())));}
     }
     if value["access"].is_object(){
+        lines.push("## Isolation and internet".into());
         let access=&value["access"];
         lines.push(format!("Launch policy — workers: {} · direct task internet: {}",access["worker_isolation"],access["worker_task_internet"]));
         if !access["supervisor_isolation"].is_null(){lines.push(format!("Launch policy — coordinator: {} · task internet: {}",access["supervisor_isolation"],access["supervisor_task_internet"]));}
@@ -112,6 +113,9 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
         }
         lines.push("Offline workers request research via peer_send question to the coordinator; an online coordinator returns evidence. An offline coordinator escalates to the owner.".into());
     }
+    if !value["auto_test"].is_null() || value["test_recipe"].is_object() || value["router_config_sha256"].is_string() {
+        lines.push("## Tests and routing".into());
+    }
     if !value["auto_test"].is_null(){lines.push(format!("Automatic host tests after worker turns: {}",value["auto_test"]));}
     if let Some(hash)=value["router_config_sha256"].as_str(){
         lines.push(format!("Reviewed Router config SHA256: {hash}"));
@@ -123,10 +127,13 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
         lines.push(format!("Host test working directory: {}",recipe["cwd_relative"]));
         lines.push(format!("Host test timeout seconds: {}",recipe["timeout_s"]));
     }
-    if value["independent_review"].is_object(){let review=&value["independent_review"];for(label,key)in [("Independent supervisor model","supervisor"),("Supervisor action","supervisor_mode"),("Fast message judge","message_judge"),("Message review mode","message_mode"),("Review allocation USD","budget_usd"),("Maximum review calls","max_calls"),("Checkpoint interval seconds","interval_s"),("Input rate USD/Mtok","input_usd_per_million"),("Output rate USD/Mtok","output_usd_per_million"),("Message risk threshold","risk_threshold")]{lines.push(format!("{label}: {}",review[key]));}if review["supervisor"]["provider"]=="jev" {lines.push(format!("Jev supervisor minimum Choice confidence: {}",review["risk_threshold"]));lines.push("Pinned Jev input rate: $0.042/M; output free. Verdicts cannot grant approval or dependency release.".into());}lines.push("Independent models use API credentials; review data is LORE-scrubbed, stateless and has no tools.".into());}
+    if value["independent_review"].is_object(){
+        lines.push("## Independent supervision".into());
+        let review=&value["independent_review"];for(label,key)in [("Independent supervisor model","supervisor"),("Supervisor action","supervisor_mode"),("Fast message judge","message_judge"),("Message review mode","message_mode"),("Review allocation USD","budget_usd"),("Maximum review calls","max_calls"),("Checkpoint interval seconds","interval_s"),("Input rate USD/Mtok","input_usd_per_million"),("Output rate USD/Mtok","output_usd_per_million"),("Message risk threshold","risk_threshold")]{lines.push(format!("{label}: {}",review[key]));}if review["supervisor"]["provider"]=="jev" {lines.push(format!("Jev supervisor minimum Choice confidence: {}",review["risk_threshold"]));lines.push("Pinned Jev input rate: $0.042/M; output free. Verdicts cannot grant approval or dependency release.".into());}lines.push("Independent models use API credentials; review data is LORE-scrubbed, stateless and has no tools.".into());}
     if let Some(hash)=value["charter_sha256"].as_str(){lines.push(format!("Approved charter SHA256: {hash}"));}
     let mut counts:BTreeMap<(String,String,String,String,String),usize>=BTreeMap::new();
     for slot in value["slots"].as_array().into_iter().flatten(){let key=(slot["role"].as_str().unwrap_or("worker").into(),slot["engine"].as_str().unwrap_or("unknown").into(),slot["model"].as_str().unwrap_or("provider default").into(),match slot["lore"].as_bool(){Some(true)=>"on",Some(false)=>"off",None=>"unknown"}.into(),slot["isolation"].as_str().or_else(||value["isolation"].as_str()).unwrap_or("unknown").into());*counts.entry(key).or_default()+=1;}
+    if !counts.is_empty() { lines.push("## Fleet members".into()); }
     for ((role,engine,model,lore,profile),count)in counts{let label=if value["resume"]==true{"Recorded"}else{"Planned"};lines.push(format!("{label} {count} × {role}: {engine}:{model} · memory {lore} · isolation {profile}"));}
     if value["resume"]==true&&value["slots"].as_array().is_some_and(|slots|slots.iter().any(|slot|slot["isolation"]=="native")){
         lines.push("Recorded native slots have host and credential access. Existing owner grants remain active during observation resume.".into());
@@ -159,10 +166,11 @@ mod tests{
     fn review_paths_cannot_inject_rows_or_hide_long_suffixes(){
         let path=format!("/{}\nApproval policy: all\tTAIL", "x".repeat(300));
         let lines=review_lines("Review",&json!({"root":path}));
-        assert_eq!(lines.len(),3);
-        assert!(lines[1].ends_with("\\nApproval policy: all\\tTAIL"));
-        assert!(!lines[1].contains('\n'));assert!(!lines[1].contains('\t'));
-        assert!(lines[1].len()>300);
+        assert_eq!(lines.len(), 4);
+        let root = lines.iter().find(|line| line.starts_with("Root: ")).unwrap();
+        assert!(root.ends_with("\\nApproval policy: all\\tTAIL"));
+        assert!(!root.contains('\n') && !root.contains('\t'));
+        assert!(root.len() > 300);
     }
     #[test]
     fn literal_tokenizer_never_expands_shell_code(){assert_eq!(words("start --prompt '$(touch nope) `$HOME`' --cwd \"a b\"").unwrap(),vec!["start","--prompt","$(touch nope) `$HOME`","--cwd","a b"]);assert!(words("'unfinished").is_err());assert!(words("x\n--force").is_err());}

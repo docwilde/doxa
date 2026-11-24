@@ -766,10 +766,13 @@ use super::*;
                 "cpus":2, "pids":256, "image":"sha256:fixture", "disk_limit":"no quota"}}));
         app.open_isolation_info(0);
         assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some("isolation"));
-        let rendered = painted_at(&app, 140, 40);
-        for expected in ["Memory: 4096 MiB", "Mounts: independent Git checkout", "Image: sha256:fixture",
-            "/isolation docker-offline --confirm", "/isolation docker-open --confirm"] {
-            assert!(rendered.contains(expected), "missing {expected}: {rendered}");
+        let policy = painted_at(&app, 140, 40);
+        assert!(policy.lines().any(|line| line.contains("Memory") && line.contains("4096 MiB")));
+        assert!(policy.lines().any(|line| line.contains("Image") && line.contains("sha256:fixture")));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
+        let changes = painted_at(&app, 140, 40);
+        for expected in ["Independent Git checkout", "/isolation docker-offline --confirm", "/isolation docker-open --confirm"] {
+            assert!(changes.contains(expected), "missing {expected}: {changes}");
         }
     }
     #[test]
@@ -8735,7 +8738,10 @@ fn fleet_setup_menu_opens_without_creating_sessions_or_prompt_drafts(){
     let mut app=App::default();app.handle(Event::Resize(150,42));app.input="Existing private draft".into();
     app.open_fleet_setup();
     assert!(app.fleet_setup.is_some());assert_eq!(app.chip_info.as_ref().unwrap().kind,"fleet_setup");
-    let view=painted_at(&app,150,42);assert!(view.contains("Worker isolation: docker-offline"));assert!(view.contains("Coordinator isolation: docker-offline"));
+    let view = painted_at(&app, 150, 42);
+    for field in ["Worker isolation", "Coordinator isolation"] {
+        assert!(view.lines().any(|line| line.contains(field) && line.contains("docker-offline")), "{view}");
+    }
     assert!(app.pending_prompts.is_empty());assert!(app.pending_queue_commands.is_empty());assert_eq!(app.input,"Existing private draft");
     app.fleet_setup_key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE));assert!(app.fleet_setup.is_none());assert!(app.chip_info.is_none());
 }

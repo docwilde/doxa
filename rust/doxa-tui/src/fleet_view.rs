@@ -152,21 +152,35 @@ fn resolve(root: &Path, prefix: &str) -> io::Result<PathBuf> {
 }
 
 pub fn status(root: &Path, prefix: &str) -> io::Result<String> {
+    status_rows(root, prefix, false).map(|rows| rows.join("\n"))
+}
+
+pub(crate) fn status_sheet(root: &Path, prefix: &str) -> io::Result<Vec<String>> {
+    status_rows(root, prefix, true)
+}
+
+fn status_rows(root: &Path, prefix: &str, sheet: bool) -> io::Result<Vec<String>> {
     let run = resolve(root, prefix)?;
     let value = manifest(&run)?;
     let id = value["run_id"].as_str().unwrap_or(prefix);
     let state = if value["live"] == true { "running" } else { "finished" };
-    let mut lines = vec![format!("fleet {} — {}", short(id), state),
-        format!("mode {} · started {} · sessions {}", short(value["mode"].as_str().unwrap_or("symmetric")),
-            short(value["started_at"].as_str().unwrap_or("?")),
-            value["spec"]["sessions"].as_u64().map_or("?".into(), |n| n.to_string()))];
+    let mode = short(value["mode"].as_str().unwrap_or("symmetric"));
+    let started = short(value["started_at"].as_str().unwrap_or("?"));
+    let sessions = value["spec"]["sessions"].as_u64().map_or("?".into(), |n| n.to_string());
+    let mut lines = if sheet {
+        vec![format!("## Fleet {} · {state}", short(id)), format!("Mode: {mode}"),
+            format!("Started: {started}"), format!("Sessions: {sessions}")]
+    } else {
+        vec![format!("fleet {} — {}", short(id), state),
+            format!("mode {mode} · started {started} · sessions {sessions}")]
+    };
     if value["stopped"] == true {
         lines.push("ended on operator request".into());
     } else if value["quiesced"] == true {
         lines.push("quiesced".into());
     }
     if let Some(messages) = value["ledger"]["messages"].as_u64() {
-        lines.push(format!("ledger messages {messages}"));
+        lines.push(if sheet { format!("Ledger messages: {messages}") } else { format!("ledger messages {messages}") });
     }
     if value["spec"]["auto_test"]==true {
         lines.push(format!("automatic host tests enabled · attempts {}/32 · owner release required",
@@ -176,6 +190,7 @@ pub fn status(root: &Path, prefix: &str) -> io::Result<String> {
         lines.push("automatic host test Docker cleanup unconfirmed · fleet teardown incomplete".into());
     }
     if value["supervision"].is_object() {
+        if sheet { lines.push("## Independent supervision".into()); }
         let guard = &value["supervision"];
         let review = &guard["context"]["review"];
         for (label, value) in [
@@ -206,12 +221,28 @@ pub fn status(root: &Path, prefix: &str) -> io::Result<String> {
     if let Some(slots) = value["slots"].as_array() {
         for slot in slots.iter().take(32) {
             let index = slot["index"].as_u64().map_or("?".into(), |n| n.to_string());
-            lines.push(format!("  slot {} · {} · {} · {}", index,
-                short(slot["role"].as_str().unwrap_or("worker")),
-                short(slot["phase"].as_str().unwrap_or("?")),
-                short(slot["session_id"].as_str().unwrap_or("?"))));
-            if let Some(profile)=slot["isolation"].as_str(){lines.push(format!("    isolation {} · direct task internet {}",short(profile),slot["task_internet"]));}
-            if let Some(enabled) = slot["lore"].as_bool() { lines.push(format!("    memory {}", if enabled { "on" } else { "off" })); }
+            let role = short(slot["role"].as_str().unwrap_or("worker"));
+            let phase = short(slot["phase"].as_str().unwrap_or("?"));
+            let session = short(slot["session_id"].as_str().unwrap_or("?"));
+            if sheet {
+                lines.push(format!("## Slot {index} · {role} · {phase}"));
+                lines.push(format!("Session: {session}"));
+            } else {
+                lines.push(format!("  slot {index} · {role} · {phase} · {session}"));
+            }
+            if let Some(profile) = slot["isolation"].as_str() {
+                let internet = &slot["task_internet"];
+                if sheet {
+                    lines.push(format!("Isolation: {}", short(profile)));
+                    lines.push(format!("Direct task internet: {internet}"));
+                } else {
+                    lines.push(format!("    isolation {} · direct task internet {internet}", short(profile)));
+                }
+            }
+            if let Some(enabled) = slot["lore"].as_bool() {
+                let state = if enabled { "on" } else { "off" };
+                lines.push(if sheet { format!("Memory: {state}") } else { format!("    memory {state}") });
+            }
             if let Some(state)=slot["auto_test"]["state"].as_str() {
                 let mut line=format!("    host test {} · turn {}",short(state),slot["auto_test"]["turn_serial"].as_u64().unwrap_or(0));
                 if let Some(result)=slot["auto_test"]["result"].as_object() {
@@ -230,8 +261,10 @@ pub fn status(root: &Path, prefix: &str) -> io::Result<String> {
             }
         }
     }
-    lines.push(format!("manifest {}", run.join("manifest.json").display()));
-    Ok(lines.join("\n"))
+    let manifest = run.join("manifest.json");
+    lines.push(if sheet { format!("Manifest: {}", manifest.display()) }
+        else { format!("manifest {}", manifest.display()) });
+    Ok(lines)
 }
 
 pub fn slot_socket(root: &Path, prefix: &str, index: usize) -> io::Result<(PathBuf, String)> {

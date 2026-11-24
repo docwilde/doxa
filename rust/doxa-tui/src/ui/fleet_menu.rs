@@ -18,7 +18,9 @@ impl SavedView{
     }
 }
 #[derive(Debug)]
-struct Reply {text:String,ids:Vec<String>,run:Option<String>}
+struct Reply { lines: Vec<String>, ids: Vec<String>, run: Option<String> }
+
+const FIRST_RUN_ROW: usize = 2;
 
 #[derive(Debug)]
 pub struct Menu {
@@ -52,20 +54,27 @@ impl Menu {
                     let matched:Vec<_>=if exact.is_empty(){ids.iter().filter(|id|id.starts_with(&query)).collect()}else{exact};
                     if matched.len()!=1{return Err(std::io::Error::new(std::io::ErrorKind::NotFound,"Fleet run missing or ambiguous"));}
                     let id=matched[0].clone();
-                    if alignment{return Ok(Reply{text:crate::fleet_alignment::inspect(&root,&id)?,ids:Vec::new(),run:Some(id)});}
-                    let mut text=crate::fleet_view::status(&root,&id)?;
+                    if alignment {
+                        let report = crate::fleet_alignment::inspect(&root, &id)?;
+                        return Ok(Reply { lines: report.lines().map(str::to_owned).collect(), ids: Vec::new(), run: Some(id) });
+                    }
+                    let mut lines = crate::fleet_view::status_sheet(&root, &id)?;
                     if let Ok(snapshot)=crate::fleet_control::snapshot(&root,&id){
                         if snapshot["native_version"]==1{
                             let phase=snapshot["phase"].as_str().unwrap_or("unknown");
-                            let mut actual:Vec<_>=text.lines().map(str::to_owned).collect();
-                            if let Some(first)=actual.first_mut(){*first=format!("fleet {} — {}",super::safe_label(&id),super::safe_label(phase));}
-                            text=actual.join("\n");
-                            text.push_str(&format!("\nNative controller phase: {}",super::safe_label(phase)));
-                            for(label,value)in [("Total budget USD",&snapshot["spec"]["run_budget_usd"]),("Approval policy",&snapshot["approvals"]["policy"]),("Approvals asked",&snapshot["approvals"]["asked"]),("Auto approved",&snapshot["approvals"]["auto_approved"]),("Refused",&snapshot["approvals"]["refused"]) ]{if !value.is_null(){text.push_str(&format!("\n{label}: {}",super::safe_label(&value.to_string())));}}
+                            if let Some(first) = lines.first_mut() {
+                                *first = format!("## Fleet {} · {}", super::safe_label(&id), super::safe_label(phase));
+                            }
+                            lines.push("## Controller".into());
+                            lines.push(format!("Native controller phase: {}", super::safe_label(phase)));
+                            for(label,value)in [("Total budget USD",&snapshot["spec"]["run_budget_usd"]),("Approval policy",&snapshot["approvals"]["policy"]),("Approvals asked",&snapshot["approvals"]["asked"]),("Auto approved",&snapshot["approvals"]["auto_approved"]),("Refused",&snapshot["approvals"]["refused"]) ]{if !value.is_null(){lines.push(format!("{label}: {}",super::safe_label(&value.to_string())));}}
                         }
                     }
-                    Ok(Reply{text,ids:Vec::new(),run:Some(id)})
-                }else{Ok(Reply{text:format!("Runs under {}\nRecorded run IDs:",root.display()),ids,run:None})}
+                    Ok(Reply { lines, ids: Vec::new(), run: Some(id) })
+                } else {
+                    let lines = vec![format!("Fleet root: {}", root.display()), "## Recorded runs".into()];
+                    Ok(Reply { lines, ids, run: None })
+                }
             })();let _=tx.send(result.map_err(|e|e.to_string()));
         });
     }
@@ -76,8 +85,7 @@ impl Menu {
             match result {
                 Ok(reply)=>{self.rows=reply.ids;self.run=reply.run;self.verified=self.run.is_some();
                     self.selected=self.selected.min(self.rows.len().saturating_sub(1));
-                    self.lines=vec!["Fleet · ↑/↓ select · Enter open · N new fleet · M messages/alignment · B runs · R refresh · Esc close".into()];
-                    self.lines.extend(reply.text.lines().map(str::to_owned));
+                    self.lines = reply.lines;
                     if let Some(run)=&self.run {self.lines.push(format!("Attach a slot: /fleet attach {run} <index>"));}
                     else{self.lines.extend(self.rows.iter().cloned());if self.rows.is_empty(){self.lines.push("No recorded runs".into());}}
                 },Err(error)=>{self.verified=false;self.rows.clear();self.lines=vec![format!("Fleet: {}",super::safe_label(&error))];}
@@ -95,9 +103,19 @@ impl Menu {
         KeyCode::Char('b')=>{self.alignment=false;self.run=None;self.verified=false;self.receiver=None;self.refresh();},
         KeyCode::Char('r')=>self.refresh(),_=>{}}
     }
+    pub(super) fn is_run_list(&self) -> bool { self.run.is_none() }
+    pub(super) fn selected_row(&self) -> Option<usize> {
+        (self.run.is_none() && self.selected < self.rows.len()).then_some(FIRST_RUN_ROW + self.selected)
+    }
     pub fn verified_view(&self)->Option<SavedView>{self.run.as_ref().filter(|_|self.verified).map(|id|SavedView{kind:ViewKind::Fleet,root:self.root.clone(),run_id:id.clone()})}
-    pub fn hover(&mut self,row:usize)->bool{let Some(index)=row.checked_sub(3) else{return false;};if self.run.is_none() && index<self.rows.len(){self.selected=index;true}else{false}}
-    pub fn display(&self)->Vec<String>{let mut lines=self.lines.clone();if self.run.is_none(){if let Some(line)=lines.get_mut(self.selected+3){line.insert_str(0,"▸ ");}}lines}
+    pub fn hover(&mut self,row:usize)->bool{let Some(index)=row.checked_sub(FIRST_RUN_ROW) else{return false;};if self.run.is_none() && index<self.rows.len(){self.selected=index;true}else{false}}
+    pub fn display(&self) -> Vec<String> {
+        let mut lines = self.lines.clone();
+        if let Some(line) = self.selected_row().and_then(|row| lines.get_mut(row)) {
+            line.insert_str(0, "▸ ");
+        }
+        lines
+    }
 }
 
 #[cfg(test)]
@@ -106,7 +124,7 @@ mod tests {
     #[test]
     fn hover_rejects_headers_and_rows_outside_real_run_choices() {
         let mut menu=Menu {root:PathBuf::from("/unused"),run:None,rows:vec!["real-run".into()],selected:0,lines:Vec::new(),receiver:None,refreshed:Instant::now(),verified:false,fixture:false,alignment:false};
-        assert!(!menu.hover(0));assert!(!menu.hover(2));assert!(menu.hover(3));assert!(!menu.hover(4));
-        menu.run=Some("real-run".into());assert!(!menu.hover(3));
+        assert!(!menu.hover(0));assert!(!menu.hover(1));assert!(menu.hover(2));assert!(!menu.hover(3));
+        menu.run=Some("real-run".into());assert!(!menu.hover(2));
     }
 }

@@ -337,23 +337,14 @@ impl App {
         }
     }
     pub(super) fn fleet_review_key(&mut self, key: KeyEvent) -> bool {
+        if self.report_scroll(key.code) {
+            return true;
+        }
         let review = self.fleet_review.as_mut().unwrap();
         match key.code {
             KeyCode::Esc => {
                 self.fleet_review = None;
                 self.chip_info = None;
-            }
-            KeyCode::Up | KeyCode::PageUp => {
-                let info = self.chip_info.as_mut().unwrap();
-                info.scroll =
-                    info.scroll
-                        .saturating_sub(if key.code == KeyCode::Up { 1 } else { 8 });
-            }
-            KeyCode::Down | KeyCode::PageDown => {
-                let info = self.chip_info.as_mut().unwrap();
-                info.scroll =
-                    info.scroll
-                        .saturating_add(if key.code == KeyCode::Down { 1 } else { 8 });
             }
             KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => {
                 if review.complete.get() {

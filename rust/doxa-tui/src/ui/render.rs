@@ -802,47 +802,7 @@ impl App {
         let Some(info) = &self.chip_info else {
             return;
         };
-        if matches!(info.kind,"fleet_setup"|"isolation_change"){
-            let lines=info.lines.iter().flat_map(|line|crate::memory_menu::wrap_review(line,usize::from(area.width.saturating_sub(3)).max(1))).collect::<Vec<_>>();
-            let visible=usize::from(area.height.saturating_sub(2));let start=info.scroll.min(lines.len().saturating_sub(visible));let end=(start+visible).min(lines.len());
-            let owner_matches=info.owner.as_ref().is_none_or(|(id,_)|self.groups[self.active_group].active_id()==Some(id.as_str()));
-            if info.kind=="isolation_change"&&owner_matches{
-                if let Some(review)=self.isolation_confirmation.as_ref(){if visible>0&&start<=review.seen.get(){review.seen.set(review.seen.get().max(end));review.complete.set(review.complete.get()||end>=lines.len());}}
-            }
-            let body=if owner_matches{lines.join("\n")}else{"Session changed; reopen isolation controls".into()};
-            frame.render_widget(Paragraph::new(body).scroll((start.min(u16::MAX as usize) as u16,0)).block(Block::default().title(if info.kind=="fleet_setup"{" New fleet "}else{" Confirm isolation and internet · ↑↓ scroll "}).borders(Borders::ALL)).style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),area);
-            draw_menu_scrollbar(frame,area,lines.len(),visible,start);return;
-        }
-        if let Some(review) = &self.fleet_review {
-            let lines = info
-                .lines
-                .iter()
-                .flat_map(|line| {
-                    crate::memory_menu::wrap_review(
-                        line,
-                        usize::from(area.width.saturating_sub(3)).max(1),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let visible = usize::from(area.height.saturating_sub(2));
-            let start = info.scroll.min(lines.len().saturating_sub(visible));
-            let end = start + visible;
-            if start <= review.seen.get() {
-                review.seen.set(review.seen.get().max(end));
-                review.complete.set(end >= lines.len());
-            }
-            frame.render_widget(
-                Paragraph::new(lines.join("\n"))
-                    .scroll((start.min(u16::MAX as usize) as u16, 0))
-                    .block(
-                        Block::default()
-                            .title(" Fleet launch review ")
-                            .borders(Borders::ALL),
-                    )
-                    .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),
-                area,
-            );
-            draw_menu_scrollbar(frame, area, lines.len(), visible, start);
+        if self.draw_report_sheet(frame, area) {
             return;
         }
         if let Some(review) = &self.fleet_dependency_review {
@@ -864,23 +824,6 @@ impl App {
                 area,
             );
             draw_menu_scrollbar(frame, area, lines.len(), visible, start);
-            return;
-        }
-        if info.kind == "fleet" {
-            let visible = usize::from(area.height.saturating_sub(2));
-            let start = info.scroll.min(info.lines.len().saturating_sub(visible));
-            frame.render_widget(
-                Paragraph::new(info.lines.join("\n"))
-                    .scroll((start.min(u16::MAX as usize) as u16, 0))
-                    .block(
-                        Block::default()
-                            .title(" Fleet · PgUp/PgDn scroll ")
-                            .borders(Borders::ALL),
-                    )
-                    .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),
-                area,
-            );
-            draw_menu_scrollbar(frame, area, info.lines.len(), visible, start);
             return;
         }
         if info.kind == "context" {
@@ -985,7 +928,7 @@ impl App {
         }
         if matches!(
             info.kind,
-            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "isolation" | "routing" | "compaction" | "native_plugin" | "native_status" | "native_package" | "native_package_run"
+            "memory" | "usage" | "context" | "sessions" | "about" | "remote_history" | "routing" | "compaction" | "native_plugin" | "native_status" | "native_package" | "native_package_run"
         ) {
             let current = self.groups[self.active_group].active_id().and_then(|id| {
                 self.session_cwds
@@ -2762,7 +2705,8 @@ impl App {
             inner[3],
         );
         let prompt_focused = active && self.focus == Focus::Prompt
-            && self.settings_menu.is_none() && self.operations_menu.is_none();
+            && self.settings_menu.is_none() && self.operations_menu.is_none()
+            && !self.chip_info.as_ref().is_some_and(|info| super::report_sheet::Report::kind(info.kind));
         let cursor = cursor.min(draft.len());
         let cursor_line = draft[..cursor].bytes().filter(|b| *b == b'\n').count();
         let cursor_column =
