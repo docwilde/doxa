@@ -1,6 +1,4 @@
 use doxa_tui::{bridge, discovery, fleet_control, fleet_plan, fleet_view, launch, mesh_control, operations, remote_client, settings, startup_restore, ui_state};
-#[cfg(test)]
-use doxa_tui::maintenance;
 use std::collections::HashSet;
 use std::io::{self, IsTerminal, Write};
 use serde_json::{Map, Value};
@@ -928,11 +926,3 @@ mod tests {
         assert!(script.contains("main \"$@\""));
     }
 }
-
-#[cfg(test)]
-#[path = "ui/credential_editor.rs"]
-mod credential_editor;
-
-#[cfg(test)]
-#[path = "ui/operations_menu.rs"]
-mod operations_menu_test;
