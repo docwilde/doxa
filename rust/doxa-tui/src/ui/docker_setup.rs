@@ -31,6 +31,7 @@ impl App {
     pub(super) fn close_settings_menu(&mut self) {
         self.title_tab_hover = None;
         self.settings_menu = None;
+        self.settings_navigation = Default::default();
         self.choice_dropdown = None;
         self.mcp_secret = None;
         if self.docker_settings_open {

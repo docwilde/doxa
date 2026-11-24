@@ -179,25 +179,27 @@ impl App {
             || self.stop_confirmation.is_some() || self.fleet_review.is_some()
             || self.fleet_dependency_review.is_some() || self.diff_modal || self.map_modal { return None; }
         let parent = self.active_chooser_rect()?;
-        let row = match &dropdown.owner {
+        let anchor = match &dropdown.owner {
             Owner::Setting(_) => {
                 let menu = self.settings_menu.as_ref()?;
-                parent.y + 3 + menu.visible_indices(parent.height).iter().position(|index| *index == menu.selected)? as u16
+                self.settings_fields(parent).into_iter().find(|(index, _)| *index == menu.selected)?.1
             }
             Owner::NewSession { field, .. } => {
                 let form=self.new_session.as_ref()?;
                 let (offset,_,start)=form.field_rows(parent.height,&self.chooser_view_start);
-                parent.y+offset+field.checked_sub(start)? as u16
+                let row = parent.y + offset + field.checked_sub(start)? as u16;
+                Rect::new(parent.x + 1, row, parent.width.saturating_sub(2), 1)
             },
         };
         let height = (dropdown.choices.len() as u16 + 2).min(parent.height.saturating_sub(2)).max(3);
         let width = dropdown.choices.iter().map(|value| self.dropdown_choice_label(&dropdown.owner,value).width() as u16 + 4).max().unwrap_or(10)
-            .max(safe_label(&dropdown.title).width() as u16 + 4).max(26).min(parent.width.saturating_sub(2));
+            .max(safe_label(&dropdown.title).width() as u16 + 4).max(26).min(anchor.width);
+        let row = anchor.y;
         let max_y = parent.bottom().saturating_sub(height + 1);
         let y = if row + 1 + height < parent.bottom() { row + 1 }
             else if row >= parent.y + height + 1 { row - height }
             else { parent.y + 1 }.min(max_y);
-        Some(Rect::new(parent.x + 1, y, width, height))
+        Some(Rect::new(anchor.x, y, width, height))
     }
 
     pub(super) fn choice_dropdown_mouse(&mut self, mouse: MouseEvent) -> bool {
@@ -255,6 +257,7 @@ impl App {
         if index >= settings::CATEGORIES.len() { return; }
         menu.finish_draft();
         self.title_tab_hover = None;
+        self.settings_navigation = Default::default();
         menu.category = index;
         self.mcp_secret=None;
         menu.selected = menu.indices().first().copied().unwrap_or(0);
@@ -268,8 +271,8 @@ impl App {
             || self.delete_confirmation.is_some() || self.stop_confirmation.is_some()
             || self.diff_modal || self.map_modal { return None; }
         let area = self.active_chooser_rect()?;
-        let (owner, tabs) = if let Some(menu) = &self.settings_menu {
-            (TitleTabOwner::Settings, settings_tabs(area, menu.category))
+        let (owner, tabs) = if self.settings_menu.is_some() {
+            (TitleTabOwner::Settings, self.settings_categories(area))
         } else {
             if self.engine_picker || self.new_session.is_some() || self.model_picker.is_some()
                 || self.effort_picker.is_some() || self.permission_picker.is_some()
@@ -284,11 +287,6 @@ impl App {
             .map(|(index, rect, _)| TitleTabHit { owner, index, rect })
     }
 
-    pub(super) fn settings_tab_line(&self, area: Rect, selected: usize) -> Line<'static> {
-        title_tab_line(area, selected, settings_tabs(area, selected),
-            self.title_tab_hover.filter(|hit| hit.owner == TitleTabOwner::Settings))
-    }
-
     pub(super) fn lore_tab_line(&self, area: Rect, picker: &super::LorePicker) -> Line<'static> {
         let selected = lore_selected(picker);
         title_tab_line(area, selected, lore_tabs(area, selected),
@@ -298,12 +296,6 @@ impl App {
 
 fn choice_label(value: &str) -> String {
     if value.is_empty() { "(default)".into() } else { safe_label(value) }
-}
-
-/// Render and hit testing consume the same title-bar tabs, including overflow.
-pub(super) fn settings_tabs(area: Rect, selected: usize) -> Vec<(usize, Rect, String)> {
-    let labels = settings::CATEGORIES.iter().enumerate().map(|(index, label)| format!(" {} {label} ", if index==9 {0} else {index+1})).collect::<Vec<_>>();
-    title_tabs(area, selected, &labels)
 }
 
 fn lore_selected(picker: &super::LorePicker) -> usize {
@@ -424,21 +416,20 @@ mod tests {
     }
 
     #[test]
-    fn settings_numbered_tabs_are_clickable_and_preserve_text_edits() {
+    fn settings_numbered_categories_are_clickable_and_preserve_text_edits() {
         let mut app = settings_app();
         assert!(paint(&app).contains("1 Session"));
         for category in 0..settings::CATEGORIES.len() {
             key(&mut app, KeyCode::Char(if category == 9 { '0' } else { char::from(b'1' + category as u8) }));
             assert_eq!(app.settings_menu.as_ref().unwrap().category, category);
             let area = app.active_chooser_rect().unwrap();
-            let tab = settings_tabs(area, category).into_iter().find(|(index, _, label)| *index == category && label.contains(settings::CATEGORIES[category])).unwrap();
+            let tab = app.settings_categories(area).into_iter().find(|(index, _, label)| *index == category && label.contains(settings::CATEGORIES[category])).unwrap();
             let mut terminal = Terminal::new(TestBackend::new(app.size.width, app.size.height)).unwrap();
             terminal.draw(|frame| app.draw(frame)).unwrap();
             let row = |y| (area.x..area.right()).map(|x|
                 terminal.backend().buffer()[(x, y)].symbol()).collect::<String>();
-            assert_eq!(tab.1.y, area.y);
-            assert!(row(area.y).contains(settings::CATEGORIES[category]));
-            assert!(!row(area.y + 2).contains(settings::CATEGORIES[category]));
+            assert!(tab.1.y > area.y);
+            assert!(row(tab.1.y).contains(settings::CATEGORIES[category]));
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), tab.1.x + 1, tab.1.y);
             assert_eq!(app.settings_menu.as_ref().unwrap().category, category);
             assert_eq!(app.drag, None, "title tab click must not resize the menu");
@@ -450,7 +441,7 @@ mod tests {
         key(&mut app, KeyCode::Char('9'));
         assert_eq!(app.settings_menu.as_ref().unwrap().category, 0);
         let area = app.active_chooser_rect().unwrap();
-        let fleet = settings_tabs(area, 0).into_iter().find(|(index, _, _)| *index == 1).unwrap();
+        let fleet = app.settings_categories(area).into_iter().find(|(index, _, _)| *index == 1).unwrap();
         mouse(&mut app, MouseEventKind::Down(MouseButton::Left), fleet.1.x + 1, fleet.1.y);
         assert_eq!(app.settings_menu.as_ref().unwrap().category, 1);
         assert_eq!(app.settings_menu.as_ref().unwrap().edits["linger_secs"].as_deref(), Some("1209"));
@@ -481,7 +472,7 @@ mod tests {
     fn settings_title_hover_highlights_without_selecting_and_clears_on_leave_close_resize() {
         let mut app = settings_app();
         let area = app.active_chooser_rect().unwrap();
-        let (_, rect, _) = settings_tabs(area, 0).into_iter().find(|(index, _, _)| *index == 1).unwrap();
+        let (_, rect, _) = app.settings_categories(area).into_iter().find(|(index, _, _)| *index == 1).unwrap();
         let menu = app.settings_menu.as_mut().unwrap();
         menu.draft = Some(("linger_secs".into(), "41".into()));
         let selected = menu.selected;
@@ -501,7 +492,7 @@ mod tests {
         app.handle(Event::Resize(100, 32));
         assert!(app.title_tab_hover.is_none());
         let area = app.active_chooser_rect().unwrap();
-        let (_, rect, _) = settings_tabs(area, 0).into_iter().find(|(index, _, _)| *index == 1).unwrap();
+        let (_, rect, _) = app.settings_categories(area).into_iter().find(|(index, _, _)| *index == 1).unwrap();
         mouse(&mut app, MouseEventKind::Moved, rect.x, rect.y);
         app.close_settings_menu();
         assert!(app.title_tab_hover.is_none());
@@ -511,35 +502,52 @@ mod tests {
     }
 
     #[test]
-    fn settings_title_hover_and_click_share_overflow_and_tenth_mcp_geometry() {
+    fn settings_category_picker_and_sidebar_share_mouse_geometry() {
         for width in [40, 70, 100] {
-            for selected in [0, 9] {
-                let mut app = settings_app();
-                app.size.width = width;
-                key(&mut app, KeyCode::Char(if selected == 9 { '0' } else { '1' }));
-                let area = app.active_chooser_rect().unwrap();
-                let tabs = settings_tabs(area, selected);
-                assert!(tabs.iter().any(|(_, _, label)| label == "‹" || label == "›"));
-                if selected == 9 { assert!(tabs.iter().any(|(index, _, label)| *index == 9 && label.contains("0 MCP"))); }
-                for (index, rect, _) in &tabs {
-                    assert!(area.contains(Position::new(rect.x, rect.y)));
-                    mouse(&mut app, MouseEventKind::Moved, rect.x, rect.y);
-                    assert_eq!(app.title_tab_hover, Some(TitleTabHit { owner: TitleTabOwner::Settings, index: *index, rect: *rect }));
-                    assert_eq!(app.settings_menu.as_ref().unwrap().category, selected);
-                    assert_title_hover(&app, *rect, true);
-                    for (_, other, _) in &tabs {
-                        if other != rect { assert_title_hover(&app, *other, false); }
-                    }
-                }
-                let (index, rect, _) = tabs.iter().find(|(_, _, label)| label == "‹" || label == "›").unwrap();
-                mouse(&mut app, MouseEventKind::Down(MouseButton::Left), rect.x, rect.y);
-                assert_eq!(app.settings_menu.as_ref().unwrap().category, *index);
-                assert!(app.title_tab_hover.is_none());
-                assert_eq!(app.drag, None);
-                mouse(&mut app, MouseEventKind::Moved, area.x, area.y);
-                assert!(app.title_tab_hover.is_none(), "border is not a title tab");
+            let mut app = settings_app();
+            app.size.width = width;
+            key(&mut app, KeyCode::Char('0'));
+            let area = app.active_chooser_rect().unwrap();
+            if width < 76 {
+                assert!(app.settings_categories(area).is_empty());
+                let button = app.settings_layout(area).category_button;
+                mouse(&mut app, MouseEventKind::Down(MouseButton::Left), button.x, button.y);
+                assert_eq!(app.settings_navigation.category_cursor, Some(9));
             }
+            let tabs = app.settings_categories(area);
+            assert!(tabs.iter().any(|(index, _, label)| *index == 9 && label.contains("0 MCP")));
+            let (index, rect, _) = tabs.iter().find(|(index, _, _)| *index != 9).unwrap();
+            assert!(area.contains(Position::new(rect.x, rect.y)));
+            mouse(&mut app, MouseEventKind::Moved, rect.x, rect.y);
+            assert_eq!(app.title_tab_hover, Some(TitleTabHit { owner: TitleTabOwner::Settings, index: *index, rect: *rect }));
+            assert_title_hover(&app, *rect, true);
+            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), rect.x, rect.y);
+            assert_eq!(app.settings_menu.as_ref().unwrap().category, *index);
+            assert!(app.title_tab_hover.is_none());
+            assert!(app.settings_navigation.category_cursor.is_none());
+            assert_eq!(app.drag, None);
         }
+    }
+
+    #[test]
+    fn compact_settings_categories_and_details_return_to_the_selected_field() {
+        let mut app = settings_app();
+        app.size.width = 40;
+        let input = "keep this prompt";
+        app.input = input.into();
+        key(&mut app, KeyCode::Char('c'));
+        key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Enter);
+        let menu = app.settings_menu.as_ref().unwrap();
+        assert_eq!(menu.category, 1);
+        let selected = menu.selected;
+        key(&mut app, KeyCode::Char('?'));
+        assert!(app.settings_navigation.details);
+        assert!(paint(&app).contains("Source default"));
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.settings_navigation.details);
+        assert_eq!(app.settings_menu.as_ref().unwrap().selected, selected);
+        assert_eq!(app.input, input);
     }
 
     #[test]
@@ -575,7 +583,8 @@ mod tests {
         let output = paint(&app);
         assert!(output.contains("▾"));
         let menu = app.active_chooser_rect().unwrap();
-        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), menu.x + 4, menu.y + 3);
+        let field = app.settings_fields(menu)[0].1;
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), field.x + 2, field.y);
         assert!(app.choice_dropdown.is_some());
         let dropdown = app.choice_dropdown_rect().unwrap();
         assert!(menu.contains(Position::new(dropdown.x, dropdown.y)));

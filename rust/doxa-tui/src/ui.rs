@@ -24,6 +24,7 @@ mod operations_controller;
 mod router_settings;
 mod mcp_settings;
 mod operations_menu;
+mod menu_sheet;
 mod credential_editor;
 pub(crate) mod panes;
 mod render;
@@ -511,6 +512,7 @@ impl SettingsMenu {
             .map(|(i, _)| i)
             .collect()
     }
+    #[cfg(test)]
     fn visible_indices(&self, height: u16) -> Vec<usize> {
         let (indices, start, count) = self.visible_window(height);
         indices.into_iter().skip(start).take(count).collect()
@@ -528,7 +530,7 @@ impl SettingsMenu {
         // so a footer does not consume the category's configured field rows.
         let footer = if self.has_preflight() { Self::MAX_PREFLIGHT_ROWS } else { 0 };
         self.indices().len().saturating_add(9).saturating_add(footer)
-            .max(8).min(usize::from(u16::MAX)) as u16
+            .clamp(14, usize::from(u16::MAX)) as u16
     }
     fn preflight_rows(&self, height: u16) -> usize {
         // Reserve the header, selected row, action hint and borders first.
@@ -1654,6 +1656,7 @@ pub struct App {
     belief_browser_fixture: bool,
     belief_button_hover: Option<Rect>,
     title_tab_hover: Option<choice_dropdown::TitleTabHit>,
+    settings_navigation: menu_sheet::SettingsNavigation,
     belief_preview: crate::belief_preview::Preview,
     memory_preview: crate::belief_preview::Preview,
     belief_pointer: Option<(u16, u16)>,
@@ -1974,6 +1977,7 @@ impl Default for App {
             belief_browser_fixture: false,
             belief_button_hover: None,
             title_tab_hover: None,
+            settings_navigation: menu_sheet::SettingsNavigation::default(),
             belief_preview: crate::belief_preview::Preview::default(),
             memory_preview: crate::belief_preview::Preview::default(),
             belief_pointer: None,

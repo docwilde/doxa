@@ -176,8 +176,6 @@ mod tests {
         let before=std::fs::read_to_string(crate::settings::config_path().unwrap()).unwrap();
         assert!(crate::settings::save(&crate::settings::config_path().unwrap(),&[("mcp_config".into(),None)],"glm").is_err());
         assert_eq!(std::fs::read_to_string(crate::settings::config_path().unwrap()).unwrap(),before);
-        let tabs=super::super::choice_dropdown::settings_tabs(Rect::new(0,0,34,12),9);
-        assert!(tabs.iter().any(|(index,_,label)|*index==9 && label.contains("0 MCP")));
     }
 }
 pub(super) struct Probe {

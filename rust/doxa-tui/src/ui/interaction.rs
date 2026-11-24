@@ -2000,17 +2000,13 @@ impl App {
             .attach_picker
             .as_ref()
             .map(|_| self.attach_matches().len());
-        if let Some(settings) = self.settings_menu.as_mut() {
-            if row >= menu.y + 3 {
-                if let Some(index) = settings
-                    .visible_indices(menu.height)
-                    .get(usize::from(row - menu.y - 3))
-                    .copied()
-                {
-                    if settings.selected != index {
-                        settings.selected = index;
-                        return true;
-                    }
+        if self.settings_menu.is_some() {
+            let point = ratatui::layout::Position::new(column, row);
+            if let Some(index) = self.settings_field_at(menu, point) {
+                let settings = self.settings_menu.as_mut().unwrap();
+                if settings.draft.is_none() && settings.selected != index {
+                    settings.selected = index;
+                    return true;
                 }
             }
         } else if let Some(picker) = self.branch_picker.as_mut() {
@@ -2630,15 +2626,12 @@ impl App {
                 if let Some(area) = menu.filter(|area| {
                     area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
                 }) {
-                    let offset = usize::from(mouse.row.saturating_sub(area.y.saturating_add(3)));
-                    let index = self
-                        .settings_menu
-                        .as_ref()
-                        .unwrap()
-                        .visible_indices(area.height)
-                        .get(offset)
-                        .copied();
-                    if let Some(index) = index.filter(|_| mouse.row >= area.y + 3) {
+                    let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+                    if self.settings_layout(area).category_button.contains(point) {
+                        self.toggle_settings_categories();
+                        return true;
+                    }
+                    if let Some(index) = self.settings_field_at(area, point) {
                         self.settings_menu.as_mut().unwrap().finish_draft();
                         self.settings_menu.as_mut().unwrap().selected = index;
                         return self.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -2682,6 +2675,17 @@ impl App {
                         && mouse.column < area.right().saturating_sub(1)
                         && mouse.row > area.y
                         && mouse.row < area.bottom().saturating_sub(1);
+                    if menu.is_setup() && inside {
+                        if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left)) {
+                            menu.setup_pointer(area, ratatui::layout::Position::new(mouse.column, mouse.row),
+                                mouse.kind == MouseEventKind::Down(MouseButton::Left));
+                        }
+                        if menu.closed() {
+                            self.retire_operations();
+                            self.chip_info = None;
+                        }
+                        return true;
+                    }
                     if inside
                         && matches!(
                             mouse.kind,
