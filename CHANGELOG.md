@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.90 — 2026-11-25
+
+**Terminal windows**
+
+- Align labels and values in Fleet review and status, New Fleet, Isolation, and Help. Narrow panes stack values under their labels.
+- Group related fields and keep key controls visible while scrolling. Long paths and digests wrap in full.
+- Keep read-through confirmation for fleet launches and isolation changes, including in narrow panes.
+
 ## 2.0.0-beta.89 — 2026-11-24
 
 **Setup and Settings**
