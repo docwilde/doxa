@@ -58,6 +58,13 @@ impl App {
                         info.scroll = 0;
                     }
                 }
+                if let Some(review) = &self.isolation_confirmation {
+                    review.seen.set(0);
+                    review.complete.set(false);
+                    if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "isolation_change") {
+                        info.scroll = 0;
+                    }
+                }
                 if let Some(review) = &mut self.fleet_dependency_review {
                     review.reset_visibility();
                     if let Some(info) = &mut self.chip_info { info.scroll = 0; }
@@ -811,21 +818,24 @@ impl App {
                     self.chip_info = None;
                     return true;
                 }
-                if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
-                    let info = self.chip_info.as_mut().unwrap();
-                    info.scroll = if key.code == KeyCode::PageUp {
-                        info.scroll.saturating_sub(8)
-                    } else {
-                        info.scroll
-                            .saturating_add(8)
-                            .min(info.lines.len().saturating_sub(1))
-                    };
+                let choosing = matches!(key.code, KeyCode::Up | KeyCode::Down)
+                    && self.fleet_menu.as_ref().unwrap().is_run_list();
+                if !choosing && self.report_scroll(key.code) {
                     return true;
                 }
                 let menu = self.fleet_menu.as_mut().unwrap();
                 menu.key(key);
-                if matches!(key.code,KeyCode::Char('m'|'b')|KeyCode::Enter){self.chip_info.as_mut().unwrap().scroll=0;}
-                self.chip_info.as_mut().unwrap().lines = menu.display();
+                let selected = if choosing { menu.selected_row() } else { None };
+                let info = self.chip_info.as_mut().unwrap();
+                if matches!(key.code, KeyCode::Char('m' | 'b') | KeyCode::Enter) {
+                    info.scroll = 0;
+                }
+                info.lines = menu.display();
+                if let Some(scroll) = selected.and_then(|source| self.active_chooser_rect()
+                    .and_then(|area| self.report_sheet(area)).map(|report| report.reveal(source, false)))
+                {
+                    self.chip_info.as_mut().unwrap().scroll = scroll;
+                }
                 return true;
             }
             if let Some(menu) = &mut self.operations_menu {
@@ -916,6 +926,9 @@ impl App {
                     }
                 }
             }
+            if self.report_scroll(key.code) {
+                return true;
+            }
             let codegraph_area = self.active_chooser_rect();
             let dynamic_rows = self.chip_info.as_ref().and_then(|info| match info.kind {
                 "context" => {
@@ -931,7 +944,7 @@ impl App {
             if let Some(info) = self.chip_info.as_mut().filter(|info| {
                 matches!(
                     info.kind,
-                    "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "routing" | "compaction" | "native_plugin" | "native_status" | "codegraph" | "native_package" | "native_package_run"
+                    "memory" | "usage" | "context" | "sessions" | "about" | "remote_history" | "routing" | "compaction" | "native_plugin" | "native_status" | "codegraph" | "native_package" | "native_package_run"
                 )
             }) {
                 if let Some(count) = dynamic_rows {
@@ -2203,6 +2216,9 @@ impl App {
         if self.settings_menu.is_some() {
             return Some(self.settings_menu_key(key));
         }
+        if self.report_scroll(code) {
+            return Some(true);
+        }
         if let Some(menu) = self.operations_menu.as_mut() {
             if menu.editing_credential() { return Some(false); }
             menu.key(key);
@@ -2713,28 +2729,23 @@ impl App {
                 }
                 return true;
             }
-            if let Some(menu) = &mut self.fleet_menu {
+            if self.fleet_menu.is_some() {
                 if let Some(area) = area {
-                    let inside = mouse.column > area.x
-                        && mouse.column < area.right().saturating_sub(1)
-                        && mouse.row > area.y
-                        && mouse.row < area.bottom().saturating_sub(1);
-                    if inside
-                        && matches!(
-                            mouse.kind,
-                            MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left)
-                        )
-                    {
-                        let scroll = self.chip_info.as_ref().unwrap().scroll;
-                        if menu.hover(usize::from(mouse.row - area.y - 1) + scroll)
-                            && mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                        {
-                            menu.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                    let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+                    let click = mouse.kind == MouseEventKind::Down(MouseButton::Left);
+                    if area.contains(point) && (click || mouse.kind == MouseEventKind::Moved) {
+                        let source = self.report_sheet(area).and_then(|report| report.source_at(point));
+                        let menu = self.fleet_menu.as_mut().unwrap();
+                        if source.is_some_and(|index| menu.hover(index)) {
+                            if click {
+                                menu.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                                self.chip_info.as_mut().unwrap().scroll = 0;
+                            }
+                            self.chip_info.as_mut().unwrap().lines = menu.display();
                         }
-                        self.chip_info.as_mut().unwrap().lines = menu.display();
                         return true;
                     }
-                    if !inside && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    if !area.contains(point) && click {
                         self.fleet_menu = None;
                         self.chip_info = None;
                         return true;

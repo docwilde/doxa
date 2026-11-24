@@ -1164,35 +1164,40 @@ impl App {
 
     pub(super) fn open_help(&mut self) {
         use crate::keybindings::Action as KeyAction;
-        let mut lines = vec![
-            "Rust DOXA commands · forms shown below".to_owned(),
-            "Unavailable commands stay local; unknown provider commands pass through".to_owned(),
-            String::new(),
-        ];
-        lines.push(
-            "Tab / Shift+Tab: focus prompt, tab headers, transcript, visible chips, sidebar".into(),
-        );
-        lines.push(format!(
-            "Focused chip: Enter opens · tab headers: ←/→ select, Enter prompt · {} next pane",
-            self.keybindings.display(KeyAction::NextPaneAlternate)
-        ));
-        lines.push(format!(
-            "{} new tab · {} close tab · {} quit · /settings → Keys to remap",
-            self.keybindings.display(KeyAction::NewTab),
-            self.keybindings.display(KeyAction::CloseTab),
-            self.keybindings.display(KeyAction::Quit)
-        ));
-        lines.push(format!(
-            "{} stop daemon · {} confirm DOXA transcript deletion · Delete closes a focused tab",
-            self.keybindings.display(KeyAction::Stop),
-            self.keybindings.display(KeyAction::DeleteTranscript),
-        ));
-        lines.push(format!("{} or /mode: permission picker", self.keybindings.display(KeyAction::Permission)));
-        lines.push("Drag transcript text to select · Ctrl+C / Ctrl+Shift+C copy · Esc clears · Ctrl+V paste into prompt".into());
-        lines.push("Copy uses wl-copy/xclip/pbcopy when available, otherwise OSC52; terminal fallback: Shift+drag, Ctrl+Shift+C / Ctrl+Shift+V".into());
+        let mut lines = vec!["## Navigation".to_owned()];
+        for (key, action) in [
+            ("Tab / Shift+Tab".into(), "Move focus through the prompt, tabs, transcript, chips and sidebar"),
+            ("Enter".into(), "Open a focused chip or return from a tab header to the prompt"),
+            ("← / →".into(), "Select a tab when its header has focus"),
+            (self.keybindings.display(KeyAction::NextPaneAlternate), "Switch to the next pane"),
+            (self.keybindings.display(KeyAction::NewTab), "Open a new tab"),
+            (self.keybindings.display(KeyAction::CloseTab), "Close the current tab"),
+            (self.keybindings.display(KeyAction::Quit), "Quit DOXA"),
+            (self.keybindings.display(KeyAction::Stop), "Stop the session daemon"),
+            (self.keybindings.display(KeyAction::DeleteTranscript), "Review DOXA transcript deletion"),
+            ("Delete".into(), "Close the focused tab"),
+            (format!("{} or /mode", self.keybindings.display(KeyAction::Permission)), "Open the permission picker"),
+            ("/settings → Keys".into(), "Remap keyboard shortcuts"),
+        ] {
+            lines.push(format!("{key} · {action}"));
+        }
+        lines.extend([
+            "## Clipboard".into(),
+            "Drag · Select transcript text".into(),
+            "Ctrl+C / Ctrl+Shift+C · Copy selection".into(),
+            "Ctrl+V · Paste into the prompt".into(),
+            "Esc · Clear selection".into(),
+            "Copy uses wl-copy, xclip or pbcopy, with OSC52 as a fallback.".into(),
+            "Terminal fallback uses Shift+drag, Ctrl+Shift+C and Ctrl+Shift+V.".into(),
+            "## Commands".into(),
+            "Unavailable commands stay local. Unknown commands can pass through to the provider.".into(),
+        ]);
         for row in COMMANDS {
             lines.push(format!("{} · {}", row.form, row.summary));
             lines.push(format!("  {}", row.support));
+        }
+        if !self.plugin_commands.is_empty() || !self.native_plugin_commands.is_empty() {
+            lines.push("## Plugin commands".into());
         }
         for command in &self.plugin_commands {
             lines.push(format!(
@@ -1216,7 +1221,9 @@ impl App {
         for failure in &self.native_plugin_failures {
             lines.push(format!("Native plugin rejected: {failure}"));
         }
-        lines.push("Local keyboard shell: !<command> · current session directory; output is neither sent nor saved".into());
+        lines.push("## Shell".into());
+        lines.push("!<command> · Run locally in the session directory. Output stays in the shell overlay.".into());
+        lines.push("## Fleet commands".into());
         for (command, description) in FLEET_ACTIONS {
             lines.push(format!("{command} · {description}"));
         }

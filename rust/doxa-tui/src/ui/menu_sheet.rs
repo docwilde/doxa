@@ -21,6 +21,10 @@ pub(super) struct Sheet {
 
 impl Sheet {
     pub(super) fn new(area: Rect) -> Self {
+        Self::with_heading(area, true)
+    }
+
+    pub(super) fn with_heading(area: Rect, heading: bool) -> Self {
         let content = Rect::new(
             area.x + 1,
             area.y + 1,
@@ -28,7 +32,7 @@ impl Sheet {
             area.height.saturating_sub(2),
         );
         let [heading, body, footer] = Layout::vertical([
-            Constraint::Length(1),
+            Constraint::Length(u16::from(heading)),
             Constraint::Fill(1),
             Constraint::Length(1),
         ])

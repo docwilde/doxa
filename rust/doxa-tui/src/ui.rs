@@ -25,6 +25,7 @@ mod router_settings;
 mod mcp_settings;
 mod operations_menu;
 mod menu_sheet;
+mod report_sheet;
 mod credential_editor;
 pub(crate) mod panes;
 mod render;

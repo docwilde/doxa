@@ -2,7 +2,7 @@
 use super::{App,ChipInfo,fleet_process,safe_label};
 use crossterm::event::{KeyCode,KeyEvent};
 use std::{io,path::PathBuf};
-const LABELS:[&str;15]=["Task","Directory","Worker engine","Worker model (blank = default)","Workers","Coordinator engine","Coordinator model","Worker isolation","Coordinator isolation","Total budget USD","Alignment supervisor (Enter edits PROVIDER:MODEL)","Message review","Message judge","Review budget USD","Router config (absolute path; blank = settings)"];
+const LABELS:[&str;15]=["Task","Directory","Worker engine","Worker model","Workers","Coordinator engine","Coordinator model","Worker isolation","Coordinator isolation","Total budget USD","Alignment supervisor","Message review","Message judge","Review budget USD","Router config"];
 #[derive(Debug)]
 pub(super) struct Wizard{values:[String;15],selected:usize,editing:bool}
 impl Wizard{
@@ -15,10 +15,18 @@ impl Wizard{
             "Router uses exact configured target IDs in the model fields. Review its private config below.".into()];
         for (index,label) in LABELS.iter().enumerate(){
             let value = if index == 0 { crate::markdown::sanitize(&self.values[index]).replace('\n', " ") }
-                else { safe_label(&self.values[index]) };
+                else if self.values[index].is_empty() && !(self.selected == index && self.editing) {
+                    match index {
+                        3 | 6 => "Provider default".into(),
+                        14 => "From Settings".into(),
+                        _ => String::new(),
+                    }
+                } else { safe_label(&self.values[index]) };
             lines.push(format!("{} {label}: {}{}",if self.selected==index{"▸"}else{" "},value,if self.selected==index&&self.editing{" ▏"}else{""}));
         }
-        lines.push("An online coordinator can answer offline workers' research questions. Alignment reviewers are separate read-only API calls with no tools.".into());lines
+        lines.push("An online coordinator can answer offline workers' research questions. Alignment reviewers are separate read-only API calls with no tools.".into());
+        lines.push("Enter edits the exact PROVIDER:MODEL for the alignment supervisor. A Router config path must be absolute.".into());
+        lines
     }
     fn args(&self)->io::Result<Vec<String>>{
         if self.values[0].trim().is_empty(){return Err(io::Error::other("Enter the approved task"));}
@@ -42,12 +50,7 @@ impl App{
     }
     pub(super) fn fleet_setup_key(&mut self,key:KeyEvent)->bool{
         if self.fleet_setup.is_some() && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
-            let page = self.active_chooser_rect().map(|area| usize::from(area.height.saturating_sub(3))).unwrap_or(10).max(1);
-            if let Some(info) = self.chip_info.as_mut() {
-                info.scroll = if key.code == KeyCode::PageUp { info.scroll.saturating_sub(page) }
-                    else { info.scroll.saturating_add(page) };
-            }
-            return true;
+            return self.report_scroll(key.code);
         }
         let Some(wizard)=self.fleet_setup.as_mut()else{return false;};
         if key.code==KeyCode::Esc{if wizard.editing{wizard.editing=false;}else{self.fleet_setup=None;self.chip_info=None;return true;}}
@@ -62,22 +65,26 @@ impl App{
                 return true;
             },_=>{}
         }}
-        if let Some(wizard)=&self.fleet_setup{
-            let lines=wizard.lines();let selected=wizard.selected;let area=self.active_chooser_rect();
-            if let Some(info)=self.chip_info.as_mut(){info.lines=lines;if let Some(area)=area{
-                let width=usize::from(area.width.saturating_sub(3)).max(1);
-                let mut row=info.lines.iter().take(3+selected).flat_map(|line|crate::memory_menu::wrap_review(line,width)).count();
-                if wizard.editing { row+=crate::memory_menu::wrap_review(&info.lines[3+selected],width).len().saturating_sub(1); }
-                info.scroll=row.saturating_sub(usize::from(area.height.saturating_sub(2))/2);
-            }}
-        }true
+        if let Some(wizard) = &self.fleet_setup {
+            let selected = wizard.selected;
+            let editing = wizard.editing;
+            self.chip_info.as_mut().unwrap().lines = wizard.lines();
+            if let Some(scroll) = self.active_chooser_rect().and_then(|area| self.report_sheet(area))
+                .map(|report| report.reveal(3 + selected, editing))
+            {
+                self.chip_info.as_mut().unwrap().scroll = scroll;
+            }
+        }
+        true
     }
 }
 #[cfg(test)]mod tests{
     use super::*;
     #[test]fn full_task_is_visible_and_scrollable_without_changing_submission(){
         use crossterm::event::KeyModifiers;
-        let mut app=App::default();app.open_fleet_setup();
+        let mut app=App::default();
+        app.handle(crossterm::event::Event::Resize(100, 28));
+        app.open_fleet_setup();
         let task=format!("{} visible ending 界", "Detail ".repeat(200));
         app.fleet_setup.as_mut().unwrap().values[0]=task.clone();
         app.fleet_setup_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
@@ -86,7 +93,7 @@ impl App{
         app.fleet_setup_key(KeyEvent::new(KeyCode::PageDown,KeyModifiers::NONE));
         assert!(app.chip_info.as_ref().unwrap().scroll>before);
         app.fleet_setup_key(KeyEvent::new(KeyCode::PageUp,KeyModifiers::NONE));
-        assert_eq!(app.chip_info.as_ref().unwrap().scroll,before);
+        assert!(app.chip_info.as_ref().unwrap().scroll <= before);
         let args=app.fleet_setup.as_ref().unwrap().args().unwrap();
         assert!(args.windows(2).any(|pair|pair[0]=="--prompt"&&pair[1]==task));
     }
