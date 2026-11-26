@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-claude"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "doxa-input",
  "doxa-isolation",
@@ -466,6 +466,22 @@ dependencies = [
 [[package]]
 name = "doxa-codegraph"
 version = "2.0.0-beta.90"
+source = "git+https://github.com/docwilde/doxa?rev=fa763acc8e738f461cd2f15ea8adfd8d58020328#fa763acc8e738f461cd2f15ea8adfd8d58020328"
+dependencies = [
+ "libc",
+ "proc-macro2",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "syn 2.0.119",
+ "tree-sitter",
+ "tree-sitter-python",
+]
+
+[[package]]
+name = "doxa-codegraph"
+version = "2.0.0-beta.91"
 dependencies = [
  "libc",
  "proc-macro2",
@@ -481,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-daemon"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "doxa-claude",
  "doxa-engines",
@@ -513,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-engines"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "doxa-input",
  "doxa-isolation",
@@ -529,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-fleet"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "doxa-isolation",
  "doxa-protocol",
@@ -547,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-hub"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -571,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-input"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -583,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-isolation"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "doxa-router",
  "errno",
@@ -597,9 +613,9 @@ dependencies = [
 
 [[package]]
 name = "doxa-lore"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
- "doxa-codegraph",
+ "doxa-codegraph 2.0.0-beta.91",
  "doxa-state",
  "doxa-vendors",
  "libc",
@@ -611,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-mcp"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "doxa-vendors",
  "libc",
@@ -624,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-peers"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "bytes",
  "doxa-isolation",
@@ -646,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-protocol"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "serde",
  "serde_json",
@@ -654,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-remote"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "bytes",
  "doxa-lore",
@@ -676,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-remote-wire"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -688,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-router"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "doxa-vendors",
  "libc",
@@ -702,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-runtime"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "doxa-input",
  "doxa-protocol",
@@ -713,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-state"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "libc",
  "serde",
@@ -726,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-transcript"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "doxa-vendors",
  "libc",
@@ -737,11 +753,11 @@ dependencies = [
 
 [[package]]
 name = "doxa-tui"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "crossterm",
  "doxa-claude",
- "doxa-codegraph",
+ "doxa-codegraph 2.0.0-beta.91",
  "doxa-engines",
  "doxa-fleet",
  "doxa-input",
@@ -786,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-vendors"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "futures-util",
  "libc",
@@ -798,7 +814,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-worktrees"
-version = "2.0.0-beta.90"
+version = "2.0.0-beta.91"
 dependencies = [
  "doxa-isolation",
  "doxa-state",
@@ -1577,9 +1593,10 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lore-core"
-version = "0.62.32"
-source = "git+https://github.com/docwilde/LORE?rev=9aa9c9f019e9264bb71ca2cd4f7fb9dbfacf8ad8#9aa9c9f019e9264bb71ca2cd4f7fb9dbfacf8ad8"
+version = "0.62.36"
+source = "git+https://github.com/docwilde/LORE?rev=3c26acd111451f52f936cc0caa357e35126b2e8e#3c26acd111451f52f936cc0caa357e35126b2e8e"
 dependencies = [
+ "doxa-codegraph 2.0.0-beta.90",
  "fancy-regex",
  "hmac 0.12.1",
  "http-body-util",
